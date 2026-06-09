@@ -2,9 +2,7 @@
 
 Status: Draft 1 for implementation. Closes gaps B1–B5 of `docs/SPEC-GAPS.md`.
 
-This spec owns capture **semantics, timing, state machines, and data flow**:
-session lifecycle, write-scope binding, the typed / voice / grease-pencil
-pipelines, ratings, corrections, retraction/redaction flows, and audio policy.
+This spec owns capture **semantics, timing, state machines, and data flow**.
 Boundaries: UI owns surfaces, layout, interaction patterns (this spec defines
 the data contracts UI renders); RUNTIME owns the ASR process and models (this
 spec consumes a `Transcriber` stream and states its requirements); EVENTS owns
@@ -19,27 +17,25 @@ and the moments events are minted). MUST/SHOULD/MAY are RFC 2119-normative.
   linking, and idle decisions happen on the capture clock and are only
   *recorded* as wall-clock timestamps.
 - **Stream clock**: ASR audio-stream position, ms from stream start; anchored
-  to the capture clock when the **first audio buffer is submitted**
-  (`anchor_mono`); segment times convert as
-  `t_mono = anchor_mono + stream_offset_ms`.
+  to the capture clock at **first audio buffer submission** (`anchor_mono`);
+  segment times convert as `t_mono = anchor_mono + stream_offset_ms`.
 - **Error budget**: VAD-onset detection latency + clock conversion error MUST
   stay under **250 ms** combined; selection changes are human-paced, so this
-  keeps binding correct (§13.1 enforces the observable behavior).
+  keeps binding correct (§13.1 enforces it).
 
 ## 2. Session lifecycle (closes B2)
 
-A **session** is a contiguous period of app use. Sessions are automatic; there
-is no manual session management.
+A **session** is a contiguous period of app use; sessions are automatic.
 
 ### 2.1 Activity
 
-**Activity** is any of: keyboard/pointer input delivered to an app window
-(keydown, drag, wheel, click, pen contact); a selection or view-mode change
-(grid ↔ single-image, image navigation); mic arm/disarm; VAD speech activity
-(any `SpeechStart`/`Partial`/`Final` while armed); journal-panel actions;
-typed-note submission and rating keystrokes. **Not activity**: app focus/raise
-alone, passive hover, background ingest/backfill progress, sidecar-writer
-activity, model-runtime health events.
+**Activity** is any of: keyboard/pointer input to an app window (keydown,
+drag, wheel, click, pen contact); selection or view-mode change (grid ↔
+single-image, image navigation); mic arm/disarm; VAD speech activity (any
+`SpeechStart`/`Partial`/`Final` while armed); journal-panel actions;
+typed-note submission and rating keystrokes. **Not activity**: app focus
+alone, passive hover, background ingest/backfill, sidecar-writer or
+model-runtime activity.
 
 ### 2.2 State machine
 
@@ -72,21 +68,18 @@ activity, model-runtime health events.
 
 Sessions are **implicit in the event log** (the set of events sharing a
 `session_id`; start = first event's `ts`). The SQLite index keeps a
-rebuildable bookkeeping row: `(session_id, started_at, ended_at NULL while
+rebuildable bookkeeping row — `(session_id, started_at, ended_at NULL while
 open, closed_clean, close_processing_done)` — index-only, never in sidecars.
 
 ### 2.4 Crash recovery
 
 On launch, before opening a new session: a `sessions` row with `ended_at IS
 NULL` means the previous process died with the session open. The app MUST set
-`ended_at` = ts of that session's last event (or `started_at` if none),
-`closed_clean = false`, and enqueue close processing (§2.5). Recovery mints no
-events; a recovered session is indistinguishable in the journal from a cleanly
-closed one.
+`ended_at` = ts of that session's last event (or `started_at` if none) and
+`closed_clean = false`, then enqueue close processing (§2.5). Recovery mints
+no events; a recovered session is indistinguishable from a cleanly closed one.
 
-### 2.5 Session-close processing (hook points)
-
-In order:
+### 2.5 Session-close processing (hook points, in order)
 
 1. **Capture drain**: mic disarms if armed; Transcriber stream ends; wait up
    to **5 s** for trailing `Final`s (they mint events into the *closing*
@@ -116,12 +109,12 @@ derives mechanically from selection/view state; the user never sets it.
 | Grid, no selection | `session` — zero targets |
 | Search results | same rules over result selection |
 
-Multi target order = user's selection order, recorded as
-`event_targets.position` (EVENTS spec). Scope changes are **instantaneous**
-for typed notes and ratings (bind at submit/keystroke time); voice binds by
-VAD onset (§5); strokes always bind to the viewed image (§8). Entering
-single-image view from a multi-selection narrows scope to the viewed image;
-returning to the grid restores the selection-derived scope.
+Multi target order = selection order, recorded as `event_targets.position`
+(EVENTS spec). Scope changes are **instantaneous** for typed notes and ratings
+(bind at submit/keystroke time); voice binds by VAD onset (§5); strokes always
+bind to the viewed image (§8). Entering single-image view from a
+multi-selection narrows scope to the viewed image; returning to the grid
+restores the selection-derived scope.
 
 ### 3.1 Scope snapshots and the scope ring buffer
 
@@ -145,16 +138,15 @@ entry (should be impossible), use the oldest and log a debug-panel warning.
 
 ## 4. Typed pipeline
 
-- UI provides a minimal input (UI owns placement/keys; recommendation: Enter =
-  submit, Shift+Enter = newline).
-- **Submit** mints exactly one event: `kind=remark`, `source=typed`, `text` =
-  input verbatim, multi-line allowed. **No markdown or other processing in
-  v1** — stored byte-for-byte (the app MAY trim one trailing newline, nothing
-  else). Empty/whitespace-only submissions mint nothing.
-- Binding: the **current scope snapshot at submit time** — no ring-buffer
-  lookup; typed input has no latency to compensate.
-- Append → sidecar writer notified → indicator pulse (§11). The typed path has
-  zero model dependencies and MUST work identically in degraded mode.
+UI provides a minimal input (UI owns placement/keys; recommendation: Enter =
+submit, Shift+Enter = newline). **Submit** mints exactly one event:
+`kind=remark`, `source=typed`, `text` = input verbatim, multi-line allowed.
+**No markdown or other processing in v1** — stored byte-for-byte (the app MAY
+trim one trailing newline, nothing else); empty/whitespace-only submissions
+mint nothing. Binding: the **current scope snapshot at submit time** — no
+ring-buffer lookup; typed input has no latency to compensate. Append → sidecar
+writer notified → indicator pulse (§11). The typed path has zero model
+dependencies and MUST work identically in degraded mode.
 
 ## 5. THE BINDING RULE — utterances bind at VAD onset (closes B1)
 
@@ -162,9 +154,9 @@ entry (should be impossible), use the oldest and log a debug-panel warning.
 > speech onset — not at transcript arrival.**
 
 Streaming ASR finalizes 0.5–2 s after the words; users click to the next image
-while still talking about the previous one. Binding at transcript arrival
-attributes words to the wrong image; binding at onset attributes them to what
-the photographer was looking at when they started saying them.
+while still talking about the previous one. Binding at onset attributes the
+words to what the photographer was looking at when they started saying them;
+binding at arrival attributes them to the wrong image.
 
 ### 5.1 Mechanism
 
@@ -181,11 +173,10 @@ wins and the indicator is corrected silently (rare; bounded by the §1 budget).
 ### 5.2 Grace window: none
 
 **N = 0. Onset wins; no grace window in v1.** Speech starting 50 ms after a
-selection change binds to the *new* scope. Any grace window trades one
-misattribution for another, adds an untunable knob, and complicates the
-indicator contract; the onset rule is one sentence — "it writes down what you
-say about what you're looking at." Revisit only on dogfooding evidence
-(recorded as a future tunable, default 0).
+selection change binds to the *new* scope. A grace window trades one
+misattribution for another and adds an untunable knob; the onset rule is one
+sentence — "it writes down what you say about what you're looking at."
+Revisit only on dogfooding evidence (recorded as a future tunable, default 0).
 
 ### 5.3 Multi-segment utterances across a scope change
 
@@ -201,10 +192,10 @@ for any reader of the session view.
 
 While an utterance is in flight (`SpeechStart` → `Final`), the indicator MUST
 show **the scope it is provisionally bound to** (`scope_at(onset)`), even if
-the live selection has since changed. The contract (§11) carries both
+the live selection has changed. The contract (§11) carries both
 `current_scope` and `streaming_utterance.bound_scope` so the UI can render
-"selection is now B, but what you're saying lands on A." UI owns rendering;
-the distinction is mandatory.
+"selection is now B, but what you're saying lands on A". The distinction is
+mandatory; the rendering is UI's.
 
 ## 6. Voice pipeline
 
@@ -217,9 +208,9 @@ a recorded **future settings option** (same pipeline, app-gated audio feed).
 ### 6.2 Audio capture chain and Transcriber requirements
 
 - **Capture is Rust-side via `cpal`** in photoproof-core — not webview/Tauri
-  audio: no IPC hop on the latency budget, sample-accurate stream anchoring,
-  audio never enters the JS heap. Capture opens the default input device,
-  downmixes to mono, resamples to **16 kHz f32**, pushes to the Transcriber.
+  audio: no IPC hop, sample-accurate stream anchoring, audio never in the JS
+  heap. Capture opens the default input device, downmixes to mono, resamples
+  to **16 kHz f32**, pushes to the Transcriber.
 - Required `Transcriber` stream interface (RUNTIME implements):
   - `push_audio(frames)` — 16 kHz mono f32.
   - Emits per utterance, in order:
@@ -257,11 +248,11 @@ detection, or re-segmentation. One ASR final segment = one utterance.
 
 `Arming`: open cpal stream, confirm ASR readiness with RUNTIME (which may
 spawn/wake the ASR child), anchor the stream clock; failure →
-`Disarmed(error)`, quiet notification. `Armed·Speaking` covers overlap: a new
-`SpeechStart` may arrive while a prior segment finalizes; the state holds
-until nothing is in flight. Disarm: stop pushing audio, `end_stream()`, accept
-trailing `Final`s up to **5 s** (they mint events normally — their onsets
-predate the disarm), then drop the stream and zero the audio ring buffer (§7).
+`Disarmed(error)`, quiet notification. `Armed·Speaking` holds while any
+utterance is in flight (a new `SpeechStart` may arrive while a prior segment
+finalizes). Disarm: stop pushing audio, `end_stream()`, accept trailing
+`Final`s up to **5 s** (they mint events normally — their onsets predate the
+disarm), then drop the stream and zero the audio ring buffer (§7).
 
 ### 6.5 Utterance lifecycle
 
@@ -275,8 +266,8 @@ predate the disarm), then drop the stream and zero the audio ring buffer (§7).
 ```
 
 - **Partials are never persisted.** They exist in memory solely for the
-  dev-build debug panel and the indicator's "speaking" affordance. The
-  indicator MUST NOT display partial text (kernel: no live transcript pane);
+  dev-build debug panel and the indicator's "speaking" affordance; the
+  indicator MUST NOT display partial text (kernel: no live transcript pane),
   the debug panel MAY.
 - **Commit**: each `Final` mints exactly one event — `kind=remark`,
   `source=voice`, `text` = final text verbatim, bound per §5, with a capture
@@ -290,8 +281,8 @@ predate the disarm), then drop the stream and zero the audio ring buffer (§7).
       "speech_ended_at":   "2026-06-09T17:42:07.480Z" } }
   ```
 
-  The VAD span (wall clock) is durable and sidecar-visible — required for
-  stroke linking (§9).
+  The VAD span (wall clock) is durable and sidecar-visible — stroke linking
+  (§9) requires it.
 - **No merging in v1.** Consecutive finals are NOT merged, regardless of gap
   or scope equality. One final = one event: simpler, preserves per-segment
   confidence/spans, and reversible later (merging can become a fold/display
@@ -301,24 +292,23 @@ predate the disarm), then drop the stream and zero the audio ring buffer (§7).
 ### 6.6 Error states
 
 If the ASR process dies mid-session (fatal `Error`, or RUNTIME reports the
-child gone): `Streaming` utterances are **Abandoned** — partials discarded
-(never persisted by rule), nothing minted, a debug-panel entry records the
-loss; the mic **auto-disarms** to `Disarmed(error)`, the audio ring buffer is
-zeroed, and the user is **notified quietly** — the indicator's degraded state
-(§11), no modal, no toast storm; re-arming retries via RUNTIME supervision.
-Typed notes, ratings, and the pencil are entirely unaffected. Degraded mode
-(below hardware floor / models absent) is this state permanently: the mic
-control exists but arming fails quietly.
+child gone): `Streaming` utterances are **Abandoned** — partials discarded,
+nothing minted, a debug-panel entry records the loss; the mic **auto-disarms**
+to `Disarmed(error)`, the ring buffer is zeroed, and the user is **notified
+quietly** — the indicator's degraded state (§11), no modal, no toast storm;
+re-arming retries via RUNTIME supervision. Typed notes, ratings, and the
+pencil are unaffected. Degraded mode (below hardware floor / models absent) is
+this state permanently: the mic control exists but arming fails quietly.
 
 ## 7. Audio policy (closes B4)
 
 - **No audio is ever written to disk in v1** — not as files, not in SQLite,
   sidecars, or app-controlled crash dumps. Capture audio lives only in an
   **in-memory ring buffer**, **60 s** at 16 kHz mono f32 (~3.8 MB).
-- A segment's audio is **discard-eligible at finalization + 5 s** (the safety
-  window covers immediate ASR retry; "discard" = ring-buffer overwrite
-  eligibility, not a deletion job). On disarm, quit, or fatal ASR error the
-  whole buffer is zeroed immediately.
+- A segment's audio is **discard-eligible at finalization + 5 s** (safety
+  window for immediate ASR retry; "discard" = overwrite eligibility, not a
+  deletion job). On disarm, quit, or fatal ASR error the whole buffer is
+  zeroed immediately.
 - Per-segment **ASR confidence is stored on the event** (§6.5) — the only
   durable residue of the audio.
 - **Future setting (recorded, not designed): audio retention opt-in.** Would
@@ -337,9 +327,8 @@ event: `kind=stroke`, `source=pencil`, bound to the **viewed image** (always
 ### 8.1 Coordinate space and mapping contract
 
 - Coordinates are normalized **(x, y) ∈ display-oriented image space** (EXIF
-  orientation applied — same orientation as the cached preview, per
-  LIBRARY/D2): `x = px / W_display`, `y = py / H_display`, origin top-left,
-  y down.
+  orientation applied — same as the cached preview, per LIBRARY/D2):
+  `x = px / W_display`, `y = py / H_display`, origin top-left, y down.
 - The event records `orientation`: the EXIF orientation value (1–8) applied at
   draw time, so a tool later rewriting orientation metadata cannot rotate
   marks out from under the user (renderers detect mismatch and compensate;
@@ -350,8 +339,8 @@ event: `kind=stroke`, `source=pencil`, bound to the **viewed image** (always
   a stroke drawn at any zoom/pan, stored, and re-rendered at any other
   zoom/pan MUST land on the same image pixels (tolerance ≤ 1 source-image
   pixel; §13.3). Rendering applies the current `T` to stored points; on-screen
-  width = image-space width × `s` (marks zoom with the image, like real grease
-  pencil).
+  width = image-space width × `s` (marks zoom with the image, like grease
+  pencil on film).
 - Points MAY extend past the frame (circling an edge subject): stored values
   clamp to **[−0.25, 1.25]**; renderers clip to the visible overlay.
 
@@ -398,8 +387,7 @@ points are stored unsmoothed**; capture-side reduction is limited to dropping
 consecutive samples closer than **0.5 screen px** (jitter dedupe, lossless at
 display resolution). Smoothing is **render-only**: centripetal Catmull-Rom
 through stored points (a one-euro filter MAY also smooth the live in-progress
-stroke for feel). Stored data is the witness; rendering taste can change
-without migration.
+stroke for feel). Stored data is the witness; rendering taste changes freely.
 
 ### 8.4 Stroke lifecycle and commit threshold
 
@@ -410,11 +398,11 @@ without migration.
                                     └─────► Discarded (no event)
 ```
 
-- A stroke is **not an event until pen-up**. Pointer-cancel (palm rejection,
-  window loss) discards it; nothing is logged.
+- A stroke is **not an event until pen-up**; pointer-cancel (palm rejection,
+  window loss) discards it, nothing logged.
 - **Commit threshold**: discard iff total path length < **0.003** (normalized
-  long-edge units) **and** duration < **100 ms**. A deliberate press-and-hold
-  dot commits; a fleeting accidental tap does not.
+  long-edge units) **and** duration < **100 ms** — a deliberate press-and-hold
+  dot commits, a fleeting accidental tap does not.
 - On commit: event minted, indicator pulses, stroke pushed onto the undo stack
   (§8.5), link resolution runs (§9).
 
@@ -434,19 +422,20 @@ without migration.
 ### 8.6 Eraser
 
 v1 eraser = **tap-to-retract a whole stroke**; no partial erase. Hit test: map
-the tap to image space (§8.1); a stroke is eligible if the minimum distance
-from tap to its polyline ≤ `max(0.01 normalized long-edge units,
-12 screen px / s)` (`s` = current zoom scale) — at least a 12-px target at any
-zoom. Among eligible strokes the **most recent** (latest event id) wins —
-topmost in render order. Erase mints a retraction event. Redacting a stroke
-(geometry scrubbed) is a journal-panel flow (§12.3), not the eraser.
+the tap to image space (§8.1); eligible if min distance from tap to the
+stroke's polyline ≤ `max(0.01 normalized long-edge units, 12 screen px / s)`
+(`s` = zoom scale) — at least a 12-px target at any zoom. Among eligible
+strokes the **most recent** (latest event id) wins — topmost in render order.
+Erase mints a retraction event; redacting a stroke (geometry scrubbed) is a
+journal-panel flow (§12.3), not the eraser.
 
 ## 9. Stroke ↔ utterance linking
 
 ### 9.1 The rule
 
 For stroke S (span = `started_at` … `started_at + t.last`) and utterance U
-(VAD span = `speech_started_at` … `speech_ended_at`):
+(VAD span = `speech_started_at` … `speech_ended_at`), candidates being
+committed events **within the same session** only:
 
 1. **Overlap**: spans overlap → link (several candidates: greatest overlap
    duration wins).
@@ -454,8 +443,6 @@ For stroke S (span = `started_at` … `started_at + t.last`) and utterance U
    the same scope context*: the utterance's bound target set must contain the
    stroke's image (session-level utterances never link via fallback).
 3. Else **unlinked** — normal and permanent; silence while marking is common.
-
-Candidates are committed events **within the same session** only.
 
 ### 9.2 Who carries the link (append-only consequence)
 
@@ -466,8 +453,8 @@ late link cannot be written onto the earlier event. Therefore:
 > pointing backward.** Link resolution runs exactly once per event, at its
 > commit, over already-committed events. Folded views (EVENTS spec) MUST
 > traverse `linked_event` in **both** directions: "linked" is symmetric,
-> realized as a one-way stored pointer. This is a direct consequence of
-> append-only that the EVENTS spec must honor.
+> realized as a one-way stored pointer — a direct consequence of append-only
+> that EVENTS must honor.
 
 - **In-flight suppression**: at stroke commit, if an utterance is currently
   streaming (`SpeechStart` seen, no `Final`) and its span-so-far overlaps the
@@ -488,13 +475,11 @@ rating wins — EVENTS owns fold and display). **Multi-select applies to all** �
 confirmed, desired: with N selected, one keystroke mints **one event targeting
 all N** (not N events), matching every culling tool photographers know and
 keeping "I rated these together" recoverable from the log. Session scope (no
-selection): rating keys do nothing. Rating display always comes from the fold;
-this spec only mints events.
+selection): rating keys do nothing. Display comes from the fold (EVENTS).
 
 ## 11. Write-scope indicator — data contract
 
-UI renders the small persistent indicator; capture feeds it. Pushed on every
-change:
+UI renders the small persistent indicator; capture feeds it, pushing on change:
 
 ```rust
 struct IndicatorState {
@@ -516,13 +501,12 @@ struct StreamingView {
 ```
 
 Plus a transient **pulse signal** `IndicatorPulse { event_kind }` on every
-event commit (remark, rating, stroke, revision, tombstone). Pulses are
-fire-and-forget; **no text content ever rides the indicator channel** (no live
-transcript — kernel). Required renderable distinctions (UI chooses how):
-current scope (count + thumbnails); mic armed vs not; **a still-streaming
-utterance bound to a scope differing from the current scope**; the degraded
-"mic intent on but ASR down" state (`DisarmedError` + `asr_unavailable`) —
-quiet, persistent, non-modal.
+event commit (remark, rating, stroke, revision, tombstone); fire-and-forget,
+and **no text content ever rides the indicator channel** (no live transcript —
+kernel). Required renderable distinctions (UI chooses how): current scope
+(count + thumbnails); mic armed vs not; **a still-streaming utterance bound to
+a scope differing from the current scope**; the degraded "mic intent on but
+ASR down" state (`DisarmedError` + `asr_unavailable`), quiet and non-modal.
 
 ## 12. Corrections, retraction, redaction (capture-side semantics)
 
@@ -573,11 +557,10 @@ simply lands in the journal, which is itself honest marginalia.
 1. **Binding under rapid selection change (scripted).** With a Transcriber
    stub: segment 1 onset at T; selection A→B at T+800 ms; segment 1 finalizes
    T+2000 ms; segment 2 onset T+1100 ms, finalizes T+3000 ms. Segment 1
-   targets A, segment 2 targets B — regardless of finalization times. Repeat
-   with the selection change 50 ms before segment 2's onset: segment 2
-   targets B (no grace window).
+   targets A, segment 2 targets B — regardless of finalization times. A
+   selection change 50 ms before an onset binds the new scope (no grace).
 2. **No audio on disk.** A full armed session (speech, finals, disarm, quit)
-   leaves zero audio bytes in app data, the library tree, SQLite, sidecars, or
+   leaves zero audio bytes in app data, library tree, SQLite, sidecars, or
    temp dirs (filesystem snapshot diff + format scan).
 3. **Stroke round-trip fidelity.** Draw one stroke at 100 % zoom, one at
    400 % panned to a corner; persist; restart; re-render at unrelated zoom/pan
@@ -595,8 +578,8 @@ simply lands in the journal, which is itself honest marginalia.
 6. **Session boundaries.** 29-min gap → same session; 31-min gap → next
    activity opens a new session (first event carries the new session_id), old
    session's `ended_at` = its last activity time. Kill the process mid-session
-   → next launch closes it with `ended_at` = last event ts and enqueues close
-   processing exactly once.
+   → next launch sets `ended_at` = last event ts, enqueues close processing
+   once.
 7. **ASR death.** Kill the ASR child mid-utterance: no event minted from the
    partial, mic auto-disarms, indicator shows degraded state, and a typed note
    submitted immediately after lands normally.
