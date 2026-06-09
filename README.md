@@ -10,10 +10,23 @@ It is not an editor, not a DAM, and pointedly not another AI opinion about your 
 
 ## Status
 
-**Pre-build.** Scope and architecture are drafted; implementation has not started.
+**Spec-complete, pre-build.** The implementation contract is written; code has not started.
 
-- [docs/SCOPE.md](docs/SCOPE.md) — full pitch, scope & architecture document
-- [docs/M1-BUILD-PLAN.md](docs/M1-BUILD-PLAN.md) — concrete plan for Milestone 1 (the Spine)
+Vision & planning (`docs/`):
+- [docs/SCOPE.md](docs/SCOPE.md) — pitch, scope & architecture overview
+- [docs/FEATURES.md](docs/FEATURES.md) — milestone-tagged feature inventory
+- [docs/SPEC-GAPS.md](docs/SPEC-GAPS.md) — design review that drove the specs; revised phase order
+- [docs/M1-BUILD-PLAN.md](docs/M1-BUILD-PLAN.md) — Milestone 1 orientation
+
+Normative specs (`spec/` — where these and `docs/` disagree, `spec/` wins):
+- [spec/EVENTS.md](spec/EVENTS.md) — the event model (foundation: log, folds, redaction, merge)
+- [spec/SIDECARS.md](spec/SIDECARS.md) — sidecar format, overflow store, export/rebuild
+- [spec/LIBRARY.md](spec/LIBRARY.md) — identity, volumes, watcher, ingest passes, previews
+- [spec/CAPTURE.md](spec/CAPTURE.md) — sessions, write-scope binding, voice, grease pencil
+- [spec/RETRIEVAL.md](spec/RETRIEVAL.md) — indexes, query pipeline, ranking, projects
+- [spec/RUNTIME.md](spec/RUNTIME.md) — local model runtime, processes, tiers, downloads
+- [spec/UI.md](spec/UI.md) — the three surfaces, indicator, journal panel, debug panel
+- [spec/DECISIONS.md](spec/DECISIONS.md) — architecture decision log + open questions
 
 ## The core loop
 

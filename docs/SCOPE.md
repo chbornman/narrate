@@ -1,7 +1,9 @@
 # Photoproof
 ### The digital contact sheet with a grease pencil
-*Scope & Architecture Document — Draft 3, June 2026*
+*Scope & Architecture Document — Draft 4, June 2026*
 *(Working title. Formerly "Darkroom Notes," briefly "Daido." Naming remains an open question — see Open Questions & Risks.)*
+
+> **Normative specs live in `spec/`** (EVENTS, SIDECARS, LIBRARY, CAPTURE, RETRIEVAL, RUNTIME, UI; decisions in `spec/DECISIONS.md`). This document is the vision and architecture overview; where it and a spec disagree, the spec wins.
 
 ---
 
@@ -81,7 +83,7 @@ Open risk worth naming: the one-way recorder must be independently compelling, a
 ├──────────────┴──────────┴───────────────┴───────────┤
 │  Local impls (default)        Cloud impls (later)    │
 │  Nemotron 3.5 ASR             hosted ASR             │
-│  SigLIP-class embedder        embedding APIs         │
+│  CLIP + text embedders        embedding APIs         │
 │  Gemma 4 / Qwen 3.6 via       Anthropic / OpenAI-    │
 │  llama.cpp server             compatible endpoints   │
 │  SQLite (+ in-mem vectors)    pgvector / managed DB  │
@@ -123,7 +125,8 @@ Every embedding row records `model_id` and `dimensions`. Swapping embedding mode
 |---|---|---|
 | Streaming ASR | **Nemotron 3.5 ASR** (600M, nemotron-3.5-asr-streaming-0.6b) | Sub-100ms end-of-utterance latency, 40 language-locales, runs on laptop-class hardware. English-only Nemotron-Speech-Streaming-En-0.6b as a lighter fallback. |
 | LLM + vision (summaries, captions, tagging) | **Gemma 4 E4B** as the floor; **Gemma 4 26B MoE (A4B)** or **Qwen 3.6-35B-A3B** as the quality tier | All natively multimodal — one model handles both image description and transcript summarization. Gemma 4 is Apache 2.0; E4B runs on modest hardware, 26B MoE gives near-31B quality at ~4B active params. Qwen 3.6-27B/35B-A3B are the open-weight Qwen options. **Qwen 3.7 is API-only (closed weights) as of June 2026** — it slots in later as a *cloud* connector if its open weights ship, exactly the kind of swap the trait architecture exists for. |
-| Image/text embeddings | SigLIP 2-class dual encoder | Better than vanilla CLIP; but note retrieval philosophy below — image embeddings are the fallback, annotation embeddings are the star. |
+| Visual embeddings | OpenCLIP ViT-H-14-378 / DFN5B (Immich's top preset, 1024-dim) | Image vectors + short visual queries only. |
+| Text embeddings | Small dedicated text-embedding model (Qwen3-Embedding-0.6B-class) | The primary signal: annotation text. CLIP text towers cap at 77 tokens and cannot carry 512-token annotation chunks — hence two embedders (spec/RUNTIME.md §3.3). |
 | Premium conversational tier | Claude (Anthropic API) | Cloud connector behind the same `LanguageModel` trait. |
 
 Hardware floor for the free tier: ~8–12 GB VRAM or Apple Silicon unified memory (E4B + 600M ASR + embedder). The developer's RTX 5080 is the quality-tier dev box, not the customer baseline.
@@ -132,22 +135,24 @@ Serving strategy: bundle or manage a llama.cpp server child process exposing the
 
 ## Data Model
 
-**Annotation events (the heart).** Append-only table; rows are never updated or deleted (redaction = tombstone event).
+**Annotation events (the heart).** Append-only log; rows are never updated or deleted, with two precisely-scoped exceptions: *retraction* folds an event out of view (a tombstone — content preserved) and *redaction* physically scrubs content while preserving structure. **The normative schema lives in `spec/EVENTS.md`**; the shape:
 
 ```
 annotation_events
-  id            ulid
-  image_hash    blake3        -- or NULL + session_id for session-level remarks
+  id            ulid          -- minted at capture onset; log order = ULID order
   session_id    ulid
-  ts            timestamp
-  source        voice | typed | markup | system
-  kind          remark | rating | series_ref | revision | stroke | tombstone
-  text          full utterance / note (NULL for pure strokes)
-  stroke_data   vector path JSON: points, pressure, tool, color,
-                normalized image coords (NULL for text events)
-  linked_event  fk → annotation_events (binds a stroke to the
-                utterance spoken while drawing it, and vice versa)
-  embedding_id  fk → vectors
+  ts            timestamp     -- UTC; testimony, never ordering
+  source        voice | typed | pencil | system
+  kind          remark | rating | stroke | revision | retraction | redaction
+  text          utterance / note (remark, revision)
+  payload       kind-specific JSON (stroke geometry, rating value, ASR confidence)
+  target_event  fk — what a revision/retraction/redaction modifies
+  linked_event  fk — stroke↔utterance link, carried by the later event
+  redacted_by   fk — present iff content has been scrubbed
+
+event_targets (event_id, image_hash, position)   -- 0..N images per event
+vectors (event_id, vec_kind, model_id, …)        -- derived, many per event,
+                                                 -- never in events or sidecars
 ```
 
 Strokes are first-class events, not a separate system: same log, same sidecar mirror, same temporal queries. A stroke linked to an utterance inherits searchability through the utterance's text and embedding ("the one where I circled the hand"). Rendering is a vector overlay in normalized image coordinates so marks survive any preview resolution, and the overlay toggles like a sheet of tracing paper — including time-scrubbing through strokes by timestamp.

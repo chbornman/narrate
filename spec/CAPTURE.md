@@ -342,41 +342,38 @@ event: `kind=stroke`, `source=pencil`, bound to the **viewed image** (always
   width = image-space width × `s` (marks zoom with the image, like grease
   pencil on film).
 - Points MAY extend past the frame (circling an edge subject): stored values
-  clamp to **[−0.25, 1.25]**; renderers clip to the visible overlay.
+  clamp to **[−0.25, 1.25]** (encoded as integers −2500..12500, §8.2);
+  renderers clip to the visible overlay.
 
 ### 8.2 Stroke payload schema
 
-Stored in `stroke_data` (JSON; flat parallel arrays for compactness):
+Stored in the event's `payload`; **the canonical encoding is normative in
+EVENTS §3.3** (canonical JSON is integer-only — no floats). Shape:
 
 ```json
 {
-  "v": 1,
-  "tool": "pencil-red",
+  "base_w": 40,
   "orientation": 1,
-  "base_width": 0.004,
-  "started_at": "2026-06-09T17:42:05.310Z",
-  "x": [0.4312, 0.4330, 0.4391],
-  "y": [0.2210, 0.2204, 0.2188],
-  "p": [1.0, 0.82, 0.77],
-  "t": [0, 9, 17]
+  "points": [[4312, 2210, 1000, 0], [4330, 2204, 820, 9], [4391, 2188, 770, 17]],
+  "tool": "pencil"
 }
 ```
 
-- `v` — payload schema version (independent of sidecar version). `tool` —
-  `"pencil-red"` is the **only** tool id in v1. `orientation` — EXIF
+- `tool` — `"pencil"` is the **only** tool id in v1 (the pencil is red; color
+  is a property of the tool, not the payload). `orientation` — EXIF
   orientation at draw time (§8.1).
-- `base_width` — normalized to the display-oriented image's **long edge**;
-  default **0.004** (0.4 % of long edge); recorded per stroke so a future
-  width control needs no schema change.
-- `x[]`, `y[]` — normalized coords (§8.1), ≤ 6 decimals; all four arrays equal
-  length. `p[]` — per-point pressure ∈ [0,1]; **1.0 when the device reports
-  none** (mouse, basic touch).
-- `t[]` — integer ms offsets from stroke start (`t[0] = 0`, non-decreasing),
-  for future time-scrubbing (M4). `started_at` (pen-down, wall clock) + `t[]`
-  reconstructs the absolute span; the event's `ts` is the **pen-up (commit)
-  time**.
-- **Width model**: rendered width `w(i) = base_width × (0.4 + 0.6 × p[i])` —
-  no pressure (p = 1.0) renders constant `base_width`; pressure pens thin to
+- `base_w` — stroke base width in **ten-thousandths of the display-oriented
+  long edge**; default **40** (0.4 % of long edge); recorded per stroke so a
+  future width control needs no schema change.
+- `points` — `[x, y, p, t]` tuples in capture order, ≥ 1, ≤ 8192. `x`,`y`:
+  integer ten-thousandths of the display-oriented extent (§8.1), range
+  −2500..12500. `p`: pressure per-mille 0..1000; **1000 when the device
+  reports none** (mouse, basic touch). `t`: integer ms offsets from pen-down
+  (`t[0] = 0`, non-decreasing), for future time-scrubbing (M4). The event's
+  `ts` is the **pen-up (commit) time**; pen-down = `ts − t_last` (no separate
+  start field).
+- **Width model**: rendered width `w(i) = base_w × (0.4 + 0.6 × p[i]/1000)` —
+  no pressure (p = 1000) renders constant base width; pressure pens thin to
   40 % at zero. Renderers interpolate width along the path.
 
 ### 8.3 Input, sampling, smoothing
@@ -433,7 +430,7 @@ journal-panel flow (§12.3), not the eraser.
 
 ### 9.1 The rule
 
-For stroke S (span = `started_at` … `started_at + t.last`) and utterance U
+For stroke S (span = pen-down … pen-up, i.e. `ts − t.last` … `ts`) and utterance U
 (VAD span = `speech_started_at` … `speech_ended_at`), candidates being
 committed events **within the same session** only:
 
@@ -501,7 +498,7 @@ struct StreamingView {
 ```
 
 Plus a transient **pulse signal** `IndicatorPulse { event_kind }` on every
-event commit (remark, rating, stroke, revision, tombstone); fire-and-forget,
+event commit (remark, rating, stroke, revision, retraction); fire-and-forget,
 and **no text content ever rides the indicator channel** (no live transcript —
 kernel). Required renderable distinctions (UI chooses how): current scope
 (count + thumbnails); mic armed vs not; **a still-streaming utterance bound to
@@ -538,12 +535,13 @@ simply lands in the journal, which is itself honest marginalia.
 
 - Explicit **two-step confirm** (UI owns the dialog; the second step MUST name
   the consequence: content removed everywhere, unrecoverable).
-- Semantics (the one sanctioned append-only violation — kernel): `text` is
-  replaced with the redaction marker; for strokes the **entire geometry is
-  scrubbed** — `x`, `y`, `p`, `t`, `base_width` removed, payload reduced to
-  `{ "v": 1, "redacted": true }`; the ASR capture payload (confidence, speech
-  span) is scrubbed with the text. Preserved: event id, `ts`, `session_id`,
-  kind, source, targets, `linked_event` — structure survives, content dies.
+- Semantics (the one sanctioned append-only violation — normative in EVENTS
+  §7): `text` and `payload` are **removed entirely** and `redacted_by` marks
+  the act — for voice remarks that scrubs the ASR capture payload (confidence,
+  duration) with the text; for strokes it scrubs the entire geometry
+  (`points`, `base_w`, the lot). Preserved: event id, `v`, `ts`, `session_id`,
+  kind, source, targets, `target_event`, `linked_event` — structure survives,
+  content dies.
 - Propagation trigger (capture fires; SIDECARS/RETRIEVAL own mechanics):
   rewrite the sidecar of **every targeted image** (queued until offline
   volumes mount); purge the event's FTS rows and vectors; when the future

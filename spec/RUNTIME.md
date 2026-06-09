@@ -74,7 +74,7 @@ Why this is the right exception to "never link inference":
 
 The trade-off, stated honestly: **a native crash inside ONNX Runtime crashes Photoproof** — there is no process boundary to absorb it. Mitigations: pin the `ort`/ONNX Runtime version per release; default to the CPU execution provider with GPU (CUDA/CoreML/DirectML) as a tier-promoted opt-in once the spike validates stability; run all embedding work on a dedicated thread with inputs pre-validated to fixed shapes; the embedder runs only in background passes, never in the capture path, so a crash can never lose an annotation (events are durable before embedding starts).
 
-**Text embeddings note (cross-spec flag).** The DFN5B text tower is the kernel's text embedder. Its CLIP text context is **77 tokens**, which cannot honor RETRIEVAL's ~512-token chunks. This spec reserves the seam — the `[embedder.text]` config table and llama.cpp's `/v1/embeddings` endpoint — but does **not** activate a second text model. Reconciliation owed between RUNTIME and RETRIEVAL; flagged, not deviated from.
+**Two embedders (resolved cross-spec).** The DFN5B text tower's 77-token CLIP context cannot honor RETRIEVAL's ~512-token annotation chunks — and annotation text is the product's *primary* signal. The runtime therefore hosts **two embedder instances behind the same `Embedder` trait**: the **CLIP embedder** (DFN5B preset above — `image_clip` vectors and short S4 query embeddings only) and the **text embedder** — a small dedicated text-embedding model (Qwen3-Embedding-0.6B-class, ONNX int8, ~0.6 GB) run in-process via the same defended `ort` exception (same determinism/fixed-shape argument applies; it is also a background-pass-and-query-time component, never in the capture path). Alternative backend behind the same seam: a GGUF embedding model on llama.cpp's `/v1/embeddings`. RETRIEVAL §3 assigns vec_kinds: `annotation_chunk` + `image_summary` → text embedder; `image_clip` → CLIP embedder.
 
 ## 4. Connector traits (normative Rust)
 
@@ -186,12 +186,15 @@ pub struct DecodedImage {
     pub height: u32,
 }
 
+/// Two configured instances exist behind this one trait (§3.3): the TEXT
+/// embedder (annotation chunks & summaries; embed_image unsupported) and the
+/// CLIP embedder (image vectors; embed_text = short queries only — its CLIP
+/// text tower truncates at 77 tokens, ample for queries, never for chunks).
 pub trait Embedder: Send + Sync {
-    /// Joint-space text embedding. NOTE: CLIP text towers truncate at
-    /// 77 tokens; RETRIEVAL must not feed 512-token chunks here (§3.3).
     async fn embed_text(&self, text: &str) -> ConnectorResult<Embedding>;
     async fn embed_image(&self, img: &DecodedImage) -> ConnectorResult<Embedding>;
-    /// 1024 for the DFN5B ViT-H-14 presets. Stored with every vector.
+    /// 1024 for the DFN5B ViT-H-14 presets; per the configured text model
+    /// for the text instance. Stored with every vector.
     fn dimensions(&self) -> usize;
     fn model_id(&self) -> &str;
 }
@@ -282,9 +285,10 @@ backend = "local-ort"        # "local-ort" | "openai-compatible"
 model = "ViT-H-14-378-quickgelu__dfn5b"   # or ViT-H-14-quickgelu__dfn5b (224px)
 device = "auto"              # "auto" | "cpu" | "gpu"
 
-[embedder.text]              # RESERVED — inactive pending RETRIEVAL
-# backend = "local-llamacpp" #   reconciliation (§3.3); schema stable now.
-# model = ""
+[embedder.text]              # the text-embedding model (§3.3): annotation
+backend = "local-ort"        # chunks & summaries. "local-ort" |
+model = "qwen3-embedding-0.6b-int8"  # "local-llamacpp" (/v1/embeddings) |
+device = "cpu"               # "openai-compatible"
 ```
 
 Unknown keys warn; missing sections take defaults. A config naming an uninstalled model puts that connector in `NotConfigured` (feature dark, journal unaffected) and surfaces the fix in settings + debug panel.
@@ -344,7 +348,7 @@ Acceptance is recorded (model id, license url, timestamp) in app data. License t
 
 | Tier | Bundle | Approx. download |
 |---|---|---|
-| 1 | LLM E4B Q4_K_M + mmproj (~5.5 GB) + ASR int8 (~0.8 GB) + DFN5B-378 ONNX (~2.6 GB) | **~9 GB** |
+| 1 | LLM E4B Q4_K_M + mmproj (~5.5 GB) + ASR int8 (~0.8 GB) + DFN5B-378 ONNX (~2.6 GB) + text embedder int8 (~0.6 GB) | **~9.5 GB** |
 | 2 (optional upgrade) | + quality LLM (Gemma 4 26B MoE Q4_K_M ~16 GB *or* Qwen 3.6-35B-A3B Q4_K_M ~20 GB) | **+16–20 GB** |
 
 Table values are planning estimates; the consent dialog always shows the live manifest sum (`Σ total_bytes`), and the spike (§12) replaces estimates with measured sizes.
@@ -446,7 +450,7 @@ We can only arbitrate **our own** usage. Whether Capture One or darktable needs 
 ## 10. First-run UX contract (UI owns the surfaces; this is the contract)
 
 1. The app opens **directly into the working app** (Tier 0 behavior): watched roots, grid, typed notes, pencil, FTS. Nothing blocks on the runtime.
-2. Hardware detection runs (sub-second); one quiet card proposes a tier: "This machine can run Photoproof's local voice & search models (~9 GB download). Download now / Later / Never." — with per-model license display, required acceptances (§5.3), and the disk budget from the live manifest (§5.4).
+2. Hardware detection runs (sub-second); one quiet card proposes a tier: "This machine can run Photoproof's local voice & search models (~9.5 GB download). Download now / Later / Never." — with per-model license display, required acceptances (§5.3), and the disk budget from the live manifest (§5.4).
 3. **No download starts without explicit consent.** "Later" re-offers from settings only; "Never" is remembered.
 4. Downloads run in the background with progress visible in settings (and debug panel); journaling continues untouched.
 5. **Features light up as ready**, individually, per §8.3: ASR weights verified → P2 spawns → mic toggle enables; LLM `Ready` → NL parse activates; embedder ready → RETRIEVAL's backfill passes begin. No fanfare — controls simply become available.
@@ -486,7 +490,7 @@ Deliverables, each with a measured number:
 ## 14. Open items (tracked, not blocking)
 
 - Multilingual Nemotron 3.5 ONNX export viability — spike deliverable §12.2.
-- Text-embedding seam for ~512-token chunks vs. CLIP's 77-token tower — cross-spec reconciliation with RETRIEVAL.md (§3.3); the config seam is reserved.
+- Text-embedding model final pick (Qwen3-Embedding-0.6B-class is the working default, §3.3) — spike validates quality/throughput alongside the CLIP embedder.
 - DFN5B exact license-acceptance requirement — spike confirms (§5.3).
 - GPU execution-provider stability for the in-process embedder — spike §12.3 gates the default (`device = "auto"` may resolve to CPU in v1 if instability is observed).
 - Future consideration (recorded only, per kernel): fine-tuning a small LLM for app tasks (summarization, sentiment, query parsing) — would slot in as a new manifest entry behind the same `LanguageModel` trait; no design work now.

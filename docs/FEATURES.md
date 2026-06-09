@@ -65,7 +65,7 @@ panel; release builds do not contain it.
 
 ## Invisible AI infrastructure
 
-- Small-models-first defaults: Nemotron 3.5 ASR (0.6B streaming) for STT; the larger OpenCLIP preset from Immich's supported set (ViT-H-14 / DFN5B class) for image+text embeddings; a small modern LLM (Gemma 4 E4B-class or a small Qwen 3.6 variant) for summaries/parsing. Larger models are optional upgrades behind the same traits, never the baseline `[M2b/M3]`
+- Small-models-first defaults: Nemotron 0.6B streaming ASR for STT; the larger OpenCLIP preset from Immich's supported set (ViT-H-14-378 / DFN5B, 1024-dim) for visual embeddings; a small dedicated text-embedding model (Qwen3-Embedding-0.6B-class) for annotation text — the primary retrieval signal (CLIP text towers cap at 77 tokens and can't carry it); a small modern LLM (Gemma 4 E4B-class or a small Qwen 3.6 variant) for summaries/parsing. Larger models are optional upgrades behind the same traits, never the baseline `[M2b/M3]`
 - Future consideration (recorded, not designed): fine-tuning a small LLM for the app's specific tasks (summarization, sentiment, query parsing)
 - Managed local model runtime: llama.cpp child process behind the OpenAI-compatible seam; the app never links inference `[M2b]`
 - Managed local streaming-ASR process `[M2b]`

@@ -1,5 +1,11 @@
 # M1 — Spine: Build Plan
 
+> **Superseded in detail by `spec/`** — the normative implementation contract is
+> spec/EVENTS.md, SIDECARS.md, LIBRARY.md, CAPTURE.md, RETRIEVAL.md, RUNTIME.md,
+> UI.md (see also docs/SPEC-GAPS.md for the revised phase order: embedded-preview
+> ingest, pencil before voice, M1-parallel runtime spike). This file remains the
+> M1 orientation document; where it and a spec disagree, the spec wins.
+
 M1 proves the journal with zero AI risk: ingest a real library, browse it, attach typed notes to images as append-only events, mirror everything to sidecars, and search it with FTS5. No models, no audio, no embeddings. If M1 is good, the product thesis (an append-only journal bound to content-addressed images) is real; everything after is amplification.
 
 **Definition of done:** the founder's ~50k-image library ingests (resumably), browses smoothly, accepts typed notes against any selection, every note appears in a `.photoproof.json` sidecar beside the image within seconds, a moved/renamed file relinks without losing its journal, and FTS5 search over notes returns the right frames.
@@ -14,7 +20,7 @@ narrate/
 │   │                           #   sidecar sync, search. No Tauri, no UI deps.
 │   │   ├── src/
 │   │   │   ├── id.rs           # ContentHash (BLAKE3), Ulid newtypes
-│   │   │   ├── events/         # AnnotationEvent, append-only log, tombstones
+│   │   │   ├── events/         # event log per spec/EVENTS.md (retraction/redaction)
 │   │   │   ├── ingest/         # walker, hasher, queue, thumbnailer, RAW decode
 │   │   │   ├── library/        # watched roots, volumes, relink, notify watcher
 │   │   │   ├── sidecar/        # .photoproof.json schema (versioned), mirror writer
@@ -42,7 +48,7 @@ Rules that keep M1 honest:
 | Hashing | `blake3` | mmap + rayon for throughput |
 | IDs | `ulid` | sortable event ids |
 | DB | `rusqlite` (bundled) | WAL mode; FTS5 ships in the bundled build |
-| RAW decode | `rawler` | libraw FFI fallback deferred until a real format gap appears |
+| RAW decode | `rawler` | backfill pass only — M1 ships on embedded JPEG previews (spec/LIBRARY.md §9); libraw FFI fallback deferred until a real format gap appears |
 | Non-RAW decode | `image` + `kamadak-exif` | JPEG/TIFF/PNG previews + EXIF subset |
 | FS watching | `notify` | plus startup reconciliation scan |
 | Serialization | `serde` / `serde_json` | sidecar schema carries an explicit `version` field |
@@ -52,9 +58,9 @@ Rules that keep M1 honest:
 ## Build Order
 
 1. **Workspace + identity.** Cargo workspace, `ContentHash`, ULID newtypes, error types. Hash a directory tree fast (mmap + rayon); this is the perf foundation everything sits on.
-2. **Schema + event log.** SQLite migrations: `images`, `volumes`, `paths`, `annotation_events`, FTS5 virtual table. Append/read API with tombstone redaction. *No update/delete code paths exist at all.*
+2. **Schema + event log.** SQLite migrations per spec/EVENTS.md (`annotation_events`, `event_targets`, `sessions`, FTS5) and spec/LIBRARY.md (`images`, `paths`, `volumes`, `ingest_passes`). Append/read API with retraction folds and the redaction scrub path — *the only update that exists.*
 3. **Sidecar mirror.** Versioned `.photoproof.json` schema (embeds content hash + full event history for that image), debounced background writer, overflow store for unwritable volumes, and `rebuild-from-sidecars`.
-4. **Ingest pipeline.** Resumable queue: walk → hash → decode → thumbnail cache. Idempotent by hash; interrupt/resume tested on a large tree. RAW via rawler, EXIF subset extraction.
+4. **Ingest pipeline.** Resumable versioned passes: walk → hash → embedded-preview extraction → thumbnail cache, EXIF subset (spec/LIBRARY.md §10). Idempotent by hash; interrupt/resume tested on a large tree. Full RAW decode via rawler is a later backfill pass, not an M1 blocker.
 5. **Library sync.** Watched roots, `notify` watcher, startup reconciliation, move/rename = relink, offline-volume state.
 6. **Desktop shell.** Tauri app: register roots, virtualized thumbnail grid, single-image view, selection model.
 7. **Typed notes + write scope.** Notes panel bound to current selection; the "speaking about: N images" scope indicator ships now, with typing, so the scope discipline is baked in before voice exists.
@@ -67,7 +73,7 @@ Steps 1–5 are pure `photoproof-core` and fully testable headless. The UI (6–
 
 The scope doc's prime directive is log integrity and portability. M1 encodes it as tests:
 
-- **Append-only:** no API mutates or deletes an event; redaction emits a tombstone and the original row survives.
+- **Append-only:** no API mutates or deletes an event; retraction tombstones (content preserved), redaction scrubs content while the row and its structure survive (spec/EVENTS.md §7).
 - **Round-trip:** ingest → annotate → delete the SQLite db → rebuild from sidecars → byte-identical event history.
 - **Relink:** move/rename a file out from under the app (running and stopped); annotations follow the hash.
 - **Interrupt:** kill ingest mid-run; resume completes with no duplicates and no missed files.

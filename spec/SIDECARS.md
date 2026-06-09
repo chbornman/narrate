@@ -71,7 +71,7 @@ Deliberately **not** included: `ended_at` (sessions close on a 30-minute idle bo
 
 Each element is one annotation event in its canonical serialized form. **The normative field-level definition of every event kind lives in `spec/EVENTS.md`**; this spec is normative only about which events appear in which file, ordering, the redaction marker, the `targets` array, and unknown-field handling. The field table below is a plausible serialization for illustration and MUST be reconciled against EVENTS.md in the coordinator's consistency pass.
 
-Inclusion rule: a sidecar for image `H` contains **every** event whose target set includes `H` — including tombstoned (retracted) events, revision events whose target event targets `H`, and redaction markers. Revisions and tombstones reference their target via `revises`/`retracts` and carry the same `targets` as the event they modify, so inclusion needs no transitive lookup.
+Inclusion rule: a sidecar for image `H` contains **every** event whose *effective* target set includes `H` (EVENTS §2.3) — including retracted events, and the revision/retraction/redaction events that modify them. Meta-events store zero targets and reference their target via `target_event`; because an event always travels with all meta-events that alter it, effective targets resolve within the file with no external lookup.
 
 Ordering: ascending by event id (ULID lexicographic). Because ULIDs are monotonic within a process (kernel), this equals append order for locally-created events; after a cross-machine merge it is the deterministic canonical order. Readers MUST NOT re-sort by `ts`.
 
@@ -80,18 +80,17 @@ Illustrative common fields (normative form defined in `spec/EVENTS.md`):
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | ULID, 26 chars. |
-| `session` | string | Session ULID; key into `sessions`. |
+| `v` | integer | Event schema version, currently `1`. |
+| `session_id` | string | Session ULID; key into `sessions`. |
 | `ts` | string | UTC RFC 3339, millisecond precision. |
 | `source` | string | `voice` \| `typed` \| `pencil` \| `system`. |
-| `kind` | string | `remark` \| `rating` \| `series_ref` \| `revision` \| `stroke` \| `tombstone`. |
-| `targets` | array | `[{ "hash": <64-hex>, "position": <int> }, …]` — the event's **complete** target list, including hashes other than this file's image (§6). Empty = session-level (§7.2). |
-| `text` | string | Utterance/note text. Absent on pure strokes and scrubbed events. |
-| `rating` | integer | On `kind:"rating"`. |
-| `asr` | object | `{ "confidence": <float 0..1> }` on voice events. |
-| `revises` / `retracts` | string | Target event id on `revision` / `tombstone`. |
-| `links` | object | e.g. `{ "utterance": <event-id> }` on a stroke. |
-| `stroke` | object | `{ "tool": "pencil", "color": "red", "orientation": <EXIF 1–8>, "points": [[x, y, pressure], …] }`, coords normalized 0..1 in the display-oriented image. |
-| `redacted` | object | Redaction marker, `{ "at": <RFC 3339> }` (§3.4). |
+| `kind` | string | `remark` \| `rating` \| `stroke` \| `revision` \| `retraction` \| `redaction`. |
+| `targets` | array | Plain array of 64-hex hashes, order = selection position — the event's **complete** target list, including hashes other than this file's image (§6). Empty = session-level (§7.2) and all meta-events (revision/retraction/redaction store zero targets; placement follows their target's effective targets, EVENTS §2.3). |
+| `text` | string | Utterance/note text (`remark`/`revision`). Absent on strokes, ratings, meta-events, and scrubbed events. |
+| `payload` | object | Kind-specific, EVENTS §3: voice remark `{ "conf_pm": <int 0..1000>, "dur_ms": <int> }`; rating `{ "value": <int 0..5> }`; stroke `{ "base_w": <int>, "orientation": <EXIF 1–8>, "points": [[x, y, p, t], …], "tool": "pencil" }` with integer ten-thousandth coords (−2500..12500), per-mille pressure, ms offsets. Removed by redaction. |
+| `target_event` | string | Target event id on `revision` / `retraction` / `redaction`. |
+| `linked_event` | string | Cross-modal stroke↔utterance link, carried by the later-committed event (EVENTS §3.3). |
+| `redacted_by` | string | Id of the redaction event that scrubbed this one (§3.4). |
 
 Embeddings, summaries, sentiment, captions, and all other derived values are **never** present in a sidecar (kernel). A writer holding such data has a bug; a reader encountering unknown fields preserves them (§5.2).
 
@@ -99,11 +98,11 @@ Embeddings, summaries, sentiment, captions, and all other derived values are **n
 
 A redacted event remains in the array as a scrubbed husk — the one sanctioned violation of append-only:
 
-- Retained: `id`, `kind`, `session`, `source`, `targets`, `ts`.
-- Removed entirely: `text`, `stroke`, `asr`, `links`, `rating`, and every other content-bearing field, **including unknown fields** (unknown fields might be content; redaction supremacy beats preservation).
-- Added: `"redacted": { "at": "<UTC RFC 3339>" }`.
+- Retained: `id`, `v`, `kind`, `session_id`, `source`, `targets`, `ts`, and structural refs (`target_event`, `linked_event`).
+- Removed entirely: `text`, `payload`, and every other content-bearing field, **including unknown fields** (unknown fields might be content; redaction supremacy beats preservation).
+- Added: `"redacted_by": "<redaction event id>"` — the redaction event itself also appears in the array (it mirrors wherever its target mirrors), carrying the when.
 
-A retraction is different and ordinary: the original event stays intact and a separate `kind:"tombstone"` event references it.
+A retraction is different and ordinary: the original event stays intact and a separate `kind:"retraction"` event references it via `target_event`.
 
 ### 3.5 Canonical serialization (byte determinism)
 
@@ -111,17 +110,18 @@ Writers MUST emit:
 
 1. UTF-8, no BOM. Non-ASCII characters raw (no `\uXXXX` beyond JSON-mandatory escapes: `"`, `\`, control characters).
 2. LF line endings; the file ends with exactly one trailing LF.
-3. Pretty-printed, 2-space indent (sidecars live in users' folders and their diffs; one-line JSON is hostile). One exception for signal-to-noise: an array whose elements are all numbers (e.g. a stroke point triple) is emitted compact on one line, `[0.412, 0.388, 0.62]`, with `", "` separators.
+3. Pretty-printed, 2-space indent (sidecars live in users' folders and their diffs; one-line JSON is hostile). One exception for signal-to-noise: an array whose elements are all numbers (e.g. a stroke point tuple) is emitted compact on one line, `[4120, 3880, 620, 0]`, with `", "` separators.
 4. **Object keys sorted ascending by UTF-8 byte order at every nesting level**, unknown fields included (they sort in naturally).
-5. Arrays: `events` sorted by `id` ascending; `targets` by `position` ascending; stroke `points` in capture order. No other array reordering.
+5. Arrays: `events` sorted by `id` ascending; `targets` in position (selection) order as stored; stroke `points` in capture order. No other array reordering.
 6. Optional/absent fields are **omitted**, never written as `null` (sole exception: top-level `image: null` in session journals, §7.2).
-7. Numbers: integers without fraction or exponent; floats in shortest round-trip decimal form (serde_json default); no NaN/Infinity anywhere.
+7. Numbers: **integers only**, without fraction or exponent; canonical event JSON contains no floats (EVENTS §4.1) — coordinates, pressure, and confidence are quantized integers. No NaN/Infinity anywhere.
+8. Event objects are EVENTS §4 canonical events re-laid-out by these rules: identical fields, identical key order, identical values — only whitespace differs. EVENTS' compact single-line form is the normal form for cross-sidecar byte comparison and dedupe.
 
 Result: identical journal content → identical bytes, on every platform, forever within a schema_version. The round-trip acceptance test (§13) depends on this.
 
 ### 3.6 Complete example
 
-`IMG_4471.arw.photoproof.json` — a typed multi-target remark, a rating later retracted by tombstone, a voice remark with low ASR confidence, its revision, a linked stroke, and a redacted event. (Event field shapes: normative form defined in `spec/EVENTS.md`.)
+`IMG_4471.arw.photoproof.json` — a typed multi-target remark, a rating later retracted, a voice remark with low ASR confidence, a stroke linked to it, its revision, the retraction, and a redacted event with its redaction. (Event field shapes are EVENTS §4 canonical.)
 
 ```json
 {
@@ -129,123 +129,111 @@ Result: identical journal content → identical bytes, on every platform, foreve
     {
       "id": "01JXF8M3ABCDEFGH23456789QR",
       "kind": "remark",
-      "session": "01JXF8M2QK5T7VWXYZ0123456R",
+      "session_id": "01JXF8M2QK5T7VWXYZ0123456R",
       "source": "typed",
       "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        },
-        {
-          "hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-          "position": 1
-        }
+        "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
+        "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
       ],
       "text": "These two are the bookends of the harbor sequence.",
-      "ts": "2026-06-09T14:02:11.482Z"
+      "ts": "2026-06-09T14:02:11.482Z",
+      "v": 1
     },
     {
       "id": "01JXF8N7P2Q4R6S8T0V1W3X5Y7",
       "kind": "rating",
-      "rating": 3,
-      "session": "01JXF8M2QK5T7VWXYZ0123456R",
+      "payload": {
+        "value": 3
+      },
+      "session_id": "01JXF8M2QK5T7VWXYZ0123456R",
       "source": "typed",
       "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        }
+        "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d"
       ],
-      "ts": "2026-06-09T14:02:40.019Z"
+      "ts": "2026-06-09T14:02:40.019Z",
+      "v": 1
     },
     {
-      "asr": {
-        "confidence": 0.74
-      },
       "id": "01JXJ9A1B2C3D4E5F6G7H8J9K0",
       "kind": "remark",
-      "session": "01JXJ99XYZ0123456789ABCDEF",
+      "payload": {
+        "conf_pm": 740,
+        "dur_ms": 3260
+      },
+      "session_id": "01JXJ99XYZ0123456789ABCDEF",
       "source": "voice",
       "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        }
+        "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d"
       ],
       "text": "the muddy light is what holds this one together",
-      "ts": "2026-07-14T09:30:05.110Z"
+      "ts": "2026-07-14T09:30:05.110Z",
+      "v": 1
     },
     {
       "id": "01JXJ9B4C5D6E7F8G9H0J1K2M3",
       "kind": "stroke",
-      "links": {
-        "utterance": "01JXJ9A1B2C3D4E5F6G7H8J9K0"
-      },
-      "session": "01JXJ99XYZ0123456789ABCDEF",
-      "source": "pencil",
-      "stroke": {
-        "color": "red",
+      "linked_event": "01JXJ9A1B2C3D4E5F6G7H8J9K0",
+      "payload": {
+        "base_w": 40,
         "orientation": 1,
         "points": [
-          [0.412, 0.388, 0.62],
-          [0.46, 0.352, 0.71],
-          [0.471, 0.43, 0.55],
-          [0.409, 0.441, 0.4]
+          [4120, 3880, 620, 0],
+          [4600, 3520, 710, 14],
+          [4710, 4300, 550, 29],
+          [4090, 4410, 400, 46]
         ],
         "tool": "pencil"
       },
+      "session_id": "01JXJ99XYZ0123456789ABCDEF",
+      "source": "pencil",
       "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        }
+        "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d"
       ],
-      "ts": "2026-07-14T09:30:07.902Z"
+      "ts": "2026-07-14T09:30:07.902Z",
+      "v": 1
     },
     {
       "id": "01JXJ9C7D8E9F0G1H2J3K4M5N6",
       "kind": "revision",
-      "revises": "01JXJ9A1B2C3D4E5F6G7H8J9K0",
-      "session": "01JXJ99XYZ0123456789ABCDEF",
+      "session_id": "01JXJ99XYZ0123456789ABCDEF",
       "source": "typed",
-      "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        }
-      ],
+      "target_event": "01JXJ9A1B2C3D4E5F6G7H8J9K0",
+      "targets": [],
       "text": "the moody light is what holds this one together",
-      "ts": "2026-07-14T09:31:42.560Z"
+      "ts": "2026-07-14T09:31:42.560Z",
+      "v": 1
     },
     {
       "id": "01JXJ9D0E1F2G3H4J5K6M7N8P9",
-      "kind": "tombstone",
-      "retracts": "01JXF8N7P2Q4R6S8T0V1W3X5Y7",
-      "session": "01JXJ99XYZ0123456789ABCDEF",
-      "source": "typed",
-      "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        }
-      ],
-      "ts": "2026-07-14T09:33:10.004Z"
+      "kind": "retraction",
+      "session_id": "01JXJ99XYZ0123456789ABCDEF",
+      "source": "system",
+      "target_event": "01JXF8N7P2Q4R6S8T0V1W3X5Y7",
+      "targets": [],
+      "ts": "2026-07-14T09:33:10.004Z",
+      "v": 1
     },
     {
       "id": "01JXJ9E3F4G5H6J7K8M9N0P1Q2",
       "kind": "remark",
-      "redacted": {
-        "at": "2026-07-14T09:40:55.231Z"
-      },
-      "session": "01JXJ99XYZ0123456789ABCDEF",
+      "redacted_by": "01JXJ9F6G7H8J9K0M1N2P3Q4R5",
+      "session_id": "01JXJ99XYZ0123456789ABCDEF",
       "source": "voice",
       "targets": [
-        {
-          "hash": "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d",
-          "position": 0
-        }
+        "7c9e1d3f5a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e3f5a7b9c2d4e6f8a0b1c3d"
       ],
-      "ts": "2026-07-14T09:35:02.770Z"
+      "ts": "2026-07-14T09:35:02.770Z",
+      "v": 1
+    },
+    {
+      "id": "01JXJ9F6G7H8J9K0M1N2P3Q4R5",
+      "kind": "redaction",
+      "session_id": "01JXJ99XYZ0123456789ABCDEF",
+      "source": "system",
+      "target_event": "01JXJ9E3F4G5H6J7K8M9N0P1Q2",
+      "targets": [],
+      "ts": "2026-07-14T09:40:55.231Z",
+      "v": 1
     }
   ],
   "format": "photoproof-sidecar",
@@ -486,7 +474,7 @@ Rebuild accepts either an export directory or the live world (watched roots + ov
 2. **Parse & validate** (§4). Failures are quarantined and reported; nothing aborts the run.
 3. **Pass 1 — redaction registry:** collect every redaction marker from every file first.
 4. **Pass 2 — union:** group by embedded hash; union events by id across all copies with redaction supremacy (§10.1) and the §10.2 conflict rule; insert event rows, `event_targets` (from each event's `targets`), sessions (from the denormalized maps; identical session ids across files must agree — mismatches are reported, first-seen wins), and images (hash + snapshot).
-5. **Derived:** rebuild FTS from folded text (revisions applied, tombstones excluded, redactions absent — fold per EVENTS.md). Vectors/summaries are queued for background re-derivation (RUNTIME/RETRIEVAL); they are never in sidecars.
+5. **Derived:** rebuild FTS from folded text (revisions applied, retracted excluded, redactions absent — fold per EVENTS.md). Vectors/summaries are queued for background re-derivation (RUNTIME/RETRIEVAL); they are never in sidecars.
 6. **Integrity report (always produced):** files scanned/parsed/failed (paths + errors), events imported, duplicate copies deduped, redactions enforced (incl. files dirtied for re-scrub), id conflicts (§10.2), opaque newer-version files (§5.3), unknown kinds preserved, and manifest discrepancies when a manifest was present (missing/extra files, count mismatches).
 7. Post-rebuild reconciliation rewrites any sidecar now a subset of the union (convergence).
 

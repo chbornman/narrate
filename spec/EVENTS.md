@@ -19,7 +19,7 @@
 
 - 26 characters, Crockford base32, **uppercase**: 48-bit UTC milliseconds + 80-bit randomness.
 - Generation is **monotonic within a process** (the `ulid` crate's monotonic mode): each issued id is strictly greater than the last, by incrementing the random component within a millisecond and clamping the timestamp component to `max(last_issued_ms, now_ms)` if the wall clock regresses.
-- Ids may be **minted before the event row is inserted**. CAPTURE mints an utterance's id at VAD speech-onset, so a stroke finalized earlier can reference it via `linked_event` even though the utterance row lands later. Minting fixes both id and `ts`.
+- Ids may be **minted before the event row is inserted**. CAPTURE mints an utterance's id at VAD speech-onset; the row lands only at ASR finalization. Minting fixes both id and `ts` at onset, so ULID order reflects capture order even when finalization lags by seconds.
 - Cross-machine ULID collisions are negligible; uniqueness is enforced by `PRIMARY KEY` and the merge rule (§8): same id ⇒ same event.
 
 ### 1.3 Clock discipline; log order vs timestamp order
@@ -48,7 +48,7 @@
 | `text`         | UTF-8 string         | `remark`/`revision` only; removed by redaction     |
 | `payload`      | JSON object          | kind-specific (§3); removed by redaction           |
 | `target_event` | EventId              | `revision`/`retraction`/`redaction` only, required |
-| `linked_event` | EventId              | `stroke` only, optional (the linked utterance)     |
+| `linked_event` | EventId              | `stroke` or voice `remark`, optional — the cross-modal link, carried by the **later-committed** event (§3.3, CAPTURE §9) |
 | `redacted_by`  | EventId              | present iff content has been scrubbed              |
 
 ### 2.2 `source` × `kind` matrix
@@ -101,9 +101,9 @@ Events with **zero** effective targets (session-level remarks, dangling meta-eve
 
 One utterance or one typed note — the atom of the journal.
 
-- **Fields:** `text` (required, non-empty after trim). For `source=voice`, `payload = {"conf_pm": int 0..1000, "dur_ms": int ≥ 0}` — per-segment ASR confidence (per-mille) and utterance duration (VAD onset → finalization). `payload` omitted for typed.
+- **Fields:** `text` (required, non-empty after trim). For `source=voice`, `payload = {"conf_pm": int 0..1000, "dur_ms": int ≥ 0}` — per-segment ASR confidence (per-mille) and utterance duration (VAD onset → finalization); a voice remark MAY carry `linked_event` referencing an earlier stroke (the later-committed event carries the link, CAPTURE §9). `payload` omitted for typed.
 - **Fold:** folded entry shows the **effective text** — the latest live revision in the chain, else the remark's own text (§6.1). Hidden entirely if retracted; redaction stub if scrubbed.
-- **Indexing:** FTS5 over effective text, one row per remark keyed by chain-root id (§5.4). Embeddings: `vec_kind='event_text'` vectors reference the root id, embed effective text, chunked ~512 tokens (RETRIEVAL owns the chunker). `dur_ms` feeds stroke↔utterance overlap linking (CAPTURE owns the algorithm).
+- **Indexing:** FTS5 over effective text, one row per remark keyed by chain-root id (§5.4). Embeddings: `vec_kind='annotation_chunk'` vectors reference the root id, embed effective text, chunked ~512 tokens (RETRIEVAL owns the chunker). `dur_ms` feeds stroke↔utterance overlap linking (CAPTURE owns the algorithm).
 - **Sidecar:** canonical JSON, verbatim. **UI default:** visible everywhere journal context appears.
 
 ### 3.2 `rating`
@@ -122,6 +122,8 @@ One grease-pencil gesture, pen-down to pen-up.
 
   ```
   {
+    "base_w": int,                  // stroke base width, ten-thousandths of the
+                                    // display-oriented long edge; default 40 (= 0.4%)
     "orientation": int 1..8,        // EXIF orientation value applied to produce the
                                     // display-oriented frame the coords refer to
     "points": [[x, y, p, t], ...],  // ≥ 1 point, ≤ 8192 (capture downsamples)
@@ -129,8 +131,8 @@ One grease-pencil gesture, pen-down to pen-up.
   }
   ```
 
-  `x`,`y`: int 0..65535, `round(u * 65535)` where `u ∈ [0,1]` is position relative to the **display-oriented** image width/height (left→right, top→bottom). `p`: pressure quantized likewise; `0` = no pressure data (mouse), rendered as nominal. `t`: int ms since pen-down, first point 0, non-decreasing. Integer quantization is deliberate: canonical JSON has no floats (§4.1); 1/65535 of image extent is sub-pixel at any preview size.
-- `linked_event` (top-level, optional): the utterance whose VAD span overlaps the stroke's time span, else nearest within ±10 s, else absent. Stored **on the stroke only**; CAPTURE computes it and may reference a minted-not-yet-inserted utterance id (§1.2). Dangling links are inert until the utterance arrives (§8).
+  `x`,`y`: int, ten-thousandths of the **display-oriented** image width/height (left→right, top→bottom): `round(u * 10000)` where `u` is the normalized position. Range **−2500..12500** — strokes may overshoot the frame while circling an edge subject (CAPTURE §8.1 clamps to [−0.25, 1.25]); renderers clip to the visible overlay. `p`: pressure per-mille, int 0..1000; devices that report no pressure record **1000** (renders at nominal width under CAPTURE's width model `w = base_w × (0.4 + 0.6·p/1000)`). `t`: int ms since pen-down, first point 0, non-decreasing; the event's `ts` is pen-up (commit), so pen-down = `ts − t_last`. Integer quantization is deliberate: canonical JSON has no floats (§4.1); 1/10000 of image extent is sub-pixel at any preview size.
+- `linked_event` (top-level, optional): the cross-modal stroke↔utterance link. **Carried by the later-committed event only**, pointing backward — a stroke linking to an earlier utterance, or a voice remark linking to an earlier stroke (CAPTURE §9 owns resolution: VAD-span overlap, else nearest within ±10 s, else absent). Folds and journal views MUST traverse `linked_event` in both directions; "linked" is symmetric even though storage is one-directional. Dangling links are inert until the partner arrives (§8).
 - **Fold:** visible on the overlay unless retracted (erase = retraction of the stroke event) or scrubbed. No partial-stroke erase in v1.
 - **Indexing:** no FTS/embeddings of its own; searchable *through* the linked utterance ("the one where I circled the hand" hits the utterance text; UI highlights the linked stroke).
 - **Sidecar:** verbatim. **UI default:** rendered on the toggleable overlay; inline at its timestamp in the journal panel.
@@ -142,7 +144,7 @@ Correction of the photographer's recorded words; ASR will mishear, and the journ
 - **Fields:** `text` (corrected full text, required); `target_event` (required) — a `remark` or another `revision` (chains). Other target kinds rejected at append.
 - **Chain resolution:** `root(e)` follows `target_event` hops until a non-revision event. All revisions resolving to root R form R's chain. **Effective text of R** = `text` of the **greatest-id** live (non-retracted, non-scrubbed) revision in the chain, else R's own text. Revision-of-revision needs no special case: both resolve to the same root, latest id wins. A revision whose chain has a missing hop is **inert** — not displayed, not indexed — and activates automatically when the missing ancestor arrives via merge.
 - **Fold:** never a standalone entry; replaces the displayed/indexed text of its root. Retracting a revision removes that correction (previous live revision or the original resurfaces). Retracting the *root* hides the whole entry, revisions included.
-- **Indexing:** on append, the root's FTS row is updated to the new effective text and the root's `event_text` vectors are invalidated for re-embedding. The original text stays in the log and sidecars — it is simply not indexed.
+- **Indexing:** on append, the root's FTS row is updated to the new effective text and the root's `annotation_chunk` vectors are invalidated for re-embedding. The original text stays in the log and sidecars — it is simply not indexed.
 - **Sidecar:** verbatim, mirrored to the root's sidecars (§2.3) — sidecars carry original *and* correction.
 - **UI default:** journal panel shows effective text with a "corrected" affordance that expands the chain; not a separate timeline entry.
 
@@ -180,9 +182,9 @@ Consequently `source=system` appears only on `retraction`/`redaction` (button-me
 
 | kind       | text | payload                   | target_event | linked_event | targets | FTS              | vectors           | sidecar            | UI default           |
 |------------|------|---------------------------|--------------|--------------|---------|------------------|-------------------|--------------------|----------------------|
-| remark     | ✓    | voice: conf_pm, dur_ms    | —            | —            | 0..N    | effective text   | event_text (root) | verbatim           | visible              |
+| remark     | ✓    | voice: conf_pm, dur_ms    | —            | voice: opt.  | 0..N    | effective text   | annotation_chunk (root) | verbatim           | visible              |
 | rating     | —    | value 0..5                | —            | —            | 1..N    | —                | —                 | verbatim           | stars + timeline row |
-| stroke     | —    | orientation, points, tool | —            | optional     | 1       | — (via link)     | — (via link)      | verbatim           | overlay + timeline   |
+| stroke     | —    | base_w, orientation, points, tool | —    | optional     | 1       | — (via link)     | — (via link)      | verbatim           | overlay + timeline   |
 | revision   | ✓    | —                         | required     | —            | 0       | updates root row | invalidates root  | verbatim, w/root   | folded into root     |
 | retraction | —    | —                         | required     | —            | 0       | removes target   | removes target    | verbatim, w/target | hides target         |
 | redaction  | —    | —                         | required     | —            | 0       | purges target    | purges target     | verbatim, w/target | target shows stub    |
@@ -233,7 +235,7 @@ Fold: effective text of `…C2D` is the revision's text; its FTS row now says "m
 **C. Stroke linked to that utterance** (circle around a hand; 4 points shown — real strokes carry tens to hundreds):
 
 ```json
-{"id":"01JZ5C5SXK3M7P9Q1R3S5T7V9W","kind":"stroke","linked_event":"01JZ5C5RTQ8W0X2Y4Z6A8B0C2D","payload":{"orientation":1,"points":[[21800,30100,0,0],[23950,28420,0,16],[26100,30090,0,33],[21810,30150,0,610]],"tool":"pencil"},"session_id":"01JZ5C3HW0RD8PT2M6QK4V9XEA","source":"pencil","targets":["b3a91c0d5e7f20146aa8c3d9e1f5b2640c7d8e9f1a2b3c4d5e6f708192a3b4c5"],"ts":"2026-06-09T14:24:12.950Z","v":1}
+{"id":"01JZ5C5SXK3M7P9Q1R3S5T7V9W","kind":"stroke","linked_event":"01JZ5C5RTQ8W0X2Y4Z6A8B0C2D","payload":{"base_w":40,"orientation":1,"points":[[3326,4593,1000,0],[3654,4337,1000,16],[3983,4591,1000,33],[3328,4601,1000,610]],"tool":"pencil"},"session_id":"01JZ5C3HW0RD8PT2M6QK4V9XEA","source":"pencil","targets":["b3a91c0d5e7f20146aa8c3d9e1f5b2640c7d8e9f1a2b3c4d5e6f708192a3b4c5"],"ts":"2026-06-09T14:24:12.950Z","v":1}
 ```
 
 **D. Redaction pair** — the redaction event, and the scrubbed form of B's voice remark as it appears in the DB and every sidecar afterwards:
@@ -292,7 +294,7 @@ CREATE TABLE annotation_events (
 
   -- structural shape per kind
   CHECK ( (target_event IS NOT NULL) = (kind IN ('revision','retraction','redaction')) ),
-  CHECK ( linked_event IS NULL OR kind = 'stroke' ),
+  CHECK ( linked_event IS NULL OR kind IN ('stroke','remark') ),
   CHECK ( kind IN ('remark','revision') OR text IS NULL ),
   CHECK ( kind NOT IN ('retraction','redaction')
           OR (text IS NULL AND payload IS NULL AND redacted_by IS NULL) ),
@@ -361,8 +363,8 @@ CREATE TABLE sidecar_dirty (
 -- serialized into event rows or sidecars.
 CREATE TABLE vectors (
   vec_id      INTEGER PRIMARY KEY,
-  vec_kind    TEXT NOT NULL CHECK (vec_kind IN ('event_text','image_summary','image')),
-  event_id    TEXT,                 -- chain-root event id, for event_text
+  vec_kind    TEXT NOT NULL CHECK (vec_kind IN ('annotation_chunk','image_summary','image_clip')),
+  event_id    TEXT,                 -- chain-root event id, for annotation_chunk
   image_hash  TEXT,                 -- for image_summary / image
   chunk_idx   INTEGER NOT NULL DEFAULT 0,
   model_id    TEXT NOT NULL,
@@ -456,7 +458,7 @@ Input: all events `e` with `H ∈ effective_targets(e)`, ascending id. Output:
 - `stroke` S: skip if retracted; scrubbed → stub (journal panel only; nothing on the overlay). Else emit path payload + resolved `linked_event`.
 - `revision`/`retraction`/`redaction`: never standalone entries; they act on their targets as above.
 
-The **indexable set** (FTS + `event_text` embeddings) = effective texts of live, unscrubbed remark roots. Retracted and scrubbed content are excluded from FTS, vectors, and context assembly identically; they differ only in what remains in the log (everything vs. structure-only).
+The **indexable set** (FTS + `annotation_chunk` embeddings) = effective texts of live, unscrubbed remark roots. Retracted and scrubbed content are excluded from FTS, vectors, and context assembly identically; they differ only in what remains in the log (everything vs. structure-only).
 
 ### 6.3 FTS/derived maintenance (same transaction as the insert)
 
@@ -570,14 +572,15 @@ pub struct EventStore { /* owns the SQLite connection pool */ }
 pub struct Minted { pub id: EventId, pub ts: UtcMillis }
 
 pub enum EventDraft {
-    Remark     { source: RemarkSource,          // Voice { conf_pm: u16, dur_ms: u32 } | Typed
+    Remark     { source: RemarkSource,          // Voice { conf_pm: u16, dur_ms: u32,
+                                                //         linked_event: Option<EventId> } | Typed
                  text: String,
                  targets: Vec<ContentHash> },   // empty = session-level
     Rating     { value: u8,                     // 0..=5
                  targets: Vec<ContentHash> },   // non-empty
-    Stroke     { payload: StrokePayload,        // orientation, points, tool (§3.3)
+    Stroke     { payload: StrokePayload,        // base_w, orientation, points, tool (§3.3)
                  target: ContentHash,
-                 linked_utterance: Option<EventId> },
+                 linked_event: Option<EventId> },   // backward link to an earlier utterance
     Revision   { target: EventId, text: String },
     Retraction { target: EventId, source: RetractionSource },  // Voice | System
     // No Redaction draft: redaction is not an append; it goes through redact().
