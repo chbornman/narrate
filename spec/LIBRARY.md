@@ -53,8 +53,6 @@ the product; a wrong non-migration costs one click, a wrong migration silently c
 truth. An explicit user-invoked "migrate journal" action is a recorded **non-feature**
 (candidate post-M3).
 
----
-
 ## 2. Images and duplicates
 
 Byte-identical copies = **one image, N path rows**: one journal, one preview set, one sidecar
@@ -70,8 +68,6 @@ RAW+JPEG = **two images, two journals, no stacking**. Recorded future feature (n
 now): pairing heuristic — same basename stem + same `DateTimeOriginal` (±1 s) + same folder —
 presented as a stack with a shared journal *view*, never merged event logs. Its absence in v1
 is a decision, not an oversight.
-
----
 
 ## 3. Paths
 
@@ -97,8 +93,6 @@ watched root** beats outside; (3) **writable** volume beats read-only; (4) most 
 deterministic tiebreak. If no row survives filter 1, return the best *offline* path plus the
 availability state (§8) so the UI can badge it.
 
----
-
 ## 4. Volumes
 
 The volume is the unit of online/offline, read-only detection, and path anchoring. Mount
@@ -123,16 +117,14 @@ Precedence, highest first:
    debug panel.
 
 Marker policy (decision): written **automatically on first ingest of any writable volume**
-hosting a watched root — no prompt. It is a 200-byte dotfile, documented in user docs beside
-the sidecar explanation, and exactly as invasive as the sidecars the product is built on.
-Unwritable volume → levels 2–3 now, marker written opportunistically if it ever mounts
-writable. Markers are **not** written to the filesystem root of system/boot volumes
-(platform ids are reliable there).
-
-Conflicts: marker matches volume A, platform id matches volume B (cloned/restored drive) →
-**marker wins**, B's platform id cleared, warning logged. Two simultaneously mounted volumes
-with the same marker ULID (full clone) → the second registers as a *new* volume with a fresh
-marker, debug-panel warning.
+hosting a watched root — no prompt. A 200-byte dotfile, documented in user docs beside the
+sidecar explanation, exactly as invasive as the sidecars the product is built on. Unwritable
+volume → levels 2–3 now, marker written opportunistically if it ever mounts writable. Markers
+are **not** written to the filesystem root of system/boot volumes (platform ids are reliable
+there). Conflicts: marker matches volume A but platform id matches volume B (cloned/restored
+drive) → **marker wins**, B's platform id cleared, warning logged; two simultaneously mounted
+volumes with the same marker ULID (full clone) → the second registers as a *new* volume with
+a fresh marker, debug-panel warning.
 
 ### 4.2 Volume state machine
 
@@ -163,8 +155,6 @@ watched root (flags lie on network mounts). Store in `volumes.read_only`. Conseq
 volumes route to the overflow store; on a later writable mount, SIDECARS.md's
 flush-to-adjacent rules apply.
 
----
-
 ## 5. Watched roots
 
 - A root = `(volume_id, rel_path)`. Registration resolves the chosen directory to volume +
@@ -187,8 +177,6 @@ directories — covers `.photoproof-volume`, `.DS_Store`, `.dtrash`, `.git`);
 Information`, `lost+found`, `node_modules`; files not on the format allowlist (§9.1); files
 > 2 GiB (sanity ceiling, logged); the app's own data directory if a root ever contains it.
 Ships as a built-in constant; user-editable exclusions are post-v1.
-
----
 
 ## 6. Library-side SQLite DDL
 
@@ -286,20 +274,18 @@ CREATE TABLE preview_artifacts (
 No separate queue table: **the queue is the set of `pending` rows in `ingest_passes`**, which
 makes ingest resumable and idempotent by construction (§10.4).
 
----
-
 ## 7. Watcher and reconciliation
 
 ### 7.1 Live watcher
 
 `notify` crate, recursive watch per active root on an online volume. **Debounce**: per-path
-500 ms quiescence; bursts coalesce to one evaluation; a file whose size is still changing at
-evaluation (mid-copy from a card reader) is re-checked every 2 s until size+mtime are stable
-across two checks. Paired rename events are handled directly as relinks; unpaired
-removes/creates fall through to §7.2, which handles moves identically — pairing is an
-optimization, not correctness. Watcher overflow, or an unsupported backend (some network
-filesystems), degrades that root to **polled mode**: a reconciliation scan (§7.3) every 10
-minutes, noted in the debug panel.
+500 ms quiescence; bursts coalesce to one evaluation; a file whose size is still changing
+(mid-copy from a card reader) is re-checked every 2 s until size+mtime are stable across two
+checks. Paired rename events are handled directly as relinks; unpaired removes/creates fall
+through to §7.2, which handles moves identically — pairing is an optimization, not
+correctness. Watcher overflow, or an unsupported backend (some network filesystems), degrades
+that root to **polled mode**: a reconciliation scan (§7.3) every 10 minutes, noted in the
+debug panel.
 
 ### 7.2 Event handling per path (single algorithm)
 
@@ -343,8 +329,6 @@ Relink = insert/activate a path row for an existing hash. It never touches `imag
 previews, embeddings, or sidecar *content* (placement may react, per SIDECARS.md).
 Annotations follow the pixels with no copying because nothing was ever keyed on path.
 
----
-
 ## 8. Image availability (derived, never stored)
 
 Computed from path rows + volume state at query time (or a maintained view — never a stored
@@ -360,8 +344,6 @@ Search, the journal panel, retrieval, and export are **fully functional in all t
 previews are cached (§9), events live in the DB/sidecar set, the read path never touches
 originals. Badge payload for non-available images: best path (§3.1, including offline rows),
 volume `label`, volume `last_seen_at`, and `stale_since` for missing.
-
----
 
 ## 9. Preview pipeline
 
@@ -390,14 +372,13 @@ is post-v1 (the journal needs the proof, not the print).
 M1 extracts the **largest embedded JPEG preview** from the RAW container via rawler's
 metadata-only parse — no demosaic, milliseconds per file. Expectations (guidance, not
 normative): CR2/CR3, NEF, modern ARW, RW2, ORF, DNG, PEF generally embed full-resolution
-previews; older Sony ARW bodies embed ~1616×1080; some RAF and compressed modes embed
-reduced previews.
+previews; older Sony ARW bodies ~1616×1080; some RAF and compressed modes reduced.
 
 **Acceptability threshold (decision): embedded preview longest edge ≥ 2048 px.** At or above:
 it sources both artifacts, `source = 'embedded'`, done. Below: still generate both artifacts
 from it (a small preview beats a placeholder), set `needs_full_decode = 1`, enqueue
-`full-raw-decode`. No embedded preview at all: placeholder in UI, `full-raw-decode` enqueued
-at elevated backfill priority.
+`full-raw-decode`. No embedded preview at all: UI placeholder, `full-raw-decode` enqueued at
+elevated backfill priority.
 
 ### 9.4 Full RAW decode (backfill pass, M1.5)
 
@@ -411,9 +392,9 @@ JPEG / PNG / TIFF / WebP: decode the original (`image` crate), generate both art
 `source = 'original'`; multi-page TIFF uses page 0 only. **HEIC/HEIF (decision)**: ingested
 in M1 — hashed, EXIF extracted — but preview generation is **deferred to the
 `full-raw-decode` backfill**, which decodes HEIC via `libheif` (embedded HEIF thumbnails are
-~320 px, below threshold). Placeholder until the backfill runs. Rationale: iPhone shooters
-are real, but a native libheif dependency must not block the M1 spine; the pass architecture
-makes "later" cheap.
+~320 px, below threshold); placeholder until then. Rationale: iPhone shooters are real, but
+a native libheif dependency must not block the M1 spine; the pass architecture makes "later"
+cheap.
 
 ### 9.6 EXIF subset (the exact fields)
 
@@ -454,8 +435,6 @@ embedded ICC presence (consumed by §9.7, not stored beyond what conversion need
   sizes, color pipeline) is bumped → re-enqueue preview passes for all images at backfill
   priority; or `full-raw-decode` upgrades a flagged image; or the manual clear. Orientation
   or ICC handling changes MUST bump `generator_version` — stroke agreement depends on it.
-
----
 
 ## 10. Ingest as versioned passes
 
@@ -537,8 +516,6 @@ queue depth, files in flight, throughput (files/s; MB/s for hash), ETA, error li
 builds keep the core API (feeding the one user-visible surface: a quiet "indexing N
 remaining" line in settings); the panel itself is compile-time stripped per the kernel.
 
----
-
 ## 11. Offline operation summary
 
 Unplugging an archive drive must cost nothing but pixels-on-demand: volume → `offline`
@@ -547,8 +524,6 @@ with badge data; journal capture against offline images is **fully allowed** (ev
 hashes; sidecar writes queue per SIDECARS.md); search is unaffected — indexes never touch
 originals; pending passes fail-transient and wait; on remount at any mount point, identity
 match (§4.1) → online → watcher up → reconciliation scan → queued sidecar flush.
-
----
 
 ## 12. Performance budgets
 
@@ -567,8 +542,6 @@ drive. Reference library: 50k images, ~1.5 TB (mixed 40–80 MB RAWs + JPEGs).
 Spinning-disk USB archives miss the ingest target proportionally to read speed; budgets are
 for the reference machine and scale with disk throughput (visible via the debug panel's MB/s
 counter).
-
----
 
 ## 13. Acceptance criteria
 
@@ -606,8 +579,6 @@ manual.
     (asserted via instrumentation).
 13. **Exclusions**: sidecars, `.photoproof-volume`, hidden dirs, and listed cache dirs never
     produce `images` rows.
-
----
 
 ## 14. Recorded non-features (v1)
 

@@ -62,11 +62,11 @@ activity, model-runtime health events.
   30 min`, the open session closes *before* the triggering activity is
   processed, with `ended_at` = wall-clock time of the **last** activity (not
   `now`); a new session opens and the triggering activity belongs to it. No
-  timer fires during idle — closure is lazy, on next activity and at quit, so
-  a session's span never includes dead air at its tail.
+  timer fires during idle — closure is lazy (next activity, or quit), so a
+  session's span never includes dead air at its tail.
 - Speech is activity, so an idle boundary never bisects an in-flight
-  utterance. A typed-only browse is a session. Sessions span folders and view
-  modes freely. Mic toggles occur within sessions, never create them.
+  utterance. A typed-only browse is a session; sessions span folders and view
+  modes freely; mic toggles occur within sessions, never create them.
 
 ### 2.3 Session records
 
@@ -94,10 +94,11 @@ In order:
 2. **Sidecar flush**: sidecar writer flushes pending events (SIDECARS spec).
 3. **Close processors**: an ordered, registered list runs asynchronously —
    empty in M1/M2a; M2b+ registers session summary, per-image rolling-summary
-   updates, sentiment scoring, annotation embedding, all *retrieval fuel
+   updates, sentiment scoring, annotation embedding — all *retrieval fuel
    only*, never user-facing prose (kernel). Processors are idempotent and
-   resumable; if the app quits first, `close_processing_done = false` and next
-   launch re-enqueues. Crash-recovered sessions use the same processors.
+   resumable; if the app quits first, next launch re-enqueues
+   (`close_processing_done = false`). Crash-recovered sessions use the same
+   processors.
 
 Steps 1–2 block quit (capped at 5 s + sidecar budget); step 3 never blocks.
 
@@ -231,9 +232,9 @@ a recorded **future settings option** (same pipeline, app-gated audio feed).
       one per segment; `t_start_ms` authoritative (Nemotron streaming provides
       segment timing); `confidence` ∈ [0,1].
   - `end_stream()` — flush; trailing `Final`s may follow, then `Closed`.
-  - `Error { fatal }` — fatal = ASR process gone (§6.6).
-  - All times are stream-clock ms offsets (§1); the Transcriber MUST NOT
-    re-emit or renumber segments.
+    `Error { fatal }` — fatal = ASR process gone (§6.6). All times are
+    stream-clock ms offsets (§1); the Transcriber MUST NOT re-emit or renumber
+    segments.
 
 ### 6.3 Segmentation ownership
 
@@ -302,12 +303,12 @@ predate the disarm), then drop the stream and zero the audio ring buffer (§7).
 If the ASR process dies mid-session (fatal `Error`, or RUNTIME reports the
 child gone): `Streaming` utterances are **Abandoned** — partials discarded
 (never persisted by rule), nothing minted, a debug-panel entry records the
-loss; the mic **auto-disarms** to `Disarmed(error)` and the audio ring buffer
-is zeroed; the user is **notified quietly** — the indicator enters its
-degraded state (§11), no modal, no toast storm; re-arming retries via RUNTIME
-supervision. Typed notes, ratings, and the pencil are entirely unaffected.
-Degraded mode (below hardware floor / models absent) is this state
-permanently: the mic control exists but arming fails quietly.
+loss; the mic **auto-disarms** to `Disarmed(error)`, the audio ring buffer is
+zeroed, and the user is **notified quietly** — the indicator's degraded state
+(§11), no modal, no toast storm; re-arming retries via RUNTIME supervision.
+Typed notes, ratings, and the pencil are entirely unaffected. Degraded mode
+(below hardware floor / models absent) is this state permanently: the mic
+control exists but arming fails quietly.
 
 ## 7. Audio policy (closes B4)
 
@@ -419,10 +420,10 @@ without migration.
 
 ### 8.5 Undo (retraction-based, never deletion)
 
-- Before pen-up: nothing to undo — the stroke doesn't exist yet.
-- After commit: **Ctrl+Z** (Cmd+Z on macOS) mints a **retraction (tombstone)
-  event** targeting the most recent non-retracted stroke on the undo stack.
-  The stroke event is preserved, folded out (kernel). Undo is never deletion.
+- Before pen-up there is nothing to undo (the stroke doesn't exist yet). After
+  commit, **Ctrl+Z** (Cmd+Z on macOS) mints a **retraction (tombstone) event**
+  targeting the most recent non-retracted stroke on the undo stack; the stroke
+  event is preserved, folded out (kernel). Undo is never deletion.
 - **Undo stack**: depth **10**, session-scoped, in-memory per process (cleared
   at session close and restart); contains only strokes authored this session
   by this process. Empty stack → Ctrl+Z is a no-op in the pencil layer.
@@ -465,21 +466,18 @@ late link cannot be written onto the earlier event. Therefore:
 > pointing backward.** Link resolution runs exactly once per event, at its
 > commit, over already-committed events. Folded views (EVENTS spec) MUST
 > traverse `linked_event` in **both** directions: "linked" is symmetric,
-> realized as a one-way stored pointer.
-
-This is a direct consequence of append-only that the EVENTS spec must honor.
-
-Details:
+> realized as a one-way stored pointer. This is a direct consequence of
+> append-only that the EVENTS spec must honor.
 
 - **In-flight suppression**: at stroke commit, if an utterance is currently
   streaming (`SpeechStart` seen, no `Final`) and its span-so-far overlaps the
   stroke, the stroke commits **unlinked** — the utterance carries the link
-  when it commits. This stops the stroke from grabbing a wrong
+  when it commits, and the stroke is kept from grabbing a wrong
   nearest-fallback partner while its true partner is still in the air.
 - Each event has **at most one outgoing** `linked_event`; an event MAY receive
   multiple incoming links (three quick circles during one sentence → three
-  strokes linking back). Folds render the connected component.
-- An abandoned utterance (§6.5) was never committed and can never be linked.
+  strokes linking back); folds render the connected component. An abandoned
+  utterance (§6.5) was never committed and can never be linked.
 
 ## 10. Ratings
 
@@ -487,12 +485,11 @@ During culling, keys **0–5** mint `kind=rating`, `source=typed`, value 0–5,
 bound to the **current scope at keystroke time** (instantaneous, like typed
 notes). **0 explicitly clears** (a rating event with value 0; fold = last
 rating wins — EVENTS owns fold and display). **Multi-select applies to all** —
-confirmed, desired behavior: with N selected, one keystroke mints **one event
-targeting all N** (not N events); it matches every culling tool photographers
-know, and the single event keeps "I rated these together" recoverable from the
-log. Session scope (no selection): rating keys do nothing (UI MAY show a no-op
-affordance). Rating display always comes from the fold; this spec only mints
-events.
+confirmed, desired: with N selected, one keystroke mints **one event targeting
+all N** (not N events), matching every culling tool photographers know and
+keeping "I rated these together" recoverable from the log. Session scope (no
+selection): rating keys do nothing. Rating display always comes from the fold;
+this spec only mints events.
 
 ## 11. Write-scope indicator — data contract
 
@@ -536,12 +533,11 @@ quiet, persistent, non-modal.
   target event and carrying the **full corrected text** (not a diff). **No
   length or diff restrictions.** Typed remarks are correctable identically.
 - **Folded text** — the latest revision in the chain — is what display, FTS,
-  and embeddings use (kernel; EVENTS owns the fold). The original stays in the
-  log and sidecars.
-- **Revisions of revisions**: a new revision references the *original* target
-  event; the chain folds to the latest revision by append order (capture
-  always submits against the original event id underlying the folded text it
-  displayed).
+  and embeddings use (kernel; EVENTS owns the fold); the original stays in the
+  log and sidecars. **Revisions of revisions**: a new revision references the
+  *original* target event; the chain folds to the latest by append order
+  (capture always submits against the original event id underlying the folded
+  text it displayed).
 - Correction MUST trigger FTS re-index and embedding refresh of the folded
   text (RETRIEVAL owns mechanics; the hook fires here).
 
@@ -583,17 +579,17 @@ simply lands in the journal, which is itself honest marginalia.
 2. **No audio on disk.** A full armed session (speech, finals, disarm, quit)
    leaves zero audio bytes in app data, the library tree, SQLite, sidecars, or
    temp dirs (filesystem snapshot diff + format scan).
-3. **Stroke round-trip fidelity.** Draw one stroke at 100 % zoom and one at
-   400 % zoom panned to a corner; persist; restart; re-render at unrelated
-   zoom/pan states. Every rendered point lies within 1 source-image pixel of
-   the original image-space path; `p[]`/`t[]` round-trip exactly; payload
+3. **Stroke round-trip fidelity.** Draw one stroke at 100 % zoom, one at
+   400 % panned to a corner; persist; restart; re-render at unrelated zoom/pan
+   states. Every rendered point lies within 1 source-image pixel of the
+   original image-space path; `p[]`/`t[]` round-trip exactly; payload
    validates against §8.2.
 4. **Undo = retraction.** Draw 3 strokes; Ctrl+Z twice → two tombstones
-   appended, zero rows mutated/deleted; the two strokes vanish from overlay
-   and fold but remain in log and sidecar; rebuild-from-sidecars reproduces
-   the same folded state.
-5. **Correction folding visible in search.** Voice remark "muddy light";
-   correct to "moody light"; FTS for "moody" returns the image with the
+   appended, zero rows mutated/deleted; the strokes vanish from overlay and
+   fold but remain in log and sidecar; rebuild-from-sidecars reproduces the
+   same folded state.
+5. **Correction folding visible in search.** Voice remark "muddy light",
+   corrected to "moody light": FTS "moody" returns the image with the
    corrected quote as provenance; "muddy" returns nothing; the journal panel
    shows corrected text with the original in history.
 6. **Session boundaries.** 29-min gap → same session; 31-min gap → next
@@ -604,14 +600,14 @@ simply lands in the journal, which is itself honest marginalia.
 7. **ASR death.** Kill the ASR child mid-utterance: no event minted from the
    partial, mic auto-disarms, indicator shows degraded state, and a typed note
    submitted immediately after lands normally.
-8. **Linking.** (a) Stroke fully inside an utterance's VAD span whose final
-   lands after pen-up → the utterance carries `linked_event` → stroke.
-   (b) Stroke 4 s after an utterance ends, same image → the stroke carries the
-   backward link. (c) 11 s after → unlinked. (d) Stroke during a
-   session-scoped utterance with no overlap → unlinked (scope gate).
-9. **Multi-select rating.** Select 5 images, press 3 → exactly one rating
-   event with 5 ordered targets; each of the 5 sidecars contains it; rebuild
-   dedupes to one event.
+8. **Linking.** (a) Stroke inside an utterance's VAD span whose final lands
+   after pen-up → the utterance carries `linked_event` → stroke. (b) Stroke
+   4 s after an utterance ends, same image → the stroke carries the backward
+   link. (c) 11 s after → unlinked. (d) Stroke near a session-scoped
+   utterance, no overlap → unlinked (scope gate).
+9. **Multi-select rating.** Select 5 images, press 3 → one rating event with
+   5 ordered targets; each of the 5 sidecars contains it; rebuild dedupes to
+   one event.
 
 ## 14. Recorded-future ledger (deferred on purpose)
 
