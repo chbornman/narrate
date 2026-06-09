@@ -1,7 +1,7 @@
-# Daido
+# Photoproof
 ### The digital contact sheet with a grease pencil
 *Scope & Architecture Document — Draft 3, June 2026*
-*(Formerly working-titled "Darkroom Notes." Tentatively renamed **Daido** — after Daidō Moriyama, whose practice embodies the shoot-relentlessly, work-the-contact-sheet tradition this product serves.)*
+*(Working title. Formerly "Darkroom Notes," briefly "Daido." Naming remains an open question — see Open Questions & Risks.)*
 
 ---
 
@@ -15,7 +15,7 @@ AI photo search doesn't solve this. Lightroom, Excire, Peakto, and Apple Photos 
 
 **The digital contact sheet with a grease pencil.** For a century, photographers worked their images on contact sheets: loupe in one hand, red grease pencil in the other — circling frames, slashing rejects, scrawling notes in the margins, and *talking through the work* with themselves or an editor. That practice produced exactly the artifact this product resurrects: a physical record of judgment, layered over time, bound to the frames themselves. Magnum's marked-up contact sheets are studied today precisely because they preserve the *thinking*, not just the pictures. Digital workflows kept the images and threw away the marginalia.
 
-Daido is a desktop application that restores that practice. You browse your library, select an image or a group, and you work the sheet: **talk** (out loud or typed) and **mark** — a red grease-pencil tool for circling, striking through, underlining a gesture in the frame, drawing the crop you're imagining. Every utterance and every stroke is transcribed/captured, timestamped, and bound to the image as an append-only journal. Over time the library stops being a pile of files and becomes a longitudinal record of a creative practice.
+Photoproof is a desktop application that restores that practice. You browse your library, select an image or a group, and you work the sheet: **talk** (out loud or typed) and **mark** — a red grease-pencil tool for circling, striking through, underlining a gesture in the frame, drawing the crop you're imagining. Every utterance and every stroke is transcribed/captured, timestamped, and bound to the image as an append-only journal. Over time the library stops being a pile of files and becomes a longitudinal record of a creative practice.
 
 Retrieval is conversational and intent-aware. Not "find photos with fog" but "pull up the images I was considering for that quieter, more melancholic series" — answered from the photographer's own words about their own work, accumulated across months of sessions.
 
@@ -27,11 +27,11 @@ Markup is non-destructive vector overlay, never pixels: strokes are recorded as 
 
 ### Positioning: not an AI product
 
-Daido is not marketed as an AI tool, because it isn't one in any sense the user experiences. The category is saturated with AI that does things *to* your photos — scores them, culls them, tags them, judges them — and the fine-art and long-project audience this serves is precisely the crowd most allergic to a machine grading their art. Here the loop is entirely human: looking, thinking, talking, marking — the same loop as a lightbox and a loupe. The AI is infrastructure for memory, not a creative authority: speech-to-text so talking is frictionless, embeddings and retrieval so your own words come back when you need them, a local model quietly summarizing in the background. It is exactly as relevant to the user as the B-tree inside Lightroom's catalog, and the marketing treats it that way. The pitch is "a journal for your photographs that you can talk to." The technology disappears; the practice remains.
+Photoproof is not marketed as an AI tool, because it isn't one in any sense the user experiences. The category is saturated with AI that does things *to* your photos — scores them, culls them, tags them, judges them — and the fine-art and long-project audience this serves is precisely the crowd most allergic to a machine grading their art. Here the loop is entirely human: looking, thinking, talking, marking — the same loop as a lightbox and a loupe. The AI is infrastructure for memory, not a creative authority: speech-to-text so talking is frictionless, embeddings and retrieval so your own words come back when you need them, a local model quietly summarizing in the background. It is exactly as relevant to the user as the B-tree inside Lightroom's catalog, and the marketing treats it that way. The pitch is "a journal for your photographs that you can talk to." The technology disappears; the practice remains.
 
 ### What it is not
 
-It is not an editor (edits stay in Capture One/darktable/Lightroom), not a DAM replacement, and not another semantic search tool. It is the journal layer the entire ecosystem is missing — and pointedly not another AI opinion about your photographs. Every competitor's AI generates opinions about your photos; Daido preserves *yours*.
+It is not an editor (edits stay in Capture One/darktable/Lightroom), not a DAM replacement, and not another semantic search tool. It is the journal layer the entire ecosystem is missing — and pointedly not another AI opinion about your photographs. Every competitor's AI generates opinions about your photos; Photoproof preserves *yours*.
 
 ## The Differentiator
 
@@ -156,13 +156,13 @@ Strokes are first-class events, not a separate system: same log, same sidecar mi
 
 **Project / intent memory (separate store).** "That collection I've been thinking about" is not per-image data. Projects get their own table: name, description, evolving notes, member images, status. Conflating this with image annotations would corrupt both; keeping it separate makes "pull up images I was considering for X" a join, not a guess.
 
-**Sidecar mirror.** A background writer keeps `IMG_4471.arw.daido.json` (and optional XMP keyword export for Lightroom/C1 interop) in sync with the event log. Full library export to open formats is a permanent, prominent feature.
+**Sidecar mirror.** A background writer keeps `IMG_4471.arw.photoproof.json` (and optional XMP keyword export for Lightroom/C1 interop) in sync with the event log. Full library export to open formats is a permanent, prominent feature.
 
 **Images table:** hash, current known paths, EXIF subset (date, camera, lens, ISO/aperture/shutter), thumbnail ref, embedding refs, caption.
 
 ## Library Sync & Sidecar Placement
 
-**Sidecars live adjacent to the image, by convention.** Photographers already understand this from XMP — darktable and Lightroom drop `.xmp` beside the RAW, and adjacency is the only placement that survives what photographers actually do: copying shoot folders to archive drives, handing files to clients, reorganizing by year. `IMG_4471.arw.daido.json` travels with its image. Each sidecar embeds the content hash so a separated sidecar can always be re-matched to its pixels. For read-only or unwritable volumes (archive drives, network shares), a centralized overflow store inside app data holds the sidecar instead; since identity is the hash, both routes converge in the database.
+**Sidecars live adjacent to the image, by convention.** Photographers already understand this from XMP — darktable and Lightroom drop `.xmp` beside the RAW, and adjacency is the only placement that survives what photographers actually do: copying shoot folders to archive drives, handing files to clients, reorganizing by year. `IMG_4471.arw.photoproof.json` travels with its image. Each sidecar embeds the content hash so a separated sidecar can always be re-matched to its pixels. For read-only or unwritable volumes (archive drives, network shares), a centralized overflow store inside app data holds the sidecar instead; since identity is the hash, both routes converge in the database.
 
 **Watched roots, not "currently open directory."** The user registers one or more root folders ("Active Work," "2019–2026 Archive"); the app owns awareness of everything beneath them. Two mechanisms keep the index honest: a live filesystem watcher (`notify` crate) while the app runs, and a reconciliation scan at launch and on schedule for changes that happened while it was closed. Because identity is content-hash, a moved or renamed file is a *relink* — new path, same hash, annotations intact — never a re-ingest.
 
@@ -230,4 +230,4 @@ Tauri 2 shell · Rust core · SQLite (WAL) + FTS5 · flat-file vector store · B
 2. Editing-app awareness (knowing what's open in C1/darktable) — explicitly deferred; revisit post-M3.
 3. Sentiment scoring quality from small local models — needs evaluation; trajectories built on noisy scores are worse than none.
 4. Markup input quality with mouse vs. pen tablet — the grease pencil wants a Wacom/pen display; mouse strokes must still feel acceptable. Pressure support is progressive enhancement.
-5. Name and positioning — tentatively **Daido** (trademark/domain availability unverified; the Moriyama estate association should be checked before any public use). Whether the free tier cannibalizes the paid tier — revisit after M3 dogfooding on the founder's own ~50k-image library. Positioning discipline: no "AI-powered" language anywhere in the product or marketing; the word appears only in the privacy explanation of what runs locally.
+5. Name and positioning — currently **Photoproof** (a working placeholder; trademark/domain availability unverified, and a final name decision is deliberately deferred). Whether the free tier cannibalizes the paid tier — revisit after M3 dogfooding on the founder's own ~50k-image library. Positioning discipline: no "AI-powered" language anywhere in the product or marketing; the word appears only in the privacy explanation of what runs locally.

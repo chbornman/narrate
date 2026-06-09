@@ -9,7 +9,7 @@ apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
 
 # Local app data / test libraries
-*.daido.json
+*.photoproof.json
 test-libraries/
 
 # OS / editor
