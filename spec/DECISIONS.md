@@ -104,6 +104,75 @@ this file is the index of *why*.
 - **X6. Sidecar event shape**: SIDECARS' illustrative table and example rewritten to EVENTS §4 canonical fields (`session_id`, plain `targets` array, `payload`, `target_event`, `linked_event`, `redacted_by`, `v`); sidecar layout = canonical events re-indented (EVENTS' compact form is the dedupe normal form); meta-events store zero targets per E3.
 - **X7. Legacy docs reconciled**: SCOPE.md (Draft 4) and M1-BUILD-PLAN.md updated — schema sketch replaced, "redaction = tombstone" corrected to retraction/redaction split, `series_ref`/`tombstone`/`markup`/`stroke_data`/SigLIP references removed; both now defer to `spec/` as normative.
 
+## Research-pass resolutions (June 2026 best-practices review)
+
+Four cited research reports (`docs/research/`) validated the spec set;
+~30 amendments applied. Disposition table in `docs/BEST-PRACTICES-REVIEW.md`.
+The decisions that changed:
+
+- **P1. Vector storage = int8 scalar quantization at MRL-512 dims** (PPVEC v2,
+  dtype in header). The f32/1024d flat-file math broke the 50 ms budget at the
+  2M-event ceiling (8 GB scan ≈ 270 ms); int8+512d covers ~3M vectors at
+  ~35 ms. Swap trigger restated in bytes-scanned (~1.5 GB/space), not rows.
+- **P2. silero-vad fronts the ASR** (in-process ort, ~1 MB): supplies speech
+  onset for the binding rule (sherpa-onnx emits no SpeechStart; transducer
+  token times are systematically late), silence gating, and the "speaking"
+  affordance. ASR endpointing keeps segmentation authority (VAD-only
+  endpointing measurably hurts accuracy).
+- **P3. One FTS construction**: EVENTS' plain content-ful `event_fts` +
+  `fts_map` is normative; RETRIEVAL's external-content variant removed;
+  prefix='2 3'; M1 search SQL materializes MATCH hits before joining and
+  bounds snippet() to the LIMITed page (documented 650× planner trap).
+- **P4. Journal folds pinned to ≤3 batched queries** — N+1 fold queries
+  forbidden by spec; it is the only mechanism by which the hot path gets slow.
+- **P5. One more derived table**: `image_journal_stats` (event_count,
+  has_strokes, last_ts) for grid badges, filter chips, RRF tie-break.
+  Confirmed: NO general materialized current-state projection — fold-on-read
+  holds to the 5k-events/image worst case.
+- **P6. Embedding hygiene normative**: Qwen3 instruction prefix on queries
+  (1–5% free win), deterministic context prefixes on tiny chunks at embed
+  time only; both versioned into inputs_hash.
+- **P7. Optional `Reranker` stage** (Qwen3-Reranker-0.6B / bge-reranker-v2-m3
+  class, top 20–30, CPU) added behind config, M3+, gated on **P8**.
+- **P8. Golden-query eval harness** (~50–100 pairs, recall@20 / nDCG@10) is
+  the gate for all deferred ranking decisions (RRF weights, S4 threshold,
+  convex-combination fusion, reranker).
+- **P9. Embedded-preview orientation verification** + per-format fixtures;
+  stroke-substrate regeneration invariant explicit (correctness, not perf —
+  previews are inconsistently pre-rotated across camera makers).
+- **P10. FAT/exFAT uniform clock-shift detection** (DST moves every mtime by
+  exactly 1 h — without detection, one transition = full re-hash storm).
+- **P11. Cloud-sync awareness**: placeholder/dataless files never hashed
+  (forces hydration); sync-root advisory; mtime-stable sidecar writes.
+- **P12. Ingest budget honestly re-scoped to internal NVMe**; slow volumes
+  scale with throughput, previews trail hashing visibly. Provisional
+  quick-hash identity tier considered and REJECTED (two-state identity vs
+  journal integrity).
+- **P13. llama-server corrections**: `--ctx-size` divides across slots
+  (16384/2 = 8192 per lane; VRAM re-budgeted); background lane MUST stream
+  (disconnect-cancel only works for streaming); /health timeout under load =
+  Busy not Lost (waitpid is ground truth).
+- **P14. sherpa-onnx wire contract corrected** (float32 frames + "Done");
+  confidence = exp(mean token log-prob), optional, uncalibrated; spike tests
+  Nemotron token-timestamp availability and may replace the demo-grade
+  websocket server with a thin Rust-crate wrapper child process.
+- **P15. cpal discipline**: open default device config + resample in-app;
+  watchdog re-arm on stream death; stream CLOSED (not paused) on disarm so
+  the OS mic dot always agrees with app state; Bluetooth-HFP quality advisory.
+- **P16. Tauri delivery normative**: thumbnails/Look images via custom URI
+  scheme only — image bytes never cross IPC, never base64; webview memory
+  bound added to acceptance; img-element recycling.
+- **P17. Pen pressure = progressive enhancement**: expected on Windows
+  (WebView2/Windows Ink), NOT expected in macOS WKWebView — constant base_w
+  there; native NSEvent pressure passthrough recorded as the future fix.
+- **P18. SQLite operations**: 64 MiB page cache, 256 MiB mmap, busy_timeout,
+  PRAGMA optimize on close, ANALYZE after rebuild/merge, checkpoint(TRUNCATE)
+  at idle, no held-open read statements, one writer + read pool; rebuild
+  inserts id-sorted in ~10k batches with FTS/derived after the union.
+- **P19. EmbeddingGemma-308M added to the spike** as the half-cost text-
+  embedder candidate; Moonshine/Kyutai STT on the ASR watch list behind the
+  trait.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).
