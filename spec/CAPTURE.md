@@ -291,11 +291,10 @@ predate the disarm), then drop the stream and zero the audio ring buffer (§7).
 
   The VAD span (wall clock) is durable and sidecar-visible — required for
   stroke linking (§9).
-- **No merging in v1.** Consecutive finals are NOT merged into one event,
-  regardless of gap or scope equality. One final = one event: simpler,
-  preserves per-segment confidence/spans, and reversible later (merging can
-  become a fold/display policy without touching stored data; the reverse
-  migration would be impossible).
+- **No merging in v1.** Consecutive finals are NOT merged, regardless of gap
+  or scope equality. One final = one event: simpler, preserves per-segment
+  confidence/spans, and reversible later (merging can become a fold/display
+  policy; the reverse migration would be impossible).
 - Empty/whitespace-only finals mint nothing.
 
 ### 6.6 Error states
@@ -373,23 +372,22 @@ Stored in `stroke_data` (JSON; flat parallel arrays for compactness):
 }
 ```
 
-- `v` — payload schema version (independent of sidecar version).
-- `tool` — `"pencil-red"` is the **only** tool id in v1.
-- `orientation` — EXIF orientation at draw time (§8.1).
+- `v` — payload schema version (independent of sidecar version). `tool` —
+  `"pencil-red"` is the **only** tool id in v1. `orientation` — EXIF
+  orientation at draw time (§8.1).
 - `base_width` — normalized to the display-oriented image's **long edge**;
   default **0.004** (0.4 % of long edge); recorded per stroke so a future
   width control needs no schema change.
-- `x[]`, `y[]` — normalized coords (§8.1), serialized at ≤ 6 decimals; all
-  four arrays equal length.
-- `p[]` — per-point pressure ∈ [0,1]; **1.0 when the device reports none**
-  (mouse, basic touch).
+- `x[]`, `y[]` — normalized coords (§8.1), ≤ 6 decimals; all four arrays equal
+  length. `p[]` — per-point pressure ∈ [0,1]; **1.0 when the device reports
+  none** (mouse, basic touch).
 - `t[]` — integer ms offsets from stroke start (`t[0] = 0`, non-decreasing),
   for future time-scrubbing (M4). `started_at` (pen-down, wall clock) + `t[]`
-  reconstructs the absolute time-span; the event's `ts` is the **pen-up
-  (commit) time**.
-- **Width model**: rendered width `w(i) = base_width × (0.4 + 0.6 × p[i])`.
-  No pressure (p = 1.0) renders constant `base_width`; pressure pens thin to
-  40 % at zero pressure. Renderers interpolate width along the path.
+  reconstructs the absolute span; the event's `ts` is the **pen-up (commit)
+  time**.
+- **Width model**: rendered width `w(i) = base_width × (0.4 + 0.6 × p[i])` —
+  no pressure (p = 1.0) renders constant `base_width`; pressure pens thin to
+  40 % at zero. Renderers interpolate width along the path.
 
 ### 8.3 Input, sampling, smoothing
 
@@ -617,10 +615,7 @@ simply lands in the journal, which is itself honest marginalia.
 
 ## 14. Recorded-future ledger (deferred on purpose)
 
-- Push-to-talk as a settings option (§6.1).
-- Onset grace window as a tunable, default 0 (§5.2).
-- Audio retention opt-in and its requirements (§7).
-- Voice-command retraction (§12.2).
-- Segment merging as a display/fold policy (§6.5).
-- Redo for pencil undo (§8.5).
-- Additional pencil tools/colors/widths; partial erase (§8.6).
+Push-to-talk as a settings option (§6.1) · onset grace window as a tunable,
+default 0 (§5.2) · audio retention opt-in (§7) · voice-command retraction
+(§12.2) · segment merging as a display/fold policy (§6.5) · redo for pencil
+undo (§8.5) · additional pencil tools/colors/widths and partial erase (§8.6).
