@@ -53,7 +53,7 @@ Rules that keep M1 honest:
 | FS watching | `notify` | plus startup reconciliation scan |
 | Serialization | `serde` / `serde_json` | sidecar schema carries an explicit `version` field |
 | Async runtime | `tokio` | ingest queue, sidecar writer, watcher all need it |
-| Frontend | Tauri 2 + Svelte or React | pick on day one and don't revisit during M1 |
+| Frontend | Tauri 2 + **Svelte 5** | decided (founder); not revisited during M1 |
 
 ## Build Order
 
@@ -85,7 +85,7 @@ Voice/ASR, the grease pencil, embeddings and vector search, LLM summaries, senti
 
 ## Decisions To Make Before Coding
 
-1. **Frontend framework** (Svelte vs. React inside Tauri) — low stakes, decide once.
+1. ~~**Frontend framework**~~ — decided: **Svelte 5** inside Tauri 2.
 2. **Thumbnail/preview cache format and location** — app data dir, content-hash-keyed; sizes (grid thumb + 2560px preview?) worth a quick benchmark against the real library.
 3. **Sidecar write debounce window** — "within seconds" UX promise vs. write amplification on spinning archive drives.
 4. **Name check** — "Photoproof" is a working placeholder; trademark/domain due diligence before anything public, and the final name is deliberately deferred (tracked in SCOPE.md open questions; doesn't block code).
