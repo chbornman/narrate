@@ -1,0 +1,1639 @@
+//! The event store: append / fold / retraction / redaction scrub / merge,
+//! with transactional FTS + derived-table maintenance.
+//!
+//! Contract: spec/EVENTS.md §5–10.
+
+mod fold;
+mod schema;
+
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use thiserror::Error;
+
+use crate::canonical::{self, CanonicalParseError};
+use crate::event::{Event, Kind, Payload, Source, StrokePayload, ValidationError};
+use crate::id::{ContentHash, EventId, Minted, Minter, SessionId, UtcMillis, validate_device_id};
+
+pub use fold::JournalEntry;
+use fold::{FoldSet, fold_entries};
+
+// ---------------------------------------------------------------------------
+// Errors and reports
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("corrupt row: {0}")]
+    Corrupt(String),
+    #[error("unknown session: {0}")]
+    SessionNotFound(String),
+    #[error("invalid input: {0}")]
+    Invalid(String),
+}
+
+#[derive(Debug, Error)]
+pub enum AppendError {
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+    #[error("target event not found: {0}")]
+    TargetNotFound(EventId),
+    #[error("invalid target kind {target_kind:?} for {meta:?}")]
+    InvalidTargetKind { meta: Kind, target_kind: Kind },
+    #[error("retraction of a retraction is not supported in v1; re-state instead")]
+    RetractionOfRetraction,
+    #[error("duplicate event id: {0}")]
+    DuplicateId(EventId),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+impl From<rusqlite::Error> for AppendError {
+    fn from(e: rusqlite::Error) -> Self {
+        AppendError::Store(StoreError::Sqlite(e))
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RedactError {
+    #[error("target event not found: {0}")]
+    NotFound(EventId),
+    #[error("kind {0:?} cannot be redacted")]
+    InvalidKind(Kind),
+    #[error("target already scrubbed: {0}")]
+    AlreadyScrubbed(EventId),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+impl From<rusqlite::Error> for RedactError {
+    fn from(e: rusqlite::Error) -> Self {
+        RedactError::Store(StoreError::Sqlite(e))
+    }
+}
+
+/// Result of a `merge()` (spec/EVENTS.md §8).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MergeReport {
+    pub inserted: usize,
+    pub duplicates: usize,
+    pub scrubbed_on_arrival: usize,
+    pub newly_scrubbed: usize,
+    /// (offset in the incoming slice, reason); never silently dropped.
+    pub quarantined: Vec<(usize, String)>,
+    /// Same id, structurally different content: corruption upstream.
+    pub integrity_warnings: Vec<EventId>,
+}
+
+// ---------------------------------------------------------------------------
+// API types
+// ---------------------------------------------------------------------------
+
+/// Draft of a new event (spec/EVENTS.md §10). There is no redaction draft:
+/// redaction is not an append; it goes through `redact()`.
+#[derive(Debug, Clone)]
+pub enum EventDraft {
+    Remark {
+        source: RemarkSource,
+        text: String,
+        /// Empty = session-level remark.
+        targets: Vec<ContentHash>,
+    },
+    Rating {
+        /// 0..=5; 0 is an explicit zero, distinct from never-rated.
+        value: u8,
+        /// Non-empty.
+        targets: Vec<ContentHash>,
+    },
+    Stroke {
+        payload: StrokePayload,
+        target: ContentHash,
+        /// Backward link to an earlier utterance (X2).
+        linked_event: Option<EventId>,
+    },
+    Revision {
+        target: EventId,
+        text: String,
+    },
+    Retraction {
+        target: EventId,
+        source: RetractionSource,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum RemarkSource {
+    Voice {
+        conf_pm: u16,
+        dur_ms: u32,
+        /// Backward link to an earlier stroke (X2).
+        linked_event: Option<EventId>,
+    },
+    Typed,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RetractionSource {
+    Voice,
+    System,
+}
+
+/// `sidecar_dirty` reasons (spec/EVENTS.md §5.3). `redaction` outranks and
+/// overwrites other reasons for a hash, never vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirtyReason {
+    Append,
+    Fold,
+    Redaction,
+}
+
+impl DirtyReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DirtyReason::Append => "append",
+            DirtyReason::Fold => "fold",
+            DirtyReason::Redaction => "redaction",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "append" => DirtyReason::Append,
+            "fold" => DirtyReason::Fold,
+            "redaction" => DirtyReason::Redaction,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirtyImage {
+    pub image: ContentHash,
+    pub reason: DirtyReason,
+    pub since_ts: UtcMillis,
+}
+
+/// Context for `open_session` (spec/EVENTS.md §9).
+#[derive(Debug, Clone)]
+pub struct SessionContext {
+    /// Semver of the writing build.
+    pub app_version: String,
+    /// 32 lowercase hex, random per install.
+    pub device_id: String,
+    /// Opaque JSON written by CAPTURE; may be absent.
+    pub root_context: Option<String>,
+}
+
+/// One `sessions` row (spec/EVENTS.md §9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub id: SessionId,
+    pub started_ts: UtcMillis,
+    pub ended_ts: Option<UtcMillis>,
+    pub app_version: String,
+    pub device_id: String,
+    pub root_context: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Read instrumentation (I16): every SELECT issued by a read-pool connection
+// on the current thread is counted, so tests can assert the §10.1 batched
+// query plan (≤ 3 SELECTs) without trusting the implementation's word.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static READ_SELECTS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn trace_read(sql: &str) {
+    let t = sql.trim_start();
+    if t.len() >= 6 && t.as_bytes()[..6].eq_ignore_ascii_case(b"select") {
+        READ_SELECTS.with(|c| c.set(c.get() + 1));
+    }
+}
+
+/// Number of SELECT statements executed by read-pool connections on this
+/// thread since the process started. Test instrumentation for invariant I16.
+pub fn read_select_count() -> u64 {
+    READ_SELECTS.with(Cell::get)
+}
+
+// ---------------------------------------------------------------------------
+// EventStore
+// ---------------------------------------------------------------------------
+
+const READ_POOL_SIZE: usize = 2;
+const MERGE_CHUNK: usize = 10_000;
+const IN_LIST_CHUNK: usize = 30_000;
+
+/// The event store: one dedicated writer connection plus a small read pool
+/// (spec/EVENTS.md §5.1); all writes serialize through the writer.
+pub struct EventStore {
+    writer: Mutex<Connection>,
+    readers: Vec<Mutex<Connection>>,
+    next_reader: AtomicUsize,
+    minter: Minter,
+}
+
+impl EventStore {
+    /// Open (creating/migrating if necessary) the journal database at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let writer = schema::open_connection(path)?;
+        schema::migrate(&writer)?;
+        let mut readers = Vec::with_capacity(READ_POOL_SIZE);
+        for _ in 0..READ_POOL_SIZE {
+            let mut conn = schema::open_connection(path)?;
+            conn.trace(Some(trace_read));
+            readers.push(Mutex::new(conn));
+        }
+        Ok(Self {
+            writer: Mutex::new(writer),
+            readers,
+            next_reader: AtomicUsize::new(0),
+            minter: Minter::new(),
+        })
+    }
+
+    /// Monotonic ULID + UTC ts, for pre-allocation at capture onset (§1.2).
+    pub fn mint(&self) -> Minted {
+        self.minter.mint()
+    }
+
+    fn with_reader<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let idx = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len();
+        let conn = self.readers[idx].lock().expect("reader mutex poisoned");
+        f(&conn)
+    }
+
+    // -- canonical JSON (§4) ------------------------------------------------
+
+    /// The bytes sidecars embed. Round-trip is byte-exact (I5).
+    pub fn canonical_json(event: &Event) -> Vec<u8> {
+        canonical::canonical_json(event)
+    }
+
+    pub fn parse_canonical(bytes: &[u8]) -> Result<Event, CanonicalParseError> {
+        canonical::parse_canonical(bytes)
+    }
+
+    // -- append (§10, §6.3) -------------------------------------------------
+
+    /// Validates (matrix, target counts, target-kind rules), inserts the
+    /// event and its `event_targets` rows, performs fold maintenance (§6.3)
+    /// — one transaction.
+    pub fn append(
+        &self,
+        session: &SessionId,
+        draft: EventDraft,
+        minted: Option<Minted>,
+    ) -> Result<Event, AppendError> {
+        let minted = minted.unwrap_or_else(|| self.minter.mint());
+        let mut w = self.writer.lock().expect("writer mutex poisoned");
+        let tx = w.transaction().map_err(StoreError::from)?;
+        let event = build_draft_event(&tx, session, draft, minted)?;
+        event.validate()?;
+        if get_event(&tx, &event.id)?.is_some() {
+            return Err(AppendError::DuplicateId(event.id));
+        }
+        insert_event(&tx, &event)?;
+
+        let mut roots: BTreeSet<EventId> = BTreeSet::new();
+        let mut dirty: BTreeMap<ContentHash, DirtyReason> = BTreeMap::new();
+        match event.kind {
+            Kind::Remark => {
+                roots.insert(event.id.clone());
+                for h in &event.targets {
+                    dirty.insert(h.clone(), DirtyReason::Append);
+                }
+            }
+            Kind::Rating | Kind::Stroke => {
+                for h in &event.targets {
+                    dirty.insert(h.clone(), DirtyReason::Append);
+                }
+            }
+            Kind::Revision => {
+                if let Some(root) = db_root_event(&tx, &event)? {
+                    for h in &root.targets {
+                        dirty.insert(h.clone(), DirtyReason::Fold);
+                    }
+                    if root.kind == Kind::Remark {
+                        roots.insert(root.id);
+                    }
+                }
+            }
+            Kind::Retraction => {
+                let target_id = event.target_event.as_ref().expect("validated");
+                if let Some(t) = get_event(&tx, target_id)? {
+                    for h in db_effective_targets(&tx, &t)? {
+                        dirty.insert(h, DirtyReason::Fold);
+                    }
+                    match t.kind {
+                        Kind::Remark => {
+                            roots.insert(t.id.clone());
+                        }
+                        Kind::Revision => {
+                            if let Some(root) = db_root_event(&tx, &t)?
+                                && root.kind == Kind::Remark
+                            {
+                                roots.insert(root.id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Kind::Redaction => unreachable!("no redaction draft exists"),
+        }
+        recompute_derived(&tx, &roots, &dirty)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(event)
+    }
+
+    // -- folded reads (§6.2, §10.1) ------------------------------------------
+
+    /// Folded journal of one image (§6.2): what the UI and context assembly
+    /// consume. Executes the §10.1 batched plan, never per-event probes.
+    pub fn folded_journal(&self, image: &ContentHash) -> Result<Vec<JournalEntry>, StoreError> {
+        self.with_reader(|conn| {
+            let set = image_closure(conn, image)?;
+            let fs = FoldSet::new(set);
+            Ok(fold_entries(&fs, |e| e.targets.contains(image)))
+        })
+    }
+
+    /// Folded journal of one session, session-level remarks included.
+    pub fn folded_session(&self, session: &SessionId) -> Result<Vec<JournalEntry>, StoreError> {
+        self.with_reader(|conn| {
+            let mut set = BTreeMap::new();
+            collect_events(
+                conn,
+                &joined_sql("e.session_id = ?1"),
+                &[session.as_str()],
+                &mut set,
+            )?;
+            closure_descendants(conn, &mut set)?;
+            let fs = FoldSet::new(set);
+            Ok(fold_entries(&fs, |e| e.session_id == *session))
+        })
+    }
+
+    /// Current rating per image = value of the greatest-id live rating
+    /// (§3.2), answered from the derived `image_ratings` fold (I7 guarantees
+    /// it equals the from-scratch fold).
+    pub fn current_rating(&self, image: &ContentHash) -> Result<Option<u8>, StoreError> {
+        self.with_reader(|conn| {
+            let v: Option<i64> = conn
+                .prepare_cached("SELECT rating FROM image_ratings WHERE image_hash = ?1")?
+                .query_row([image.as_str()], |r| r.get(0))
+                .optional()?;
+            Ok(v.map(|v| v as u8))
+        })
+    }
+
+    // -- raw reads ------------------------------------------------------------
+
+    /// Verbatim history: retracted included, scrubbed in scrubbed form.
+    pub fn raw_event(&self, id: &EventId) -> Result<Option<Event>, StoreError> {
+        self.with_reader(|conn| get_event(conn, id))
+    }
+
+    /// Effective-target closure for one image, ascending id — the sidecar
+    /// feed (§2.3).
+    pub fn events_for_image(&self, image: &ContentHash) -> Result<Vec<Event>, StoreError> {
+        self.with_reader(|conn| {
+            let set = image_closure(conn, image)?;
+            Ok(set.into_values().collect())
+        })
+    }
+
+    /// Zero-effective-target events per session — overflow/export feed (§2.3).
+    pub fn sessionlevel_events(&self, session: &SessionId) -> Result<Vec<Event>, StoreError> {
+        self.with_reader(|conn| {
+            let mut set = BTreeMap::new();
+            collect_events(
+                conn,
+                &joined_sql("e.session_id = ?1"),
+                &[session.as_str()],
+                &mut set,
+            )?;
+            // Ancestors to fixpoint, so effective_targets resolves fully.
+            let mut tried: HashSet<EventId> = set.keys().cloned().collect();
+            loop {
+                let mut missing: Vec<String> = Vec::new();
+                for t in set.values().filter_map(|e| e.target_event.clone()) {
+                    if tried.insert(t.clone()) {
+                        missing.push(t.as_str().to_owned());
+                    }
+                }
+                if missing.is_empty() {
+                    break;
+                }
+                fetch_joined_in(conn, "id", &missing, &mut set)?;
+            }
+            let fs = FoldSet::new(set);
+            Ok(fs
+                .events
+                .values()
+                .filter(|e| e.session_id == *session && fs.effective_targets(e).is_empty())
+                .cloned()
+                .collect())
+        })
+    }
+
+    // -- redaction (§7) -------------------------------------------------------
+
+    /// §7: all steps in one transaction. Returns the redaction event ids
+    /// minted (one per chain member).
+    pub fn redact(&self, target: &EventId) -> Result<Vec<EventId>, RedactError> {
+        let mut w = self.writer.lock().expect("writer mutex poisoned");
+        let tx = w.transaction().map_err(StoreError::from)?;
+        // 1. Validate.
+        let t = get_event(&tx, target)?.ok_or_else(|| RedactError::NotFound(target.clone()))?;
+        if !matches!(t.kind, Kind::Remark | Kind::Revision | Kind::Stroke) {
+            return Err(RedactError::InvalidKind(t.kind));
+        }
+        if t.scrubbed() {
+            return Err(RedactError::AlreadyScrubbed(target.clone()));
+        }
+        // 2. Chain closure: C = chain(root(target)) for remark/revision;
+        //    C = {target} for a stroke. A dangling chain scrubs the reachable
+        //    sub-chain rooted at the target itself.
+        let (anchor, members) = if t.kind == Kind::Stroke {
+            (t.clone(), vec![t.clone()])
+        } else {
+            let anchor = db_root_event(&tx, &t)?.unwrap_or_else(|| t.clone());
+            let members = db_chain_members(&tx, &anchor)?;
+            (anchor, members)
+        };
+        let session_id = redaction_session(&tx, &t)?;
+        // 3.–6. Record the act, registry, scrub in place, purge indexes.
+        let mut out = Vec::new();
+        for c in &members {
+            if c.scrubbed() {
+                continue; // idempotence
+            }
+            let m = self.minter.mint();
+            let r = Event {
+                id: m.id,
+                v: 1,
+                session_id: session_id.clone(),
+                ts: m.ts,
+                source: Source::System,
+                kind: Kind::Redaction,
+                targets: Vec::new(),
+                text: None,
+                payload: None,
+                target_event: Some(c.id.clone()),
+                linked_event: None,
+                redacted_by: None,
+            };
+            r.validate()
+                .map_err(|e| StoreError::Invalid(e.to_string()))?;
+            insert_event(&tx, &r)?;
+            registry_upsert(&tx, &c.id, &r.id, r.ts)?;
+            scrub_in_place(&tx, &c.id, &r.id)?;
+            tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                .execute([c.id.as_str()])
+                .map_err(StoreError::from)?;
+            out.push(r.id);
+        }
+        // 6.–7. FTS purge + queue propagation via the scoped recompute.
+        let mut roots = BTreeSet::new();
+        if anchor.kind == Kind::Remark {
+            roots.insert(anchor.id.clone());
+        }
+        let mut dirty = BTreeMap::new();
+        for h in db_effective_targets(&tx, &anchor)? {
+            dirty.insert(h, DirtyReason::Redaction);
+        }
+        recompute_derived(&tx, &roots, &dirty)?;
+        tx.commit().map_err(StoreError::from)?;
+        // 8. Physical hygiene: scrubbed plaintext must not linger in the WAL.
+        schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)").map_err(StoreError::from)?;
+        Ok(out)
+    }
+
+    // -- merge (§8) -----------------------------------------------------------
+
+    /// The one synchronization primitive: set-union by event id,
+    /// order-independent, with redaction supremacy.
+    pub fn merge(&self, incoming: &[Event]) -> Result<MergeReport, StoreError> {
+        let mut report = MergeReport::default();
+
+        // 0. Validate; quarantine invalid events (never silently dropped,
+        //    never inserted). Dedupe within the batch (set semantics).
+        let mut valid: Vec<(usize, &Event)> = Vec::with_capacity(incoming.len());
+        let mut seen: HashMap<&EventId, &Event> = HashMap::new();
+        for (i, e) in incoming.iter().enumerate() {
+            if let Err(err) = e.validate() {
+                report.quarantined.push((i, err.to_string()));
+                continue;
+            }
+            if let Some(first) = seen.get(&e.id) {
+                report.duplicates += 1;
+                if structural_mismatch(first, e) {
+                    report.integrity_warnings.push(e.id.clone());
+                }
+                continue;
+            }
+            seen.insert(&e.id, e);
+            valid.push((i, e));
+        }
+        let incoming_kinds: HashMap<&EventId, Kind> =
+            valid.iter().map(|(_, e)| (&e.id, e.kind)).collect();
+
+        // Batching discipline (§8): sort ascending by event id before insert.
+        valid.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+
+        let large = valid.len() > MERGE_CHUNK;
+        let mut w = self.writer.lock().expect("writer mutex poisoned");
+        let mut touched: Vec<Event> = Vec::new();
+
+        if !large {
+            // One transaction: union + derived recompute.
+            let tx = w.transaction()?;
+            merge_chunk(&tx, &valid, &incoming_kinds, &mut report, &mut touched)?;
+            let (roots, dirty) = merge_affected(&tx, &touched)?;
+            recompute_derived(&tx, &roots, &dirty)?;
+            tx.commit()?;
+        } else {
+            // Commit in ~10k-event transactions; populate FTS and the derived
+            // tables in a single pass after the union completes (§8).
+            for chunk in valid.chunks(MERGE_CHUNK) {
+                let tx = w.transaction()?;
+                merge_chunk(&tx, chunk, &incoming_kinds, &mut report, &mut touched)?;
+                tx.commit()?;
+            }
+            let tx = w.transaction()?;
+            let (roots, dirty) = merge_affected(&tx, &touched)?;
+            recompute_derived(&tx, &roots, &dirty)?;
+            tx.commit()?;
+            schema::run_pragma(&w, "ANALYZE")?;
+            w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
+            schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+        Ok(report)
+    }
+
+    /// Session union (§8 step 5): same id ⇒ immutable fields keep local on
+    /// mismatch (returned as warnings); `ended_ts := max(non-NULL)`.
+    pub fn merge_sessions(&self, incoming: &[SessionRecord]) -> Result<Vec<SessionId>, StoreError> {
+        let mut w = self.writer.lock().expect("writer mutex poisoned");
+        let tx = w.transaction()?;
+        let mut warnings = Vec::new();
+        for s in incoming {
+            match get_session(&tx, &s.id)? {
+                None => {
+                    insert_session(&tx, s)?;
+                }
+                Some(local) => {
+                    if local.started_ts != s.started_ts
+                        || local.app_version != s.app_version
+                        || local.device_id != s.device_id
+                        || local.root_context != s.root_context
+                    {
+                        warnings.push(s.id.clone());
+                    }
+                    let ended = match (local.ended_ts, s.ended_ts) {
+                        (None, None) => None,
+                        (a, b) => std::cmp::max(a, b),
+                    };
+                    if ended != local.ended_ts {
+                        tx.prepare_cached("UPDATE sessions SET ended_ts = ?1 WHERE id = ?2")?
+                            .execute(params![ended.map(|t| t.to_rfc3339()), s.id.as_str()])?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(warnings)
+    }
+
+    // -- sidecar-writer interface (§5.3) ---------------------------------------
+
+    /// The durable dirty set; `reason='redaction'` rows are first-priority.
+    pub fn dirty_images(&self) -> Result<Vec<DirtyImage>, StoreError> {
+        self.with_reader(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT image_hash, reason, since_ts FROM sidecar_dirty \
+                 ORDER BY (reason = 'redaction') DESC, since_ts ASC, image_hash ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let hash: String = row.get(0)?;
+                let reason: String = row.get(1)?;
+                let since: String = row.get(2)?;
+                out.push(DirtyImage {
+                    image: ContentHash::from_hex(&hash)
+                        .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                    reason: DirtyReason::parse(&reason)
+                        .ok_or_else(|| StoreError::Corrupt(format!("dirty reason {reason}")))?,
+                    since_ts: UtcMillis::parse(&since)
+                        .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    /// Rows are removed via ack only after a successful sidecar write.
+    pub fn ack_dirty(&self, image: &ContentHash, upto_ts: UtcMillis) -> Result<(), StoreError> {
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        w.prepare_cached("DELETE FROM sidecar_dirty WHERE image_hash = ?1 AND since_ts <= ?2")?
+            .execute(params![image.as_str(), upto_ts.to_rfc3339()])?;
+        Ok(())
+    }
+
+    // -- sessions (§9) ----------------------------------------------------------
+
+    pub fn open_session(&self, ctx: SessionContext) -> Result<SessionId, StoreError> {
+        validate_device_id(&ctx.device_id).map_err(|e| StoreError::Invalid(e.to_string()))?;
+        if ctx.app_version.is_empty() {
+            return Err(StoreError::Invalid("app_version must be non-empty".into()));
+        }
+        let m = self.minter.mint();
+        let id = SessionId::from_str_strict(m.id.as_str()).expect("minted ULID is valid");
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        insert_session(
+            &w,
+            &SessionRecord {
+                id: id.clone(),
+                started_ts: m.ts,
+                ended_ts: None,
+                app_version: ctx.app_version,
+                device_id: ctx.device_id,
+                root_context: ctx.root_context,
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// `ended_ts` set once on close — the single permitted UPDATE on
+    /// `sessions`. Closing an already-closed session is a no-op.
+    pub fn close_session(&self, id: &SessionId, ended: UtcMillis) -> Result<(), StoreError> {
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        let n = w
+            .prepare_cached("UPDATE sessions SET ended_ts = ?1 WHERE id = ?2 AND ended_ts IS NULL")?
+            .execute(params![ended.to_rfc3339(), id.as_str()])?;
+        if n == 0 && get_session(&w, id)?.is_none() {
+            return Err(StoreError::SessionNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Read one session row (storage only; lifecycle in CAPTURE).
+    pub fn session(&self, id: &SessionId) -> Result<Option<SessionRecord>, StoreError> {
+        self.with_reader(|conn| get_session(conn, id))
+    }
+
+    // -- rebuild (§5.3–5.4, I7) ---------------------------------------------------
+
+    /// Drop + recompute all derived tables from the truth tables. Must equal
+    /// incremental maintenance (I7). `sidecar_dirty` is preserved: it is a
+    /// durable queue with ack history, not a pure fold of the log.
+    pub fn rebuild_derived(&self) -> Result<(), StoreError> {
+        let mut w = self.writer.lock().expect("writer mutex poisoned");
+        let tx = w.transaction()?;
+        tx.execute("DELETE FROM redactions", [])?;
+        tx.execute("DELETE FROM image_ratings", [])?;
+        tx.execute("DELETE FROM image_journal_stats", [])?;
+        tx.execute("DELETE FROM event_fts", [])?;
+
+        // Registry = the fold of kind='redaction' events; deterministic
+        // min-redaction-id per target (matches the incremental upsert rule).
+        {
+            let mut stmt = tx.prepare(
+                "SELECT target_event, id, ts FROM annotation_events \
+                 WHERE kind = 'redaction' ORDER BY id ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let target: String = row.get(0)?;
+                let rid: String = row.get(1)?;
+                let ts: String = row.get(2)?;
+                tx.prepare_cached(
+                    "INSERT OR IGNORE INTO redactions(event_id, redaction_id, ts) \
+                     VALUES (?1, ?2, ?3)",
+                )?
+                .execute(params![target, rid, ts])?;
+            }
+        }
+
+        // Full fold for FTS bodies.
+        let mut set = BTreeMap::new();
+        collect_events(&tx, &joined_sql("1=1"), &[], &mut set)?;
+        let fs = FoldSet::new(set);
+        let retracted = fs.retracted_ids();
+        let chains = fs.chains();
+        let mut live_roots: HashSet<EventId> = HashSet::new();
+        for e in fs.events.values() {
+            if e.kind != Kind::Remark {
+                continue;
+            }
+            tx.prepare_cached("INSERT OR IGNORE INTO fts_map(root_event_id) VALUES (?1)")?
+                .execute([e.id.as_str()])?;
+            let live = !retracted.contains(&e.id) && !e.scrubbed();
+            if live {
+                let rowid: i64 = tx
+                    .prepare_cached("SELECT fts_rowid FROM fts_map WHERE root_event_id = ?1")?
+                    .query_row([e.id.as_str()], |r| r.get(0))?;
+                let (text, _) = fs.effective_text(e, &chains, &retracted);
+                tx.prepare_cached("INSERT INTO event_fts(rowid, body) VALUES (?1, ?2)")?
+                    .execute(params![rowid, text.unwrap_or_default()])?;
+                live_roots.insert(e.id.clone());
+            }
+        }
+
+        // Vectors referencing dead roots are dropped; still-valid vectors are
+        // preserved (core cannot re-embed — RETRIEVAL owns recreation).
+        {
+            let dead: Vec<String> = {
+                let mut stmt =
+                    tx.prepare("SELECT DISTINCT event_id FROM vectors WHERE event_id IS NOT NULL")?;
+                let ids = stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                ids.into_iter()
+                    .filter(|s| {
+                        EventId::from_str_strict(s)
+                            .map(|id| !live_roots.contains(&id))
+                            .unwrap_or(true)
+                    })
+                    .collect()
+            };
+            for id in dead {
+                tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                    .execute([id])?;
+            }
+        }
+
+        // Per-image folds.
+        {
+            let images: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT DISTINCT image_hash FROM event_targets")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for h in images {
+                recompute_image(&tx, &h)?;
+            }
+        }
+
+        tx.commit()?;
+        // §5.1/§5.4 operational rules after rebuild.
+        schema::run_pragma(&w, "ANALYZE")?;
+        w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
+        schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+}
+
+impl Drop for EventStore {
+    fn drop(&mut self) {
+        // §5.1: checkpoint at shutdown; PRAGMA optimize on connection close.
+        if let Ok(w) = self.writer.lock() {
+            let _ = schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)");
+            let _ = schema::run_pragma(&w, "PRAGMA optimize");
+        }
+        for r in &self.readers {
+            if let Ok(c) = r.lock() {
+                let _ = schema::run_pragma(&c, "PRAGMA optimize");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row mapping + batched fetch (§10.1)
+// ---------------------------------------------------------------------------
+
+const EVENT_COLS: &str = "e.id, e.v, e.session_id, e.ts, e.source, e.kind, e.text, e.payload, \
+                          e.target_event, e.linked_event, e.redacted_by, t.image_hash";
+
+fn joined_sql(where_clause: &str) -> String {
+    format!(
+        "SELECT {EVENT_COLS} FROM annotation_events e \
+         LEFT JOIN event_targets t ON t.event_id = e.id \
+         WHERE {where_clause} ORDER BY e.id, t.position"
+    )
+}
+
+fn corrupt(msg: impl std::fmt::Display) -> StoreError {
+    StoreError::Corrupt(msg.to_string())
+}
+
+fn event_from_row(row: &rusqlite::Row<'_>) -> Result<Event, StoreError> {
+    let id: String = row.get(0)?;
+    let v: i64 = row.get(1)?;
+    let session: String = row.get(2)?;
+    let ts: String = row.get(3)?;
+    let source: String = row.get(4)?;
+    let kind: String = row.get(5)?;
+    let text: Option<String> = row.get(6)?;
+    let payload: Option<String> = row.get(7)?;
+    let target_event: Option<String> = row.get(8)?;
+    let linked_event: Option<String> = row.get(9)?;
+    let redacted_by: Option<String> = row.get(10)?;
+
+    let kind = Kind::parse(&kind).ok_or_else(|| corrupt(format!("kind {kind}")))?;
+    let source = Source::parse(&source).ok_or_else(|| corrupt(format!("source {source}")))?;
+    let opt_id = |s: Option<String>| -> Result<Option<EventId>, StoreError> {
+        s.map(|s| EventId::from_str_strict(&s).map_err(corrupt))
+            .transpose()
+    };
+    Ok(Event {
+        id: EventId::from_str_strict(&id).map_err(corrupt)?,
+        v: u32::try_from(v).map_err(corrupt)?,
+        session_id: SessionId::from_str_strict(&session).map_err(corrupt)?,
+        ts: UtcMillis::parse(&ts).map_err(corrupt)?,
+        source,
+        kind,
+        targets: Vec::new(),
+        text,
+        payload: payload
+            .map(|p| canonical::parse_payload_json(kind, source, &p).map_err(corrupt))
+            .transpose()?,
+        target_event: opt_id(target_event)?,
+        linked_event: opt_id(linked_event)?,
+        redacted_by: opt_id(redacted_by)?,
+    })
+}
+
+/// Run one joined SELECT and fold its rows (events × target rows) into `out`.
+fn collect_events(
+    conn: &Connection,
+    sql: &str,
+    params: &[&str],
+    out: &mut BTreeMap<EventId, Event>,
+) -> Result<(), StoreError> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let mut rows = stmt.query(params_from_iter(params.iter()))?;
+    while let Some(row) = rows.next()? {
+        let id_s: String = row.get(0)?;
+        let id = EventId::from_str_strict(&id_s).map_err(corrupt)?;
+        if !out.contains_key(&id) {
+            out.insert(id.clone(), event_from_row(row)?);
+        }
+        let hash: Option<String> = row.get(11)?;
+        if let Some(h) = hash {
+            // Rows arrive ordered by t.position; duplicates impossible (PK).
+            out.get_mut(&id)
+                .expect("just inserted")
+                .targets
+                .push(ContentHash::from_hex(&h).map_err(corrupt)?);
+        }
+    }
+    Ok(())
+}
+
+/// One batched joined fetch over `e.{column} IN (...)` (chunked only past
+/// the SQLite variable limit; a single statement in all realistic cases).
+fn fetch_joined_in(
+    conn: &Connection,
+    column: &str,
+    ids: &[String],
+    out: &mut BTreeMap<EventId, Event>,
+) -> Result<(), StoreError> {
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let sql = joined_sql(&format!("e.{column} IN ({marks})"));
+        let params: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        collect_events(conn, &sql, &params, out)?;
+    }
+    Ok(())
+}
+
+/// Only these kinds can be the target of a meta-event, so only they extend
+/// the closure frontier — this is what makes one §10.1 round the norm.
+fn can_be_meta_target(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Remark | Kind::Rating | Kind::Stroke | Kind::Revision
+    )
+}
+
+/// §10.1 step 3: meta-closure to fixpoint; each round one batched query.
+fn closure_descendants(
+    conn: &Connection,
+    set: &mut BTreeMap<EventId, Event>,
+) -> Result<(), StoreError> {
+    let mut frontier: Vec<String> = set
+        .values()
+        .filter(|e| can_be_meta_target(e.kind))
+        .map(|e| e.id.as_str().to_owned())
+        .collect();
+    while !frontier.is_empty() {
+        let mut found = BTreeMap::new();
+        fetch_joined_in(conn, "target_event", &frontier, &mut found)?;
+        frontier = Vec::new();
+        for (id, e) in found {
+            if let std::collections::btree_map::Entry::Vacant(slot) = set.entry(id) {
+                if can_be_meta_target(e.kind) {
+                    frontier.push(slot.key().as_str().to_owned());
+                }
+                slot.insert(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// §10.1: covering range scan → one batched id fetch → meta-closure.
+fn image_closure(
+    conn: &Connection,
+    image: &ContentHash,
+) -> Result<BTreeMap<EventId, Event>, StoreError> {
+    // 1. Covering range scan on idx_targets_image.
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT event_id FROM event_targets WHERE image_hash = ?1 ORDER BY event_id",
+        )?;
+        let rows = stmt.query_map([image.as_str()], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut set = BTreeMap::new();
+    if ids.is_empty() {
+        return Ok(set);
+    }
+    // 2. One batched SELECT for those ids.
+    fetch_joined_in(conn, "id", &ids, &mut set)?;
+    // 3. Meta-closure to fixpoint.
+    closure_descendants(conn, &mut set)?;
+    Ok(set)
+}
+
+fn get_event(conn: &Connection, id: &EventId) -> Result<Option<Event>, StoreError> {
+    let mut set = BTreeMap::new();
+    collect_events(conn, &joined_sql("e.id = ?1"), &[id.as_str()], &mut set)?;
+    Ok(set.into_values().next())
+}
+
+// ---------------------------------------------------------------------------
+// Write internals
+// ---------------------------------------------------------------------------
+
+fn insert_event(conn: &Connection, e: &Event) -> Result<(), StoreError> {
+    conn.prepare_cached(
+        "INSERT INTO annotation_events \
+         (id, v, session_id, ts, source, kind, text, payload, target_event, linked_event, redacted_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?
+    .execute(params![
+        e.id.as_str(),
+        e.v as i64,
+        e.session_id.as_str(),
+        e.ts.to_rfc3339(),
+        e.source.as_str(),
+        e.kind.as_str(),
+        e.text,
+        e.payload.as_ref().map(canonical::payload_canonical_json),
+        e.target_event.as_ref().map(EventId::as_str),
+        e.linked_event.as_ref().map(EventId::as_str),
+        e.redacted_by.as_ref().map(EventId::as_str),
+    ])?;
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO event_targets (event_id, image_hash, position) VALUES (?1, ?2, ?3)",
+    )?;
+    for (i, h) in e.targets.iter().enumerate() {
+        stmt.execute(params![e.id.as_str(), h.as_str(), i as i64])?;
+    }
+    Ok(())
+}
+
+/// Walk revision hops to the chain root (§6.1); cycles/dangling ⇒ None.
+fn db_root_event(conn: &Connection, e: &Event) -> Result<Option<Event>, StoreError> {
+    let mut seen: HashSet<EventId> = HashSet::new();
+    let mut cur = e.clone();
+    while cur.kind == Kind::Revision {
+        if !seen.insert(cur.id.clone()) {
+            return Ok(None);
+        }
+        let Some(target) = cur.target_event.clone() else {
+            return Ok(None);
+        };
+        match get_event(conn, &target)? {
+            Some(next) => cur = next,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(cur))
+}
+
+/// `effective_targets(e)` against the database (§2.3); dangling ⇒ [].
+fn db_effective_targets(conn: &Connection, e: &Event) -> Result<Vec<ContentHash>, StoreError> {
+    let mut seen: HashSet<EventId> = HashSet::new();
+    let mut cur = e.clone();
+    while cur.kind.is_meta() {
+        if !seen.insert(cur.id.clone()) {
+            return Ok(Vec::new());
+        }
+        let Some(target) = cur.target_event.clone() else {
+            return Ok(Vec::new());
+        };
+        match get_event(conn, &target)? {
+            Some(next) => cur = next,
+            None => return Ok(Vec::new()),
+        }
+    }
+    Ok(cur.targets)
+}
+
+/// `chain(R)` = {R} ∪ revisions resolving to R, ascending id (§6.1).
+fn db_chain_members(conn: &Connection, root: &Event) -> Result<Vec<Event>, StoreError> {
+    let mut set = BTreeMap::new();
+    set.insert(root.id.clone(), root.clone());
+    closure_descendants(conn, &mut set)?;
+    let fs = FoldSet::new(set);
+    let mut members: Vec<Event> = vec![root.clone()];
+    for e in fs.events.values() {
+        if e.kind == Kind::Revision && fs.root_id(e).as_ref() == Some(&root.id) {
+            members.push(e.clone());
+        }
+    }
+    members.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(members)
+}
+
+fn scrub_in_place(conn: &Connection, victim: &EventId, marker: &EventId) -> Result<(), StoreError> {
+    conn.prepare_cached(
+        "UPDATE annotation_events SET text = NULL, payload = NULL, redacted_by = ?1 WHERE id = ?2",
+    )?
+    .execute(params![marker.as_str(), victim.as_str()])?;
+    Ok(())
+}
+
+/// Registry upsert: deterministic min-redaction-id wins, so incremental
+/// maintenance matches `rebuild_derived()` under any arrival order.
+fn registry_upsert(
+    conn: &Connection,
+    victim: &EventId,
+    redaction: &EventId,
+    ts: UtcMillis,
+) -> Result<(), StoreError> {
+    conn.prepare_cached(
+        "INSERT INTO redactions(event_id, redaction_id, ts) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(event_id) DO UPDATE SET redaction_id = excluded.redaction_id, ts = excluded.ts \
+         WHERE excluded.redaction_id < redactions.redaction_id",
+    )?
+    .execute(params![victim.as_str(), redaction.as_str(), ts.to_rfc3339()])?;
+    Ok(())
+}
+
+fn registry_lookup(conn: &Connection, id: &EventId) -> Result<Option<EventId>, StoreError> {
+    let v: Option<String> = conn
+        .prepare_cached("SELECT redaction_id FROM redactions WHERE event_id = ?1")?
+        .query_row([id.as_str()], |r| r.get(0))
+        .optional()?;
+    v.map(|s| EventId::from_str_strict(&s).map_err(corrupt))
+        .transpose()
+}
+
+/// Redaction events are recorded against the current session (§7 step 3):
+/// the latest open session, else the latest session, else the target's own.
+fn redaction_session(conn: &Connection, target: &Event) -> Result<SessionId, StoreError> {
+    let open: Option<String> = conn
+        .prepare_cached("SELECT id FROM sessions WHERE ended_ts IS NULL ORDER BY id DESC LIMIT 1")?
+        .query_row([], |r| r.get(0))
+        .optional()?;
+    let any = match open {
+        Some(s) => Some(s),
+        None => conn
+            .prepare_cached("SELECT id FROM sessions ORDER BY id DESC LIMIT 1")?
+            .query_row([], |r| r.get(0))
+            .optional()?,
+    };
+    match any {
+        Some(s) => SessionId::from_str_strict(&s).map_err(corrupt),
+        None => Ok(target.session_id.clone()),
+    }
+}
+
+fn build_draft_event(
+    conn: &Connection,
+    session: &SessionId,
+    draft: EventDraft,
+    minted: Minted,
+) -> Result<Event, AppendError> {
+    let base = |source: Source, kind: Kind| Event {
+        id: minted.id.clone(),
+        v: 1,
+        session_id: session.clone(),
+        ts: minted.ts,
+        source,
+        kind,
+        targets: Vec::new(),
+        text: None,
+        payload: None,
+        target_event: None,
+        linked_event: None,
+        redacted_by: None,
+    };
+    Ok(match draft {
+        EventDraft::Remark {
+            source,
+            text,
+            targets,
+        } => {
+            let (src, payload, linked) = match source {
+                RemarkSource::Voice {
+                    conf_pm,
+                    dur_ms,
+                    linked_event,
+                } => (
+                    Source::Voice,
+                    Some(Payload::Voice { conf_pm, dur_ms }),
+                    linked_event,
+                ),
+                RemarkSource::Typed => (Source::Typed, None, None),
+            };
+            let mut e = base(src, Kind::Remark);
+            e.targets = targets;
+            e.text = Some(text);
+            e.payload = payload;
+            e.linked_event = linked;
+            e
+        }
+        EventDraft::Rating { value, targets } => {
+            let mut e = base(Source::Typed, Kind::Rating);
+            e.targets = targets;
+            e.payload = Some(Payload::Rating { value });
+            e
+        }
+        EventDraft::Stroke {
+            payload,
+            target,
+            linked_event,
+        } => {
+            let mut e = base(Source::Pencil, Kind::Stroke);
+            e.targets = vec![target];
+            e.payload = Some(Payload::Stroke(payload));
+            e.linked_event = linked_event;
+            e
+        }
+        EventDraft::Revision { target, text } => {
+            let t = get_event(conn, &target)?
+                .ok_or_else(|| AppendError::TargetNotFound(target.clone()))?;
+            if !matches!(t.kind, Kind::Remark | Kind::Revision) {
+                return Err(AppendError::InvalidTargetKind {
+                    meta: Kind::Revision,
+                    target_kind: t.kind,
+                });
+            }
+            let mut e = base(Source::Typed, Kind::Revision);
+            e.target_event = Some(target);
+            e.text = Some(text);
+            e
+        }
+        EventDraft::Retraction { target, source } => {
+            let t = get_event(conn, &target)?
+                .ok_or_else(|| AppendError::TargetNotFound(target.clone()))?;
+            match t.kind {
+                Kind::Retraction => return Err(AppendError::RetractionOfRetraction),
+                Kind::Redaction => {
+                    return Err(AppendError::InvalidTargetKind {
+                        meta: Kind::Retraction,
+                        target_kind: t.kind,
+                    });
+                }
+                _ => {}
+            }
+            let src = match source {
+                RetractionSource::Voice => Source::Voice,
+                RetractionSource::System => Source::System,
+            };
+            let mut e = base(src, Kind::Retraction);
+            e.target_event = Some(target);
+            e
+        }
+    })
+}
+
+fn structural_mismatch(a: &Event, b: &Event) -> bool {
+    let core_differs = a.v != b.v
+        || a.session_id != b.session_id
+        || a.ts != b.ts
+        || a.source != b.source
+        || a.kind != b.kind
+        || a.target_event != b.target_event
+        || a.linked_event != b.linked_event
+        || a.targets != b.targets;
+    if core_differs {
+        return true;
+    }
+    if !a.scrubbed() && !b.scrubbed() {
+        return a.text != b.text || a.payload != b.payload;
+    }
+    false
+}
+
+/// Second-stage merge validation: target-kind rules, when the target's kind
+/// is determinable from the batch or the database. Unknown targets are
+/// dangling — inert, never invalid (§5.1, §8).
+fn target_kind_violation(
+    conn: &Connection,
+    e: &Event,
+    incoming_kinds: &HashMap<&EventId, Kind>,
+) -> Result<Option<String>, StoreError> {
+    let Some(target) = e.target_event.as_ref() else {
+        return Ok(None);
+    };
+    let known = match incoming_kinds.get(target) {
+        Some(k) => Some(*k),
+        None => {
+            let s: Option<String> = conn
+                .prepare_cached("SELECT kind FROM annotation_events WHERE id = ?1")?
+                .query_row([target.as_str()], |r| r.get(0))
+                .optional()?;
+            s.and_then(|s| Kind::parse(&s))
+        }
+    };
+    let Some(k) = known else { return Ok(None) };
+    let allowed = match e.kind {
+        Kind::Revision => matches!(k, Kind::Remark | Kind::Revision),
+        Kind::Retraction => matches!(
+            k,
+            Kind::Remark | Kind::Rating | Kind::Stroke | Kind::Revision
+        ),
+        Kind::Redaction => matches!(k, Kind::Remark | Kind::Revision | Kind::Stroke),
+        _ => true,
+    };
+    Ok(if allowed {
+        None
+    } else {
+        Some(format!("{} may not target {}", e.kind.as_str(), k.as_str()))
+    })
+}
+
+/// §8 steps 0–3 for one chunk of the (sorted) incoming union.
+fn merge_chunk(
+    tx: &Connection,
+    chunk: &[(usize, &Event)],
+    incoming_kinds: &HashMap<&EventId, Kind>,
+    report: &mut MergeReport,
+    touched: &mut Vec<Event>,
+) -> Result<(), StoreError> {
+    let mut ok: Vec<&Event> = Vec::with_capacity(chunk.len());
+    for (offset, e) in chunk {
+        match target_kind_violation(tx, e, incoming_kinds)? {
+            Some(reason) => report.quarantined.push((*offset, reason)),
+            None => ok.push(e),
+        }
+    }
+
+    // 1. Redactions first — supremacy in force before content lands.
+    for e in ok.iter().filter(|e| e.kind == Kind::Redaction) {
+        let target = e.target_event.as_ref().expect("validated");
+        match get_event(tx, &e.id)? {
+            None => {
+                insert_event(tx, e)?;
+                report.inserted += 1;
+                touched.push((*e).clone());
+            }
+            Some(_) => report.duplicates += 1,
+        }
+        registry_upsert(tx, target, &e.id, e.ts)?;
+        // 2. Scrub local victims of newly learned redactions.
+        if let Some(victim) = get_event(tx, target)?
+            && !victim.scrubbed()
+            && matches!(victim.kind, Kind::Remark | Kind::Revision | Kind::Stroke)
+        {
+            let marker = registry_lookup(tx, &victim.id)?.expect("just upserted");
+            scrub_in_place(tx, &victim.id, &marker)?;
+            tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                .execute([victim.id.as_str()])?;
+            report.newly_scrubbed += 1;
+            touched.push(victim.scrubbed_form(marker));
+        }
+    }
+
+    // 3. Union the rest (ascending id; order is cosmetic).
+    for e in ok.iter().filter(|e| e.kind != Kind::Redaction) {
+        let condemned = registry_lookup(tx, &e.id)?;
+        let arriving = match condemned {
+            Some(marker) if !e.scrubbed() => {
+                report.scrubbed_on_arrival += 1;
+                e.scrubbed_form(marker)
+            }
+            _ => (*e).clone(),
+        };
+        match get_event(tx, &arriving.id)? {
+            None => {
+                insert_event(tx, &arriving)?;
+                report.inserted += 1;
+                touched.push(arriving);
+            }
+            Some(local) => {
+                if local.scrubbed() && !arriving.scrubbed() {
+                    // Supremacy: keep local.
+                    report.duplicates += 1;
+                    if structural_mismatch(&local, &arriving) {
+                        report.integrity_warnings.push(arriving.id.clone());
+                    }
+                } else if arriving.scrubbed() && !local.scrubbed() {
+                    // Learn it.
+                    let marker = arriving.redacted_by.clone().expect("scrubbed");
+                    scrub_in_place(tx, &local.id, &marker)?;
+                    tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                        .execute([local.id.as_str()])?;
+                    report.newly_scrubbed += 1;
+                    touched.push(local.scrubbed_form(marker));
+                } else {
+                    report.duplicates += 1;
+                    if structural_mismatch(&local, &arriving) {
+                        // Same id MUST mean same event; local wins, warn.
+                        report.integrity_warnings.push(arriving.id.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// §8 step 4: affected chain roots and images for the post-union recompute.
+fn merge_affected(
+    tx: &Connection,
+    touched: &[Event],
+) -> Result<(BTreeSet<EventId>, BTreeMap<ContentHash, DirtyReason>), StoreError> {
+    let mut roots: BTreeSet<EventId> = BTreeSet::new();
+    let mut dirty: BTreeMap<ContentHash, DirtyReason> = BTreeMap::new();
+    for e in touched {
+        let reason = if e.scrubbed() || e.kind == Kind::Redaction {
+            DirtyReason::Redaction
+        } else {
+            DirtyReason::Append
+        };
+        for h in db_effective_targets(tx, e)? {
+            let entry = dirty.entry(h).or_insert(reason);
+            if reason == DirtyReason::Redaction {
+                *entry = DirtyReason::Redaction;
+            }
+        }
+        match e.kind {
+            Kind::Remark => {
+                roots.insert(e.id.clone());
+            }
+            Kind::Revision => {
+                if let Some(root) = db_root_event(tx, e)?
+                    && root.kind == Kind::Remark
+                {
+                    roots.insert(root.id);
+                }
+            }
+            Kind::Retraction | Kind::Redaction => {
+                let target = e.target_event.as_ref().expect("validated");
+                if let Some(t) = get_event(tx, target)? {
+                    match t.kind {
+                        Kind::Remark => {
+                            roots.insert(t.id.clone());
+                        }
+                        Kind::Revision => {
+                            if let Some(root) = db_root_event(tx, &t)?
+                                && root.kind == Kind::Remark
+                            {
+                                roots.insert(root.id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Kind::Rating | Kind::Stroke => {}
+        }
+    }
+    Ok((roots, dirty))
+}
+
+// ---------------------------------------------------------------------------
+// Derived maintenance (§6.3): same transaction as the triggering write;
+// scoped recomputation from the truth tables, so incremental state always
+// equals `rebuild_derived()` (I7) and merge results are order-free (§8).
+// ---------------------------------------------------------------------------
+
+fn recompute_derived(
+    tx: &Connection,
+    roots: &BTreeSet<EventId>,
+    dirty: &BTreeMap<ContentHash, DirtyReason>,
+) -> Result<(), StoreError> {
+    if !roots.is_empty() {
+        let ids: Vec<String> = roots.iter().map(|r| r.as_str().to_owned()).collect();
+        let mut set = BTreeMap::new();
+        fetch_joined_in(tx, "id", &ids, &mut set)?;
+        closure_descendants(tx, &mut set)?;
+        let fs = FoldSet::new(set);
+        let retracted = fs.retracted_ids();
+        let chains = fs.chains();
+        for rid in roots {
+            let Some(root) = fs.get(rid) else { continue };
+            if root.kind != Kind::Remark {
+                continue;
+            }
+            // fts_map rows are created for every remark root touched and
+            // never deleted (stable rowids, §6.3).
+            tx.prepare_cached("INSERT OR IGNORE INTO fts_map(root_event_id) VALUES (?1)")?
+                .execute([rid.as_str()])?;
+            let rowid: i64 = tx
+                .prepare_cached("SELECT fts_rowid FROM fts_map WHERE root_event_id = ?1")?
+                .query_row([rid.as_str()], |r| r.get(0))?;
+            let old_body: Option<String> = tx
+                .prepare_cached("SELECT body FROM event_fts WHERE rowid = ?1")?
+                .query_row([rowid], |r| r.get(0))
+                .optional()?;
+            let live = !retracted.contains(rid) && !root.scrubbed();
+            if live {
+                let (text, _) = fs.effective_text(root, &chains, &retracted);
+                let body = text.unwrap_or_default();
+                match &old_body {
+                    None => {
+                        tx.prepare_cached("INSERT INTO event_fts(rowid, body) VALUES (?1, ?2)")?
+                            .execute(params![rowid, body])?;
+                    }
+                    Some(b) if *b != body => {
+                        tx.prepare_cached("UPDATE event_fts SET body = ?1 WHERE rowid = ?2")?
+                            .execute(params![body, rowid])?;
+                        // Effective text changed: invalidate the root's
+                        // vectors for re-embedding (§6.3).
+                        tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                            .execute([rid.as_str()])?;
+                    }
+                    _ => {}
+                }
+            } else {
+                if old_body.is_some() {
+                    tx.prepare_cached("DELETE FROM event_fts WHERE rowid = ?1")?
+                        .execute([rowid])?;
+                }
+                tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                    .execute([rid.as_str()])?;
+            }
+        }
+    }
+
+    let now = UtcMillis::now();
+    for (hash, reason) in dirty {
+        recompute_image(tx, hash.as_str())?;
+        upsert_dirty(tx, hash, *reason, now)?;
+    }
+    Ok(())
+}
+
+/// Recompute `image_ratings` + `image_journal_stats` for one image from the
+/// truth tables (one batched query; retraction checks answered from
+/// `idx_events_target`, no row fetch).
+fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
+    let mut stmt = tx.prepare_cached(
+        "SELECT e.id, e.kind, e.ts, e.redacted_by IS NOT NULL, e.payload, \
+                NOT EXISTS (SELECT 1 FROM annotation_events r \
+                            WHERE r.target_event = e.id AND r.kind = 'retraction') \
+         FROM event_targets t JOIN annotation_events e ON e.id = t.event_id \
+         WHERE t.image_hash = ?1 AND e.kind IN ('remark','rating','stroke') \
+         ORDER BY e.id",
+    )?;
+    let mut rows = stmt.query([hash])?;
+    let mut event_count: i64 = 0;
+    let mut has_strokes = false;
+    let mut last_ts: Option<String> = None;
+    let mut winner: Option<(String, String, i64)> = None; // (event_id, ts, value)
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let ts: String = row.get(2)?;
+        let scrubbed: bool = row.get(3)?;
+        let payload: Option<String> = row.get(4)?;
+        let live: bool = row.get(5)?;
+        if !live {
+            continue;
+        }
+        event_count += 1;
+        last_ts = Some(ts.clone());
+        match kind.as_str() {
+            "stroke" if !scrubbed => has_strokes = true,
+            "rating" if !scrubbed => {
+                if let Some(p) = payload
+                    && let Ok(Payload::Rating { value }) =
+                        canonical::parse_payload_json(Kind::Rating, Source::Typed, &p)
+                {
+                    winner = Some((id, ts, i64::from(value)));
+                }
+            }
+            _ => {}
+        }
+    }
+    match winner {
+        Some((event_id, ts, value)) => {
+            tx.prepare_cached(
+                "INSERT INTO image_ratings(image_hash, rating, event_id, ts) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(image_hash) DO UPDATE SET \
+                   rating = excluded.rating, event_id = excluded.event_id, ts = excluded.ts",
+            )?
+            .execute(params![hash, value, event_id, ts])?;
+        }
+        None => {
+            tx.prepare_cached("DELETE FROM image_ratings WHERE image_hash = ?1")?
+                .execute([hash])?;
+        }
+    }
+    if event_count > 0 {
+        tx.prepare_cached(
+            "INSERT INTO image_journal_stats(image_hash, event_count, has_strokes, last_ts) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(image_hash) DO UPDATE SET \
+               event_count = excluded.event_count, has_strokes = excluded.has_strokes, \
+               last_ts = excluded.last_ts",
+        )?
+        .execute(params![
+            hash,
+            event_count,
+            has_strokes as i64,
+            last_ts.expect("count > 0")
+        ])?;
+    } else {
+        tx.prepare_cached("DELETE FROM image_journal_stats WHERE image_hash = ?1")?
+            .execute([hash])?;
+    }
+    Ok(())
+}
+
+/// `'redaction'` outranks and overwrites other reasons for a hash, never
+/// vice versa (§5.3); otherwise the first mark wins until acked.
+fn upsert_dirty(
+    tx: &Connection,
+    hash: &ContentHash,
+    reason: DirtyReason,
+    now: UtcMillis,
+) -> Result<(), StoreError> {
+    tx.prepare_cached(
+        "INSERT INTO sidecar_dirty(image_hash, reason, since_ts) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(image_hash) DO UPDATE SET \
+           reason = excluded.reason, since_ts = excluded.since_ts \
+         WHERE excluded.reason = 'redaction' AND sidecar_dirty.reason <> 'redaction'",
+    )?
+    .execute(params![hash.as_str(), reason.as_str(), now.to_rfc3339()])?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session rows
+// ---------------------------------------------------------------------------
+
+fn insert_session(conn: &Connection, s: &SessionRecord) -> Result<(), StoreError> {
+    conn.prepare_cached(
+        "INSERT INTO sessions (id, started_ts, ended_ts, app_version, device_id, root_context) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?
+    .execute(params![
+        s.id.as_str(),
+        s.started_ts.to_rfc3339(),
+        s.ended_ts.map(|t| t.to_rfc3339()),
+        s.app_version,
+        s.device_id,
+        s.root_context,
+    ])?;
+    Ok(())
+}
+
+fn get_session(conn: &Connection, id: &SessionId) -> Result<Option<SessionRecord>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, started_ts, ended_ts, app_version, device_id, root_context \
+         FROM sessions WHERE id = ?1",
+    )?;
+    let row = stmt
+        .query_row([id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .optional()?;
+    row.map(
+        |(id, started, ended, app_version, device_id, root_context)| {
+            Ok(SessionRecord {
+                id: SessionId::from_str_strict(&id).map_err(corrupt)?,
+                started_ts: UtcMillis::parse(&started).map_err(corrupt)?,
+                ended_ts: ended
+                    .map(|t| UtcMillis::parse(&t).map_err(corrupt))
+                    .transpose()?,
+                app_version,
+                device_id,
+                root_context,
+            })
+        },
+    )
+    .transpose()
+}

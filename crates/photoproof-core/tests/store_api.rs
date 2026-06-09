@@ -1,0 +1,559 @@
+//! spec/EVENTS.md behavioral coverage beyond the §11 invariants: sessions
+//! (§9, E7), the sidecar dirty queue (§5.3), FTS lifecycle (§5.4, §6.3),
+//! link symmetry (§3.3, X2), and append/redact rejection rules (§3, §10).
+
+mod common;
+
+use common::*;
+use photoproof_core::{
+    AppendError, EventDraft, JournalEntry, Kind, RedactError, RemarkSource, SessionContext,
+    SessionId, SessionRecord, UtcMillis,
+};
+
+// -- sessions (§9, E7) --------------------------------------------------------
+
+#[test]
+fn sessions_open_close_and_merge() {
+    let ts = new_store();
+    let rec = ts.store.session(&ts.session).unwrap().unwrap();
+    assert_eq!(rec.app_version, "0.1.0");
+    assert_eq!(rec.device_id, DEVICE_ID);
+    assert!(rec.ended_ts.is_none());
+
+    // Close once; closing again is a no-op (ended_ts set once).
+    let ended = UtcMillis::now();
+    ts.store.close_session(&ts.session, ended).unwrap();
+    let rec = ts.store.session(&ts.session).unwrap().unwrap();
+    assert_eq!(rec.ended_ts, Some(ended));
+    ts.store
+        .close_session(
+            &ts.session,
+            UtcMillis::from_epoch_ms(ended.epoch_ms() + 9999),
+        )
+        .unwrap();
+    let rec2 = ts.store.session(&ts.session).unwrap().unwrap();
+    assert_eq!(rec2.ended_ts, Some(ended), "ended_ts is set once");
+
+    // Unknown session errors.
+    let ghost = SessionId::from_str_strict("01JZ5C3HW0RD8PT2M6QK4V9XEB").unwrap();
+    assert!(ts.store.close_session(&ghost, ended).is_err());
+
+    // Merge: union by id; ended_ts := max(non-NULL); immutable-field
+    // mismatch keeps local and warns.
+    let other = SessionRecord {
+        id: ghost.clone(),
+        started_ts: UtcMillis::from_epoch_ms(1_700_000_000_000),
+        ended_ts: None,
+        app_version: "0.0.9".into(),
+        device_id: DEVICE_ID.into(),
+        root_context: Some(r#"{"roots":["r1"],"focus_path":"2026/iceland"}"#.into()),
+    };
+    let warnings = ts
+        .store
+        .merge_sessions(std::slice::from_ref(&other))
+        .unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(ts.store.session(&ghost).unwrap().unwrap(), other);
+
+    let later = UtcMillis::from_epoch_ms(1_700_000_100_000);
+    let mut update = other.clone();
+    update.ended_ts = Some(later);
+    let warnings = ts.store.merge_sessions(&[update]).unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(
+        ts.store.session(&ghost).unwrap().unwrap().ended_ts,
+        Some(later)
+    );
+
+    // max(non-NULL): an older ended_ts does not regress the local one.
+    let mut older = other.clone();
+    older.ended_ts = Some(UtcMillis::from_epoch_ms(1_700_000_050_000));
+    ts.store.merge_sessions(&[older]).unwrap();
+    assert_eq!(
+        ts.store.session(&ghost).unwrap().unwrap().ended_ts,
+        Some(later)
+    );
+
+    // Immutable mismatch: local wins, warned.
+    let mut conflicting = other.clone();
+    conflicting.app_version = "9.9.9".into();
+    let warnings = ts.store.merge_sessions(&[conflicting]).unwrap();
+    assert_eq!(warnings, vec![ghost.clone()]);
+    assert_eq!(
+        ts.store.session(&ghost).unwrap().unwrap().app_version,
+        "0.0.9"
+    );
+
+    // device_id is validated at open_session.
+    let err = ts.store.open_session(SessionContext {
+        app_version: "0.1.0".into(),
+        device_id: "NOT-HEX".into(),
+        root_context: None,
+    });
+    assert!(err.is_err());
+}
+
+// -- sidecar dirty queue (§5.3, §7 step 7) -------------------------------------
+
+#[test]
+fn dirty_queue_priority_and_ack() {
+    let ts = new_store();
+    let (a, b) = (hash(1), hash(2));
+    let r = ts
+        .store
+        .append(
+            &ts.session,
+            d_remark("note", vec![a.clone(), b.clone()]),
+            None,
+        )
+        .unwrap();
+
+    let dirty = ts.store.dirty_images().unwrap();
+    assert_eq!(dirty.len(), 2);
+    assert!(
+        dirty
+            .iter()
+            .all(|d| d.reason == photoproof_core::DirtyReason::Append)
+    );
+
+    // Ack image b: row removed only via ack.
+    let upto = dirty.iter().find(|d| d.image == b).unwrap().since_ts;
+    ts.store.ack_dirty(&b, upto).unwrap();
+    let dirty = ts.store.dirty_images().unwrap();
+    assert_eq!(dirty.len(), 1);
+    assert_eq!(dirty[0].image, a);
+
+    // Redaction outranks and overwrites 'append'.
+    ts.store.redact(&r.id).unwrap();
+    let dirty = ts.store.dirty_images().unwrap();
+    assert!(
+        dirty
+            .iter()
+            .all(|d| d.reason == photoproof_core::DirtyReason::Redaction)
+    );
+    // 'redaction' rows are first-priority and never coalesced away by later
+    // writes (§5.3): an append on the same image keeps the redaction reason.
+    ts.store
+        .append(&ts.session, d_remark("later note", vec![a.clone()]), None)
+        .unwrap();
+    let row_a = ts
+        .store
+        .dirty_images()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.image == a)
+        .unwrap();
+    assert_eq!(row_a.reason, photoproof_core::DirtyReason::Redaction);
+    // And redaction rows order first.
+    assert_eq!(
+        ts.store.dirty_images().unwrap()[0].reason,
+        photoproof_core::DirtyReason::Redaction
+    );
+}
+
+// -- FTS lifecycle (§5.4, §6.3, P3) ---------------------------------------------
+
+#[test]
+fn fts_tracks_effective_text_per_chain_root() {
+    let ts = new_store();
+    let a = hash(1);
+    let v = ts
+        .store
+        .append(
+            &ts.session,
+            d_voice("that muddy light", vec![a.clone()], None),
+            None,
+        )
+        .unwrap();
+    let conn = ts.raw_conn();
+    assert_eq!(fts_roots(&conn, "muddy"), vec![v.id.to_string()]);
+
+    // Revision: the root's single FTS row now carries the corrected text.
+    let rev = ts
+        .store
+        .append(
+            &ts.session,
+            d_revision(v.id.clone(), "that moody light"),
+            None,
+        )
+        .unwrap();
+    assert!(
+        fts_roots(&conn, "muddy").is_empty(),
+        "original text not indexed"
+    );
+    assert_eq!(
+        fts_roots(&conn, "moody"),
+        vec![v.id.to_string()],
+        "keyed by root"
+    );
+
+    // Revision-of-revision: latest id wins; still one row.
+    let rev2 = ts
+        .store
+        .append(
+            &ts.session,
+            d_revision(rev.id.clone(), "that smoky light"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(fts_roots(&conn, "smoky"), vec![v.id.to_string()]);
+    let row_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM event_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(row_count, 1, "one FTS row per chain root");
+
+    // Retracting the latest revision resurfaces the previous correction.
+    ts.store
+        .append(&ts.session, d_retract(rev2.id), None)
+        .unwrap();
+    assert_eq!(fts_roots(&conn, "moody"), vec![v.id.to_string()]);
+    assert!(fts_roots(&conn, "smoky").is_empty());
+
+    // Retracting the root removes the row entirely.
+    ts.store
+        .append(&ts.session, d_retract(v.id.clone()), None)
+        .unwrap();
+    assert!(fts_roots(&conn, "moody").is_empty());
+    assert!(fts_roots(&conn, "light").is_empty());
+    // fts_map rows are never deleted (stable rowids).
+    let map_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fts_map", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(map_count, 1);
+}
+
+#[test]
+fn session_level_remarks_are_indexed_and_exported() {
+    let ts = new_store();
+    let e = ts
+        .store
+        .append(&ts.session, d_remark("freestanding thought", vec![]), None)
+        .unwrap();
+    let conn = ts.raw_conn();
+    assert_eq!(fts_roots(&conn, "freestanding"), vec![e.id.to_string()]);
+
+    // Zero-effective-target feed (§2.3): includes the session-level remark
+    // and a dangling meta-event; excludes targeted events.
+    ts.store
+        .append(&ts.session, d_remark("targeted", vec![hash(1)]), None)
+        .unwrap();
+    let dangling_target = ts.store.mint();
+    let m = ts.store.mint();
+    let dangling = photoproof_core::Event {
+        id: m.id,
+        v: 1,
+        session_id: ts.session.clone(),
+        ts: m.ts,
+        source: photoproof_core::Source::Typed,
+        kind: Kind::Revision,
+        targets: vec![],
+        text: Some("revision of nothing yet".into()),
+        payload: None,
+        target_event: Some(dangling_target.id),
+        linked_event: None,
+        redacted_by: None,
+    };
+    ts.store.merge(std::slice::from_ref(&dangling)).unwrap();
+
+    let sl = ts.store.sessionlevel_events(&ts.session).unwrap();
+    let ids: Vec<_> = sl.iter().map(|e| e.id.to_string()).collect();
+    assert!(ids.contains(&e.id.to_string()));
+    assert!(ids.contains(&dangling.id.to_string()));
+    assert_eq!(sl.len(), 2);
+
+    // The session fold shows it; the journal stays ULID-ordered.
+    let folded = ts.store.folded_session(&ts.session).unwrap();
+    assert!(
+        matches!(&folded[0], JournalEntry::Remark { text, .. } if text == "freestanding thought")
+    );
+}
+
+// -- stroke↔utterance link symmetry (§3.3, X2) -----------------------------------
+
+#[test]
+fn linked_event_resolves_in_both_directions() {
+    let ts = new_store();
+    let a = hash(1);
+
+    // Speak first, circle after: the stroke carries the backward link.
+    let v1 = ts
+        .store
+        .append(
+            &ts.session,
+            d_voice("look at the hand", vec![a.clone()], None),
+            None,
+        )
+        .unwrap();
+    let s1 = ts
+        .store
+        .append(&ts.session, d_stroke(a.clone(), Some(v1.id.clone())), None)
+        .unwrap();
+
+    // Circle first, speak after: the voice remark carries the backward link.
+    let s2 = ts
+        .store
+        .append(&ts.session, d_stroke(a.clone(), None), None)
+        .unwrap();
+    ts.store
+        .append(
+            &ts.session,
+            EventDraft::Remark {
+                source: RemarkSource::Voice {
+                    conf_pm: 950,
+                    dur_ms: 900,
+                    linked_event: Some(s2.id.clone()),
+                },
+                text: "and that edge".into(),
+                targets: vec![a.clone()],
+            },
+            None,
+        )
+        .unwrap();
+
+    let folded = ts.store.folded_journal(&a).unwrap();
+    let stroke_links: Vec<(String, Option<String>)> = folded
+        .iter()
+        .filter_map(|e| match e {
+            JournalEntry::Stroke {
+                id, linked_event, ..
+            } => Some((id.to_string(), linked_event.as_ref().map(|l| l.to_string()))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stroke_links.len(), 2);
+    // s1: forward (stored on the stroke itself).
+    assert_eq!(
+        stroke_links[0],
+        (s1.id.to_string(), Some(v1.id.to_string()))
+    );
+    // s2: reverse (stored on the later voice remark, resolved at fold time).
+    assert_eq!(stroke_links[1].0, s2.id.to_string());
+    assert!(stroke_links[1].1.is_some(), "reverse link resolved");
+}
+
+// -- append/redact rejection rules (§2–3, §10) -------------------------------------
+
+#[test]
+fn append_and_redact_rejections() {
+    let ts = new_store();
+    let a = hash(1);
+    let r = ts
+        .store
+        .append(&ts.session, d_remark("a note", vec![a.clone()]), None)
+        .unwrap();
+    let rating = ts
+        .store
+        .append(&ts.session, d_rating(4, vec![a.clone()]), None)
+        .unwrap();
+
+    // Rating with no targets: invalid (§2.3).
+    assert!(matches!(
+        ts.store.append(&ts.session, d_rating(3, vec![]), None),
+        Err(AppendError::Validation(_))
+    ));
+    // Rating value > 5.
+    assert!(matches!(
+        ts.store
+            .append(&ts.session, d_rating(6, vec![a.clone()]), None),
+        Err(AppendError::Validation(_))
+    ));
+    // Empty remark text.
+    assert!(matches!(
+        ts.store
+            .append(&ts.session, d_remark("   ", vec![a.clone()]), None),
+        Err(AppendError::Validation(_))
+    ));
+    // Voice confidence out of range.
+    assert!(matches!(
+        ts.store.append(
+            &ts.session,
+            EventDraft::Remark {
+                source: RemarkSource::Voice {
+                    conf_pm: 1001,
+                    dur_ms: 10,
+                    linked_event: None
+                },
+                text: "x".into(),
+                targets: vec![],
+            },
+            None
+        ),
+        Err(AppendError::Validation(_))
+    ));
+    // Revision of a rating: invalid target kind (§3.4).
+    assert!(matches!(
+        ts.store
+            .append(&ts.session, d_revision(rating.id.clone(), "x"), None),
+        Err(AppendError::InvalidTargetKind { .. })
+    ));
+    // Revision of a missing event: rejected at append (merge is the dangling
+    // path, not append).
+    let ghost = ts.store.mint();
+    assert!(matches!(
+        ts.store
+            .append(&ts.session, d_revision(ghost.id.clone(), "x"), None),
+        Err(AppendError::TargetNotFound(_))
+    ));
+    // Duplicate minted id.
+    let m = ts.store.mint();
+    ts.store
+        .append(&ts.session, d_remark("first", vec![]), Some(m.clone()))
+        .unwrap();
+    assert!(matches!(
+        ts.store
+            .append(&ts.session, d_remark("again", vec![]), Some(m)),
+        Err(AppendError::DuplicateId(_))
+    ));
+
+    // Redaction of a rating: not permitted — retract instead (§3.2, §3.6).
+    assert!(matches!(
+        ts.store.redact(&rating.id),
+        Err(RedactError::InvalidKind(Kind::Rating))
+    ));
+    // Redacting twice: AlreadyScrubbed.
+    ts.store.redact(&r.id).unwrap();
+    assert!(matches!(
+        ts.store.redact(&r.id),
+        Err(RedactError::AlreadyScrubbed(_))
+    ));
+    // Redacting a retraction: invalid kind.
+    let r2 = ts
+        .store
+        .append(&ts.session, d_remark("note two", vec![a.clone()]), None)
+        .unwrap();
+    let retr = ts
+        .store
+        .append(&ts.session, d_retract(r2.id), None)
+        .unwrap();
+    assert!(matches!(
+        ts.store.redact(&retr.id),
+        Err(RedactError::InvalidKind(Kind::Retraction))
+    ));
+
+    // Merge quarantines a source×kind matrix violation (§2.2).
+    let g = Gen::new(ts.session.clone());
+    let mut bad = g.rating(3, vec![a.clone()]);
+    bad.source = photoproof_core::Source::Voice; // spoken ratings: not v1
+    let report = ts.store.merge(&[bad]).unwrap();
+    assert_eq!(report.quarantined.len(), 1);
+    assert_eq!(report.inserted, 0);
+}
+
+// -- §8 batching discipline: > 10k merges commit in chunks, derived state in
+// -- a single pass after the union, finished with ANALYZE + FTS optimize.
+
+#[test]
+fn merge_large_batch_uses_chunked_path() {
+    let ts = new_store();
+    let g = Gen::new(ts.session.clone());
+    let images: Vec<_> = (1..=3).map(hash).collect();
+    let mut events = Vec::with_capacity(10_500);
+    let mut remark_ids = Vec::new();
+    for i in 0..10_400 {
+        let e = g.remark(
+            &format!("bulk note {i}"),
+            vec![images[i % images.len()].clone()],
+        );
+        remark_ids.push(e.id.clone());
+        events.push(e);
+    }
+    // Sprinkle meta-events so the post-union recompute crosses chunks.
+    for id in remark_ids.iter().take(50) {
+        events.push(g.retraction(id.clone()));
+    }
+    for id in remark_ids.iter().skip(50).take(25) {
+        events.push(g.revision(id.clone(), "bulk corrected"));
+    }
+    for id in remark_ids.iter().skip(75).take(25) {
+        events.push(g.redaction(id.clone()));
+    }
+    let report = ts.store.merge(&events).unwrap();
+    assert_eq!(report.inserted, events.len());
+    assert!(report.quarantined.is_empty());
+
+    let conn = ts.raw_conn();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM annotation_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, events.len() as i64);
+    // Live FTS rows = remarks − retracted − redacted.
+    let fts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM event_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fts, 10_400 - 50 - 25);
+    assert_eq!(fts_roots(&conn, "corrected").len(), 25);
+    // Scrubbed victims learned their markers.
+    let scrubbed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM annotation_events WHERE redacted_by IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scrubbed, 25);
+    // Fold still works over the merged state.
+    let folded = ts.store.folded_journal(&images[0]).unwrap();
+    assert!(!folded.is_empty());
+    // And the result equals incremental-vs-rebuild (I7) on this path too.
+    let before = dump_derived(&conn, true);
+    ts.store.rebuild_derived().unwrap();
+    assert_eq!(dump_derived(&conn, true), before);
+}
+
+// -- redaction chain closure (§3.6, §7) ---------------------------------------------
+
+#[test]
+fn redaction_chain_closure_scrubs_whole_chain() {
+    let ts = new_store();
+    let a = hash(1);
+    let v = ts
+        .store
+        .append(
+            &ts.session,
+            d_voice("sensitive call notes", vec![a.clone()], None),
+            None,
+        )
+        .unwrap();
+    let rev1 = ts
+        .store
+        .append(
+            &ts.session,
+            d_revision(v.id.clone(), "sensitive call notes v2"),
+            None,
+        )
+        .unwrap();
+    let rev2 = ts
+        .store
+        .append(
+            &ts.session,
+            d_revision(rev1.id.clone(), "sensitive call notes v3"),
+            None,
+        )
+        .unwrap();
+
+    // Redacting a *member* scrubs the entire chain, one redaction event per
+    // member, ascending.
+    let acts = ts.store.redact(&rev1.id).unwrap();
+    assert_eq!(acts.len(), 3);
+    assert!(acts.windows(2).all(|w| w[0] < w[1]));
+    for id in [&v.id, &rev1.id, &rev2.id] {
+        let e = ts.store.raw_event(id).unwrap().unwrap();
+        assert!(e.scrubbed(), "{id} scrubbed by chain closure");
+    }
+    // Registry has one row per member.
+    let conn = ts.raw_conn();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM redactions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 3);
+    // The fold shows a stub; FTS is empty.
+    let folded = ts.store.folded_journal(&a).unwrap();
+    assert!(matches!(
+        folded[0],
+        JournalEntry::RedactedStub {
+            kind: Kind::Remark,
+            ..
+        }
+    ));
+    assert!(fts_roots(&conn, "sensitive").is_empty());
+}

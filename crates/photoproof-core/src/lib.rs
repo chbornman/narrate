@@ -3,5 +3,21 @@
 //! Normative contracts live in `spec/` at the repository root; this crate
 //! implements them. No Tauri, no UI dependencies — drivable from tests and
 //! a future CLI.
+//!
+//! - `id`: ContentHash, EventId/SessionId, UtcMillis, monotonic Minter (EVENTS §1)
+//! - `event`: the event record + shape validation (EVENTS §2–3)
+//! - `canonical`: canonical JSON serialization, byte-exact round-trip (EVENTS §4)
+//! - `store`: SQLite schema + EventStore (append/fold/redact/merge) (EVENTS §5–10)
 
+pub mod canonical;
+pub mod event;
 pub mod id;
+pub mod store;
+
+pub use canonical::{CanonicalParseError, canonical_json, parse_canonical};
+pub use event::{Event, Kind, Payload, Source, StrokePayload, StrokePoint, Tool, ValidationError};
+pub use id::{ContentHash, EventId, IdError, Minted, Minter, SessionId, UtcMillis};
+pub use store::{
+    AppendError, DirtyImage, DirtyReason, EventDraft, EventStore, JournalEntry, MergeReport,
+    RedactError, RemarkSource, RetractionSource, SessionContext, SessionRecord, StoreError,
+};
