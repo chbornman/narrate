@@ -188,12 +188,32 @@ pub(crate) fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Migration slot pre-allocated to packet P2.1 (spec/SIDECARS.md tables).
+/// Only P2.1 edits this constant.
+const SIDECARS_SCHEMA_SQL: &str = r#"
+-- (P2.1 sidecar tables go here)
+"#;
+
+/// Migration slot pre-allocated to packet P2.2 (spec/LIBRARY.md tables).
+/// Only P2.2 edits this constant.
+const LIBRARY_SCHEMA_SQL: &str = r#"
+-- (P2.2 library tables go here)
+"#;
+
 /// Create the schema if the database is new (versioned by `user_version`).
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
         conn.execute_batch(SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 1")?;
+    }
+    if version < 2 {
+        conn.execute_batch(SIDECARS_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 2")?;
+    }
+    if version < 3 {
+        conn.execute_batch(LIBRARY_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 3")?;
     }
     Ok(())
 }

@@ -13,9 +13,13 @@ rusqlite = { workspace = true, features = ["trace"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# --- sidecar deps (owned by packet P2.1; append below this line only) ---
+# --- library deps (owned by packet P2.2; append below this line only) ---
 
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }
 serde_json.workspace = true
 rand = "0.8"
+# --- sidecar dev-deps (owned by packet P2.1; append below this line only) ---
+# --- library dev-deps (owned by packet P2.2; append below this line only) ---
