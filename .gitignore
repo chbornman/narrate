@@ -1,0 +1,20 @@
+# Rust
+/target/
+Cargo.lock.orig
+
+# Tauri / frontend
+node_modules/
+dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# Local app data / test libraries
+*.photoproof.json
+test-libraries/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

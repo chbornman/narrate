@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/photoproof-core",
+    "crates/photoproof-connectors",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+repository = "https://github.com/chbornman/narrate"
+
+[workspace.dependencies]
+blake3 = { version = "1", features = ["mmap", "rayon"] }
+ulid = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+futures-core = "0.3"
+tempfile = "3"
