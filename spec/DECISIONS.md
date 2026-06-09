@@ -173,6 +173,52 @@ The decisions that changed:
   embedder candidate; Moonshine/Kyutai STT on the ASR watch list behind the
   trait.
 
+## Build-pass resolutions (implementation, June 2026)
+
+Ambiguities found while implementing, resolved per the integrity invariants
+and flagged here per the build loop. Spec text stands; these record the
+chosen readings.
+
+- **B1 (P1.1).** FTS5 ignores `PRAGMA secure_delete`; the I8 byte-scan
+  demands `INSERT INTO event_fts(event_fts, rank) VALUES('secure-delete', 1)`
+  at table creation — adopted as the FTS analogue of EVENTS §5.1.
+- **B2 (P1.1).** `redact()` carries no session parameter; redaction events
+  take the latest open session, else the latest session, else the target's own.
+- **B3 (P1.1).** Reverse `linked_event` traversal resolves within the fetched
+  fold closure (K8 guarantees the linker targets the same image), keeping the
+  §10.1 plan at exactly 3 queries; no new index.
+- **B4 (P1.1).** `image_journal_stats`: `event_count` = non-retracted content
+  events (scrubbed stubs count); `has_strokes` = non-retracted *and*
+  non-scrubbed strokes; `last_ts` = ts of the greatest-id live event.
+- **B5 (P1.1).** Session union is a separate primitive (`merge_sessions`);
+  `merge()` stays events-only.
+- **B6 (P1.1).** `rebuild_derived()` preserves `sidecar_dirty` (durable queue
+  with ack history) and live-root vectors (RETRIEVAL owns re-embedding);
+  deletes dead-root vectors.
+- **B7 (P1.1).** Duplicate redactions of one target: registry keeps the min
+  redaction id deterministically; the victim's `redacted_by` is first-learned
+  and immutable (scrub-only trigger).
+- **B8 (P1.1).** Fold timing asserted at 10 ms in release (measured 7.9 ms),
+  100 ms debug allowance; query count: 3 SELECTs norm, +1 per revision-chain
+  fixpoint round (§10.1's own wording).
+- **B9 (P1.1).** Append requires resolvable revision/retraction targets;
+  dangling refs arise only via merge (inert-by-design). Sessions need not
+  pre-exist at append.
+- **B10 (P1.2).** VAD trait shape: push-mode `process_frame`/`reset`/
+  `sample_rate`, events `SpeechStart{onset}`/`SpeechEnd{end}`, per-frame
+  gate; `Send` not `Sync` (lives on the capture thread).
+- **B11 (P1.2).** `VecKey` = space + unit (`event_id`+`chunk_index` |
+  `image_hash`) per RETRIEVAL §1.2's unique indexes; dedicated
+  `VectorStoreError` instead of the supervision-shaped `ConnectorError`.
+- **B12 (P1.2).** Reranker returns candidate indices and gains `model_id()`;
+  the text embedder's unsupported `embed_image` maps to `Backend{status:501}`.
+- **B13 (P1.2).** Config: non-empty `api_key_ref` must match
+  `keychain:<service>/<account>` else hard parse error; `chunk_ms` ∈
+  {80, 160, 560, 1120} enforced at parse; unknown keys warn, never fail.
+- **B14 (P1.2).** Native `async fn` in traits kept per RUNTIME §4: traits are
+  not dyn-compatible and futures carry no `Send` bound — later packets use
+  static/generic dispatch.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

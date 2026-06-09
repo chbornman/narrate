@@ -138,8 +138,8 @@ ledger as founder-machine-deferred with a checklist entry.
 | Packet | Status | Gate result | Commit |
 |---|---|---|---|
 | P0 Scaffold | ✅ done | fmt/clippy/test green (2 tests) | `d2b1ec2` |
-| P1.1 Events engine | not started | — | — |
-| P1.2 Connector traits | not started | — | — |
+| P1.1 Events engine | ✅ done | fmt/clippy/test green (40 tests: I1–I16, §4.3 byte-exact vectors, shuffled-merge property, ≤3-query fold assert, 5k fold 7.9 ms release) | `ddc77bd` |
+| P1.2 Connector traits | ✅ done | fmt/clippy/test green (53 tests: config TOML valid+invalid, scripted-timing mock Transcriber, deterministic mock Embedder/LLM/VectorStore/Reranker, VAD contract) | `f604666` |
 | P2.1 Sidecars | not started | — | — |
 | P2.2 Library | not started | — | — |
 | P3.1 Search core | not started | — | — |
