@@ -144,24 +144,55 @@ One file per `(vec_kind, model_id)` pair under app data:
 appdata/vectors/{vec_kind}.{model_id_sanitized}.ppvec
 ```
 
-Format: 16-byte header — magic `PPVEC\x01`, `dims: u32 LE`, 6 reserved bytes —
-followed by row-major `f32` LE rows of length `dims`. Vectors are
-**L2-normalized at write time**, so cosine similarity = dot product.
+**Format (PPVEC v2):** header — magic `PPVEC\x02`, `dims: u32 LE`,
+`dtype: u8` (`0` = f32, `1` = int8), reserved padding to alignment — followed,
+for int8 files, by the quantization parameters: **per-dimension** `scale:
+f32[dims]` and `offset: f32[dims]`, frozen at file creation from a calibration
+sample of the space; every stored vector and every query is quantized with
+these same parameters. Then row-major rows of `dims` entries each. Vectors are
+**L2-normalized before quantization**, so cosine similarity = (de-scaled) dot
+product.
 
-- **Read:** memory-mapped; brute-force dot product over all non-deleted rows,
-  top-k. At 50k images / a few hundred-k chunks: single-digit ms (SCOPE.md).
+**Stored encoding default: int8 scalar quantization at MRL-truncated 512
+dims.** f32 exists only transiently at embed time; nothing f32 touches disk.
+Cost: ~1–2% retrieval quality for an **8× reduction** in scan bytes and
+storage versus f32-1024d
+([HF embedding-quantization](https://huggingface.co/blog/embedding-quantization));
+Matryoshka truncation 1024→512 is independently ~1–2%. The runtime spike
+(RUNTIME.md) decides 512 vs 1024 with a small eval on the §12 golden set.
+
+- **Read:** memory-mapped; brute-force top-k over all non-deleted rows.
+  **Multithreaded SIMD scanning is a requirement, not an optimization.** The
+  honest latency model is bandwidth, not "single-digit ms": `scan_time ≈
+  scan_bytes / ~30 GB/s` effective desktop memory bandwidth
+  ([hardware analysis](https://apxml.com/courses/advanced-vector-search-llms/chapter-2-optimizing-vector-search-performance/hardware-acceleration-considerations)).
+  At a p95 < 50 ms budget:
+
+  | Encoding | Bytes/vec | Vectors @ 50 ms |
+  |---|---|---|
+  | f32 1024d | 4 KB | ≈ 375k |
+  | **int8 512d (default)** | 512 B | ≈ 3M |
+
+  **Prewarm:** on app start (or first search), sequentially touch the active
+  spaces' files to pull them into the OS page cache — otherwise the first
+  scan runs at disk speed, not memory speed. If prewarm is skipped, the
+  cold-start hit must be documented and the first query excluded from the
+  latency budget.
 - **Append:** at file end; write + fsync the file first, then commit the
   SQLite row (an orphaned file row is unreachable garbage, cleaned by
   compaction; the reverse order would be a dangling pointer).
 - **Delete:** logical — `deleted=1` in SQLite — **and for redaction the file
   row is additionally zeroed in place** (the scrub must be physical, per
-  EVENTS.md).
+  EVENTS.md). Redaction zeroing semantics are unchanged by the int8 encoding:
+  the stored int8 row bytes are zeroed.
 - **Compact:** when deleted rows exceed 20% of a file or 10,000 (whichever
   first): rewrite dropping dead rows, remap `file_row` in one transaction.
   Runs in the background-pass scheduler (LIBRARY.md).
-- **Scale escape hatch:** all access goes through `VectorStore`. At >500k
-  vectors per space, swap in sqlite-vec or usearch behind the same trait;
-  SQLite metadata rows are unchanged. Not built in v1.
+- **Scale escape hatch:** all access goes through `VectorStore`. The swap
+  trigger is **bytes scanned per space > ~1.5 GB** (the 50 ms budget at
+  ~30 GB/s — ≈ 3M int8-512d vectors), not a row count; past it, swap in
+  usearch (or sqlite-vec once stable) behind the same trait; SQLite metadata
+  rows are unchanged. Not built in v1.
 
 ```rust
 pub trait VectorStore {

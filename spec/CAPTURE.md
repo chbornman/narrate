@@ -160,15 +160,21 @@ binding at arrival attributes them to the wrong image.
 
 ### 5.1 Mechanism
 
-On `Final { segment_id, text, t_start, t_end, confidence }` (stream-clock
-offsets, §6.2): convert `t_start` → `t_mono` (§1), call `scope_at(t_mono)`
-(§3.1); the snapshot's targets become the event's targets (a `session`
-snapshot yields a session-level event, zero targets).
+On `SpeechStart { t_start_ms }` (silero-vad, in-process on the cpal stream —
+§6.2): convert `t_start_ms` → `t_mono` (§1), call `scope_at(t_mono)` (§3.1),
+and hold that snapshot for the utterance. On `Final { segment_id, text,
+t_start, t_end, confidence? }`, the held snapshot's targets become the
+event's targets (a `session` snapshot yields a session-level event, zero
+targets).
 
-The `Final`'s `t_start` is **authoritative** for binding. The earlier
-`SpeechStart` (§6.2) drives only the provisional indicator display; if the
-`Final`'s `t_start` falls across a scope change from the estimate, the `Final`
-wins and the indicator is corrected silently (rare; bounded by the §1 budget).
+**The VAD onset is authoritative for binding.** The `Final`'s `t_start` (ASR
+token timestamp) is a **cross-check only**: transducer token times are
+systematically late — RNN-T emission delay
+([FastEmit](https://arxiv.org/abs/2010.11148)) — and may not exist at all for
+the Nemotron export (RUNTIME's spike tests this). When present and it
+disagrees with the VAD onset across a scope change by more than the §1
+budget, the disagreement is logged to the debug panel; binding is **never**
+silently re-decided from token times.
 
 ### 5.2 Grace window: none
 
@@ -191,7 +197,7 @@ for any reader of the session view.
 ### 5.4 UI contract for streaming utterances
 
 While an utterance is in flight (`SpeechStart` → `Final`), the indicator MUST
-show **the scope it is provisionally bound to** (`scope_at(onset)`), even if
+show **the scope it is bound to** (`scope_at(onset)`), even if
 the live selection has changed. The contract (§11) carries both
 `current_scope` and `streaming_utterance.bound_scope` so the UI can render
 "selection is now B, but what you're saying lands on A". The distinction is
