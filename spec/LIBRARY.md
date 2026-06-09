@@ -24,7 +24,8 @@ processes files in **ascending size order** so the grid populates quickly — sm
 become browsable while 80 MB RAWs are in flight. File-level parallelism: up to
 `min(physical_cores, 8)` concurrent files; BLAKE3-internal rayon only for files ≥ 64 MiB
 (avoids oversubscription). Hashing is disk-bound: required ≥ 1 GB/s sustained aggregate on
-NVMe (BLAKE3 exceeds 5 GB/s/core; falling short is a pipeline bug). End-to-end budget: §12.
+NVMe (BLAKE3 exceeds 5 GB/s/core; falling short is a pipeline bug). End-to-end budget: §12;
+slow-volume behavior: §12.1.
 
 ### 1.3 Bytes changed in place = new image
 
@@ -494,19 +495,34 @@ watcher up → reconciliation scan → queued sidecar flush.
 
 ## 12. Performance budgets
 
-Reference: 8 physical cores, 32 GB RAM, NVMe ≥ 2 GB/s, internal drive; 50k images, ~1.5 TB (mixed RAW+JPEG).
+Reference: 8 physical cores, 32 GB RAM, NVMe ≥ 2 GB/s, internal drive; 50k images, ~1.5 TB (mixed RAW+JPEG). **The ≤ 90-min first-ingest budget applies to internal NVMe explicitly**; slow volumes get §12.1, not a miracle.
 
 | Budget | Target |
 |---|---|
-| First-run M1 ingest (hash + exif + preview, embedded route) | ≤ 90 min end-to-end; hash phase ≥ 1 GB/s sustained (~25 min for 1.5 TB) |
+| First-run M1 ingest (hash + exif + preview, embedded route) — internal NVMe | ≤ 90 min end-to-end; hash phase ≥ 1 GB/s sustained (~25 min for 1.5 TB) |
 | Grid usability during first run | first 1,000 thumbs within 60 s of start (ascending-size ordering makes this achievable) |
 | Watcher latency, steady state | new stable file → thumb in grid ≤ 5 s (p95) |
 | Startup reconciliation, 50k files, no changes | ≤ 10 s (stat-only fast path, zero hashing) |
 | Reconciliation after a 1k-file move | ≤ 30 s incl. re-hash of moved files |
 | Grid scroll | previews served from disk cache, no decode-on-scroll; supports UI.md's 60 fps virtualized grid |
 
-Spinning-disk USB archives miss the ingest target proportionally to read speed; budgets
-scale with disk throughput (visible via the debug panel's MB/s counter).
+### 12.1 Slow volumes (normative)
+
+On volumes measured below ~200 MB/s sustained read, the budget **scales with throughput** —
+a 120 MB/s spinning-disk USB archive is ≈ 3.5 h/TB of hashing, full stop — and previews
+trail hashing visibly (the hash queue saturates the disk; the embedded-preview pass reads
+behind it). The UI requirement on such volumes is **honest progress framing**, not speed: the
+ingest hairline plus debug-panel detail (MB/s, ETA derived from measured throughput), never a
+fast-path identity tier that papers over the wait.
+
+**Considered and rejected — provisional quick-hash identity tier** (the digiKam pattern:
+MD5 of first+last 100 KB + size, [digikam-users](https://mail.kde.org/pipermail/digikam-users/2013-June/017748.html);
+the czkawka pattern: size → 2 KB prehash → full hash, [workflow](https://deepwiki.com/qarmin/czkawka/4.1-tool-types-and-workflow)):
+a provisional identity that later upgrades to the full BLAKE3 hash would make slow first
+ingests feel fast, but two-state identity is unacceptable complexity for the journal's
+integrity model — every event target, sidecar binding, and cache key would need a "which
+identity?" answer, and digiKam's tier has known in-place-edit blind spots. One identity, one
+hash, honest progress.
 
 ## 13. Acceptance criteria
 
@@ -547,4 +563,5 @@ Each is a test in `photoproof-core/tests/` (headless, real temp filesystems) unl
 RAW+JPEG stacking and the pairing heuristic (§2.1); journal migration across an in-place
 overwrite (§1.3), manual or automatic; user-editable exclusion patterns; symlink following;
 preview cache eviction; full-resolution loupe decode; wide-gamut display output (§9.7);
-GIF/BMP/PSD/video ingestion; libraw FFI fallback (until rawler hits a real format gap).
+GIF/BMP/PSD/video ingestion; libraw FFI fallback (until rawler hits a real format gap);
+provisional quick-hash identity tier (rejected outright, not deferred — §12.1).
