@@ -176,6 +176,6 @@ The decisions that changed:
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).
-- **Q2.** EVENTS §12 carries two founder-level questions: (a) multi-target events expose sibling-image *hashes* in shared sidecars — recommendation: accept (non-reversible, and stripping breaks dedupe); (b) do redacted events show as "[redacted]" stubs in the journal panel, or vanish without trace? Both supported; privacy-philosophy call.
+- ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).
 - **Q4.** M3 gates: sentiment quality evaluation; dedicated-text-embedder benchmark vs. alternatives during dogfooding.

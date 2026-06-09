@@ -707,7 +707,7 @@ Each is a test in `photoproof-core/tests`. I1–I5 restate the M1 plan's list wi
 
 Only decisions that are genuinely his:
 
-- **Q1 — Cross-image hash visibility in sidecars.** A multi-target event's canonical JSON lists *all* its target hashes, so a sidecar handed to a client reveals opaque BLAKE3 hashes of sibling images (not their pixels, names, or paths). **Recommendation: accept** — hashes are non-reversible, and stripping `targets` per-sidecar would break byte-identical dedupe and rebuild fidelity (I3, I11). Decide; SIDECARS documents it either way.
-- **Q2 — Redacted stubs in the journal panel.** Default specified here: a scrubbed event shows as an inert "[redacted]" stub (honest about the log's shape). The alternative — hide stubs entirely so redaction leaves no visible trace — is a privacy-philosophy call, not an engineering one. Storage and fold support both; UI implements whichever he picks.
+- **Q1 — Cross-image hash visibility in sidecars. RESOLVED (founder, June 2026): accepted.** A multi-target event's canonical JSON lists *all* its target hashes; hashes are non-reversible, and stripping `targets` per-sidecar would break byte-identical dedupe and rebuild fidelity (I3, I11).
+- **Q2 — Redacted stubs in the journal panel. RESOLVED (founder, June 2026): stubs.** A scrubbed event shows as an inert "[redacted]" stub (honest about the log's shape); UI implements the stub rendering.
 
 Everything else in this document is decided.
