@@ -323,9 +323,9 @@ permanently: the mic control exists but arming fails quietly.
 - **Future setting (recorded, not designed): audio retention opt-in.** Would
   require: per-event clips keyed by event id in app data (never beside
   images), a retention-duration setting, redaction extended to delete clips
-  (A3 anticipates this), an export stance (clips are NOT part of the sidecar
-  export), and a privacy disclosure. Until then: the audio is gone seconds
-  after you spoke.
+  (A3 anticipates this), an export stance (clips NOT in the sidecar export),
+  and a privacy disclosure. Until then: the audio is gone seconds after you
+  spoke.
 
 ## 8. Grease pencil (closes B5)
 
@@ -574,12 +574,12 @@ simply lands in the journal, which is itself honest marginalia.
 
 ## 13. Acceptance criteria
 
-1. **Binding under rapid selection change (scripted).** With a scripted
-   Transcriber stub: arm mic; segment 1 onset at T; selection A→B at
-   T+800 ms; segment 1 finalizes at T+2000 ms; segment 2 onset T+1100 ms,
-   finalizes T+3000 ms. Result: segment 1 targets A, segment 2 targets B —
-   regardless of finalization times. Repeat with the selection change 50 ms
-   *before* segment 2's onset: segment 2 targets B (no grace window).
+1. **Binding under rapid selection change (scripted).** With a Transcriber
+   stub: segment 1 onset at T; selection A→B at T+800 ms; segment 1 finalizes
+   T+2000 ms; segment 2 onset T+1100 ms, finalizes T+3000 ms. Segment 1
+   targets A, segment 2 targets B — regardless of finalization times. Repeat
+   with the selection change 50 ms before segment 2's onset: segment 2
+   targets B (no grace window).
 2. **No audio on disk.** A full armed session (speech, finals, disarm, quit)
    leaves zero audio bytes in app data, the library tree, SQLite, sidecars, or
    temp dirs (filesystem snapshot diff + format scan).
@@ -596,11 +596,11 @@ simply lands in the journal, which is itself honest marginalia.
    correct to "moody light"; FTS for "moody" returns the image with the
    corrected quote as provenance; "muddy" returns nothing; the journal panel
    shows corrected text with the original in history.
-6. **Session boundaries.** 29-min activity gap → same session; 31-min gap →
-   next activity opens a new session (its first event carries the new
-   session_id) and the old session's `ended_at` = its last activity time.
-   Kill the process with a session open → next launch closes it with
-   `ended_at` = last event ts and enqueues close processing exactly once.
+6. **Session boundaries.** 29-min gap → same session; 31-min gap → next
+   activity opens a new session (first event carries the new session_id), old
+   session's `ended_at` = its last activity time. Kill the process mid-session
+   → next launch closes it with `ended_at` = last event ts and enqueues close
+   processing exactly once.
 7. **ASR death.** Kill the ASR child mid-utterance: no event minted from the
    partial, mic auto-disarms, indicator shows degraded state, and a typed note
    submitted immediately after lands normally.

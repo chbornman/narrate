@@ -21,14 +21,14 @@ about where a hash's bytes were last observed (§3).
 
 ### 1.2 Hashing strategy (performance)
 
-- Files ≥ 1 MiB: memory-mapped (`memmap2`), hashed with `blake3`'s rayon parallel mode.
-  Smaller files: plain buffered read (mmap setup costs more than it saves below that).
-- The hash queue processes files in **ascending size order** so the grid populates quickly:
-  small JPEGs become browsable while 80 MB RAWs are still in flight.
-- File-level parallelism: up to `min(physical_cores, 8)` concurrent files; BLAKE3's internal
-  rayon parallelism only for files ≥ 64 MiB (avoids oversubscription).
-- Hashing is disk-bound. Required: ≥ 1 GB/s sustained aggregate on NVMe (BLAKE3 exceeds
-  5 GB/s/core; falling short is a pipeline bug, not a CPU limit). End-to-end budget: §12.
+Files ≥ 1 MiB are memory-mapped (`memmap2`) and hashed with `blake3`'s rayon parallel mode;
+smaller files use a plain buffered read (mmap costs more than it saves below that). The hash
+queue processes files in **ascending size order** so the grid populates quickly — small JPEGs
+become browsable while 80 MB RAWs are in flight. File-level parallelism: up to
+`min(physical_cores, 8)` concurrent files; BLAKE3's internal rayon parallelism only for files
+≥ 64 MiB (avoids oversubscription). Hashing is disk-bound: required ≥ 1 GB/s sustained
+aggregate on NVMe (BLAKE3 exceeds 5 GB/s/core; falling short is a pipeline bug, not a CPU
+limit). End-to-end budget: §12.
 
 ### 1.3 Bytes changed in place = new image
 
@@ -37,22 +37,21 @@ whether an overwrite is "the same picture." When bytes at a known path change (d
 §7):
 
 1. New bytes hashed → new `images` row (if unseen) + M1 passes enqueued.
-2. The old image's path row at that location → `stale` (reason `superseded`); a new `active`
-   row binds the path to the new hash.
+2. The old image's path row there → `stale` (reason `superseded`); a new `active` row binds
+   the path to the new hash.
 3. The old image row, journal, previews, and sidecar content are **untouched** — no events
-   move, copy, or migrate. The old journal stays reachable via the old hash's record, through
+   move, copy, or migrate. The old journal stays reachable via the old hash's record: through
    search (FTS/semantic hits still resolve to it) and the old image's journal panel.
 4. The old image's availability typically becomes `missing` (§8) unless other paths remain.
 
-UI-facing concept (consumed by UI.md): **dormant prior version**. The single-image view for
+UI-facing concept (consumed by UI.md): **dormant prior version** — the single-image view for
 the new hash MAY show a one-line affordance ("a previous file at this location has journal
 entries — view"), derived entirely from stale `superseded` path rows at the same
-`(volume_id, rel_path)`. No merge, no automatic anything.
-
-Defense: any auto-migration heuristic (same path, similar pixels, close mtime) will
-eventually attach years of reflection to the wrong pixels, and the journal is the product. A
-wrong non-migration costs one click; a wrong migration silently corrupts truth. An explicit
-user-invoked "migrate journal" action is a recorded **non-feature** (candidate post-M3).
+`(volume_id, rel_path)`. No merge, no automatic anything. Defense: any auto-migration
+heuristic will eventually attach years of reflection to the wrong pixels, and the journal is
+the product; a wrong non-migration costs one click, a wrong migration silently corrupts
+truth. An explicit user-invoked "migrate journal" action is a recorded **non-feature**
+(candidate post-M3).
 
 ---
 
@@ -576,41 +575,35 @@ counter).
 Each is a test in `photoproof-core/tests/` (headless, real temp filesystems) unless marked
 manual.
 
-1. **Relink, running**: move and rename files under a watched root while running → path rows
-   updated, same `image_hash`, journal intact, zero new `images` rows, zero hashing beyond
-   the moved files.
+1. **Relink, running**: move/rename files under a watched root while running → path rows
+   updated, same `image_hash`, journal intact, zero new `images` rows, zero extra hashing.
 2. **Relink, stopped**: same mutation with the app stopped → startup reconciliation produces
    the identical end state as (1).
-3. **Interrupt/resume**: `kill -9` during a 10k-file ingest at random points (including
-   mid-transaction and mid-preview-write) → restart completes with exactly one `images` row
-   per unique hash, every pass `done`, no torn cache files, no missed files (verified against
-   an independent walk).
+3. **Interrupt/resume**: `kill -9` during a 10k-file ingest at random points (incl.
+   mid-transaction, mid-preview-write) → restart completes with exactly one `images` row per
+   unique hash, every pass `done`, no torn cache files, no misses (vs. an independent walk).
 4. **Duplicates**: 500 byte-identical copies → one `images` row, N active path rows;
-   annotating via any path lands in the one journal; best-path resolution follows §3.1
-   deterministically.
-5. **In-place overwrite**: overwrite a JPEG with a re-export → new image row + passes; old
-   image keeps its journal; old path row `stale/superseded`; dormant-prior-version lookup
-   finds the old hash from the new path.
-6. **Volume remount, new mount point**: ingest at mount A; remount at B (marker/platform id
-   unchanged) → volume `online`, `mount_point = B`, all paths resolve, no relink storm, no
-   re-hash.
+   annotating via any path lands in the one journal; best-path follows §3.1 deterministically.
+5. **In-place overwrite**: re-export over a JPEG → new image + passes; old image keeps its
+   journal; old path `stale/superseded`; dormant-prior-version lookup finds the old hash.
+6. **Volume remount, new mount point**: ingest at mount A, remount at B (marker/platform id
+   unchanged) → `online`, `mount_point = B`, all paths resolve, no relink storm, no re-hash.
 7. **Marker precedence**: platform id changed (new enclosure), marker intact → same volume
    identity; warning logged.
 8. **Offline browsing** (manual + automated state check): unplug a volume → images report
-   `offline`, previews render, search returns them, typed notes attach, sidecar writes queue;
-   remount → flush with no duplicate events (merge=union).
-9. **Root removal**: remove a root → events untouched, paths `stale/root-removed`,
-   availability `missing`; re-register → full recovery via the fast path, zero re-hashing of
-   unchanged files.
-10. **Orientation correctness**: ingest an EXIF-orientation-6 portrait → cached artifacts are
-    upright; a stroke drawn at the subject's eye (normalized display-oriented coords)
-    re-renders at the eye after preview regeneration and after rebuild-from-sidecars. Repeat
-    for orientations 3 and 8.
-11. **Threshold routing**: a RAW with a 1616×1080 embedded preview gets small artifacts +
-    `needs_full_decode = 1` + a queued `full-raw-decode` row; after the backfill, artifacts
-    are full-quality and the flag is clear.
-12. **Reconciliation budget**: 50k-path fixture, no changes → scan ≤ 10 s with zero hash
-    invocations (asserted via instrumentation).
+   `offline`, previews render, search returns them, typed notes attach, sidecar writes
+   queue; remount → flush with no duplicate events (merge=union).
+9. **Root removal**: remove → events untouched, paths `stale/root-removed`, availability
+   `missing`; re-register → full recovery via the fast path, zero re-hashing of unchanged
+   files.
+10. **Orientation correctness**: an EXIF-orientation-6 portrait → cached artifacts upright;
+    a stroke drawn at the subject's eye (normalized display-oriented coords) re-renders at
+    the eye after preview regeneration and after rebuild-from-sidecars. Repeat for 3 and 8.
+11. **Threshold routing**: a RAW with a 1616×1080 embedded preview → small artifacts +
+    `needs_full_decode = 1` + queued `full-raw-decode`; after backfill, full-quality + flag
+    clear.
+12. **Reconciliation budget**: 50k-path fixture, no changes → ≤ 10 s, zero hash invocations
+    (asserted via instrumentation).
 13. **Exclusions**: sidecars, `.photoproof-volume`, hidden dirs, and listed cache dirs never
     produce `images` rows.
 
