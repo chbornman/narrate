@@ -340,19 +340,26 @@ Events commit to SQLite (WAL) first — that append is the moment of capture —
 
 ### 9.2 Atomic write
 
-Sidecars are always replaced whole, never appended or patched in place:
+Sidecars are always replaced whole, never appended or patched in place. The writer is
+**mtime-stable**: before writing, compare the serialized bytes against the existing file and
+**skip the write entirely when identical** — no temp file, no rename, no mtime touch. (§3.5
+determinism makes the comparison exact; this closes cloud-sync churn loops where a sync
+service touching the file would otherwise ping-pong with our writer, each side re-triggering
+the other forever. See LIBRARY.md §5.2.)
 
 1. Serialize the complete canonical document (§3.5).
-2. Write to a temp file in the **same directory**: `<sidecar-name>.tmp-<8-hex-random>`.
-3. Flush + fsync the temp file.
-4. Atomically rename over the target — POSIX `rename(2)` then fsync the parent directory; Windows `ReplaceFileW` / `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
-5. On any failure: delete the temp file, leave the target untouched.
+2. If the target exists and its bytes equal the serialization, **stop** — the write is
+   skipped (mtime-stable no-op).
+3. Write to a temp file in the **same directory**: `<sidecar-name>.tmp-<8-hex-random>`.
+4. Flush + fsync the temp file.
+5. Atomically rename over the target — POSIX `rename(2)` then fsync the parent directory; Windows `ReplaceFileW` / `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
+6. On any failure: delete the temp file, leave the target untouched.
 
 Invariant: at every instant the target path holds either the previous complete sidecar or the new complete sidecar. `kill -9` at any point cannot corrupt an existing sidecar (acceptance §13.3).
 
 ### 9.3 Partial-write recovery
 
-Orphaned `*.photoproof.json.tmp-*` files (crash between steps 2–4) are ignored by all scanners and deleted by the writer when older than one hour or when the same target is next written. They are never parsed and never merged.
+Orphaned `*.photoproof.json.tmp-*` files (crash between steps 3–5) are ignored by all scanners and deleted by the writer when older than one hour or when the same target is next written. They are never parsed and never merged.
 
 ### 9.4 Write failures, retry, durability window
 
@@ -473,10 +480,11 @@ Rebuild accepts either an export directory or the live world (watched roots + ov
 1. **Scan:** enumerate `*.photoproof.json` (case-insensitive suffix), skipping `*.tmp-*` orphans.
 2. **Parse & validate** (§4). Failures are quarantined and reported; nothing aborts the run.
 3. **Pass 1 — redaction registry:** collect every redaction marker from every file first.
-4. **Pass 2 — union:** group by embedded hash; union events by id across all copies with redaction supremacy (§10.1) and the §10.2 conflict rule; insert event rows, `event_targets` (from each event's `targets`), sessions (from the denormalized maps; identical session ids across files must agree — mismatches are reported, first-seen wins), and images (hash + snapshot).
-5. **Derived:** rebuild FTS from folded text (revisions applied, retracted excluded, redactions absent — fold per EVENTS.md). Vectors/summaries are queued for background re-derivation (RUNTIME/RETRIEVAL); they are never in sidecars.
-6. **Integrity report (always produced):** files scanned/parsed/failed (paths + errors), events imported, duplicate copies deduped, redactions enforced (incl. files dirtied for re-scrub), id conflicts (§10.2), opaque newer-version files (§5.3), unknown kinds preserved, and manifest discrepancies when a manifest was present (missing/extra files, count mismatches).
-7. Post-rebuild reconciliation rewrites any sidecar now a subset of the union (convergence).
+4. **Pass 2 — union:** group by embedded hash; union events by id across all copies with redaction supremacy (§10.1) and the §10.2 conflict rule; collect event rows, `event_targets` (from each event's `targets`), sessions (from the denormalized maps; identical session ids across files must agree — mismatches are reported, first-seen wins), and images (hash + snapshot).
+5. **Insert (ingestion discipline, normative):** after the union pass completes, **sort the full event set ascending by event id** before insertion — monotonic ULID keys make every insert a right-edge B-tree append instead of a rebalancing storm ([andersmurphy: UUID primary keys in SQLite](https://andersmurphy.com/2026/06/05/the-perils-of-uuid-primary-keys-in-sqlite.html)). Insert in transactions of **~10k events**. The same discipline applies to large merges — see `spec/EVENTS.md`.
+6. **Derived (single pass, after the union):** populate FTS from folded text (revisions applied, retracted excluded, redactions absent — fold per EVENTS.md) and the derived tables in **one pass after the union completes** — never interleaved per-file. Vectors/summaries are queued for background re-derivation (RUNTIME/RETRIEVAL); they are never in sidecars. Finish with `ANALYZE` + FTS `optimize` + `wal_checkpoint(TRUNCATE)`.
+7. **Integrity report (always produced):** files scanned/parsed/failed (paths + errors), events imported, duplicate copies deduped, redactions enforced (incl. files dirtied for re-scrub), id conflicts (§10.2), opaque newer-version files (§5.3), unknown kinds preserved, and manifest discrepancies when a manifest was present (missing/extra files, count mismatches).
+8. Post-rebuild reconciliation rewrites any sidecar now a subset of the union (convergence).
 
 ## 13. Acceptance criteria
 
@@ -490,6 +498,7 @@ Rebuild accepts either an export directory or the live world (watched roots + ov
 8. **Collision safety:** a pre-existing user file named `IMG_0001.jpg.photoproof.json` that is not a sidecar is never modified; the journal lands in overflow; the report says so.
 9. **Overflow migration:** annotate images on a read-only volume → remount writable → adjacent sidecars appear with full history, overflow entries are gone, and a second migration run is a no-op.
 10. **Re-match:** every row of the §10.3 table has a test, including the swapped-image/adjacent-mismatch case ending with both journals intact under their correct hashes.
+11. **Mtime-stable writer:** flushing an image whose sidecar already holds the identical canonical bytes performs no write — file mtime and inode/file-id unchanged, no temp file created (asserted via instrumentation); a one-event change still writes normally. Repeated reconciliation passes over a converged library leave every sidecar's mtime untouched.
 
 ## 14. XMP keyword export (post-M3 — design space reserved, not specified)
 

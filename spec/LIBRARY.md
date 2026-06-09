@@ -157,9 +157,34 @@ directories — covers `.photoproof-volume`, `.DS_Store`, `.dtrash`, `.git`);
 `*.photoproof.json` sidecars; known tool/cache dirs, case-insensitive — `@eaDir`, `__MACOSX`,
 `*.lrdata`, `*.cocatalogdb`, Capture One session subfolders (`Cache`, `Proxies`,
 `Thumbnails`), `Lightroom Catalog*`, `.thumbnails`, `$RECYCLE.BIN`, `System Volume
-Information`, `lost+found`, `node_modules`; files off the format allowlist (§9.1) or > 2 GiB
-(sanity ceiling, logged); the app's own data dir if a root ever contains it. Ships as a
-built-in constant; user-editable exclusions are post-v1.
+Information`, `lost+found`, `node_modules`; cloud-sync caches and partials —
+`.dropbox.cache`, `*.tmp.drivedownload`, `*.tmp.driveupload`, and `~$*` / `.~*` partial
+files (§5.2); files off the format allowlist (§9.1) or > 2 GiB (sanity ceiling, logged); the
+app's own data dir if a root ever contains it. Ships as a built-in constant; user-editable
+exclusions are post-v1.
+
+### 5.2 Cloud-sync awareness
+
+Sync services and watched roots interact badly in two specific ways; both are handled, not
+wished away:
+
+- **Detection + one-time advisory.** Registration (and reconciliation, for roots that move)
+  detects roots inside Dropbox/OneDrive/Google Drive/iCloud Drive well-known paths or
+  containing marker files (`.dropbox`, sync-flavored `desktop.ini`). The app surfaces a
+  one-time advisory: sync services version-spam on every sidecar write — each journal flush
+  becomes a synced revision, with version-history churn and upload traffic to match
+  ([Lightroom Queen](https://www.lightroomqueen.com/community/threads/how-to-run-lightroom-from-a-onedrive-sync-folder.25987/),
+  [storage review](https://kevinlisota.photography/2019/02/online-storage-review/)). The root
+  is still allowed — informed users, not blocked ones. (The sidecar writer's mtime-stable
+  skip, SIDECARS.md §9.2, keeps our side of the churn loop closed.)
+- **Placeholder / dataless files MUST be detected at stat level and never hashed.** OneDrive
+  Files-On-Demand placeholders carry `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`; macOS
+  iCloud/file-provider items carry the dataless flag (`SF_DATALESS` /
+  `st_flags`-visible). Reading a placeholder's bytes forces a full hydration download —
+  hashing one would silently pull the user's entire cloud archive. Such paths route to a
+  **deferred/skipped state** (an ingest_passes `skipped` hash row with a `placeholder`
+  error-code, visible in the debug panel), re-checked at each reconciliation scan; a later
+  hydrated stat ingests normally.
 
 ## 6. Library-side SQLite DDL
 
@@ -260,8 +285,10 @@ resumable and idempotent by construction (§10.4).
 (mid-copy from a card reader) is re-checked every 2 s until size+mtime are stable across two
 checks. Paired rename events are handled directly as relinks; unpaired removes/creates fall
 through to §7.2, which handles moves identically — pairing is an optimization, not
-correctness. Watcher overflow, or an unsupported backend (some network filesystems),
-degrades that root to **polled mode**: a §7.3 scan every 10 minutes, noted in the debug panel.
+correctness. Any watcher error or overflow event triggers an **immediate §7.3 scan of that
+root** (events were missed; the scan is the recovery, §7.3); overflow, or an unsupported
+backend (some network filesystems), additionally degrades that root to **polled mode**: a
+§7.3 scan every 10 minutes, noted in the debug panel.
 
 ### 7.2 Event handling per path (single algorithm)
 
@@ -281,8 +308,14 @@ of content addressing.
 
 ### 7.3 Startup / scheduled reconciliation scan
 
-Runs at launch for every root on an online volume, on every volume online-transition, and on
-a 6-hour timer while running. Per root:
+Runs at launch for every root on an online volume, on every volume online-transition, on
+a 6-hour timer while running, on **system resume from sleep** (watcher gaps across sleep are
+a canonical missed-event source; Syncthing keeps periodic rescans even with its watcher on,
+by explicit refusal to drop them —
+[docs](https://docs.syncthing.net/users/syncing.html),
+[forum](https://forum.syncthing.net/t/linux-are-periodic-full-rescans-really-needed-when-fs-watcher-is-enabled/12548)),
+and on **any watcher error/overflow event** — which triggers an immediate scan of the
+affected root in addition to the polled-mode degradation in §7.1. Per root:
 
 1. Load all `active` path rows into a map `rel_path → (path_id, size, mtime_ns)`.
 2. Walk the filesystem (exclusions applied). Per file: known + size & mtime match (**2 s
@@ -294,10 +327,24 @@ a 6-hour timer while running. Per root:
 4. Batch-update `last_verified_at` for fast-path rows (one transaction per few thousand rows
    — per-row writes would dominate the scan).
 
+**Uniform clock-shift detection** (runs before any mismatch re-hashing): FAT/exFAT store
+timestamps in *local* time, so a DST transition or timezone move shifts every mtime on the
+volume by exactly the same round-hour delta
+([exFAT timestamp primer](https://blog.1234n6.com/exfat-timestamps-exfat-primer-and-my-methodology/),
+[Microsoft Q&A](https://learn.microsoft.com/en-us/answers/questions/3840573/why-does-windows-only-have-2-second-resolution-for),
+[forensics study](https://www.sciencedirect.com/science/article/pii/S2666281722001573)).
+If a scan finds **more than 25% of a root's files** mtime-shifted by the **same round-hour
+delta (±2 s)** with sizes unchanged, treat it as a **clock-shift event**: update the stored
+`mtime_ns` of all matching rows in place, re-hash a **random sample of 16** of them to
+confirm bytes are unchanged (any sample mismatch aborts the shortcut and falls back to
+ordinary per-file mismatch handling), log the event to the debug panel — and **never trigger
+a full re-hash storm**.
+
 **Re-hash is required exactly when**: (a) the path is new to the index, (b) size differs,
-(c) mtime differs beyond fs tolerance, (d) an explicit verify command (debug panel) or a
-sidecar hash mismatch (SIDECARS.md) demands it. Never otherwise — a 50k-file no-change scan
-does zero hashing.
+(c) mtime differs beyond fs tolerance and the clock-shift rule above did not absorb it,
+(d) an explicit verify command (debug panel) or a sidecar hash mismatch (SIDECARS.md)
+demands it, (e) a clock-shift confirmation sample. Never otherwise — a 50k-file no-change
+scan does zero hashing.
 
 ### 7.4 Relink invariant
 
@@ -353,13 +400,49 @@ NEF, modern ARW, RW2, ORF, DNG, PEF generally embed full-resolution previews; ol
 it sources both artifacts, `source = 'embedded'`, done. Below: still generate both artifacts
 from it (a small preview beats a placeholder), set `needs_full_decode = 1`, enqueue
 `full-raw-decode`. No embedded preview at all: UI placeholder, `full-raw-decode` enqueued at
-elevated backfill priority.
+elevated backfill priority. CR3 HDR-PQ files embed an **HEIF (non-JPEG) preview**: routed
+with HEIC (§9.5) through the libheif-capable `full-raw-decode` backfill path, placeholder
+until then.
+
+### 9.3.1 Embedded-preview orientation policy (load-bearing)
+
+Embedded previews are **inconsistently pre-rotated across makers** — some cameras write the
+preview already display-oriented, others write it sensor-oriented and rely on the EXIF
+orientation tag ([exiftool forum](https://exiftool.org/forum/index.php?topic=4415.0);
+[Wikimedia hit exactly this](https://phabricator.wikimedia.org/T172556)). Blindly applying
+`exif_orientation` to an extracted preview therefore double-rotates some files. Normative
+extraction rule:
+
+- On extraction, compare the preview's pixel aspect/dimensions against the RAW's stated
+  dimensions plus orientation. If the preview's geometry already matches the
+  **display-oriented** shape, it is already rotated: apply **no** further orientation. Apply
+  EXIF orientation only when the preview is NOT already display-oriented.
+- quickraw exposes the preview's own orientation ([repo](https://github.com/RawLabo/quickraw));
+  use it as a cross-check on the dimension heuristic where available.
+- Square-ish images (aspect within tolerance of 1:1, where the heuristic cannot decide)
+  default to applying the EXIF tag, logged for fixture coverage.
+
+Why this is load-bearing, stated plainly: **strokes are drawn over previews** (§9.2, §9.7).
+A silently double-rotated preview puts the stroke coordinate space at 90° to the pixels —
+it corrupts the stroke contract without any error surfacing. Per-format acceptance fixtures
+are therefore mandatory (§13.10): at minimum Nikon and Fuji portrait-orientation shots,
+covering both pre-rotated and tag-reliant preview conventions.
 
 ### 9.4 Full RAW decode (backfill pass, M1.5)
 
 `full-raw-decode` (rawler; libraw FFI fallback deferred until a real format gap appears)
 regenerates **both** artifacts for flagged images, sets `source = 'full-decode'`, clears the
-flag. A backfill (§10.3), never an M1 ingest blocker.
+flag. A backfill (§10.3), never an M1 ingest blocker. Rules:
+
+- A full decode **MAY alter tone/color** versus the embedded (camera-rendered) preview —
+  rawler's render is not Canon's/Nikon's — but **MUST preserve display-oriented geometry
+  exactly**: same orientation handling, same aspect, strokes land where they were drawn.
+- **Invariant: a stroke substrate — any preview an existing stroke was drawn over — is never
+  regenerated except via a `generator_version` bump** (§9.8). Backfill upgrades happen
+  because the image was flagged below threshold, never as a silent swap under existing marks.
+- Images already meeting the §9.3 threshold are never flagged and are **skipped** by this
+  backfill — and this skip is doubly load-bearing for images carrying journal strokes:
+  backfill MUST NOT touch them (confirming and strengthening the flag-only scope above).
 
 ### 9.5 Non-RAW handling
 
@@ -448,6 +531,13 @@ Priority (lower = sooner), stored per row: **P0** M1 passes for newly discovered
 (live watcher — the user is probably looking at that folder); **P1** M1 passes from
 reconciliation/initial scans; **P2** backfills (`full-raw-decode`, regeneration); **P3**
 GPU/model backfills (`image-embedding`, `caption`).
+
+Promotion rule within backfills: a threshold-miss image (`needs_full_decode = 1`) **with
+pending or existing strokes** is promoted above plain P2 decode backfills (enqueued/bumped
+to P1) — the older-Sony-ARW small-preview case, where the user is actively marking up a
+1616×1080 substrate that deserves upgrading first. CR3 HDR-PQ files (HEIF previews, §9.3)
+ride the same libheif-capable `full-raw-decode` path as HEIC and follow the same promotion
+rule.
 
 Dequeue order: `(priority, enqueued_at)`; within the hash pass, ascending file size (§1.2).
 Concurrency: one dispatcher (tokio task) feeding worker pools — **CPU pool**
@@ -551,12 +641,25 @@ Each is a test in `photoproof-core/tests/` (headless, real temp filesystems) unl
 10. **Orientation correctness**: an EXIF-orientation-6 portrait → cached artifacts upright;
     a stroke drawn at the subject's eye (normalized display-oriented coords) re-renders at
     the eye after preview regeneration and after rebuild-from-sidecars. Repeat for 3 and 8.
+    Per-format embedded-preview fixtures (§9.3.1): at minimum a Nikon and a Fuji
+    portrait-orientation RAW — one with a pre-rotated embedded preview, one tag-reliant —
+    each yields upright artifacts with **no double rotation**, asserted by pixel comparison
+    against a known-good render.
 11. **Threshold routing**: a RAW with a 1616×1080 embedded preview → small artifacts,
     `needs_full_decode = 1`, queued `full-raw-decode`; after backfill, full-quality, flag clear.
 12. **Reconciliation budget**: 50k-path fixture, no changes → ≤ 10 s, zero hash invocations
     (asserted via instrumentation).
-13. **Exclusions**: sidecars, `.photoproof-volume`, hidden dirs, and listed cache dirs never
-    produce `images` rows.
+13. **Exclusions**: sidecars, `.photoproof-volume`, hidden dirs, and listed cache dirs
+    (including the §5.2 sync caches/partials) never produce `images` rows.
+14. **Clock shift**: a 10k-path FAT/exFAT-mtime fixture with every mtime shifted by exactly
+    +1 h (sizes unchanged) → reconciliation detects the uniform shift, updates stored mtimes
+    in place, hashes exactly 16 sampled files, and zero re-hash storm (asserted via
+    instrumentation); one file with genuinely changed bytes inside the same scan is still
+    caught and re-hashed.
+15. **Placeholder files**: a stat-level placeholder fixture (simulated
+    `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` / dataless attributes) → no read of file bytes,
+    no `images` row, a deferred/skipped state visible in pass counters; after "hydration"
+    (attribute cleared), the next reconciliation ingests it normally.
 
 ## 14. Recorded non-features (v1)
 

@@ -17,7 +17,7 @@ Boundaries with sibling specs:
    - **P1 — llama.cpp `llama-server`**: hosts the small LLM (text + multimodal projector for captions), OpenAI-compatible HTTP.
    - **P2 — ASR server**: hosts Nemotron streaming ASR (serving recipe in §3.2; the contract is hard now, the recipe is the M2b-spike deliverable).
    - **Nothing else.** No Python anywhere. No Docker anywhere.
-3. **One sanctioned exception to the no-linking rule: the embedder** runs in-process via ONNX Runtime (`ort` crate). Defense in §3.3.
+3. **One sanctioned exception to the no-linking rule: the in-process `ort` components** — the embedders and silero-vad — run in-process via ONNX Runtime (`ort` crate). Defense in §3.3.
 4. **Below the hardware floor the app is fully functional as a journal.** Tier 0 = typed notes + grease pencil + FTS5 search, no models, no downloads, no degradation of any M1 feature. Stated loudly: **degraded mode is not a crippled app; it is exactly M1, which is a complete product.** Every runtime failure path lands here, quietly.
 5. **No model ships in the installer.** Weights are downloaded on demand, with explicit consent, resumable and checksummed (§5). The installer stays small; first run works instantly in Tier 0 mode while downloads proceed.
 6. All inference endpoints bind to `127.0.0.1` on random ports. Nothing listens on external interfaces, ever. ("Free tier never touches the network" refers to user data; weight download is the one sanctioned egress, consent-gated, and carries no user data.)
@@ -44,12 +44,13 @@ Hosts the small LLM behind `LanguageModel`. One server, one model resident.
   llama-server --host 127.0.0.1 --port {alloc} \
     --model {models}/gemma-4-e4b-it/gemma-4-e4b-it-Q4_K_M.gguf \
     --mmproj {models}/gemma-4-e4b-it/mmproj-f16.gguf \
-    --ctx-size 8192 --parallel 2 --gpu-layers {auto|n} \
+    --ctx-size 16384 --parallel 2 --gpu-layers {auto|n} \
     --no-webui --log-disable
   ```
 
 - Endpoints used: `/health` (readiness); `/v1/chat/completions` for completion, caption (image content parts via mmproj), and JSON-schema-constrained query parsing (`response_format: {type:"json_schema", ...}`). `/v1/embeddings` is *reserved* (§3.3 text-embedding note) but unused by default.
 - `--parallel 2` gives two server slots; the app-side scheduler (§9) maps them to one interactive lane + one background lane. Multimodal (caption) requests are background-lane only.
+- **`--ctx-size` is divided across parallel slots** ([llama.cpp #11681](https://github.com/ggml-org/llama.cpp/issues/11681)): 16384 with `--parallel 2` yields **8192 per lane** — the per-lane context the rest of this spec assumes. The doubled total context roughly doubles KV-cache VRAM versus a naïve 8192 budget; the Tier-1 numbers absorb this conservatively (§6.2). Slot semantics have churned upstream ([#17989](https://github.com/ggml-org/llama.cpp/issues/17989)); **verify the divide-vs-share behavior against the pinned build** at vendoring time.
 - Quantization: **Q4_K_M** for all GGUF weights. Rationale: the best quality/size point of the K-quant family in community evals, universally published for the target models, and it fits the Tier-1 budget; Q5/Q6 buys little for summarization/parsing at ~25–50% more VRAM; below Q4 measurably degrades instruction following, which schema-constrained query parsing depends on.
 
 ### 3.2 P2 — ASR server (Nemotron streaming)
@@ -58,11 +59,12 @@ Hosts the small LLM behind `LanguageModel`. One server, one model resident.
 
 - It is the only Python-free, container-free, desktop-grade path that exists today (verified, §2). NVIDIA NIM/Riva containers are rejected: Docker on a consumer desktop violates invariant 1.2's spirit and the installation reality of this audience.
 - CPU-resident ASR is a *feature*, not a fallback: a 0.6B cache-aware streaming model is real-time on laptop CPUs at int8, and keeping ASR off the GPU removes the worst VRAM contention (live mic vs. LLM) by construction (§9).
-- Binary: pinned `sherpa-onnx-online-websocket-server` (static, per platform) vendored in the app bundle, spawned on a random localhost port. Wire protocol: 16-bit PCM frames in, JSON segment messages out (partials + finals with timestamps); the connector adapts this to the `Transcriber` contract.
+- Binary: pinned `sherpa-onnx-online-websocket-server` (static, per platform) vendored in the app bundle, spawned on a random localhost port. **Wire protocol (corrected): raw float32 sample frames** in over the WebSocket, with a `"Done"` text message signaling end-of-stream — the 16-bit/16 kHz language in sherpa's docs describes wave *files*, not the socket ([online WebSocket docs](https://k2-fsa.github.io/sherpa/onnx/websocket/online-websocket.html)). Result JSON carries `text`, `tokens`, `timestamps`, `segment`, `start_time`, `is_final` ([C API](https://github.com/k2-fsa/sherpa-onnx/blob/master/sherpa-onnx/c-api/c-api.h)); the connector maps `segment` → `utterance_id` and adapts the rest to the `Transcriber` contract.
+- **Serving shape is a spike decision (§12.2).** The vendored websocket server is closer to a reference binary than a hardened server. The alternative: wrap the official [sherpa-onnx Rust crate](https://crates.io/crates/sherpa-onnx) in a **tiny purpose-built child process we own** — same process boundary, same wire contract, drops the demo-grade server. Either way P2 stays an external child (invariant 1.1). The spike MUST also test whether the Nemotron export emits usable token `timestamps` — unverified ([discussion #985](https://github.com/k2-fsa/sherpa-onnx/discussions/985)); CAPTURE's binding no longer depends on them (VAD onset is authoritative, CAPTURE §5), but the cross-check wants them.
 - Model: English `nemotron-speech-streaming-en-0.6b` int8 (published sherpa-onnx export) as the v1 default. The multilingual `nemotron-3.5-asr-streaming-0.6b` is the *target* default per SCOPE; its ONNX/sherpa export is unconfirmed, so: **the Transcriber contract (§4.1) is normative now; the multilingual serving recipe is an explicit M2b-spike deliverable (§12).** Fallback order: multilingual 3.5 → English 0.6b → ASR disabled (voice features dark, journal unaffected).
 - Chunk size: 160 ms default (config `chunk_ms`), trading ~200 ms extra latency for roughly half the CPU of 80 ms chunks.
 
-### 3.3 The embedder — in-process ONNX Runtime (the defended exception)
+### 3.3 In-process ONNX Runtime — embedders + silero-vad (the defended exception)
 
 `Embedder` is implemented **in-process** via the `ort` crate (ONNX Runtime), loading the visual and text towers of `ViT-H-14-378-quickgelu__dfn5b` as two ONNX sessions (the same artifact layout Immich uses).
 
@@ -74,7 +76,11 @@ Why this is the right exception to "never link inference":
 
 The trade-off, stated honestly: **a native crash inside ONNX Runtime crashes Photoproof** — there is no process boundary to absorb it. Mitigations: pin the `ort`/ONNX Runtime version per release; default to the CPU execution provider with GPU (CUDA/CoreML/DirectML) as a tier-promoted opt-in once the spike validates stability; run all embedding work on a dedicated thread with inputs pre-validated to fixed shapes; the embedder runs only in background passes, never in the capture path, so a crash can never lose an annotation (events are durable before embedding starts).
 
+**silero-vad joins the `ort` exception (capture path — the explicit carve-out).** A silero-vad session (~1 MB, ~2 ms per audio chunk — [measured latency](https://rajatpandit.com/agentic-ai/real-time-audio-vad/)) runs in-process on the cpal capture stream for **speech-onset detection ahead of P2**, plus silence gating and the "speaking" indicator affordance; **P2 keeps endpointing/segmentation authority** (CAPTURE §5–6). The embedder defense above leans on "background passes only, never the capture path" — silero-vad is the deliberate exception to that clause, and it earns it the same way: tiny, deterministic, fixed-shape, stateless across chunks from the caller's view. A native crash in it costs the armed mic (`Disarmed(error)`, CAPTURE §6.6), never durable data — annotations are events before anything model-shaped touches them.
+
 **Two embedders (resolved cross-spec).** The DFN5B text tower's 77-token CLIP context cannot honor RETRIEVAL's ~512-token annotation chunks — and annotation text is the product's *primary* signal. The runtime therefore hosts **two embedder instances behind the same `Embedder` trait**: the **CLIP embedder** (DFN5B preset above — `image_clip` vectors and short S4 query embeddings only) and the **text embedder** — a small dedicated text-embedding model (Qwen3-Embedding-0.6B-class, ONNX int8, ~0.6 GB) run in-process via the same defended `ort` exception (same determinism/fixed-shape argument applies; it is also a background-pass-and-query-time component, never in the capture path). Alternative backend behind the same seam: a GGUF embedding model on llama.cpp's `/v1/embeddings`. RETRIEVAL §3 assigns vec_kinds: `annotation_chunk` + `image_summary` → text embedder; `image_clip` → CLIP embedder.
+
+**Instruction-prefix contract (text embedder).** Instruction-aware text embedders lose measurable quality without their query instruction (the Qwen3-Embedding card reports 1–5% — [card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)). Normative split: **queries are embedded with the model's instruction prefix; documents are embedded bare.** The exact template, its version, and its place in `inputs_hash` are owned by RETRIEVAL.md (amendment R1); the runtime embedder applies the configured template verbatim and never invents one.
 
 ## 4. Connector traits (normative Rust)
 
@@ -133,9 +139,13 @@ pub struct TranscriptSegment {
     pub onset: StreamMs,
     /// End of speech covered by this segment so far.
     pub end: StreamMs,
-    /// Mean token confidence in [0,1]; stored per event per the kernel.
-    /// Partials may carry a provisional value.
-    pub confidence: f32,
+    /// exp(mean token log-prob), in [0,1]. OPTIONAL: `None` when the
+    /// backend exposes no token log-probs (sherpa-onnx `ys_probs` only
+    /// recently landed — k2-fsa/sherpa-onnx#2897 — and has hotword quirks,
+    /// #2937). Explicitly UNCALIBRATED: a score, not a probability; never
+    /// compare values across model versions. Stored per event per the
+    /// kernel when present. Partials may carry a provisional value.
+    pub confidence: Option<f32>,
     /// BCP-47 of the recognized language, when the model reports it.
     pub language: Option<String>,
 }
@@ -260,7 +270,7 @@ backend = "local-llamacpp"   # "local-llamacpp" | "openai-compatible" | "anthrop
 model = "gemma-4-e4b-it-q4_k_m"   # manifest model id (local) or API model name
 
 [llm.local-llamacpp]
-ctx_size = 8192
+ctx_size = 16384             # TOTAL; divided across slots (#11681) → 8192/lane
 parallel_slots = 2           # 1 interactive + 1 background lane
 gpu_layers = "auto"          # "auto" | integer | 0 (CPU)
 startup_timeout_secs = 120
@@ -289,6 +299,9 @@ device = "auto"              # "auto" | "cpu" | "gpu"
 backend = "local-ort"        # chunks & summaries. "local-ort" |
 model = "qwen3-embedding-0.6b-int8"  # "local-llamacpp" (/v1/embeddings) |
 device = "cpu"               # "openai-compatible"
+                             # query/document instruction prefixes: template
+                             # owned by RETRIEVAL (R1); queries instructed,
+                             # documents bare (§3.3)
 ```
 
 Unknown keys warn; missing sections take defaults. A config naming an uninstalled model puts that connector in `NotConfigured` (feature dark, journal unaffected) and surfaces the fix in settings + debug panel.
@@ -370,7 +383,8 @@ Table values are planning estimates; the consent dialog always shows the live ma
 | **1** | 8–12 GB VRAM, or Apple Silicon ≥ 16 GB unified | Nemotron 0.6B int8, **CPU** | Gemma 4 E4B-class Q4_K_M (or small Qwen 3.6), GPU | DFN5B ViT-H-14-378, GPU (background only) | Voice capture, summaries, captions, embeddings, NL query parse. |
 | **2** | ≥ 16 GB VRAM (or ≥ 32 GB Apple unified) | same as Tier 1 | Optional quality upgrade: Gemma 4 26B MoE (A4B) Q4_K_M at 16–24 GB; Qwen 3.6-35B-A3B Q4_K_M at ≥ 24 GB (low-active-param MoE tolerates partial CPU offload) | same | Tier 1 plus better summaries/parsing. Offered, never auto-applied. |
 
-- 6–8 GB cards: Tier 0 by default; the settings override to Tier 1 is honored with `ctx_size = 4096` and the 224 px embedder variant.
+- **KV-cache note (post-#11681 correction):** the corrected launch doubles *total* context to 16384 to preserve 8192/lane, roughly doubling KV-cache VRAM versus the draft budget. Tier 1 plans for this conservatively — the E4B-class bundle plus doubled KV must still fit under `detected_VRAM − vram_headroom_mb` at the 8 GB gate; the spike (§12.1) measures the real number and may lower `gpu_layers` defaults rather than the gate.
+- 6–8 GB cards: Tier 0 by default; the settings override to Tier 1 is honored with `ctx_size = 8192` (**4096/lane** post-division — the extra KV of a 16384 total does not fit here) and the 224 px embedder variant.
 - **User override always wins** (`[runtime] tier`), in both directions. Overriding above detected hardware shows a one-time plain warning.
 - Tier selection changes which manifest entries are *offered*; it never deletes installed weights.
 
@@ -401,7 +415,7 @@ NotConfigured ─► Downloading ─► Spawning ─► Starting ─► Ready �
 
 - `Spawning`: allocate port (§8.2), spawn child, attach log capture.
 - `Starting`: poll health (P1: `GET /health` until 200 — llama.cpp returns 503 while loading; P2: WebSocket handshake open/close) every 500 ms up to `startup_timeout_secs` (default 120 s — first load from a cold HDD is slow). Timeout ⇒ kill ⇒ `Restarting`.
-- `Ready`: liveness check every 5 s; an in-flight `ConnectionLost` triggers an immediate check.
+- `Ready`: liveness check every 5 s; an in-flight `ConnectionLost` triggers an immediate check. **`/health` requests queue behind inference under load** ([#20684](https://github.com/ggml-org/llama.cpp/issues/20684)), so a slow or timed-out health probe while requests are in flight means **Busy, not Lost** — no restart. Restart triggers are exactly three: child-process exit (`waitpid` — the ground truth for liveness), connection refused, or health failure while **no** request is in flight. An optional `/slots` cross-check MAY feed the debug panel but never triggers a restart — it can itself hang while `/health` is green ([#20921](https://github.com/ggml-org/llama.cpp/issues/20921)).
 - `Restarting(n)`: exponential backoff 1, 2, 4, 8 … capped at 60 s; **max 5 attempts per rolling 10 minutes**, then `Failed`.
 - `Failed`: feature-degrades quietly (no dialog, no toast storm); full detail — state history, last 200 log lines, exit codes — in the dev-build debug panel. A "restart runtime" action in settings re-enters `Spawning` with a fresh attempt budget.
 
@@ -443,7 +457,8 @@ We can only arbitrate **our own** usage. Whether Capture One or darktable needs 
 - **Priority order (our usage)**: `live ASR session > interactive LLM call (query parse) > background passes (summaries, embeddings, captions)`.
 - **Mechanism — one LLM server, priority lanes, no second instance.** Separate model instances are too expensive (double weights), and load/unload thrash is worse. So: one `llama-server` with `--parallel 2`; the app-side **pass scheduler** owns every request:
   - `Lane::Interactive` (query parse): queue depth 1, head-of-line; if it would otherwise wait more than 250 ms, the background slot's current request is *cancelled* (HTTP disconnect — llama.cpp frees the slot) and re-queued.
-  - `Lane::Background` (summaries, captions): single in-flight request, bounded `max_tokens`, scheduled only when no interactive call is queued.
+  - `Lane::Background` (summaries, captions): single in-flight request, bounded `max_tokens`, scheduled only when no interactive call is queued. **All background-lane requests MUST set `stream: true`** — llama-server only detects a client disconnect (and frees the slot) for streaming requests; a non-streaming request is not cancellable mid-flight ([#9273](https://github.com/ggml-org/llama.cpp/issues/9273)).
+  - **Honesty clause — prompt processing is not preemptible.** Disconnect-cancellation takes effect during token *generation*; a request still in its prompt-processing phase may run that phase to completion regardless ([ik_llama #1020](https://github.com/ikawrakow/ik_llama.cpp/issues/1020)). Therefore background prompts are kept deliberately small — a caption is one image plus a short prompt, never a batch — so the worst-case non-preemptible window stays bounded.
 - **Mic armed ⇒ background passes pause.** ASR is CPU-resident (§3.2), so this is mostly CPU/memory-bandwidth hygiene, but the rule is unconditional: while the mic is armed, the scheduler holds background LLM calls and embedding batches; in-flight items finish (bounded) and nothing new starts. Unpause at mic disarm + 5 s.
 - **Embedder coexists**: the ort embedder (GPU EP) runs only in background passes, batch size set by the spike; on allocation failure it falls back to CPU EP for the rest of the pass and records the event for the debug panel.
 
@@ -469,9 +484,9 @@ We can only arbitrate **our own** usage. Whether Capture One or darktable needs 
 Deliverables, each with a measured number:
 
 1. **Supervision proof**: spawn/supervise `llama-server` with Gemma 4 E4B-class Q4_K_M on the dev box (RTX 5080) and one Tier-1-class machine (Apple Silicon 16 GB). Demonstrate: random-port spawn, health gating, kill-mid-call → restart → single-retry success, parent-kill → zero orphans (exercising every §8.4 mechanism per platform).
-2. **ASR recipe selection**: run sherpa-onnx Nemotron English 0.6B int8 streaming on CPU; measure partial latency, final latency at 160 ms chunks, and CPU% on a laptop-class machine. Decide: multilingual `nemotron-3.5-asr-streaming-0.6b` ONNX export — feasible now / wait / English-only v1. **This decision is the spike's headline deliverable** (§3.2).
-3. **Embedder recipe**: DFN5B ViT-H-14-378 via `ort` — images/sec on Tier-1 GPU and on CPU; peak VRAM; text-tower parity vs. reference OpenCLIP (cosine ≥ 0.999 on a probe set); stability under a 10k-image batch (the in-process crash risk, §3.3) → gates the GPU-EP default.
-4. **Concurrency reality**: ASR streaming (CPU) + interactive LLM call + embedding batch simultaneously on the Tier-1 machine; verify §9 priorities hold (interactive parse < 2 s p95 while a batch runs).
+2. **ASR recipe selection**: run sherpa-onnx Nemotron English 0.6B int8 streaming on CPU; measure partial latency, final latency at 160 ms chunks, and CPU% on a laptop-class machine. Decide: multilingual `nemotron-3.5-asr-streaming-0.6b` ONNX export — feasible now / wait / English-only v1. **This decision is the spike's headline deliverable** (§3.2). Additionally: (a) decide the P2 serving shape — vendored C++ websocket server vs. a tiny Rust-crate wrapper child we own (§3.2); (b) **test whether the Nemotron export emits usable token timestamps** (§3.2 — gates the binding cross-check, [#985](https://github.com/k2-fsa/sherpa-onnx/discussions/985)); (c) measure silero-vad onset error (detection latency + clock conversion) against CAPTURE §1's **250 ms combined budget**.
+3. **Embedder recipe**: DFN5B ViT-H-14-378 via `ort` — images/sec on Tier-1 GPU and on CPU; peak VRAM; text-tower parity vs. reference OpenCLIP (cosine ≥ 0.999 on a probe set); stability under a 10k-image batch (the in-process crash risk, §3.3) → gates the GPU-EP default. **Text embedder bake-off**: benchmark **EmbeddingGemma-308M** ([HF blog](https://huggingface.co/blog/embeddinggemma)) alongside Qwen3-Embedding-0.6B as the half-cost candidate — retrieval quality on the RETRIEVAL golden-query set (R6), throughput, and footprint decide the default.
+4. **Concurrency reality**: ASR streaming (CPU) + interactive LLM call + embedding batch simultaneously on the Tier-1 machine; verify §9 priorities hold (interactive parse < 2 s p95 while a batch runs), **including the worst case**: parse issued mid-prompt-processing of a caption (the non-preemptible window, §9 / acceptance 13.8).
 5. **JSON-schema decoding**: confirm llama.cpp constrained output yields parseable RETRIEVAL filter-AST JSON at E4B Q4_K_M — 50-query probe set, ≥ 98% schema-valid.
 6. Findings PR updates: §5.4 sizes, §6.2 gates if needed, §9 batch sizes; resolves the §3.2 and §3.3 open items.
 
@@ -484,13 +499,13 @@ Deliverables, each with a measured number:
 5. **Single instance**: launching a second app instance focuses the first and exits; the process table shows exactly one `llama-server` and one ASR process throughout.
 6. **Readiness gating**: from cold start with installed models, the mic toggle is disabled-with-affordance until ASR `Ready`, then enables with no other UI change; NL queries before LLM `Ready` degrade to FTS+vector and still return results.
 7. **License gate**: zero bytes of an `acceptance_required` model are downloaded before the recorded acceptance exists.
-8. **Arbitration**: with the mic armed, no background LLM/embedding work starts (observable in the debug panel); an interactive parse issued during a caption batch completes without waiting for the batch to finish.
+8. **Arbitration, worst case**: with the mic armed, no background LLM/embedding work starts (observable in the debug panel). An interactive parse issued **mid-prompt-processing of a caption** — the non-preemptible window (§9), not the friendly mid-generation case — still completes within the §12.4 interactive budget; the test MUST time this case explicitly.
 9. **GC safety**: trigger a manifest bump with a reindex pending → old embedder weights survive until RETRIEVAL reports the reindex complete; no active pass ever loses its model files.
 
 ## 14. Open items (tracked, not blocking)
 
 - Multilingual Nemotron 3.5 ONNX export viability — spike deliverable §12.2.
-- Text-embedding model final pick (Qwen3-Embedding-0.6B-class is the working default, §3.3) — spike validates quality/throughput alongside the CLIP embedder.
+- Text-embedding model final pick (Qwen3-Embedding-0.6B-class is the working default; EmbeddingGemma-308M is the half-cost challenger, §12.3) — spike validates quality/throughput alongside the CLIP embedder.
 - DFN5B exact license-acceptance requirement — spike confirms (§5.3).
 - GPU execution-provider stability for the in-process embedder — spike §12.3 gates the default (`device = "auto"` may resolve to CPU in v1 if instability is observed).
 - Future consideration (recorded only, per kernel): fine-tuning a small LLM for app tasks (summarization, sentiment, query parsing) — would slot in as a new manifest entry behind the same `LanguageModel` trait; no design work now.

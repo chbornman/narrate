@@ -3,8 +3,9 @@
 Status: Draft 1, June 2026. Closes SPEC-GAPS E1–E4, plus the read-scope context
 model and the project/intent store.
 
-Boundaries (normative): `EVENTS.md` owns the event log, fold rules, and the FTS
-table DDL *skeleton*; this spec owns **what** gets indexed and when, the
+Boundaries (normative): `EVENTS.md` owns the event log, fold rules, and the
+`event_fts`/`fts_map` DDL and construction (the single normative FTS design —
+EVENTS §5.4); this spec owns **what** gets indexed and when, the
 `vectors` table in full, query processing, ranking, the result data contract,
 context assembly, derived views, and the project store. `RUNTIME.md` owns model
 serving; this spec consumes the `Embedder` and `LanguageModel` traits.
@@ -23,15 +24,21 @@ result must carry a human-readable explanation of why it matched (§6).
 
 ### 1.1 FTS5 — what is indexed
 
-Two FTS5 virtual tables (names and DDL skeleton normative in EVENTS.md; the
-column and content requirements below are normative here):
+Two FTS5 virtual tables. `event_fts` is owned in full — name, DDL,
+construction — by EVENTS §5.4, **the single normative FTS design**; this spec
+defers to it and adds only the content rules. `summaries_fts` is owned here.
 
-| Table | Row unit | Content | Required columns |
+| Table | Row unit | Content | Keying |
 |---|---|---|---|
-| `events_fts` | one row per indexable event | the event's **folded text** | `text`, `event_id UNINDEXED` |
+| `event_fts` | one row per **live remark chain root** | the root's **effective (folded) text**, single `body` column | `fts_map(root_event_id, fts_rowid)` (EVENTS §5.4) |
 | `summaries_fts` | one row per derived summary | summary text (§9) | `text`, `summary_id UNINDEXED` |
 
-**Indexable events.** An event row enters `events_fts` iff all of:
+`event_fts` is a **plain content-ful** table: the folded text exists nowhere
+as a real column elsewhere, and `snippet()` needs stored text — so there is no
+external-content option and no `event_id UNINDEXED` column; the id mapping
+lives in `fts_map`.
+
+**Indexable events.** A remark root has a row in `event_fts` iff all of:
 
 - `kind` is `remark` (typed or voice). `rating` events are structured data,
   never FTS. `stroke` events have no text of their own (they become searchable
@@ -46,7 +53,7 @@ the separate `session_hits` list of the result contract (§5.4), never attribute
 to an image.
 
 **Why a separate summaries table** (decision): summaries are derived rows,
-not events; a second column in `events_fts` would force a fake event row per
+not events; a second column in `event_fts` would force a fake event row per
 summary and entangle event retraction logic with derived-data lifecycle. A
 separate table is its own down-weighted ranked list in fusion (§5.3). A
 summary hit may *rank* an image but is never shown as provenance text (§6).
@@ -55,28 +62,32 @@ summary hit may *rank* an image but is never shown as provenance text (§6).
 
 ```sql
 tokenize = "unicode61 remove_diacritics 2"
-prefix   = '2 3 4'
+prefix   = '2 3'
 -- detail=full (default): required for snippet() and phrase queries
 ```
 
 `unicode61` with `remove_diacritics 2` so "Sebastião" matches "sebastiao".
 No custom `tokenchars`: "f/2.8" tokenizes as `f`,`2`,`8` — acceptable, since
 exposure data is queried through structured filters, not prose. Prefix indexes
-at 2/3/4 chars make search-as-you-type prefix matching (§4) index-backed.
+at 2/3 chars make search-as-you-type prefix matching (§4) index-backed; no
+4-char index — each prefix length is a full extra posting index, and ≥4-char
+prefixes are served acceptably by the main term index.
 
 **Index maintenance** (all inside the same transaction as the triggering event
-append/scrub; delete + reinsert, never in-place update):
+append/scrub; `event_fts` mechanics are EVENTS §6.3's — root rows keyed
+through `fts_map`):
 
-| Trigger | `events_fts` action | `vectors` action (§1.2) |
+| Trigger | `event_fts` action (EVENTS §6.3) | `vectors` action (§1.2) |
 |---|---|---|
-| New indexable event | insert folded text | enqueue embed (M3+) |
-| Revision of event E | delete E's row; insert new folded text | mark E's chunk rows `deleted=1`; enqueue re-embed |
-| Retraction of E | delete E's row | mark E's chunk rows `deleted=1` |
-| Redaction of E | delete E's row (same transaction as content scrub) | mark deleted **and zero the flat-file rows** (§1.2); delete E's sentiment row; delete derived summaries whose `inputs` include E (§9.5) |
+| New indexable remark R | insert R's root row (folded text) | enqueue embed (M3+) |
+| Revision in root R's chain | update R's row to the new effective text | mark R's chunk rows `deleted=1`; enqueue re-embed |
+| Retraction of root R | delete R's row | mark R's chunk rows `deleted=1` |
+| Retraction of a revision of R | recompute R's effective text (update, or delete if R no longer live) | mark R's chunk rows `deleted=1`; enqueue re-embed |
+| Redaction of chain root R | delete R's row (same transaction as content scrub) | mark deleted **and zero the flat-file rows** (§1.3); delete the chain's sentiment rows; delete derived summaries whose `inputs` include any chain member (§9.5) |
 | Un-retract (if EVENTS.md permits) | reinsert | re-embed |
 
 Acceptance: a retracted or redacted event is absent from all search results
-the moment the triggering call returns (§12).
+the moment the triggering call returns (§13).
 
 ### 1.2 Vectors — DDL (normative, owned by this spec)
 
@@ -93,7 +104,9 @@ CREATE TABLE vectors (
   char_start   INTEGER,                            -- char offsets (Unicode scalars) into the
   char_end     INTEGER,                            --   folded text, for quote extraction
   file_row     INTEGER NOT NULL,                   -- row index in the flat file for (vec_kind, model_id)
-  inputs_hash  TEXT    NOT NULL,                   -- blake3 of embedded text (or preview bytes), staleness check
+  inputs_hash  TEXT    NOT NULL,                   -- blake3 of embedded text (or preview bytes) + the
+                                                   --   context-prefix scheme version (§2) + instruct
+                                                   --   template version (§3); staleness check
   created_ts   TEXT    NOT NULL,                   -- RFC 3339 UTC
   deleted      INTEGER NOT NULL DEFAULT 0,         -- awaiting compaction; search skips
   CHECK ((event_id IS NULL) <> (image_hash IS NULL))

@@ -261,9 +261,21 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA secure_delete = ON;     -- required: redaction must overwrite freed bytes (§7)
 PRAGMA foreign_keys = OFF;     -- deliberate, see below
+PRAGMA cache_size = -65536;    -- 64 MiB page cache
+PRAGMA mmap_size = 268435456;  -- 256 MiB memory-mapped I/O
+PRAGMA temp_store = MEMORY;
+PRAGMA busy_timeout = 5000;    -- ms; writer + read pool share one file
 ```
 
-Foreign keys stay OFF because merge legitimately inserts events whose `target_event`/`linked_event`/`session_id` referent has not arrived yet (a sidecar found before its sibling; a stroke referencing a minted utterance id). Dangling references are **inert, never invalid** (§6.1, §8); referential integrity is a fold-level concept here, not a storage constraint.
+`page_size` stays at the 4096 default — no measured win justifies a migration. Foreign keys stay OFF because merge legitimately inserts events whose `target_event`/`linked_event`/`session_id` referent has not arrived yet (a sidecar found before its sibling; a stroke referencing a minted utterance id). Dangling references are **inert, never invalid** (§6.1, §8); referential integrity is a fold-level concept here, not a storage constraint.
+
+**Operational rules (normative):**
+
+- `PRAGMA optimize` on every connection close, and periodically on long-lived connections.
+- Full `ANALYZE` after rebuild-from-sidecars or any large merge — the FTS5 join planner depends on fresh stats (RETRIEVAL §4).
+- `PRAGMA wal_checkpoint(TRUNCATE)` at app idle and at shutdown.
+- Long-lived UI statements MUST NOT hold read transactions open: an open reader blocks checkpointing and the WAL grows without bound, slowing every read ([sqlite.org/wal.html](https://sqlite.org/wal.html)). Step or reset statements promptly; never keep a cursor alive across UI idle time.
+- `EventStore` opens **one dedicated writer connection plus a small read pool** (the [tokio-rusqlite](https://docs.rs/tokio-rusqlite/latest/tokio_rusqlite/)/async-sqlite pattern); all writes serialize through the writer.
 
 ### 5.2 Truth tables (the journal — rebuildable only from sidecars)
 
@@ -306,8 +318,12 @@ CREATE TABLE annotation_events (
 ) STRICT;
 
 CREATE INDEX idx_events_session ON annotation_events(session_id, id);
-CREATE INDEX idx_events_target  ON annotation_events(target_event) WHERE target_event IS NOT NULL;
-CREATE INDEX idx_events_kind    ON annotation_events(kind);
+-- (target_event, kind): retracted(id) checks and the meta-closure's kind dispatch
+-- (§6.1, §10.1) are answered from the index alone, no row fetch.
+CREATE INDEX idx_events_target  ON annotation_events(target_event, kind) WHERE target_event IS NOT NULL;
+-- No index on kind alone: six values, too low-selectivity to earn one. The redaction
+-- registry rebuild gets a partial index instead:
+CREATE INDEX idx_events_redactions ON annotation_events(id) WHERE kind = 'redaction';
 
 CREATE TABLE event_targets (
   event_id    TEXT    NOT NULL CHECK (length(event_id) = 26),
@@ -330,6 +346,8 @@ CREATE TABLE sessions (             -- storage here; lifecycle in CAPTURE (§9)
 ) STRICT;
 ```
 
+**Payload-filtering rule (normative):** any future filtering on `payload` fields is done through a **virtual generated column plus an index on it** — never `json_extract()` in a hot WHERE clause, which forces a full-table JSON parse per query ([JSON virtual columns](https://antonz.org/json-virtual-columns/)). The §5.2 CHECK constraints may use `json_extract` (they run once, at insert); query paths may not.
+
 ### 5.3 Derived tables (rebuildable from the truth tables; never in sidecars)
 
 ```sql
@@ -346,6 +364,19 @@ CREATE TABLE image_ratings (
   rating      INTEGER NOT NULL CHECK (rating BETWEEN 0 AND 5),
   event_id    TEXT NOT NULL,        -- the winning rating event
   ts          TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+
+-- Journal-stats fold: one row per image with any live journal presence.
+-- Consumers: grid has-journal badges, the HasStrokes filter chip, and RRF
+-- recency tie-breaking (RETRIEVAL §4, §5.3) — each an indexed lookup instead
+-- of a per-image fold. Maintained in the same append/redact/merge transactions
+-- as the other derived tables (§6.3), rebuilt by rebuild_derived(), covered by
+-- the derived=fold invariant (I7).
+CREATE TABLE image_journal_stats (
+  image_hash   TEXT PRIMARY KEY,
+  event_count  INTEGER NOT NULL,    -- live (non-retracted) events targeting the image
+  has_strokes  INTEGER NOT NULL,    -- 0/1: any live stroke
+  last_ts      TEXT NOT NULL        -- ts of the most recent live event
 ) STRICT, WITHOUT ROWID;
 
 -- Durable dirty set consumed by the sidecar writer (SIDECARS owns consumption).
@@ -393,7 +424,9 @@ CREATE VIRTUAL TABLE event_fts USING fts5(
 );
 ```
 
-`event_fts` rows are keyed by `fts_map.fts_rowid` and contain the **effective text** of one live remark root. Maintenance is **not** done with SQL triggers: fold rules (chain resolution, retraction fallback) are application logic triggers cannot express. Instead `photoproof-core` performs FTS maintenance **in the same SQLite transaction as the event insert** (§6.3). A hit's `root_event_id` joins through `event_targets` to images — provenance ("the matching quote, dated") is free.
+`event_fts` rows are keyed by `fts_map.fts_rowid` and contain the **effective text** of one live remark root. **This plain content-ful construction — stored text, no external-content option, no UNINDEXED columns, id mapping in `fts_map` — is THE single normative FTS design; RETRIEVAL defers to it.** Maintenance is **not** done with SQL triggers: fold rules (chain resolution, retraction fallback) are application logic triggers cannot express. Instead `photoproof-core` performs FTS maintenance **in the same SQLite transaction as the event insert** (§6.3). A hit's `root_event_id` joins through `event_targets` to images — provenance ("the matching quote, dated") is free.
+
+After rebuild-from-sidecars and after any large merge, run `INSERT INTO event_fts(event_fts) VALUES('optimize')`: each transaction writes its own small index b-trees, so the FTS index fragments and query cost grows until the segments are merged.
 
 ### 5.5 Append-only enforcement (defense in depth)
 
@@ -474,6 +507,8 @@ The **indexable set** (FTS + `annotation_chunk` embeddings) = effective texts of
 | redact (§7) | DELETE fts row for chain root; delete vectors; dirty(`redaction`) |
 | merge (§8) | batch inserts first, then recompute derived state for affected roots/images |
 
+Every operation above additionally upserts `image_journal_stats` (§5.3) for the affected images — `event_count`/`has_strokes`/`last_ts` recomputed from the live fold — in the same transaction, exactly as `image_ratings` is.
+
 `fts_map` rows are never deleted (stable rowids); only `event_fts` rows come and go. All derived tables are disposable: `rebuild_derived()` recomputes them from `annotation_events` + `event_targets` alone and MUST equal incremental maintenance (I7).
 
 ---
@@ -545,6 +580,8 @@ Dangling references after a merge (a revision whose ancestor's sidecar sits on a
 
 `MergeReport`: `{ inserted, duplicates, scrubbed_on_arrival, newly_scrubbed, quarantined: Vec<(offset, reason)>, integrity_warnings: Vec<EventId> }`.
 
+**Batching discipline for rebuild and large merges (normative):** sort the incoming union **ascending by event id before insert** — monotonic ULIDs then append at the B-tree's right edge instead of rebalancing it; commit in transactions of **~10k events**; populate `event_fts` and the derived tables in a **single pass after the union completes** (step 4 above), never interleaved per-event; finish with `ANALYZE`, `INSERT INTO event_fts(event_fts) VALUES('optimize')`, and `PRAGMA wal_checkpoint(TRUNCATE)` (§5.1, §5.4). The result is identical either way (I6); the discipline is purely about not turning a 50k-sidecar rebuild into a B-tree-rebalancing exercise.
+
 ---
 
 ## 9. Sessions (storage)
@@ -566,7 +603,7 @@ Sessions referenced by exported events are included in the export manifest (SIDE
 Signatures are the contract; no update/delete API exists.
 
 ```rust
-pub struct EventStore { /* owns the SQLite connection pool */ }
+pub struct EventStore { /* one dedicated writer connection + small read pool (§5.1) */ }
 
 /// Id + timestamp fixed at capture onset; insertion may happen later (§1.2).
 pub struct Minted { pub id: EventId, pub ts: UtcMillis }
@@ -631,6 +668,16 @@ impl EventStore {
 }
 ```
 
+### 10.1 Folded-read query plan (normative)
+
+`folded_journal(image)` and `events_for_image(image)` execute **at most three batched queries**:
+
+1. **Covering range scan** on `idx_targets_image(image_hash, event_id)` → the event ids targeting the image.
+2. **One batched** `SELECT … FROM annotation_events WHERE id IN (…)` for those ids.
+3. **Meta-closure:** `SELECT … FROM annotation_events WHERE target_event IN (…)` — revisions, retractions, redactions of the fetched set — iterated to fixpoint (each round is one batched query; chains are shallow, so one round is the norm), answered from `idx_events_target(target_event, kind)`.
+
+Per-event `retracted()`/`chain()` queries are **FORBIDDEN** — N+1 probes are the only mechanism that makes the 5k-event worst case slow; the batched plan keeps it at single-digit milliseconds. The fold itself (§6) runs in application memory over the fetched set.
+
 ---
 
 ## 11. Integrity invariants (testable; extends the M1 plan's list)
@@ -652,6 +699,7 @@ Each is a test in `photoproof-core/tests`. I1–I5 restate the M1 plan's list wi
 - **I13 Order discipline.** Journal order = ascending ULID; events with regressed `ts` (clock skew) reorder nothing; no code path sorts by `ts`.
 - **I14 Monotonic mint.** Ids minted by one process strictly increase, including across a simulated wall-clock regression.
 - **I15 Scrubbed shape.** A scrubbed event retains id/v/session/ts/source/kind/targets/target_event/linked_event; its canonical JSON omits `text`/`payload` and carries `redacted_by`.
+- **I16 Fold reads are batched.** `folded_journal`/`events_for_image` issue at most 3 batched queries per §10.1 (a query-count assertion in tests fails on any per-event `retracted()`/`chain()` probe), and the 5k-event worst-case fold stays under 10 ms on the reference machine.
 
 ---
 
