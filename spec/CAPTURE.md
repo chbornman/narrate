@@ -208,26 +208,50 @@ mandatory; the rendering is UI's.
 ### 6.1 Mic toggle semantics
 
 The mic control is a **toggle: arm / disarm** — not push-to-talk. Armed =
-continuously listening; the ASR's VAD decides what is speech. Push-to-talk is
+continuously listening; in-process silero-vad (§6.2) decides what counts as
+speech and supplies onset; the ASR's endpointing decides where utterances
+end. Push-to-talk is
 a recorded **future settings option** (same pipeline, app-gated audio feed).
 
 ### 6.2 Audio capture chain and Transcriber requirements
 
 - **Capture is Rust-side via `cpal`** in photoproof-core — not webview/Tauri
   audio: no IPC hop, sample-accurate stream anchoring, audio never in the JS
-  heap. Capture opens the default input device, downmixes to mono, resamples
-  to **16 kHz f32**, pushes to the Transcriber.
+  heap. Capture opens the device's **default input config** and
+  downmixes/resamples **in-app** to 16 kHz mono f32 — it MUST NOT request
+  16 kHz from the device; hosts refuse or misbehave when asked for
+  non-native rates ([cpal #593](https://github.com/RustAudio/cpal/issues/593)).
+- **silero-vad runs in-process on the cpal stream** (the sanctioned `ort`
+  capture-path exception, RUNTIME §3.3; ~1 MB, ~2 ms/chunk). It supplies:
+  `SpeechStart` with the **authoritative onset timestamp** for scope binding
+  (§5); **silence gating** — audio is not shipped to the ASR during silence;
+  and the "speaking" indicator affordance (§11). The ASR keeps
+  endpointing/segmentation authority (§6.3).
+- **Stream failure handling**: a `cpal` error callback, or a silence
+  watchdog tripping (device delivering no frames while armed), transitions
+  to `Disarmed(error)` with the quiet indicator state; **re-arming rebuilds
+  the stream from scratch**. Default-device changes are NOT followed
+  automatically — a cpal stream does not migrate; re-arming re-resolves the
+  device.
+- **Settings → Microphone advisory** (UI renders the surface): when a
+  Bluetooth-HFP input is selected, show the one-line advisory "Bluetooth
+  headset mics reduce transcription quality" — engaging an AirPods-class mic
+  collapses the link to narrow-band SCO
+  ([Apple Communities](https://discussions.apple.com/thread/251360777)).
 - Required `Transcriber` stream interface (RUNTIME implements):
-  - `push_audio(frames)` — 16 kHz mono f32.
+  - `push_audio(frames)` — 16 kHz mono f32, speech-gated (silence withheld).
   - Emits per utterance, in order:
-    - `SpeechStart { t_start_ms }` — VAD onset; detection latency ≤ **300 ms**
+    - `SpeechStart { t_start_ms }` — emitted by the **capture-side
+      silero-vad** (above), not the ASR; detection latency ≤ **300 ms**
       after true onset; `t_start_ms` is the *estimated onset*, not detection
-      time.
+      time. Authoritative for binding (§5).
     - `Partial { segment_id, text, t_start_ms, t_now_ms }` — zero or more;
       `segment_id` stable from first partial through final.
-    - `Final { segment_id, text, t_start_ms, t_end_ms, confidence }` — exactly
-      one per segment; `t_start_ms` authoritative (Nemotron streaming provides
-      segment timing); `confidence` ∈ [0,1].
+    - `Final { segment_id, text, t_start_ms, t_end_ms, confidence? }` —
+      exactly one per segment; `t_start_ms` is the ASR token timestamp,
+      **cross-check only** (§5.1) and possibly absent for the Nemotron
+      export; `confidence` optional — exp(mean token log-prob),
+      uncalibrated (RUNTIME §4).
   - `end_stream()` — flush; trailing `Final`s may follow, then `Closed`.
     `Error { fatal }` — fatal = ASR process gone (§6.6). All times are
     stream-clock ms offsets (§1); the Transcriber MUST NOT re-emit or renumber
@@ -235,8 +259,12 @@ a recorded **future settings option** (same pipeline, app-gated audio feed).
 
 ### 6.3 Segmentation ownership
 
-**The ASR's endpointing is authoritative.** Capture performs no VAD, silence
-detection, or re-segmentation. One ASR final segment = one utterance.
+**The ASR's endpointing is authoritative for utterance ends.** silero-vad
+(§6.2) owns speech *onset* and silence gating; capture performs no
+re-segmentation beyond that gate, and VAD-only endpointing is rejected — it
+measurably hurts accuracy versus model endpointing
+([NVIDIA Riva notes](https://docs.nvidia.com/nim/riva/asr/1.8.0/release-notes.html)).
+One ASR final segment = one utterance.
 
 ### 6.4 Mic state machine
 
@@ -252,13 +280,16 @@ detection, or re-segmentation. One ASR final segment = one utterance.
    │        fatal ASR error (§6.6)     (≥1 utterance in flight)
 ```
 
-`Arming`: open cpal stream, confirm ASR readiness with RUNTIME (which may
-spawn/wake the ASR child), anchor the stream clock; failure →
-`Disarmed(error)`, quiet notification. `Armed·Speaking` holds while any
-utterance is in flight (a new `SpeechStart` may arrive while a prior segment
-finalizes). Disarm: stop pushing audio, `end_stream()`, accept trailing
-`Final`s up to **5 s** (they mint events normally — their onsets predate the
-disarm), then drop the stream and zero the audio ring buffer (§7).
+`Arming`: open the cpal stream (default device config, §6.2), confirm ASR
+readiness with RUNTIME (which may spawn/wake the ASR child), anchor the
+stream clock; failure → `Disarmed(error)`, quiet notification.
+`Armed·Speaking` holds while any utterance is in flight (a new `SpeechStart`
+may arrive while a prior segment finalizes). Disarm: stop pushing audio,
+`end_stream()`, accept trailing `Final`s up to **5 s** (they mint events
+normally — their onsets predate the disarm), then **close the cpal stream
+entirely** — never paused-but-open — and zero the audio ring buffer (§7).
+Closing (not pausing) is normative: the OS microphone indicator (the macOS
+orange dot) must always agree with the app's armed state.
 
 ### 6.5 Utterance lifecycle
 
@@ -288,7 +319,10 @@ disarm), then drop the stream and zero the audio ring buffer (§7).
   ```
 
   The VAD span (wall clock) is durable and sidecar-visible — stroke linking
-  (§9) requires it.
+  (§9) requires it. `confidence` is exp(mean token log-prob), **uncalibrated
+  and optional** — the field is omitted when the model exposes no token
+  log-probs (RUNTIME §4), and values are never compared across model
+  versions.
 - **No merging in v1.** Consecutive finals are NOT merged, regardless of gap
   or scope equality. One final = one event: simpler, preserves per-segment
   confidence/spans, and reversible later (merging can become a fold/display
@@ -315,8 +349,8 @@ this state permanently: the mic control exists but arming fails quietly.
   window for immediate ASR retry; "discard" = overwrite eligibility, not a
   deletion job). On disarm, quit, or fatal ASR error the whole buffer is
   zeroed immediately.
-- Per-segment **ASR confidence is stored on the event** (§6.5) — the only
-  durable residue of the audio.
+- Per-segment **ASR confidence is stored on the event when available**
+  (§6.5; uncalibrated, optional) — the only durable residue of the audio.
 - **Future setting (recorded, not designed): audio retention opt-in.** Would
   require: per-event clips keyed by event id in app data (never beside
   images), a retention-duration setting, redaction extended to delete clips
@@ -385,7 +419,13 @@ EVENTS §3.3** (canonical JSON is integer-only — no floats). Shape:
 ### 8.3 Input, sampling, smoothing
 
 Pointer events — mouse, pen (pressure where the platform provides it), touch —
-share one path; use coalesced/high-frequency samples where available. **Raw
+share one path; use coalesced/high-frequency samples where available —
+**feature-detect `getCoalescedEvents`** (absent in WKWebView before macOS
+15.2 — [caniuse](https://caniuse.com/mdn-api_pointerevent_getcoalescedevents))
+and the dedupe + Catmull-Rom pipeline below MUST produce acceptable strokes
+from plain `pointermove` cadence alone. Pressure availability is
+platform-dependent (UI §4.4): the `p = 1000` no-pressure rule (§8.2) is the
+**normal case on macOS**, not the exception. **Raw
 points are stored unsmoothed**; capture-side reduction is limited to dropping
 consecutive samples closer than **0.5 screen px** (jitter dedupe, lossless at
 display resolution). Smoothing is **render-only**: centripetal Catmull-Rom
@@ -563,9 +603,13 @@ simply lands in the journal, which is itself honest marginalia.
    T+2000 ms; segment 2 onset T+1100 ms, finalizes T+3000 ms. Segment 1
    targets A, segment 2 targets B — regardless of finalization times. A
    selection change 50 ms before an onset binds the new scope (no grace).
+   Against real audio, the runtime spike (RUNTIME §12.2) measures realized
+   VAD-onset error (silero detection latency + clock conversion) and it MUST
+   fall within the §1 **250 ms combined budget**.
 2. **No audio on disk.** A full armed session (speech, finals, disarm, quit)
    leaves zero audio bytes in app data, library tree, SQLite, sidecars, or
-   temp dirs (filesystem snapshot diff + format scan).
+   temp dirs (filesystem snapshot diff + format scan). On disarm the cpal
+   stream is closed, not paused: the OS mic-in-use indicator clears (§6.4).
 3. **Stroke round-trip fidelity.** Draw one stroke at 100 % zoom, one at
    400 % panned to a corner; persist; restart; re-render at unrelated zoom/pan
    states. Every rendered point lies within 1 source-image pixel of the

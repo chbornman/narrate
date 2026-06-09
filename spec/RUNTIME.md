@@ -161,8 +161,10 @@ pub enum SegmentKind {
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
-    /// 16-bit signed PCM, mono, at `Transcriber::sample_rate()`.
-    pub pcm: Vec<i16>,
+    /// f32 samples, mono, at `Transcriber::sample_rate()` — matches both
+    /// CAPTURE's resampled feed and the P2 float32 wire format (§3.2);
+    /// no i16 round-trip anywhere in the path.
+    pub samples: Vec<f32>,
     pub captured_at: StreamMs,
 }
 
@@ -501,6 +503,7 @@ Deliverables, each with a measured number:
 7. **License gate**: zero bytes of an `acceptance_required` model are downloaded before the recorded acceptance exists.
 8. **Arbitration, worst case**: with the mic armed, no background LLM/embedding work starts (observable in the debug panel). An interactive parse issued **mid-prompt-processing of a caption** — the non-preemptible window (§9), not the friendly mid-generation case — still completes within the §12.4 interactive budget; the test MUST time this case explicitly.
 9. **GC safety**: trigger a manifest bump with a reindex pending → old embedder weights survive until RETRIEVAL reports the reindex complete; no active pass ever loses its model files.
+10. **Busy is not Lost**: a `/health` probe that times out while a long completion is in flight causes **no restart** (the supervisor reports Busy, visible in the debug panel); the same timeout with nothing in flight does restart. Child exit is detected via `waitpid`, not via health polling.
 
 ## 14. Open items (tracked, not blocking)
 

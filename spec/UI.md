@@ -104,6 +104,7 @@ Explicitly absent: appearance/theme, keyboard remapping, per-folder options, cac
 ### 3.3 Virtualization & performance
 
 - The grid is windowed/virtualized: only visible rows (+1 screen of overscan) are mounted. Thumbnails load from the preview cache (display-oriented sRGB, per LIBRARY) into a neutral placeholder; no layout shift on load.
+- **Thumbnail delivery (normative):** thumbnails and Look images are served over a Tauri **custom URI scheme** (async `register_uri_scheme_protocol`) reading from the preview cache, with HTTP cache headers so the webview's own cache does the rest. Image bytes **never** cross `invoke`/IPC and are never base64-encoded — maintainer guidance is unambiguous that protocol serving beats IPC for assets ([tauri discussions #7145](https://github.com/orgs/tauri-apps/discussions/7145), [#5690](https://github.com/orgs/tauri-apps/discussions/5690)). The virtualizer **recycles `img` elements**; no blob/object URLs for thumbnails.
 - **Budget: 60 fps sustained scroll on a 20k-item folder** on the hardware-floor machine. Thumbnail decode happens off the main thread; scrolling never blocks on IO.
 - During live ingest the grid populates incrementally (new items appear in sort position) without breaking scroll position or 60 fps.
 
@@ -131,6 +132,7 @@ Explicitly forbidden on thumbnails: rating stars, color labels, label chips, fil
 ### 3.7 Grid acceptance criteria
 
 - [ ] 20k-item folder scrolls at 60 fps end-to-end on floor hardware.
+- [ ] Webview process memory stays below **800 MB** after scrolling a 20k-item grid end-to-end **twice** — guards the WebView2 asset memory-release class of bug ([tauri #2952](https://github.com/tauri-apps/tauri/issues/2952)).
 - [ ] Rail is absent from layout until summoned; summoning/hiding never reflows the grid (overlay, not push).
 - [ ] Rating keys 0–5 with a selection commit events with **no visual change to any thumbnail** — indicator pulse only.
 - [ ] A thumbnail shows at most the two permitted badges; nothing else.
@@ -178,6 +180,7 @@ CAPTURE owns stroke semantics (one pen-down→pen-up = one event, normalized dis
 - **Activation:** `B` toggles pencil mode (sticky toggle, not hold-key — photographers draw multiple strokes per thought; a held key cramps the drawing hand). Pencil mode persists across prev/next within Look and resets to off when returning to Grid.
 - **Cursor:** in pencil mode the cursor is a small red dot (the pencil tip); otherwise the platform default/grab cursor. The dot is the entire mode announcement — **no toolbar, no palette, no tool options appear.** One red pencil is the whole tool set in v1 (CAPTURE / SPEC-GAPS B5). The pencil is a mode, not a palette.
 - **Eraser:** hold `E` (or use the stylus eraser end) while in pencil mode; cursor becomes a small hollow circle; clicking/tapping a stroke retracts that whole stroke event (tombstone, per EVENTS). No partial-stroke erase. Pre-commit undo (`Cmd/Ctrl+Z` during the same pen-down) is local and never logged.
+- **Pressure is progressive enhancement, not a baseline.** Expected on Windows pen hardware, where WebView2 receives pressure via Windows Ink (support-doc item: the Wacom driver's "Use Windows Ink" toggle must be on — [Wacom support](https://support.wacom.com/hc/en-us/articles/1500006343962-Why-is-my-pen-pressure-not-working)). **Not expected in WKWebView on macOS** — macOS tablets post mouse events with tablet subtype data ([Wacom dev docs](https://developer-docs.wacom.com/docs/icbt/macos/ns-events/ns-events-basics/)) and there is no positive evidence pressure reaches the webview; strokes render at constant `base_w` there (CAPTURE §8.2's no-pressure rule is the macOS norm). Recorded future option: a native NSEvent tablet-pressure passthrough **plugin** feeding the overlay — a plugin, not a webview fix.
 - **Overlay toggle:** `O` toggles the tracing-paper overlay (all strokes shown/hidden). Toggling the overlay off while in pencil mode also exits pencil mode (you cannot draw on paper you cannot see). Overlay state persists per app-run; defaults to on.
 - Stroke commit (pen-up) pulses the indicator. Nothing else happens visibly — the stroke simply remains on the tracing paper.
 
@@ -265,12 +268,13 @@ The single ambient capture-feedback element. Bottom-right corner, all surfaces, 
 
 - Mic glyph absent until ASR is ready (RUNTIME); it appears silently.
 - Disarmed: dimmed glyph. Armed: solid glyph with a faint slow breathing animation while VAD detects speech.
+- **Armed hover popover** carries the one-line privacy claim: "Listening — audio is transcribed on this device and never written to disk." Nothing more. Note the macOS interplay: the system orange mic dot burns for the **entire armed session** ([Apple](https://support.apple.com/en-us/118449)); the app's armed state must always agree with it — CAPTURE closes (never pauses) the audio stream on disarm, so glyph and dot cannot disagree.
 - **Streaming-utterance scope:** while an utterance that started under a *previous* scope is still streaming, the indicator shows that bound scope with a tether, e.g. `● 1 ⇠ 🎙` — "the words in flight belong to that earlier snapshot," even though the user has clicked onward. It reverts to the live scope when the segment finalizes. This renders CAPTURE's utterance-start binding rule; the indicator never re-binds anything itself.
 - **ASR degraded/down:** the glyph swaps to a muted-mic glyph (struck through), dimmed. Hover popover explains in one line ("Voice capture unavailable — typed notes and pencil still work."). **Never a modal, never a toast, never a banner.**
 
 ### 7.4 Pulse
 
-A single ~300 ms brightness pulse of the scope dot on each committed event: typed note, finalized utterance, stroke commit, rating, revision/retraction/redaction, and sidecar/metadata writes where they carry their own commit signal. Pulses queue visually (rapid events = rapid distinct pulses, coalesced above ~5/s). **Budget: input action → pulse < 50 ms** for locally-originated events.
+A single ~300 ms brightness pulse of the scope dot on each committed event: typed note, finalized utterance, stroke commit, rating, revision/retraction/redaction, and sidecar/metadata writes where they carry their own commit signal. Pulses queue visually (rapid events = rapid distinct pulses, coalesced above ~5/s). Coalescing applies on the wire too: the pulse stream must stay low-rate and payload-light — high-frequency Tauri event emission has a documented leak history ([tauri #852](https://github.com/tauri-apps/tauri/issues/852)). **Budget: input action → pulse < 50 ms** for locally-originated events.
 
 ### 7.5 Ingest line & toasts
 

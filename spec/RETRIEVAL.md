@@ -225,6 +225,16 @@ Per text-bearing event, over the **folded** text:
   exact matched span (§6).
 - A revision re-folds the text → all chunks invalidated and re-embedded;
   offsets always refer to the *current* folded text.
+- **Tiny-chunk context prefix (normative):** chunks under ~2 sentences are
+  embedded with a deterministic metadata prefix prepended **at embed time
+  only** — capture/annotation date, folder name, and active project name if
+  any (e.g. `[2026-01-14 · 2026/iceland · Quiet Hours] `). One-sentence texts
+  benefit measurably from added context at embed time
+  ([One Word Is Not Enough](https://arxiv.org/html/2512.06744)). The prefix
+  never enters FTS, the stored folded text, or provenance: quotes still come
+  from the **bare** folded text via `char_start`/`char_end`. The prefix scheme
+  version enters `inputs_hash` (§1.2). The prefix MUST be deterministic — no
+  generated text — so rebuild byte-equality (§13.8) is preserved.
 
 ## 3. What is embedded, by pass
 
@@ -245,6 +255,23 @@ signal). The **CLIP embedder** (OpenCLIP ViT-H-14/DFN5B-class preset) produces
 with its text tower for S4 visual matching. Each space records its own
 `model_id` as always.
 
+**Instruction prefixes (normative).** The text embedder
+(Qwen3-Embedding-class) is instruction-aware and the two sides are
+asymmetric: **documents are embedded bare** (no prefix beyond §2's tiny-chunk
+rule — the Qwen3 convention), **queries are embedded with the instruct
+template**, literally:
+
+```
+Instruct: Given a photographer's search, retrieve their journal notes about matching images
+Query: {q}
+```
+
+Skipping the query instruction costs **1–5%** retrieval quality per the model
+card ([Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)).
+The prefix template version is an `inputs_hash` input (§1.2), so a template
+change invalidates and re-embeds rather than silently mixing recipes. (CLIP
+queries take the bare text — no instruct template on the CLIP text tower.)
+
 ## 4. M1 search — FTS5 + structured filters (ships first; specified fully)
 
 M1 search is the v1 product: no models, no vectors, no parse LLM.
@@ -252,7 +279,10 @@ M1 search is the v1 product: no models, no vectors, no parse LLM.
 **Input:** a query string plus zero or more UI filter chips (date range,
 camera, lens, folder/root, rating, has-strokes, source, online/offline).
 Chips construct `Filter` values (§5.1) directly — the same AST the M3 parser
-emits, so M1 filter execution *is* the M3 code path.
+emits, so M1 filter execution *is* the M3 code path. The has-strokes chip
+(`Filter::HasStrokes`) compiles to an indexed WHERE on
+`image_journal_stats.has_strokes` (EVENTS §5.3) — never a stroke-event fold
+at query time; the rating chip likewise reads `image_ratings`.
 
 **Query construction:** split on whitespace; drop empty tokens; escape each
 token by doubling internal `"`; all tokens but the last become quoted exact
@@ -266,17 +296,39 @@ input:  fog barn        → MATCH '"fog" "barn"*'
 Implicit AND (FTS5 default). No user-facing boolean syntax in v1; `OR`,
 `NEAR`, `-` are treated as plain tokens (quoting neutralizes them).
 
-**Execution (one SQL statement, target <100 ms end to end):**
+**Execution (one SQL statement, materialize-first, target <100 ms end to end):**
 
 ```sql
-SELECT e.event_id, e.image_hash_set, bm25(events_fts) AS s,
-       snippet(events_fts, 0, '⟦', '⟧', '…', 12) AS snip
-FROM events_fts
-JOIN annotation_events e ON e.id = events_fts.event_id
-WHERE events_fts MATCH :q
-  AND <filter WHERE clauses, joined through event_targets / images / paths>
-ORDER BY s LIMIT 500;
+WITH hits AS MATERIALIZED (
+  SELECT f.rowid AS fts_rowid,
+         bm25(event_fts) AS s,
+         snippet(event_fts, 0, '⟦', '⟧', '…', 12) AS snip
+  FROM event_fts f
+  WHERE event_fts MATCH :q
+  ORDER BY s
+  LIMIT 500
+)
+SELECT m.root_event_id, t.image_hash, h.s, h.snip
+FROM hits h
+JOIN fts_map m       ON m.fts_rowid = h.fts_rowid
+JOIN event_targets t ON t.event_id  = m.root_event_id
+WHERE <filter WHERE clauses, joined through event_targets / images / paths>;
 ```
+
+The shape is normative, not stylistic:
+
+- The MATERIALIZED CTE resolves the MATCH **before** any join — joining an
+  FTS5 virtual table directly has a documented planner failure mode of
+  170 s → 0.26 s (**650×**) depending on join order
+  ([sqlite.org forum](https://sqlite.org/forum/info/509bdbe534f58f20)).
+- `snippet()` is evaluated only over the LIMITed hit set, never per candidate
+  row pre-LIMIT ([sql.js-httpvfs #10](https://github.com/phiresky/sql.js-httpvfs/issues/10)).
+- It matches EVENTS' schema: `event_fts(body)` keyed through
+  `fts_map(root_event_id, fts_rowid)` — there is no `event_id` column on the
+  FTS table to join on.
+- The outer joins still depend on fresh statistics: `ANALYZE` after rebuild
+  and large merges (EVENTS §5.1) is a correctness-of-performance dependency
+  of this statement.
 
 Filters are **hard constraints** (WHERE), never ranking inputs. Image-scoped
 filters (camera, date-captured, rating, folder) apply to the images joined
@@ -422,7 +474,7 @@ filter; they never rank.
 | # | Signal | Source | Ranked list of |
 |---|---|---|---|
 | S1 | `annotation_chunk` vectors — **primary** | embed(`semantic`) vs. `annotation_chunk` space, k=200 chunks | images (via event_targets), best chunk per image |
-| S2 | FTS5 `events_fts` | `keywords` via §4 query construction, limit 500 | images, best bm25 per image |
+| S2 | FTS5 `event_fts` | `keywords` via §4 query construction, limit 500 | images, best bm25 per image |
 | S3 | `summaries_fts` + `image_summary` vectors | same query texts vs. summary indexes | images |
 | S4 | `image_clip` vectors | embed(`semantic`) vs. `image_clip` space, k=200 | images |
 
@@ -454,8 +506,8 @@ promise is "your best matching words come back": a max, not an integral.
 ```
 score(img) = Σ over signals s where img appears:   w_s / (k + rank_s(img))
 k = 60
-w: S1 events_fts-vec (annotation_chunk) = 1.0
-   S2 events_fts (FTS5)                 = 1.0
+w: S1 annotation_chunk vectors          = 1.0
+   S2 event_fts (FTS5)                  = 1.0
    S3 summaries  (both sub-lists)       = 0.5
    S4 image_clip                        = 0.5  (when active, §5.2)
 ```
@@ -464,11 +516,34 @@ w: S1 events_fts-vec (annotation_chunk) = 1.0
 summaries) each contribute at w=0.5 — summaries are derived prose and must
 never outvote the photographer's actual words.
 
-**Tie-breaking:** equal fused scores order by recency of last non-retracted
-annotation event (`max(ts)` per image), most recent first; then by
-`image_hash` for determinism.
+**Tie-breaking:** equal fused scores order by `image_journal_stats.last_ts`
+(EVENTS §5.3 — the materialized recency of the image's last live annotation
+event; an indexed read, never a `max(ts)` fold at query time), most recent
+first; then by `image_hash` for determinism.
 
 Top 100 fused images proceed to results.
+
+**Optional stage 3b — cross-encoder reranking (M3+, default OFF).** Behind a
+config flag, a `Reranker` may reorder the head of the fused list:
+
+```rust
+pub trait Reranker {
+    /// Reorders `candidates` by query relevance; returns the new order.
+    fn rerank(&self, query: &str, candidates: &[CandidateText]) -> Result<Vec<usize>>;
+}
+```
+
+- **Candidates:** the top **20–30** fused-union images' best-evidence texts
+  (the §5.4 best-quote spans — 1–3 sentences each, far cheaper than benchmark
+  passages).
+- **Target models:** Qwen3-Reranker-0.6B or bge-reranker-v2-m3, ONNX int8 on
+  CPU (≈ 130–400 ms for a batch this size).
+- **Expected gain:** +5–15 nDCG@10, typical for a cross-encoder over a hybrid
+  pipeline.
+- **Activation gate:** stays OFF until the §12 eval demonstrates a measurable
+  gap on the golden set **and** the reranked path stays inside the 1–2 s
+  result budget. The fused order is the fallback whenever the reranker is
+  off, unavailable, or over budget — search never blocks on it.
 
 ### 5.4 Stage 4 — result contract (normative; UI renders this, never raw rows)
 
@@ -566,7 +641,7 @@ WHERE on every join). S4 inactive (`visual=false`, S1∪S2 ≥ 10). Suppose:
 - S1 (annotation_chunk): img **A** (chunk of event `01HV…Q3`, span
   "something quieter in these three… almost mournful, could anchor the slow
   series"), img **B**, img **C** — ranks 1, 2, 3.
-- S2 (events_fts on `"quieter," "melancholic" "series" …` — yields events
+- S2 (event_fts on `"quieter," "melancholic" "series" …` — yields events
   containing "quieter"/"series"): img **B** rank 1, img **A** rank 2.
 - S3 (summaries): img **A** rank 1, img **C** rank 2.
 
@@ -591,7 +666,7 @@ three per-signal ranks, the fused 0.043997, and the dropped project clause.
 ### 7.2 M1: typing `fog ba` with filter chip `rating ≥ 3`
 
 - Keystroke "…ba" lands; 100 ms debounce elapses; prior query interrupted.
-- Query construction: `MATCH '"fog" "ba"*'` (prefix index `prefix='2 3 4'`
+- Query construction: `MATCH '"fog" "ba"*'` (prefix index `prefix='2 3'`
   serves the 2-char prefix).
 - SQL: §4 statement + `WHERE folded_rating >= 3` joined through
   `event_targets` → `images`.
@@ -633,6 +708,15 @@ else the §2 heuristic. The assembler emits a structured `AssembledContext`
 (layer-tagged blocks) so callers can place layers in their own prompts; it
 never formats final prompts itself. Retracted/redacted content is invisible to
 the assembler by construction (it reads folded state only).
+
+**Lost-in-the-middle ordering (normative for callers):** models attend best
+to the beginning and end of a long context and worst to its middle — the
+effect persists in current long-context models
+([Liu et al.](https://arxiv.org/abs/2307.03172)). Callers therefore place
+retrieval blocks in relevance order with the **strongest evidence at the
+start AND end** of the assembled context and the weakest in the middle. The
+assembler hands back blocks in fused relevance order; the start/end placement
+is the caller's obligation, stated here because every caller shares it.
 
 ## 9. Derived views — retrieval fuel ONLY (E4)
 
@@ -760,7 +844,7 @@ queryable ("was in the series last winter, dropped in spring") — required for
 M4 temporal questions. `project_notes` rows are never edited or deleted.
 
 **Project notes are not FTS-indexed in v1** — they are not image events
-(`events_fts` would be a category error) and not derived prose
+(`event_fts` would be a category error) and not derived prose
 (`summaries_fts` would launder user truth through the fuel tier). They reach
 the model through context assembly (layer 4) and reach search through
 project-filter resolution; v1 does not full-text-rank projects as results.
@@ -831,16 +915,41 @@ appdata/projects.photoproof.json
   derived row (§9) make this a lazy regeneration, not a migration: rows with
   stale `model_id` are regenerated by the background pass in
   recently-annotated-first order; old rows serve until replaced.
-- **FTS rebuild command** (CLI + dev menu): wipe both FTS tables, re-fold
-  every indexable event and live summary, reinsert. For external-content FTS
-  tables `INSERT INTO events_fts(events_fts) VALUES('rebuild')` is the fast
-  path (EVENTS.md owns which construction is used). Required after any change
-  to fold rules or tokenizer config (a tokenizer change is a schema version
-  bump).
+- **FTS rebuild command** (CLI + dev menu): wipe both FTS tables; re-fold
+  every live remark chain root and live summary; **bulk reinsert** (event
+  rows keyed by their existing `fts_map` rowids); finish with
+  `INSERT INTO event_fts(event_fts) VALUES('optimize')` (and the equivalent
+  for `summaries_fts`). There is no external-content `'rebuild'` fast path —
+  `event_fts` is plain content-ful (EVENTS §5.4), and the folded text it
+  indexes exists nowhere as a column to rebuild from. Required after any
+  change to fold rules or tokenizer config (a tokenizer change is a schema
+  version bump).
 - Rebuild-from-sidecars (M1 integrity test) implies: sidecars + previews can
   reconstruct *every* table in this spec. Nothing here is truth.
 
-## 12. Acceptance criteria
+## 12. Retrieval evaluation — the gate for every ranking knob
+
+A **golden query set of ~50–100 query → expected-images pairs**, accumulated
+from dogfooding (real queries against a real library, expected result sets
+hand-marked), kept as repo fixtures. The harness runs the §5 pipeline and
+reports **recall@20** and **nDCG@10** — per signal (S1–S4 individually) and
+for the fused order.
+
+This eval is the named gate for:
+
+- **RRF weight tuning** — the §5.3 weights are defaults, not findings;
+- **the S4 activation threshold** — §5.2's `< 10 images` constant;
+- **a possible convex-combination fusion upgrade** — a tuned convex
+  combination of normalized scores beats RRF given even a handful of labeled
+  queries ([Bruch et al.](https://arxiv.org/abs/2210.11934)); revisit once
+  the golden set exists;
+- **the reranker go/no-go** (§5.3 stage 3b);
+- **the 512-vs-1024 MRL truncation decision** (§1.3, runtime spike).
+
+Once the harness exists, no ranking-affecting change ships without
+before/after numbers on it.
+
+## 13. Acceptance criteria
 
 1. **M1 latency:** search-as-you-type p95 < 100 ms (keystroke post-debounce →
    result rows) on the reference 50k-image / journal-bearing library; grid
@@ -878,3 +987,15 @@ appdata/projects.photoproof.json
 10. **Fuel-only invariant:** no release-build UI surface renders
     `derived_summaries.text` or `sentiment_scores.score` (compile-time: the
     Tauri command layer exposes no API returning them outside dev builds).
+11. **M1 query plan:** the §4 statement's `EXPLAIN QUERY PLAN` shows the
+    MATERIALIZED hits CTE resolved before any join to `fts_map`/
+    `event_targets`, and `snippet()` is evaluated for at most the LIMITed hit
+    set (plan-shape test, guarding the 650× FTS-join planner failure).
+12. **PPVEC v2 round-trip:** an int8/MRL-512 space written, closed, reopened,
+    and scanned returns top-k identical (within quantization tolerance) to
+    the transient-f32 reference path; the header round-trips
+    dtype/dims/scale/offset exactly; redaction zeroes the stored int8 row
+    bytes (byte-scan test, mirroring EVENTS I8).
+13. **Eval harness exists:** the §12 golden-set harness runs against fixture
+    data and reports recall@20 and nDCG@10 per signal and fused; the §5.3
+    reranker stays OFF unless those numbers justify it within budget.
