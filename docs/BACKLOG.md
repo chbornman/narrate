@@ -10,6 +10,15 @@ managing = off-thesis).
 
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
+- [ ] **Search entry as overlay, results as canvas** — `/` opens a floating
+  input over the DIMMED current surface (context stays visible; honest
+  "overlay" per I1); results expand to the full canvas as they arrive
+  (results stay a contact sheet — selection/write-scope/Look behavior
+  unchanged, UI §5 stands). (Founder, dogfood round 2.)
+- [ ] **Adopt Lucide icons** (`@lucide/svelte`) — replace ad-hoc glyphs
+  (🔍 from the spec mockup, sort ▾, ⏏, ×, chevron, titlebar buttons) with
+  a consistent stroke set, sized/toned via tokens. UI.md §5 mockup emoji is
+  illustrative, not normative. (Founder, dogfood round 2.)
 - [ ] **Roots changes propagate live across windows** — adding/removing a
   folder in Settings must appear in the main-window rail instantly:
   `add_root`/`remove_root` emit a `roots-changed` event (same pattern as
