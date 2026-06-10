@@ -10,6 +10,11 @@ managing = off-thesis).
 
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
+- [ ] **Roots changes propagate live across windows** — adding/removing a
+  folder in Settings must appear in the main-window rail instantly:
+  `add_root`/`remove_root` emit a `roots-changed` event (same pattern as
+  P4.2b's `settings-changed`); App listens → `refreshRoots()`. Same class
+  as the journal-staleness fix (`ecf6e26`). (Founder, dogfood round 2.)
 - [ ] **Add watched folder from the main window** — currently reachable via
   drag-a-folder-onto-the-window, Settings (Ctrl+,), and the first-run
   screen, but the rail itself has no [+] affordance; add a quiet "Add
