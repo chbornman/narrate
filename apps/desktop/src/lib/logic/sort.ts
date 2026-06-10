@@ -49,5 +49,5 @@ export function sortItems(items: GridItem[], mode: SortMode): GridItem[] {
 }
 
 /** Thumbnail size: 4 steps, ~96–320 px cells (§3.6). */
-export const THUMB_STEPS = [96, 160, 240, 320] as const;
+export const THUMB_STEPS = [96, 160, 240, 320, 420, 512] as const;
 export const DEFAULT_THUMB_STEP = 1;

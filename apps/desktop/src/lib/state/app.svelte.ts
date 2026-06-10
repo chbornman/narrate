@@ -166,6 +166,9 @@ export class Ui {
   }
 
   async openFolder(rootId: string, folder: string) {
+    // Opening a folder always lands on the Grid: navigating sources while in
+    // Look exits the single-image view (founder dogfood, round 1).
+    if (this.surface === "look") await this.leaveLook();
     this.grid.rootId = rootId;
     this.grid.folder = folder;
     this.grid.sort = prefs.loadSort(rootId, folder);
