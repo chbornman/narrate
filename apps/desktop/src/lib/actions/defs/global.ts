@@ -30,6 +30,8 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "g" }],
     scope: "global",
     group: "contract",
+    // The pointer path OUT of Look (dogfood round 1 reachability audit).
+    seats: ["look-backdrop"],
     available: always,
   },
   {
@@ -39,7 +41,9 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "Tab" }],
     scope: "global",
     group: "contract",
+    seats: ["gutter", "look-backdrop"],
     available: always,
+    checked: (ctx) => ctx.chromeHidden,
   },
   {
     id: "toggle-rail",
@@ -47,6 +51,8 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "\\" }],
     scope: "global",
     group: "panels",
+    // Pointer path: the titlebar rail button (Titlebar.svelte dispatches
+    // through resolveAction — same row, zero new verbs).
     available: always,
   },
   {
@@ -55,6 +61,7 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "?" }, { key: "F1" }],
     scope: "global",
     group: "contract",
+    seats: ["gutter", "look-backdrop"],
     available: always,
   },
   {
@@ -100,7 +107,9 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "a" }],
     scope: "global",
     group: "capture",
+    seats: ["gutter"],
     available: always,
+    checked: (ctx) => ctx.autoAdvance,
   },
   {
     id: "set-surround",
@@ -125,6 +134,7 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "F11" }],
     scope: "global",
     group: "system",
+    seats: ["gutter", "look-backdrop"],
     available: always,
     worksInInput: true,
   },
@@ -134,6 +144,7 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: ",", ctrlOrMeta: true }],
     scope: "global",
     group: "system",
+    seats: ["gutter", "look-backdrop"],
     available: always,
     worksInInput: true,
   },

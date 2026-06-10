@@ -67,8 +67,14 @@
       <hr />
     {:else}
       <button
-        role={row.kind === "radio" ? "menuitemradio" : "menuitem"}
-        aria-checked={row.kind === "radio" ? row.checked === true : undefined}
+        role={row.kind === "radio"
+          ? "menuitemradio"
+          : row.checked !== undefined
+            ? "menuitemcheckbox"
+            : "menuitem"}
+        aria-checked={row.kind === "radio" || row.checked !== undefined
+          ? row.checked === true
+          : undefined}
         class:focused={nav.focus === i}
         class:checked={row.checked === true}
         disabled={row.disabled === true}
@@ -80,7 +86,7 @@
           } else activate(row);
         }}
       >
-        {#if row.kind === "radio"}
+        {#if row.kind === "radio" || row.checked !== undefined}
           <span class="check">{row.checked === true ? "•" : ""}</span>
         {/if}
         <span class="verb">{row.verb}</span>

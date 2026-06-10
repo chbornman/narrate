@@ -61,6 +61,10 @@ export const listFolder = (rootId: string, folder: string) =>
 
 export const ingestStatus = () => invoke<IngestStatus>("ingest_status");
 export const settingsGet = () => invoke<AppSettings>("settings_get");
+/** Settings → "Stacked pairs show": persists and emits `settings-changed`
+ * to every window (the main grid re-pairs live). */
+export const setStackDisplay = (display: "jpeg" | "raw") =>
+  invoke<AppSettings>("set_stack_display", { display });
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 export const exportJournal = (dest: string) =>
   invoke<ExportReportDto>("export_journal", { dest });

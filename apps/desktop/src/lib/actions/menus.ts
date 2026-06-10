@@ -46,6 +46,7 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "open-look",
     "rate",
     "stack-toggle-active",
+    "flip-stack-member",
     "—",
     "open-inspector", // Metadata/Journal items (Stage C seats them)
     "—",
@@ -61,6 +62,15 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "set-thumb-step",
     { submenu: "Stacks", kinds: ["stack-collapse-all", "stack-expand-all"] },
     "set-surround",
+    "—",
+    // Dogfood round 1 reachability audit: every verb gets a pointer seat.
+    "cycle-cell-info",
+    "toggle-auto-advance",
+    "—",
+    "toggle-lights-out",
+    "toggle-fullscreen",
+    "toggle-cheatsheet",
+    "open-settings",
   ],
   "rail-folder": ["rail-folder-open", "rail-folder-reveal", "rescan-root"],
   "look-backdrop": [
@@ -68,7 +78,17 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "zoom-fit",
     "zoom-100",
     "—",
+    // Dogfood round 1 reachability audit (Look-side pointer seats).
+    "toggle-filmstrip",
+    "flip-stack-member",
+    "—",
     "set-surround",
+    "—",
+    "go-grid",
+    "toggle-lights-out",
+    "toggle-fullscreen",
+    "toggle-cheatsheet",
+    "open-settings",
   ],
   "look-toolbar": [], // reserved seat (M2a pencil toolbar)
 };
@@ -93,7 +113,15 @@ function rowForDef(def: ActionDef, ctx: ActionContext, arg?: unknown): MenuRow |
   }
   const action = actionFor(def, ctx, arg);
   if (action === undefined) return null;
-  return { kind: "item", verb: def.verb, keyHint: def.keys[0], disabled, action };
+  return {
+    kind: "item",
+    verb: def.verb,
+    keyHint: def.keys[0],
+    disabled,
+    action,
+    // Toggle rows render their ON state (predicate on the def, never here).
+    checked: def.checked?.(ctx),
+  };
 }
 
 function actionFor(

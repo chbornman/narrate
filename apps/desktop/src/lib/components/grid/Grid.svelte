@@ -18,12 +18,16 @@
   import * as sel from "../../logic/selection";
   import * as layout from "../../logic/gridlayout";
   import * as marquee from "../../logic/marquee";
+  import * as stacks from "../../logic/stacks";
   import { THUMB_STEPS } from "../../logic/sort";
   import Thumb from "./Thumb.svelte";
   import Marquee from "./Marquee.svelte";
 
   const GAP = 8;
   const PAD = 10;
+  /** Expanded pair members nudge toward each other (dogfood round 1: the
+   * gap tightens between linked members; columns stay snapped). */
+  const NUDGE = 2;
 
   let viewportEl: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
@@ -32,6 +36,10 @@
 
   const geom = $derived(layout.snap(vw, THUMB_STEPS[ui.grid.thumbStep], GAP, PAD));
   const units = $derived(ui.grid.units);
+  // EXPANDED pair members read as linked (featureset §5 dogfood round 1):
+  // adjacency math is pure (stacks.expandedLinks); rendering = an inward
+  // nudge + a shared underline bridging the remaining gap.
+  const links = $derived(stacks.expandedLinks(ui.grid.stackModel, geom.cols));
   const totalHeight = $derived(layout.totalHeight(geom, units.length));
   const range = $derived(layout.visibleRange(geom, scrollTop, vh, units.length));
   const poolSize = $derived(layout.poolSize(geom, vh));
@@ -228,7 +236,9 @@
     {#each slots as s (s.key)}
       {@const unit = units[s.idx]}
       {@const pos = layout.position(geom, s.idx)}
-      <div class="cell" style:transform="translate({pos.x}px, {pos.y}px)">
+      {@const link = links[s.idx] ?? { left: false, right: false }}
+      {@const dx = link.right ? NUDGE : link.left ? -NUDGE : 0}
+      <div class="cell" style:transform="translate({pos.x + dx}px, {pos.y}px)">
         <Thumb
           hash={unit.primary.hash}
           hasJournal={unit.primary.hasJournal}
@@ -245,6 +255,15 @@
           onstacktoggle={() => onChevron(s.idx)}
           oncontextmenu={(e) => onThumbContextMenu(s.idx, e)}
         />
+        {#if link.left || link.right}
+          <!-- the shared pair underline: the left member spans the gap, so
+               the line reads continuous across both cells (token color) -->
+          <div
+            class="stack-link"
+            style:top="{geom.cell + 2}px"
+            style:width="{geom.cell + (link.right ? GAP - 2 * NUDGE : 0)}px"
+          ></div>
+        {/if}
       </div>
     {/each}
     <Marquee rect={marqueeRect} />
@@ -267,5 +286,14 @@
     top: 0;
     left: 0;
     will-change: transform;
+  }
+  /* Expanded-pair link: a quiet shared underline in the row gap. */
+  .stack-link {
+    position: absolute;
+    left: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--text-faint);
+    pointer-events: none;
   }
 </style>

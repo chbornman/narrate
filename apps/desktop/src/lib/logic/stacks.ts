@@ -6,12 +6,15 @@
  *   · auto-pair by basename + folder (one JPEG + one RAW, case-insensitive)
  *   · live, reversible collapse per pair AND globally (overrides XOR the
  *     global state — import-time-only pairing is the recorded anti-pattern)
- *   · collapsed preview = JPEG (primary), RAW hidden as `alt`; an R flip
- *     swaps the displayed member
+ *   · collapsed preview = the PREFERRED member (Settings → "Stacked pairs
+ *     show", JPEG by default — dogfood round 1); the other member hides as
+ *     `alt`; an R flip swaps the displayed member (XOR the preference)
  *   · expandTargets(): a collapsed pair is ONE cell but TWO write-scope
  *     targets — display member first, then the hidden member (CAPTURE
  *     event_targets.position, DECISIONS 4; the indicator truthfully reads
  *     "● 2")
+ *   · expandedLinks(): which EXPANDED members sit next to their partner
+ *     (the grid draws them visually linked)
  */
 import type { GridItem } from "../types/dto";
 import type { DisplayUnit } from "../types/display";
@@ -53,12 +56,18 @@ export function isCollapsed(
   return overrides.has(key) ? !globalCollapsed : globalCollapsed;
 }
 
+/** Which member a collapsed pair displays by default (Settings →
+ * "Stacked pairs show": JPEG (default) | RAW — dogfood round 1). */
+export type StackDisplayMember = "jpeg" | "raw";
+
 export interface StackOptions {
   globalCollapsed: boolean;
   /** Pair keys deviating from the global state (live per-pair toggle). */
   overrides: ReadonlySet<string>;
-  /** Pair keys displaying the RAW member on top (R flip; collapsed only). */
+  /** Pair keys flipped to the NON-preferred member (R; collapsed only). */
   flips: ReadonlySet<string>;
+  /** The preferred display member; "jpeg" when absent. */
+  display?: StackDisplayMember;
 }
 
 export interface StackModel {
@@ -69,9 +78,10 @@ export interface StackModel {
 
 /**
  * Items (already sorted) → grid cells. A collapsed pair emits ONE unit at
- * the first-occurring member's position (JPEG on top unless flipped); an
- * expanded pair emits both members as individual units that still carry
- * their pair key (so the collapse control and menu row stay live).
+ * the first-occurring member's position (the preferred member on top
+ * unless flipped — R XORs the preference); an expanded pair emits both
+ * members as individual units that still carry their pair key (so the
+ * collapse control and menu row stay live).
  */
 export function buildUnits(items: GridItem[], opts: StackOptions): StackModel {
   // First pass: the JPEG+RAW pairs (first of each class per key wins;
@@ -114,12 +124,37 @@ export function buildUnits(items: GridItem[], opts: StackOptions): StackModel {
     emitted.add(key);
     const jpeg = items[jpegAt.get(key) as number];
     const raw = items[rawAt.get(key) as number];
-    units.push(
-      opts.flips.has(key) ? { primary: raw, alt: jpeg } : { primary: jpeg, alt: raw },
-    );
+    const rawOnTop = (opts.display === "raw") !== opts.flips.has(key);
+    units.push(rawOnTop ? { primary: raw, alt: jpeg } : { primary: jpeg, alt: raw });
     pairs.push(key);
   }
   return { units, pairs };
+}
+
+/** Per-unit adjacency for EXPANDED pair members (dogfood round 1: expanded
+ * members must read as visually linked in the grid). A link joins the two
+ * members of one pair when they occupy adjacent cells on the same row of a
+ * `cols`-wide grid; a row wrap (or a foreign cell between them, e.g. under
+ * capture-time sort) breaks it — the chevrons still mark membership. */
+export function expandedLinks(
+  model: StackModel,
+  cols: number,
+): { left: boolean; right: boolean }[] {
+  const { units, pairs } = model;
+  const expanded = (i: number) => pairs[i] !== null && units[i].alt === null;
+  return units.map((_, i) => {
+    if (!expanded(i)) return { left: false, right: false };
+    const sameRow = (a: number, b: number) =>
+      cols > 0 && Math.floor(a / cols) === Math.floor(b / cols);
+    const left =
+      i > 0 && pairs[i - 1] === pairs[i] && expanded(i - 1) && sameRow(i - 1, i);
+    const right =
+      i + 1 < units.length &&
+      pairs[i + 1] === pairs[i] &&
+      expanded(i + 1) &&
+      sameRow(i, i + 1);
+    return { left, right };
+  });
 }
 
 /**

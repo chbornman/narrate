@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SCALE,
   carryOver,
+  clampOffsets,
   clampScale,
   fitScale,
   fitTransform,
@@ -196,11 +197,12 @@ describe("session carryOver — ←/→ persistence (featureset §2)", () => {
   });
 
   it("actual (1:1) carries across a LANDSCAPE → PORTRAIT aspect change", () => {
-    // Punch into the bottom-right quadrant at 100%, then "arrow" to an
-    // image of opposite aspect: still 100%, and the SAME image fraction
-    // sits at the container center — the Appendix-B regression.
+    // Punch into the image center at 100%, then "arrow" to an image of
+    // opposite aspect: still 100%, and the SAME image fraction sits at the
+    // container center — the Appendix-B regression. (Interior anchor: no
+    // edge constraint binds.)
     let t = fitTransform(C, LANDSCAPE);
-    t = zoomAtPoint(t, C, LANDSCAPE, { x: 1100, y: 750 }, 1);
+    t = zoomAtPoint(t, C, LANDSCAPE, { x: 600, y: 400 }, 1);
     const s = toSession(t, C, LANDSCAPE, "actual");
     const next = carryOver(s, C, PORTRAIT);
     expect(next.scale).toBe(1);
@@ -210,8 +212,20 @@ describe("session carryOver — ←/→ persistence (featureset §2)", () => {
     });
     expect(centered.x).toBeCloseTo(C.w / 2, 9);
     expect(centered.y).toBeCloseTo(C.h / 2, 9);
-    expect(Number.isFinite(next.tx)).toBe(true);
-    expect(Number.isFinite(next.ty)).toBe(true);
+
+    // A near-corner anchor cannot sit at center: clampOffsets pins the
+    // image edges to the container edges instead (same rule as panning).
+    const corner = toSession(
+      zoomAtPoint(fitTransform(C, LANDSCAPE), C, LANDSCAPE, { x: 1100, y: 750 }, 1),
+      C,
+      LANDSCAPE,
+      "actual",
+    );
+    const clamped = carryOver(corner, C, PORTRAIT);
+    expect(clamped.tx).toBe(C.w - PORTRAIT.w); // x pins to the right edge
+    // y stays interior on this geometry: the fraction still sits at center.
+    const cy = screenPoint(clamped, { x: 0, y: corner.centerFrac.y * PORTRAIT.h }).y;
+    expect(cy).toBeCloseTo(C.h / 2, 9);
   });
 
   it("free zoom keeps the ABSOLUTE magnification across images", () => {
@@ -236,5 +250,51 @@ describe("session carryOver — ←/→ persistence (featureset §2)", () => {
     const t = carryOver(s, C, PORTRAIT);
     expect(t.tx).toBeCloseTo((C.w - PORTRAIT.w) / 2, 9);
     expect(t.ty).toBeCloseTo((C.h - PORTRAIT.h) / 2, 9);
+  });
+});
+
+describe("clampOffsets — centering + pan clamp (founder dogfood round 1)", () => {
+  const container = { w: 1000, h: 800 };
+  const image = { w: 2000, h: 1000 }; // fit scale = 0.5 (width-bound)
+
+  it("centers both axes once the whole image fits", () => {
+    // scale 0.3: 600×300 inside 1000×800 — wherever panning left it.
+    const t = clampOffsets({ scale: 0.3, tx: -120, ty: 999 }, container, image);
+    expect(t.tx).toBeCloseTo((1000 - 600) / 2);
+    expect(t.ty).toBeCloseTo((800 - 300) / 2);
+  });
+
+  it("centers per axis: height fits while width overflows", () => {
+    // scale 0.6: 1200×600 — x overflows (clamped), y fits (centered).
+    const t = clampOffsets({ scale: 0.6, tx: 50, ty: -500 }, container, image);
+    expect(t.tx).toBe(0); // clamp: offsets sit in [container - scaled, 0]
+    expect(t.ty).toBeCloseTo((800 - 600) / 2);
+  });
+
+  it("clamps panning so edges never detach while zoomed in", () => {
+    // scale 1: 2000×1000 overflows both. Legal tx ∈ [-1000, 0], ty ∈ [-200, 0].
+    expect(clampOffsets({ scale: 1, tx: 80, ty: 10 }, container, image)).toEqual({
+      scale: 1,
+      tx: 0,
+      ty: 0,
+    });
+    expect(
+      clampOffsets({ scale: 1, tx: -1500, ty: -900 }, container, image),
+    ).toEqual({ scale: 1, tx: -1000, ty: -200 });
+    // In-range offsets pass through untouched.
+    expect(
+      clampOffsets({ scale: 1, tx: -400, ty: -100 }, container, image),
+    ).toEqual({ scale: 1, tx: -400, ty: -100 });
+  });
+
+  it("carryOver output is always normalized (zoom out below fill re-centers)", () => {
+    // A free session aimed at the image corner at a scale where it all fits.
+    const t = carryOver(
+      { mode: "free", scale: 0.25, centerFrac: { x: 0.05, y: 0.05 } },
+      container,
+      image,
+    );
+    expect(t.tx).toBeCloseTo((1000 - 500) / 2);
+    expect(t.ty).toBeCloseTo((800 - 250) / 2);
   });
 });

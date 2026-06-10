@@ -1,16 +1,31 @@
 //! Minimal app-side settings persistence. UI preferences (sort per folder,
-//! thumb size, rail pin) live in webview localStorage; only state the Rust
-//! side owns lands here (currently: the last-export timestamp shown inline
-//! in Settings → Export, spec/UI.md §2.4).
+//! thumb size, rail pin) live in webview localStorage; state the Rust side
+//! owns lands here: the last-export timestamp shown inline in Settings →
+//! Export (spec/UI.md §2.4) and the stacked-pair display preference —
+//! edited in the Settings window, consumed live by the main window, so it
+//! needs a store both webviews share.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Which member a collapsed RAW+JPEG stack DISPLAYS (featureset §5 dogfood
+/// amendment: "Stacked pairs show: JPEG (default) | RAW"). The frontend's
+/// stacks.ts display-member selection and the Look R-flip starting member
+/// follow this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StackDisplay {
+    #[default]
+    Jpeg,
+    Raw,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     pub last_export_ts: Option<String>,
+    pub stack_display: StackDisplay,
 }
 
 pub fn settings_path(app_data: &Path) -> PathBuf {
@@ -62,9 +77,26 @@ mod tests {
         assert_eq!(load(dir.path()).last_export_ts, None);
         let s = AppSettings {
             last_export_ts: Some("2026-06-09T12:00:00Z".into()),
+            stack_display: StackDisplay::Raw,
         };
         save(dir.path(), &s).unwrap();
-        assert_eq!(load(dir.path()).last_export_ts, s.last_export_ts);
+        let loaded = load(dir.path());
+        assert_eq!(loaded.last_export_ts, s.last_export_ts);
+        assert_eq!(loaded.stack_display, StackDisplay::Raw);
+    }
+
+    #[test]
+    fn stack_display_defaults_to_jpeg_and_speaks_lowercase_json() {
+        // Pre-existing settings.json files (no stackDisplay key) load with
+        // the JPEG default; the wire form matches the TS union "jpeg"|"raw".
+        let s: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.stack_display, StackDisplay::Jpeg);
+        let json = serde_json::to_string(&AppSettings {
+            last_export_ts: None,
+            stack_display: StackDisplay::Raw,
+        })
+        .unwrap();
+        assert!(json.contains("\"stackDisplay\":\"raw\""), "got: {json}");
     }
 
     #[test]

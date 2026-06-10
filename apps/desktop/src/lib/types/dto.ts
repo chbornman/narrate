@@ -61,6 +61,9 @@ export interface RuntimeStatus {
 
 export interface AppSettings {
   lastExportTs: string | null;
+  /** Which member a collapsed RAW+JPEG stack displays (featureset §5
+   * dogfood amendment; backend settings.rs StackDisplay twin). */
+  stackDisplay: "jpeg" | "raw";
 }
 
 export interface ExportReportDto {

@@ -16,8 +16,9 @@
    * `atFit` is reported back for that row's enabled gate.
    */
   import { ui } from "../../state/app.svelte";
-  import { displayUrl } from "../../ipc/urls";
+  import { displayUrl, originalUrl } from "../../ipc/urls";
   import * as zoom from "../../logic/zoom";
+  import { needsOriginal } from "../../logic/fullres";
   import {
     SPACE_IDLE,
     spaceDown,
@@ -35,11 +36,13 @@
   const hash = $derived(ui.look.currentHash);
 
   // New image (←/→ or R): dims are unknown until load — the transform
-  // waits for them rather than reusing the previous image's.
+  // waits for them rather than reusing the previous image's. The original
+  // re-proves its load per image (cache makes a revisit instant).
   $effect(() => {
     void hash;
     natW = 0;
     natH = 0;
+    originalLoadedHash = null;
   });
 
   const container = $derived<zoom.Dims>({ w: cw, h: ch });
@@ -55,6 +58,49 @@
   $effect(() => {
     ui.look.atFit = mode === "fit";
   });
+
+  // ---- progressive full resolution (logic/fullres.ts owns the predicate) ----
+  //
+  // Past what the preview can supply, request the original (its protocol
+  // route refuses RAW/TIFF/offline with 404 — the preview stands silently).
+  // The request is STICKY per hash (zooming back out never re-fetches or
+  // flickers); the preview stays painted until the original has LOADED,
+  // then they swap in place. The original renders into the preview's
+  // layout box (explicit natW×natH), so the live transform — derived from
+  // the canonical zoom session — carries over exactly, by construction.
+
+  /** Hash whose original has been requested (sticky for the session). */
+  let originalHash = $state<string | null>(null);
+  /** Hash whose original <img> has finished loading (the swap gate). */
+  let originalLoadedHash = $state<string | null>(null);
+  /** Hashes whose original the protocol refused (404): never re-asked. */
+  let originalFailed = $state<ReadonlySet<string>>(new Set());
+
+  const wantsOriginal = $derived(
+    hash !== null &&
+      ready &&
+      t !== null &&
+      !originalFailed.has(hash) &&
+      needsOriginal({
+        scale: t.scale,
+        preview: image,
+        devicePixelRatio: window.devicePixelRatio || 1,
+      }),
+  );
+  $effect(() => {
+    if (wantsOriginal) originalHash = hash;
+  });
+  const originalShown = $derived(
+    hash !== null && originalHash === hash && originalLoadedHash === hash,
+  );
+
+  function onOriginalError() {
+    if (originalHash === null) return;
+    const failed = new Set(originalFailed);
+    failed.add(originalHash);
+    originalFailed = failed; // e.g. a RAW source: the preview stands (M1.5)
+    originalHash = null;
+  }
 
   // ---- session writes (the only zoom mutations) ------------------------------
 
@@ -230,6 +276,7 @@
       alt=""
       draggable="false"
       class:ready
+      class:supplanted={originalShown}
       style:transform={t !== null
         ? `translate(${t.tx}px, ${t.ty}px) scale(${t.scale})`
         : "none"}
@@ -239,6 +286,27 @@
         natH = img.naturalHeight;
       }}
     />
+    {#if originalHash === hash}
+      <!-- the original, laid out in the PREVIEW's pixel box under the same
+           transform: invisible until loaded, then swapped in place -->
+      <img
+        class="original"
+        class:shown={originalShown}
+        src={originalUrl(hash)}
+        alt=""
+        draggable="false"
+        decoding="async"
+        style:width="{natW}px"
+        style:height="{natH}px"
+        style:transform={t !== null
+          ? `translate(${t.tx}px, ${t.ty}px) scale(${t.scale})`
+          : "none"}
+        onload={() => {
+          originalLoadedHash = hash;
+        }}
+        onerror={onOriginalError}
+      />
+    {/if}
   {/if}
   {#if readout !== null && !ui.shell.chromeHidden}
     <span class="readout">{readout}</span>
@@ -266,6 +334,17 @@
   }
   .stage > img:not(.ready) {
     visibility: hidden; /* dims unknown: never paint a misplaced frame */
+  }
+  /* The progressive-original pair: the preview hides only once the
+   * original is actually painted (no flash, no blocking). */
+  .stage > img.supplanted {
+    visibility: hidden;
+  }
+  .stage > img.original {
+    visibility: hidden;
+  }
+  .stage > img.original.shown {
+    visibility: visible;
   }
   .readout {
     position: absolute;

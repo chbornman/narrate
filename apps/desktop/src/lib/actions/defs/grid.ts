@@ -127,6 +127,7 @@ export const GRID_DEFS: ActionDef[] = [
     keys: [{ key: "t" }],
     scope: "grid",
     group: "grid",
+    seats: ["gutter"], // pointer reachability (dogfood round 1): cycles per pick
     available: always,
     enabled: gridKeysFree,
   },
@@ -168,6 +169,7 @@ export const GRID_DEFS: ActionDef[] = [
     keys: [{ key: "r" }],
     scope: "grid",
     group: "grid",
+    seats: ["thumb"], // pointer reachability (dogfood round 1)
     available: always,
     // Only a COLLAPSED pair has a hidden member to flip to (the Look-side
     // R row is Stage B's, in defs/look.ts).

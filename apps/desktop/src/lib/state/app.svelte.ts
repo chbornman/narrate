@@ -25,7 +25,7 @@ import {
 } from "../logic/sources";
 import type { Action } from "../logic/keymap";
 import type { ActionContext } from "../actions/types";
-import type { FolderNode, RootDto } from "../types/dto";
+import type { AppSettings, FolderNode, RootDto } from "../types/dto";
 import type { LookEntry } from "../types/display";
 import type { Filter, SearchResults } from "../types/search";
 import * as prefs from "./prefs";
@@ -105,6 +105,11 @@ export class Ui {
     this.grid.loadPrefs();
     this.look.loadPrefs();
     this.autoAdvance = prefs.loadAutoAdvance();
+    try {
+      this.applySettings(await ipc.settingsGet());
+    } catch {
+      /* backend unavailable (tests/dev): defaults stand */
+    }
     this.roots = await ipc.listRoots();
     const last = prefs.loadLastFolder();
     if (last && this.roots.some((r) => r.rootId === last.rootId)) {
@@ -114,6 +119,18 @@ export class Ui {
     }
     this.shell.ingest = await ipc.ingestStatus();
     await this.reportScope();
+  }
+
+  /** Backend settings echo (boot + the Settings window's live edits via
+   * the `settings-changed` event): the stacked-pair display preference
+   * flows into the grid slice (stacks.ts). Look starts on the same member
+   * by construction — LookEntry.display derives from DisplayUnit.primary. */
+  applySettings(s: AppSettings | null) {
+    const member = s?.stackDisplay === "raw" ? "raw" : "jpeg";
+    if (member === this.grid.stackDisplay) return;
+    this.grid.setStackDisplay(member);
+    // A selected collapsed pair re-reports: display member leads (U4).
+    void this.reportScope();
   }
 
   get folderName(): string {

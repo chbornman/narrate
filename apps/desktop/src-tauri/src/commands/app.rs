@@ -3,17 +3,38 @@
 
 use photoproof_core::UtcMillis;
 use photoproof_core::sidecar::VolumeInfo;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use super::S;
 use super::library::root_dto;
 use crate::dto::{ExportReportDto, RebuildReportDto, RuntimeStatus};
 use crate::error::{CmdError, CmdResult};
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, StackDisplay};
 
 #[tauri::command]
 pub fn settings_get(app: S<'_>) -> AppSettings {
     app.settings.lock().expect("settings mutex").clone()
+}
+
+/// Settings → Watched folders: "Stacked pairs show: JPEG (default) | RAW"
+/// (featureset §5 dogfood amendment). Persists in settings.json and emits
+/// `settings-changed` to every window so the main grid re-pairs LIVE —
+/// localStorage is webview-local, so the Settings window cannot carry this
+/// preference itself.
+#[tauri::command]
+pub fn set_stack_display(
+    app: S<'_>,
+    handle: AppHandle,
+    display: StackDisplay,
+) -> CmdResult<AppSettings> {
+    let next = {
+        let mut s = app.settings.lock().expect("settings mutex");
+        s.stack_display = display;
+        crate::settings::save(&app.app_data, &s)?;
+        s.clone()
+    };
+    let _ = handle.emit("settings-changed", next.clone());
+    Ok(next)
 }
 
 /// RUNTIME contract seam (P6.2). M1: degraded mode — no models, no ASR; the

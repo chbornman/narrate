@@ -144,6 +144,48 @@ describe("cheatsheet completeness", () => {
   });
 });
 
+describe("pointer-reachability audit (dogfood round 1: visible UI for actions)", () => {
+  /**
+   * Every non-reserved verb must be reachable by POINTER somewhere — a
+   * context-menu seat, a chrome button, or a pointer-native gesture. This
+   * table names the affordance for every verb that is deliberately NOT
+   * menu-seated; a new def missing from both fails the audit.
+   */
+  const CHROME_OR_POINTER_NATIVE: Record<string, string> = {
+    escape: "every Esc layer has a pointer dismissal (outside-click, scrim, ×)",
+    "toggle-rail": "titlebar rail button (Titlebar.svelte via resolveAction)",
+    "open-search": "titlebar search button",
+    "summon-note": "indicator capsule click (the note zone)",
+    quit: "titlebar × window control",
+    "toggle-debug-panel": "dev builds only (F12) — not a product surface",
+    "focus-move": "pointer-native: clicking a thumb moves focus",
+    "focus-edge": "pointer-native: scrollbar + clicks",
+    "focus-page": "pointer-native: scrollbar + clicks",
+    "toggle-select-focused": "pointer-native: Ctrl+click on a thumb",
+    "open-sort-menu": "grid header sort ▾ button",
+    "thumb-size": "grid header slider + Ctrl+wheel",
+    "zoom-step": "pointer-native: wheel zoom-to-cursor",
+    "look-close": "backdrop menu carries Go to Grid (the pointer path out of Look)",
+    "look-nav": "filmstrip thumb clicks",
+    "rail-nav": "pointer-native: rail rows are clickable",
+    "rail-enter": "pointer-native: a rail row click opens the folder",
+    "search-nav": "pointer-native: result rows are clickable",
+    "search-open-result": "search result row click",
+    "remove-last-chip": "chip × buttons in the search overlay",
+  };
+
+  it("every non-reserved verb holds a seat or names its chrome/pointer affordance", () => {
+    for (const def of REGISTRY) {
+      if (def.reserved === true) continue;
+      const seated = def.seats !== undefined && def.seats.length > 0;
+      expect(
+        seated || def.id in CHROME_OR_POINTER_NATIVE,
+        `${def.id}@${def.scope} has no pointer path — seat it or name its affordance`,
+      ).toBe(true);
+    }
+  });
+});
+
 describe("seat coverage (menus can render every seated verb)", () => {
   it("every seated, non-reserved def appears in its seat's order table", () => {
     const ctx = withDefaults({

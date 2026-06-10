@@ -1,22 +1,30 @@
 <script lang="ts">
   /**
-   * The capture indicator (UI §7), REWRITTEN as a renderer over
-   * logic/segments.ts: ingest hairline · scope (the pulse target) ·
-   * n-of-m in Look · mode segments (auto-advance; reserved mic seat).
-   * Hover = scope popover (micro-thumbnails via the Popover primitive);
-   * click = summon the note input.
+   * The capture indicator (UI §7), a renderer over logic/segments.ts:
+   * ingest hairline · scope (the pulse target) · n-of-m in Look · mode
+   * segments (auto-advance; reserved mic seat). Hover = scope popover
+   * (micro-thumbnails via the Popover primitive).
    *
-   * EXEMPT from Tab lights-out (coordinator ruling: the indicator is
-   * capture-state truth — modes must stay visible; future mic evidence
-   * lives here. Founder sign-off flagged in DECISIONS 5).
+   * The indicator stays a STATUS strip — it is not the content panel — but
+   * its SCOPE segment is clickable (dogfood round 1, indicator↔inspector
+   * bridge): click opens the inspector on the Journal tab for the active
+   * image, dispatching the registry's open-inspector row via resolveAction
+   * (the same Action J dispatches; tooltip resolves from the same def).
+   * The rest of the capsule keeps click = summon the note input.
+   *
+   * EXEMPT from Tab lights-out (coordinator ruling, DECISIONS U5: the
+   * indicator is capture-state truth — modes must stay visible; future mic
+   * evidence lives here).
    */
   import { ui } from "../../state/app.svelte";
   import { segments } from "../../logic/segments";
   import { scopeTargets } from "../../logic/scope";
   import { thumbUrl } from "../../ipc/urls";
+  import { resolveAction } from "../../actions/registry";
+  import { tooltip } from "../../primitives/tooltip";
   import Popover from "../../primitives/Popover.svelte";
 
-  let capsuleEl: HTMLButtonElement | undefined = $state();
+  let capsuleEl: HTMLDivElement | undefined = $state();
 
   const segs = $derived(
     segments({
@@ -30,7 +38,15 @@
     }),
   );
   const hairline = $derived(segs.find((s) => s.id === "ingest"));
-  const textSegs = $derived(segs.filter((s) => s.id !== "ingest"));
+  const scopeSeg = $derived(segs.find((s) => s.id === "scope"));
+  const restSegs = $derived(segs.filter((s) => s.id !== "ingest" && s.id !== "scope"));
+
+  /** Scope segment click → the inspector's Journal tab for the active
+   * image (the registry row J uses; zero new verbs). */
+  function openJournal() {
+    const action = resolveAction("open-inspector", ui.actionContext(), "journal");
+    if (action !== null) void ui.perform(action);
+  }
 
   // Hover popover: micro-thumbnails of the scoped images, up to 8 then
   // "+N" (UI §7.2). Sourced from the same lists the scope derives from;
@@ -75,12 +91,7 @@
     </Popover>
   {/if}
 
-  <button
-    bind:this={capsuleEl}
-    class="capsule"
-    onclick={() => ui.summonNote()}
-    aria-label="Write a note"
-  >
+  <div bind:this={capsuleEl} class="capsule">
     {#if hairline !== undefined}
       <span class="hairline" title={hairline.title}>
         <span
@@ -89,17 +100,25 @@
         ></span>
       </span>
     {/if}
-    {#each textSegs as seg (seg.id)}
-      <span
-        class="segment"
-        class:scope={seg.pulse === true}
-        class:pulsing={seg.pulse === true && pulsing}
-        title={seg.title}>{seg.text}</span
+    {#if scopeSeg !== undefined}
+      <!-- the indicator↔inspector bridge: status text, journal on click -->
+      <button
+        class="zone scope-btn"
+        aria-label="Open the journal for this image"
+        onclick={openJournal}
+        {@attach tooltip({ actionId: "open-inspector", verb: "Journal", arg: "journal" })}
       >
-    {/each}
-    <!-- mic glyph absent until ASR is ready (P4.2: never) — its seat is
-         reserved by segments.ts ordering -->
-  </button>
+        <span class="segment scope" class:pulsing>{scopeSeg.text}</span>
+      </button>
+    {/if}
+    <button class="zone note-btn" onclick={() => ui.summonNote()} aria-label="Write a note">
+      {#each restSegs as seg (seg.id)}
+        <span class="segment" title={seg.title}>{seg.text}</span>
+      {/each}
+      <!-- mic glyph absent until ASR is ready (P4.2: never) — its seat is
+           reserved by segments.ts ordering -->
+    </button>
+  </div>
 </div>
 
 <style>
@@ -113,13 +132,30 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
     height: 24px;
-    padding: 0 10px;
+    padding: 0;
     border-radius: 12px;
     background: var(--bg-overlay);
     border: 1px solid var(--chrome);
     overflow: hidden;
+  }
+  /* The two click zones tile the capsule; visually they are the capsule. */
+  .zone {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    padding: 0;
+  }
+  .scope-btn {
+    padding-left: 10px;
+  }
+  .note-btn {
+    flex: 1;
+    min-width: 12px; /* note stays pointer-reachable with no other segments */
+    padding: 0 10px 0 8px;
   }
   .segment {
     color: var(--text-dim);
@@ -130,6 +166,10 @@
     transition:
       color 120ms ease-out,
       text-shadow 120ms ease-out;
+  }
+  /* Hover affordance for the journal bridge (quiet: text brightens). */
+  .scope-btn:hover .segment.scope {
+    color: var(--text);
   }
   .segment.scope.pulsing {
     color: var(--text);

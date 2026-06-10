@@ -41,8 +41,13 @@ export class GridSlice {
   stackGlobalCollapsed = $state(true);
   /** Pair keys overriding the global state (per-pair toggle). */
   pairOverrides = $state<ReadonlySet<string>>(new Set());
-  /** Pair keys displaying the RAW member on top (R flip, session-local). */
+  /** Pair keys flipped to the non-preferred member (R, session-local). */
   pairFlips = $state<ReadonlySet<string>>(new Set());
+  /** Which member a collapsed pair displays (Settings → "Stacked pairs
+   * show", dogfood round 1). The BACKEND settings store owns persistence
+   * (both windows share it); the root's applySettings wires boot + live
+   * edits here. */
+  stackDisplay = $state<stacks.StackDisplayMember>("jpeg");
 
   // -- cell info (T cycle; logic/cellinfo.ts) ---------------------------------------
   cellInfo = $state<CellInfoLevel>("none");
@@ -64,6 +69,7 @@ export class GridSlice {
       globalCollapsed: this.stackGlobalCollapsed,
       overrides: this.pairOverrides,
       flips: this.pairFlips,
+      display: this.stackDisplay,
     }),
   );
 
@@ -158,6 +164,17 @@ export class GridSlice {
     this.stackGlobalCollapsed = collapsed;
     this.pairOverrides = new Set();
     prefs.saveStackGlobal(collapsed);
+    this.fixupSelection(prevActive);
+  }
+
+  /** "Stacked pairs show: JPEG | RAW" — takes effect live. Flips are
+   * relative to the preferred member, so they reset; selection follows
+   * each cell's new display member (persistence is the backend's). */
+  setStackDisplay(member: stacks.StackDisplayMember) {
+    if (member === this.stackDisplay) return;
+    const prevActive = this.activeHash;
+    this.stackDisplay = member;
+    this.pairFlips = new Set();
     this.fixupSelection(prevActive);
   }
 

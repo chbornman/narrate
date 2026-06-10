@@ -162,3 +162,100 @@ describe("expandTargets — the ● 2 truth (CAPTURE conformance, DECISIONS 4)",
     expect(stacks.expandTargets(["gone"], m.units)).toEqual(["gone"]);
   });
 });
+
+describe("display-member preference (Settings → 'Stacked pairs show', dogfood round 1)", () => {
+  const items = [item("a/IMG_1.jpg"), item("a/IMG_1.cr2"), item("a/IMG_2.jpg")];
+  const build = (
+    display: stacks.StackDisplayMember | undefined,
+    flips: string[] = [],
+  ) =>
+    stacks.buildUnits(items, {
+      globalCollapsed: true,
+      overrides: new Set(),
+      flips: new Set(flips),
+      display,
+    });
+
+  it("defaults to JPEG on top (option absent — existing callers unchanged)", () => {
+    const m = build(undefined);
+    expect(m.units[0].primary.hash).toBe("h:a/IMG_1.jpg");
+    expect(m.units[0].alt?.hash).toBe("h:a/IMG_1.cr2");
+  });
+
+  it("'raw' shows the RAW member on top, JPEG hidden as alt", () => {
+    const m = build("raw");
+    expect(m.units[0].primary.hash).toBe("h:a/IMG_1.cr2");
+    expect(m.units[0].alt?.hash).toBe("h:a/IMG_1.jpg");
+    // Solo JPEGs are untouched by the preference.
+    expect(m.units[1].primary.hash).toBe("h:a/IMG_2.jpg");
+    expect(m.units[1].alt).toBeNull();
+  });
+
+  it("R flips XOR the preference (flip under 'raw' shows the JPEG)", () => {
+    const m = build("raw", ["a/img_1"]);
+    expect(m.units[0].primary.hash).toBe("h:a/IMG_1.jpg");
+    expect(m.units[0].alt?.hash).toBe("h:a/IMG_1.cr2");
+  });
+
+  it("write targets follow the preference: display member first (U4 order rule)", () => {
+    const m = build("raw");
+    expect(stacks.expandTargets(["h:a/IMG_1.cr2"], m.units)).toEqual([
+      "h:a/IMG_1.cr2",
+      "h:a/IMG_1.jpg",
+    ]);
+    // …and naming the hidden JPEG still expands to the full pair, RAW first.
+    expect(stacks.expandTargets(["h:a/IMG_1.jpg"], m.units)).toEqual([
+      "h:a/IMG_1.cr2",
+      "h:a/IMG_1.jpg",
+    ]);
+  });
+
+  it("the preference does not affect pairing or expanded members", () => {
+    const m = stacks.buildUnits(items, {
+      globalCollapsed: false,
+      overrides: new Set(),
+      flips: new Set(),
+      display: "raw",
+    });
+    expect(m.units.length).toBe(3);
+    expect(m.pairs).toEqual(["a/img_1", "a/img_1", null]);
+  });
+});
+
+describe("expandedLinks — expanded members read as linked (dogfood round 1)", () => {
+  const items = [item("a/IMG_1.jpg"), item("a/IMG_1.cr2"), item("a/IMG_2.jpg")];
+
+  it("links the two expanded members when adjacent on one row", () => {
+    const m = expanded(items);
+    expect(stacks.expandedLinks(m, 4)).toEqual([
+      { left: false, right: true },
+      { left: true, right: false },
+      { left: false, right: false },
+    ]);
+  });
+
+  it("a row wrap between members breaks the link (chevrons still mark membership)", () => {
+    const m = expanded(items);
+    // cols = 1: every unit is its own row.
+    expect(stacks.expandedLinks(m, 1)).toEqual([
+      { left: false, right: false },
+      { left: false, right: false },
+      { left: false, right: false },
+    ]);
+  });
+
+  it("a foreign cell between members breaks the link (capture-time sort can split a pair)", () => {
+    const split = [item("a/IMG_1.jpg"), item("a/IMG_0.jpg"), item("a/IMG_1.cr2")];
+    const m = stacks.buildUnits(split, {
+      globalCollapsed: false,
+      overrides: new Set(),
+      flips: new Set(),
+    });
+    expect(stacks.expandedLinks(m, 10).every((l) => !l.left && !l.right)).toBe(true);
+  });
+
+  it("collapsed pairs and solos never link", () => {
+    const m = collapsed(items);
+    expect(stacks.expandedLinks(m, 4).every((l) => !l.left && !l.right)).toBe(true);
+  });
+});

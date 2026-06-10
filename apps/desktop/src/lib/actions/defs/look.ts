@@ -91,8 +91,10 @@ export const LOOK_DEFS: ActionDef[] = [
     keys: [{ key: "f" }],
     scope: "look",
     group: "look",
+    seats: ["look-backdrop"], // pointer reachability (dogfood round 1)
     available: always,
     enabled: lookKeysFree,
+    checked: (ctx) => ctx.filmstrip,
   },
   {
     id: "flip-stack-member",
@@ -101,6 +103,7 @@ export const LOOK_DEFS: ActionDef[] = [
     keys: [{ key: "r" }],
     scope: "look",
     group: "look",
+    seats: ["look-backdrop"], // pointer reachability (dogfood round 1)
     available: always,
     // Deliberately NOT gated on ctx.activeIsPair: that field tracks the
     // GRID's active unit and goes stale as ←/→ move through a Look

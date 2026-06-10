@@ -152,9 +152,39 @@ export function carryOver(
 ): ZoomTransform {
   if (session === null || session.mode === "fit") return fitTransform(container, image);
   const scale = clampScale(session.mode === "actual" ? 1 : session.scale, container, image);
+  return clampOffsets(
+    {
+      scale,
+      tx: container.w / 2 - session.centerFrac.x * image.w * scale,
+      ty: container.h / 2 - session.centerFrac.y * image.h * scale,
+    },
+    container,
+    image,
+  );
+}
+
+/**
+ * Offset normalization, applied to every derived transform (carryOver is
+ * the single render path, so wheel/pan/resize all pass through here): an
+ * axis whose scaled image FITS the container centers on that axis (zoom
+ * out below fill → the image returns to center, per axis — width can fit
+ * while height still overflows); an axis that OVERFLOWS clamps so the
+ * image edge never detaches from the container edge while panning.
+ * (Founder dogfood, round 1.)
+ */
+export function clampOffsets(
+  t: ZoomTransform,
+  container: Dims,
+  image: Dims,
+): ZoomTransform {
+  const clampAxis = (offset: number, c: number, i: number): number => {
+    const scaled = i * t.scale;
+    if (scaled <= c) return (c - scaled) / 2;
+    return Math.max(c - scaled, Math.min(0, offset));
+  };
   return {
-    scale,
-    tx: container.w / 2 - session.centerFrac.x * image.w * scale,
-    ty: container.h / 2 - session.centerFrac.y * image.h * scale,
+    scale: t.scale,
+    tx: clampAxis(t.tx, container.w, image.w),
+    ty: clampAxis(t.ty, container.h, image.h),
   };
 }

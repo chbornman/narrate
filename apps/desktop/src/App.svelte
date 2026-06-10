@@ -18,7 +18,12 @@
   import { ui } from "./lib/state/app.svelte";
   import { dispatch } from "./lib/logic/keymap";
   import * as ipc from "./lib/ipc/commands";
-  import type { IndicatorPulse, IndicatorState, IngestStatus } from "./lib/types/dto";
+  import type {
+    AppSettings,
+    IndicatorPulse,
+    IndicatorState,
+    IngestStatus,
+  } from "./lib/types/dto";
   import Titlebar from "./lib/components/shell/Titlebar.svelte";
   import Indicator from "./lib/components/shell/Indicator.svelte";
   import NoteInput from "./lib/components/shell/NoteInput.svelte";
@@ -108,6 +113,9 @@
       listen<IngestStatus>("ingest-progress", (e) => {
         ui.shell.ingest = e.payload;
       }),
+      // The Settings window's edits land live (set_stack_display emits to
+      // every window; the grid re-pairs stacks on the spot).
+      listen<AppSettings>("settings-changed", (e) => ui.applySettings(e.payload)),
       // Drag a folder onto the window → register-root confirm (featureset
       // §6; the OS hands paths only on drop — DropConfirm renders them).
       getCurrentWebview().onDragDropEvent((e) => {

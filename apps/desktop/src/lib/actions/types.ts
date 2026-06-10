@@ -90,6 +90,9 @@ export interface ActionDef {
   available: (ctx: ActionContext) => boolean;
   /** Runnable now (graying, key gating). */
   enabled?: (ctx: ActionContext) => boolean;
+  /** Toggle rows: current ON state, rendered as a menu check (display
+   * only — like available/enabled, state predicates live ONLY on defs). */
+  checked?: (ctx: ActionContext) => boolean;
   /** Exempt from the §11 single-letter suppression (chord-level non-typing
    * keys only — rule in match.ts). */
   worksInInput?: boolean;

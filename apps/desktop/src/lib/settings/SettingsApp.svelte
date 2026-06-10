@@ -48,6 +48,13 @@
     await refresh();
   }
 
+  /** "Stacked pairs show" (featureset §5 dogfood amendment): persisted by
+   * the backend, which emits `settings-changed` — the main window's grid
+   * re-pairs live. */
+  async function setStackDisplay(display: "jpeg" | "raw") {
+    settings = await ipc.setStackDisplay(display);
+  }
+
   async function runExport() {
     const dir = await open({ directory: true, multiple: false, title: "Export destination" });
     if (typeof dir !== "string") return;
@@ -106,6 +113,19 @@
       {/if}
     {/each}
     <button onclick={() => void addFolder()}>Add folder…</button>
+    <!-- library behavior row (U6 stands: no new section) -->
+    <div class="row pref">
+      <span class="name">Stacked pairs show</span>
+      <select
+        aria-label="Stacked pairs show"
+        value={settings?.stackDisplay ?? "jpeg"}
+        onchange={(e) =>
+          void setStackDisplay(e.currentTarget.value === "raw" ? "raw" : "jpeg")}
+      >
+        <option value="jpeg">JPEG (default)</option>
+        <option value="raw">RAW</option>
+      </select>
+    </div>
   </section>
 
   <!-- 2. Microphone — hidden until ASR is installed (UI §2.4 / RUNTIME) -->
@@ -218,5 +238,12 @@
     color: var(--text-dim);
     font-size: 12px;
     margin: -2px 0 10px;
+  }
+  .row.pref {
+    margin-top: 12px;
+  }
+  .row.pref .name {
+    flex: initial;
+    color: var(--text-dim);
   }
 </style>

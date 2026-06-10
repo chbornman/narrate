@@ -133,8 +133,9 @@
   {#if hasJournal}<span class="journal-dot"></span>{/if}
   {#if offline}<span class="offline-badge">⏏</span>{/if}
   {#if stack !== "solo"}
-    <!-- the expand/collapse CONTROL, not a badge (featureset §5) -->
-    <StackChevron collapsed={stack === "collapsed"} onactivate={onstacktoggle} />
+    <!-- the expand/collapse CONTROL, not a badge (featureset §5).
+         count: D1 pairs strictly one JPEG with one RAW — always 2. -->
+    <StackChevron collapsed={stack === "collapsed"} count={2} onactivate={onstacktoggle} />
   {/if}
 </div>
 

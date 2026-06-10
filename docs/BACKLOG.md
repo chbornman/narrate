@@ -8,6 +8,12 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
+- [ ] **Zoom centering + pan clamp** (coordinator applies at the P4.2b
+  merge): when the scaled image fits the viewport on an axis, center on
+  that axis; while it overflows, clamp panning so edges never detach from
+  the viewport. One pure `clampOffsets()` in zoom.ts + unit tests.
+  (Founder, dogfood round 1.)
+
 - [ ] **Journal entries show sibling targets** — a multi-target note's entry
   carries a quiet "+N others" affordance (targets are already in the event;
   the journal DTO needs them surfaced). (Founder, dogfood round 1.)

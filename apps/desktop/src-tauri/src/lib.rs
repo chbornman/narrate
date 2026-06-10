@@ -45,20 +45,22 @@ pub fn run() {
                 .build(),
         )
         // Thumbnails + Look images: photoproof://localhost/{thumb|display}/{hash}
-        // straight from the preview cache. Bytes never cross IPC, never
-        // base64 (UI §3.3, DECISIONS P16).
+        // straight from the preview cache, plus /original/{hash} — the
+        // progressive full-resolution route Look swaps to past 1:1 (served
+        // only for webview-decodable stored formats; protocol.rs owns the
+        // allowlist). Bytes never cross IPC, never base64 (UI §3.3,
+        // DECISIONS P16).
         .register_asynchronous_uri_scheme_protocol("photoproof", |ctx, request, responder| {
             let path = request.uri().path().to_owned();
-            let cache_dir = ctx
+            let library = ctx
                 .app_handle()
                 .try_state::<Arc<App>>()
-                .map(|s| s.library.cache_dir().to_path_buf());
+                .map(|s| s.library.clone());
             std::thread::spawn(move || {
-                let response = cache_dir
-                    .and_then(|dir| protocol::resolve(&dir, &path))
-                    .and_then(|file| std::fs::read(file).ok())
-                    .map(protocol::respond_ok)
-                    .unwrap_or_else(protocol::respond_not_found);
+                let response = match library {
+                    Some(lib) => protocol::serve(&lib, &path),
+                    None => protocol::respond_not_found(),
+                };
                 responder.respond(response);
             });
         })
@@ -125,6 +127,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::list_folder,
         commands::library::ingest_status,
         commands::app::settings_get,
+        commands::app::set_stack_display,
         commands::app::runtime_status,
         commands::app::export_journal,
         commands::app::rebuild_index,
@@ -163,6 +166,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::list_folder,
         commands::library::ingest_status,
         commands::app::settings_get,
+        commands::app::set_stack_display,
         commands::app::runtime_status,
         commands::app::export_journal,
         commands::app::rebuild_index,

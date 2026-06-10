@@ -30,7 +30,14 @@ function chordText(chord: KeyChord): string {
   return parts.join("+");
 }
 
-export function tooltip(opts: { actionId: Action["kind"]; verb?: string }): Attachment {
+export function tooltip(opts: {
+  actionId: Action["kind"];
+  verb?: string;
+  /** Parametrized defs: pick the chord whose arg matches (e.g. the
+   * open-inspector def carries I→metadata and J→journal — a Journal
+   * affordance hints J). Still resolved from the registry, never typed. */
+  arg?: unknown;
+}): Attachment {
   return (node) => {
     const el = node as HTMLElement;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -45,7 +52,10 @@ export function tooltip(opts: { actionId: Action["kind"]; verb?: string }): Atta
       const v = document.createElement("span");
       v.textContent = verb;
       tip.appendChild(v);
-      const chord = def?.keys[0];
+      const chord =
+        opts.arg === undefined
+          ? def?.keys[0]
+          : def?.keys.find((k) => k.arg === opts.arg);
       if (chord !== undefined) {
         const k = document.createElement("span");
         k.className = "key";

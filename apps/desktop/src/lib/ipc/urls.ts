@@ -13,3 +13,10 @@ export const thumbUrl = (hash: string): string =>
 
 export const displayUrl = (hash: string): string =>
   `photoproof://localhost/display/${hash}`;
+
+/** The ORIGINAL file — Look's progressive full-resolution route. Served
+ * only for webview-decodable stored formats (protocol.rs allowlist:
+ * jpeg/png/webp); RAW/TIFF/offline answer 404 and Look keeps the preview
+ * silently. */
+export const originalUrl = (hash: string): string =>
+  `photoproof://localhost/original/${hash}`;
