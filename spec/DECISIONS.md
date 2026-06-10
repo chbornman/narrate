@@ -251,6 +251,26 @@ chosen readings.
   surfaces as `Err(StoreError::CheckpointBlocked)` after bounded retry —
   the write is already durable; `maintain()` completes the hygiene. Silent
   swallowing (what the audit flagged) was rejected.
+- **B24 (P2.1).** Events carrying unknown extra fields (EVENTS §4.1(8) vs
+  SIDECARS §5.2): preserved verbatim as opaque entries (byte-equivalent
+  rewrite, sorted by id, redactable via husk) but NOT indexed — EVENTS'
+  closed field set is normative for event shape (X6); preservation and
+  redaction supremacy both hold.
+- **B25 (P2.1).** Unparseable file at a sidecar slot: renamed aside as
+  corrupt ONLY if it positively self-identifies as ours (format-marker
+  bytes); otherwise it is a §2.3 collision and is never touched.
+- **B26 (P2.1).** §10.3(a) swapped-images rehoming is literally unbounded
+  mutual recursion; rehoming goes through the overflow store (verified
+  durable) with same-scan migration to adjacent — identical end state,
+  one-scan convergence.
+- **B27 (P2.1).** Manifest `counts.sessions` = distinct session ids over
+  events; `filenames` = the snapshot filename (extensible via the
+  `VolumeInfo` seam).
+- **B28 (P2.1).** Sessions learned only from sidecars get
+  `device_id = 32×'0'` (sidecars deliberately carry no machine ids, §3.2).
+- **B29 (P2.1).** Volume identity crosses the packet boundary through the
+  `ImageLocator` trait (`Writable`/`Unwritable{image_path}`/`Offline`) +
+  `VolumeInfo` — owned by sidecars, implemented by the library layer.
 
 ## Open questions deliberately left to the founder
 
