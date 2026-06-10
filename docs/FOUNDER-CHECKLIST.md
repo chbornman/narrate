@@ -28,7 +28,11 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   unreachable). Tests assert engine truth; confirm and the spec text gets
   fixed in a future edit.
 
-## 2. Founder-machine verification (feeds DOGFOOD-M1.md at P4.1)
+## 2. Founder-machine verification — **docs/DOGFOOD-M1.md is the script**
+
+Platform note: the NVIDIA+Wayland WebKit crash is handled in-app now
+(`b142477`); no env var needed. Dev builds generate previews at full speed
+since `e60cb15` (optimized deps).
 
 - [ ] **Real 50k RAW library ingest** (M1 step 9) — resumability, perf
   budgets (≤90 min NVMe target, first 1k thumbs ≤60 s), preview quality.
@@ -68,8 +72,9 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
 - [ ] **Full-scale `#[ignore]` tests** (50k-scan, 10k clock-shift, hash
   throughput) — verified once in release here; wire into a nightly/manual CI
   lane rather than every push.
-- [ ] **Process-level kill -9 ingest harness** — in-process cancellation is
-  covered; a true out-of-process kill harness is a P4.1 candidate.
+- [x] **Process-level kill -9 ingest harness** — closed by P4.1's C3
+  scenario: real SIGKILL at randomized points, `PRAGMA integrity_check`
+  after every kill, no dups/misses, sidecars converge.
 - [ ] **Full RAW decode backfill pass** (M1.5) — queue knows the pass kind;
   worker deliberately not built (K12).
 - [ ] **HEIC support** — deferred to the decode backfill (L5), keeps libheif
@@ -82,3 +87,7 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
 - 2026-06-10: Phase 3 complete (P3.1 search core, P3.2 desktop shell, search
   wired; 254 workspace tests + 95 vitest). Added B31 erratum, app visual
   checklist, HEIC count check.
+- 2026-06-10 (later): **P4.1 complete — M1 dogfood-ready.** 268 tests both
+  profiles, E2E incl. kill -9 + redaction drills, DOGFOOD-M1.md written.
+  Kill-9 harness item closed; NVIDIA/Wayland fix baked in; dev-loop fixes
+  (thumb retry, optimized-dep profile) landed after live testing.

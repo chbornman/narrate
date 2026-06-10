@@ -307,6 +307,18 @@ chosen readings.
   model-consent screen waits for P6.2's `runtime_status` contract;
   Settings' "rebuild index" = in-process union-merge + `rebuild_derived()`,
   the fresh-database restore stays an offline path.
+- **B37 (P4.1, closes B34).** `image_journal_stats.has_text` = any live AND
+  non-scrubbed remark (symmetric with B4's `has_strokes`; a redacted stub is
+  not words-evidence). The grid's has-journal dot = `has_text || has_strokes`.
+- **B38 (P4.1).** `has_text` was added to the v1 DDL in place — no deployed
+  databases exist pre-dogfood. After dogfooding begins, schema changes
+  require real migration steps.
+- **B39 (P4.1).** Product-facing reads all go through core APIs
+  (`journal_stats`, `list_folder`, `folder_tree`, `open_sessions`); the
+  shell's raw-row reads survive only behind the `debug-panel` feature
+  (diagnostics rendering raw rows). `Library` implements `ImageLocator`
+  (B29's home); `SidecarEngine::new_shared(Arc<EventStore>, …)` added, the
+  borrowed `new` retained to avoid churning the sidecars suite.
 
 ## Open questions deliberately left to the founder
 
