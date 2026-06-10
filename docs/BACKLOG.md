@@ -97,6 +97,8 @@ managing = off-thesis).
 
 ## Decided, awaiting founder appetite
 
+- [ ] **Sidebar design pass** — both sidebars (rail/sources, inspector) deserve a deliberate future design round (layout, affordances, what lives where) once M3's source-list growth and the collection-view question land; for now only baseline functionality matters. (Founder, dogfood round 2.)
+
 - [ ] Full interface themes (light chrome + grays) — token architecture
   ready; surround-luminance shipped in P4.2 (D6).
 - [ ] Configurable external editor (D4 revisit).
