@@ -69,8 +69,15 @@ export interface ActionContext {
   thumbStep: number;
   surround: SurroundLevel;
   filmstrip: boolean;
-  // reserved (always falsy in P4.2; M2a/M2b light them up)
+  // grease pencil (live since P5.1 — M2a)
+  /** Sticky pencil mode (B; Look only, resets on return to Grid). */
   pencilMode: boolean;
+  /** Tracing-paper overlay shown (O; hidden ⇒ pencil unavailable). */
+  overlayVisible: boolean;
+  /** Ctrl+Z has pencil work: a pen-down to cancel or a stacked stroke to
+   * retract — otherwise the pencil layer must not swallow the chord. */
+  pencilUndoable: boolean;
+  // reserved (always falsy until M2b)
   micArmed: boolean;
 }
 

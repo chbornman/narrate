@@ -21,6 +21,10 @@ vi.mock("@tauri-apps/api/core", () => ({
         return [];
       case "image_metadata":
         return null;
+      case "retract_event":
+        return true;
+      case "report_activity":
+        return "S1";
       case "redact_event":
         return { redacted: ["01A"], sidecarsUpdated: 1, offlinePending: [] };
       default:
@@ -123,6 +127,22 @@ describe("JournalTab display states (UI §8.2)", () => {
     const { container } = render(JournalTab);
     expect(container.textContent).toContain("rating set to 4");
     expect(container.textContent).toContain("rating cleared");
+  });
+
+  it("the Retract row rides ui.perform: a committed retraction also leaves the pencil undo stack (CAPTURE §8.5)", async () => {
+    // THE UI path of the journal panel — routing the row verb around the
+    // dispatch case would leave the stale stack entry for Ctrl+Z to mint
+    // a duplicate tombstone against.
+    ui.inspector.entries = [entry("01A", { kind: "stroke", text: null, stroke: null })];
+    ui.look.undoStack = [];
+    ui.look.undoSessionId = null;
+    ui.look.onStrokeCommitted("01A", HASH, "S1");
+    render(JournalTab);
+    await fireEvent.click(screen.getByRole("button", { name: "Retract" }));
+    await vi.waitFor(() => {
+      expect(ipcLog.calls.some((c) => c.cmd === "retract_event")).toBe(true);
+      expect(ui.look.undoStack).toEqual([]);
+    });
   });
 });
 

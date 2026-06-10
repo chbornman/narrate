@@ -26,6 +26,7 @@
     spaceUp,
     type SpaceHoldState,
   } from "../../logic/looknav";
+  import PencilOverlay from "./PencilOverlay.svelte";
 
   let stageEl: HTMLDivElement | undefined = $state();
   let cw = $state(0);
@@ -233,10 +234,18 @@
   }
 
   function onWindowKeyup(e: KeyboardEvent) {
+    // Hold-E eraser release (P5.1): engagement is the registry's
+    // pencil-eraser row; the release is a raw key fact — the Space-pan
+    // precedent. Released unconditionally so a hold can never wedge.
+    if (e.key === "e" || e.key === "E") ui.look.eraserHeld = false;
     if (e.key !== " ") return;
     // Always resolve the machine (a hold must never wedge), but a clean
-    // tap acts only if the stage still owns the keys at release.
-    const { state, outcome } = spaceUp(spaceHold);
+    // tap acts only if the stage still owns the keys at release. With the
+    // pencil on, Space is the pan key — never close (UI §11; the machine
+    // owns that gate so the registry and raw pipelines agree).
+    const { state, outcome } = spaceUp(spaceHold, {
+      pencilOn: ui.look.pencilMode,
+    });
     spaceHold = state;
     if (outcome === "close" && stageOwnsRawKeys())
       void ui.perform({ kind: "look-close" });
@@ -308,10 +317,14 @@
       />
     {/if}
   {/if}
+  {#if hash !== null && ready && t !== null}
+    <!-- the tracing paper (P5.1): folded strokes + the live stroke; its
+         pointer-events gate keeps drag-pan/Space-pan/wheel on the stage -->
+    <PencilOverlay {t} {container} {image} {hash} />
+  {/if}
   {#if readout !== null && !ui.shell.chromeHidden}
     <span class="readout">{readout}</span>
   {/if}
-  <!-- overlay slot reserved: the M2a stroke canvas mounts here -->
 </div>
 
 <style>

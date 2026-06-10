@@ -109,12 +109,14 @@ describe("member flips (R)", () => {
 // ---------------------------------------------------------------------------
 
 const fresh = { atFit: false, repeat: false };
+const pencilOff = { pencilOn: false };
+const pencilOn = { pencilOn: true };
 
 describe("Space at fit", () => {
   it("never engages the machine — the registry's look-close row owns the tap", () => {
     const s = spaceDown(SPACE_IDLE, { atFit: true, repeat: false });
     expect(s.held).toBe(false);
-    expect(spaceUp(s).outcome).toBe("none");
+    expect(spaceUp(s, pencilOff).outcome).toBe("none");
   });
 });
 
@@ -122,7 +124,7 @@ describe("Space while zoomed — clean tap closes", () => {
   it("down engages the hold; an untouched keyup closes", () => {
     const held = spaceDown(SPACE_IDLE, fresh);
     expect(held).toEqual({ held: true, panned: false });
-    const { state, outcome } = spaceUp(held);
+    const { state, outcome } = spaceUp(held, pencilOff);
     expect(outcome).toBe("close");
     expect(state).toEqual(SPACE_IDLE);
   });
@@ -133,7 +135,7 @@ describe("Space while zoomed — hold pans", () => {
     let s = spaceDown(SPACE_IDLE, fresh);
     s = spacePanned(s);
     expect(s).toEqual({ held: true, panned: true });
-    const { state, outcome } = spaceUp(s);
+    const { state, outcome } = spaceUp(s, pencilOff);
     expect(outcome).toBe("none");
     expect(state).toEqual(SPACE_IDLE);
   });
@@ -150,7 +152,7 @@ describe("Space auto-repeat", () => {
     let s = spacePanned(spaceDown(SPACE_IDLE, fresh));
     s = spaceDown(s, { atFit: false, repeat: true }); // OS key repeat
     expect(s.panned).toBe(true);
-    expect(spaceUp(s).outcome).toBe("none");
+    expect(spaceUp(s, pencilOff).outcome).toBe("none");
   });
 
   it("a repeat arriving on idle never engages — its keyup can never close", () => {
@@ -158,13 +160,13 @@ describe("Space auto-repeat", () => {
     // change): treating it as a fresh tap would close on release.
     const s = spaceDown(SPACE_IDLE, { atFit: false, repeat: true });
     expect(s.held).toBe(false);
-    expect(spaceUp(s).outcome).toBe("none");
+    expect(spaceUp(s, pencilOff).outcome).toBe("none");
   });
 });
 
 describe("Space stray events", () => {
   it("keyup on idle is a no-op", () => {
-    const { state, outcome } = spaceUp(SPACE_IDLE);
+    const { state, outcome } = spaceUp(SPACE_IDLE, pencilOff);
     expect(outcome).toBe("none");
     expect(state).toBe(SPACE_IDLE);
   });
@@ -182,12 +184,38 @@ describe("Space stray events", () => {
 describe("Space across cycles", () => {
   it("the machine resets cleanly between holds", () => {
     // Cycle 1: clean tap → close.
-    let r = spaceUp(spaceDown(SPACE_IDLE, fresh));
+    let r = spaceUp(spaceDown(SPACE_IDLE, fresh), pencilOff);
     expect(r.outcome).toBe("close");
     // Cycle 2 from the returned state: panned hold → none.
-    r = spaceUp(spacePanned(spaceDown(r.state, fresh)));
+    r = spaceUp(spacePanned(spaceDown(r.state, fresh)), pencilOff);
     expect(r.outcome).toBe("none");
     // Cycle 3: clean again → close.
-    expect(spaceUp(spaceDown(r.state, fresh)).outcome).toBe("close");
+    expect(spaceUp(spaceDown(r.state, fresh), pencilOff).outcome).toBe("close");
+  });
+});
+
+describe("Space with the pencil ON (UI §11: Pan — never close)", () => {
+  it("a clean zoomed tap resolves to NOTHING — Look stays open", () => {
+    // The look-close def's `!ctx.pencilMode` gate covers fit; this is the
+    // zoomed raw-pipeline half: a Space tap released without dragging
+    // must not destroy pencil mode.
+    const { state, outcome } = spaceUp(spaceDown(SPACE_IDLE, fresh), pencilOn);
+    expect(outcome).toBe("none");
+    expect(state).toEqual(SPACE_IDLE); // resolved, never wedged
+  });
+
+  it("mid-pen-down the stage sees no pan, yet the tap still cannot close", () => {
+    // During a draw the overlay holds pointer capture, so spacePanned is
+    // never reached — without the gate every mid-mark tap looks clean.
+    const held = spaceDown(SPACE_IDLE, fresh);
+    expect(held.panned).toBe(false); // exactly the dangerous shape
+    expect(spaceUp(held, pencilOn).outcome).toBe("none");
+  });
+
+  it("a panned hold stays a no-op too; pencil OFF keeps the clean-tap close", () => {
+    expect(spaceUp(spacePanned(spaceDown(SPACE_IDLE, fresh)), pencilOn).outcome).toBe(
+      "none",
+    );
+    expect(spaceUp(spaceDown(SPACE_IDLE, fresh), pencilOff).outcome).toBe("close");
   });
 });

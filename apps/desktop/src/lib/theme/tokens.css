@@ -7,9 +7,10 @@
  * tokens for legibility at each luminance. Full interface themes
  * (post-M1) will be a [data-theme] block here — no component changes.
  *
- * THE SATURATED PENCIL RED IS RESERVED for the grease pencil (M2a) —
- * it appears nowhere in P4.2. The has-journal dot uses the dulled reds
- * below. Everything else is achromatic.
+ * THE SATURATED PENCIL RED belongs to the grease pencil ALONE (DECISIONS
+ * I5; live since P5.1): the Look overlay, the live stroke, the journal
+ * micro-previews, and the pencil cursor dot. The has-journal dot uses the
+ * dulled reds below. Everything else is achromatic.
  */
 :root {
   /* chrome (fixed, dark) */
@@ -24,8 +25,9 @@
   --text-faint: #5a5a5a;
   /* chrome focus ring (focusables in panels/menus/inputs) */
   --focus: #cfcfcf;
-  /* RESERVED — do not use anywhere in P4.2 (the grease pencil owns it, M2a):
-     --red-pencil: #e03131; */
+  /* The grease pencil's tool color — the ONLY saturated color in the UI
+   * (I5). Pencil surfaces only; everything else stays achromatic. */
+  --red-pencil: #e03131;
   --font:
     system-ui,
     -apple-system,

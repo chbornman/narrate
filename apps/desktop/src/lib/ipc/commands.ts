@@ -21,6 +21,8 @@ import type {
   RootDto,
   RuntimeStatus,
   ScopeView,
+  StrokeCommitDto,
+  StrokePayloadWire,
 } from "../types/dto";
 import type { Filter, SearchResults } from "../types/search";
 
@@ -39,7 +41,18 @@ export const addNote = (text: string) => invoke<boolean>("add_note", { text });
 export const setRating = (value: number) =>
   invoke<boolean>("set_rating", { value });
 
-export const reportActivity = () => invoke<void>("report_activity");
+/** Activity touch (CAPTURE §2.1). Resolves to the CURRENT (post-touch)
+ * session id: session closure is lazy (§2.2), so this echo is how the
+ * frontend observes a rotation — the session-scoped pencil undo stack
+ * clears against it (§8.5). */
+export const reportActivity = () => invoke<string>("report_activity");
+
+/** Grease-pencil stroke (CAPTURE §8): minted at pen-up, bound to the single
+ * VIEWED image — never the scope ring buffer — and committed UNLINKED
+ * (DECISIONS C5; P6.1 resolves links). Resolves to the event id plus the
+ * session it landed in — both feed the session-scoped undo stack (§8.5). */
+export const addStroke = (hash: string, payload: StrokePayloadWire) =>
+  invoke<StrokeCommitDto>("add_stroke", { hash, payload });
 
 // -- search (RETRIEVAL §4 / §5.4) -------------------------------------------
 

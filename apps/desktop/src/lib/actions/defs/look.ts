@@ -8,9 +8,10 @@
  * zoom-toggle/zoom-fit/zoom-100 seated here + the global set-surround row
  * fill menus.ts's frozen look-backdrop order table.
  *
- * Reserved M2a band (P/E/V, O): registry rows that dispatch to NOTHING —
- * hidden from menus and the cheatsheet until the pencil packet lights
- * them up (featureset §9; ActionDef.reserved).
+ * The grease-pencil band (P5.1, M2a — CAPTURE §8, UI §4.4/§11): the P4.2
+ * reserved rows reconciled onto the SPEC's keys — B = sticky pencil
+ * toggle, hold-E = eraser, O = overlay toggle, Ctrl+Z = undo; the
+ * redundant pencil-visibility (V) row collapsed into the single O toggle.
  */
 import type { ActionDef } from "../types";
 
@@ -40,8 +41,10 @@ export const LOOK_DEFS: ActionDef[] = [
     group: "look",
     available: always,
     // While zoomed, Space is hold-to-pan (pointer pipeline, Stage B) —
-    // the §3 showcase: no special-case branch in any component.
-    enabled: (ctx) => ctx.lookAtFit && !ctx.railFocused,
+    // the §3 showcase: no special-case branch in any component. With the
+    // pencil on, Space is the PAN key at any zoom (UI §11: "Space (hold) +
+    // drag · Look (pencil on) · Pan") — it must never close Look mid-mark.
+    enabled: (ctx) => ctx.lookAtFit && !ctx.railFocused && !ctx.pencilMode,
   },
   {
     id: "zoom-toggle",
@@ -112,41 +115,56 @@ export const LOOK_DEFS: ActionDef[] = [
     // Stage A's (same Action kind, scope "grid").
     enabled: lookKeysFree,
   },
-  // ---- reserved M2a band (P/E/V + overlay cycle): dispatch to nothing ----
+  // ---- the grease pencil (P5.1 — CAPTURE §8, UI §4.4) --------------------
   {
     id: "pencil-pen",
     verb: "Pencil",
-    keys: [{ key: "p" }],
+    label: "Grease pencil (sticky; resets on return to Grid)",
+    keys: [{ key: "b" }],
     scope: "look",
-    group: "look",
+    group: "capture",
+    seats: ["look-backdrop"], // pointer reachability (R6 excludes only drawing)
     available: always,
-    reserved: true,
+    // You cannot draw on paper you cannot see (UI §4.4): a hidden overlay
+    // makes the pencil UNAVAILABLE, not merely inert.
+    enabled: (ctx) => !ctx.railFocused && ctx.overlayVisible,
+    checked: (ctx) => ctx.pencilMode,
   },
   {
     id: "pencil-eraser",
     verb: "Eraser",
+    label: "Eraser — hold E, tap a stroke to retract it",
     keys: [{ key: "e" }],
     scope: "look",
-    group: "look",
+    group: "capture",
     available: always,
-    reserved: true,
+    // HOLD semantics: keydown engages through this row; the release is a
+    // raw keyup fact in PencilOverlay (the Space-pan precedent). Pointer
+    // path: the stylus eraser end (named in the reachability audit).
+    enabled: (ctx) => !ctx.railFocused && ctx.pencilMode,
   },
   {
-    id: "pencil-visibility",
-    verb: "Strokes visibility",
-    keys: [{ key: "v" }],
+    id: "pencil-undo",
+    verb: "Undo stroke",
+    label: "Undo last stroke (retraction; mid-draw it cancels, unlogged)",
+    keys: [{ key: "z", ctrlOrMeta: true }],
     scope: "look",
-    group: "look",
+    group: "capture",
     available: always,
-    reserved: true,
+    // Empty stack and no pen down → the pencil layer must NOT swallow the
+    // chord (CAPTURE §8.5: Ctrl+Z is a no-op in the pencil layer).
+    enabled: (ctx) => !ctx.railFocused && ctx.pencilUndoable,
   },
   {
     id: "cycle-overlay",
     verb: "Overlay",
+    label: "Tracing-paper overlay (hiding it exits pencil mode)",
     keys: [{ key: "o" }],
     scope: "look",
     group: "look",
+    seats: ["look-backdrop"],
     available: always,
-    reserved: true,
+    enabled: lookKeysFree,
+    checked: (ctx) => ctx.overlayVisible,
   },
 ];

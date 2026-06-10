@@ -100,11 +100,24 @@ export function spacePanned(s: SpaceHoldState): SpaceHoldState {
 }
 
 /** Space keyup: a clean engaged tap closes; a panned hold (or a stray
- * keyup on idle) resolves to nothing. The machine always returns to idle. */
-export function spaceUp(s: SpaceHoldState): {
+ * keyup on idle) resolves to nothing. The machine always returns to idle.
+ *
+ * With the pencil ON, Space is the PAN key at any zoom (UI §11: "Space
+ * (hold) + drag · Look (pencil on) · Pan") — it must never close Look,
+ * mid-mark least of all (during pen-down the overlay holds pointer
+ * capture, so the stage never sees a pan and every tap looks clean). The
+ * registry's look-close row carries the same `!ctx.pencilMode` gate at
+ * fit; this is the zoomed (raw-pipeline) half of that ruling. */
+export function spaceUp(
+  s: SpaceHoldState,
+  e: { pencilOn: boolean },
+): {
   state: SpaceHoldState;
   outcome: "close" | "none";
 } {
   if (!s.held) return { state: s, outcome: "none" };
-  return { state: SPACE_IDLE, outcome: s.panned ? "none" : "close" };
+  return {
+    state: SPACE_IDLE,
+    outcome: s.panned || e.pencilOn ? "none" : "close",
+  };
 }

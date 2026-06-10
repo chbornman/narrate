@@ -5,11 +5,11 @@
  * actions/match.ts running against the registry; the executable key table
  * lives in actions/defs/*.
  *
- * P4.2 boundaries: pencil rows (P/E/V, overlay cycle) and the mic row (M)
- * are RESERVED registry rows — they dispatch to nothing here; the actions
- * arrive with their packets (M2a/M2b). Single-letter shortcuts are
- * suppressed while any text input is focused (UI §11; rule owned by
- * actions/match.ts).
+ * The pencil band went live with P5.1 (B sticky toggle, hold-E eraser,
+ * O overlay, Ctrl+Z undo — UI §4.4/§11; the P4.2 reserved P/E/V rows were
+ * reconciled onto the spec's keys). The mic row (M) stays RESERVED until
+ * M2b. Single-letter shortcuts are suppressed while any text input is
+ * focused (UI §11; rule owned by actions/match.ts).
  */
 import { match } from "../actions/match";
 import { REGISTRY } from "../actions/registry";
@@ -83,6 +83,8 @@ export type Action =
   | { kind: "journal-retract"; eventId: string }
   | { kind: "journal-redact"; eventId: string }
   | { kind: "journal-toggle-retracted" }
+  // stroke row click → flash that stroke on the Look overlay (UI §8.2)
+  | { kind: "journal-flash-stroke"; eventId: string }
   // OS integration (D4 — no deletion verbs, D3)
   | { kind: "reveal-in-file-manager" }
   | { kind: "copy-file-path" }
@@ -91,12 +93,15 @@ export type Action =
   | { kind: "search-nav"; dir: "up" | "down" | "left" | "right" }
   | { kind: "search-open-result" }
   | { kind: "remove-last-chip" }
-  // reserved rows — dispatch to nothing in P4.2 (M2a/M2b packets)
-  | { kind: "toggle-mic" }
+  // grease pencil (P5.1 — keymap reconciliation: B toggle, hold-E eraser,
+  // O overlay, Ctrl+Z undo; the reserved pencil-visibility row collapsed
+  // into the single overlay toggle)
   | { kind: "pencil-pen" }
   | { kind: "pencil-eraser" }
-  | { kind: "pencil-visibility" }
-  | { kind: "cycle-overlay" };
+  | { kind: "pencil-undo" }
+  | { kind: "cycle-overlay" }
+  // reserved rows — dispatch to nothing until M2b
+  | { kind: "toggle-mic" };
 
 /** The P3.2 KeyContext fields — still required, so existing fixtures and
  * callers compile unchanged. */
@@ -136,6 +141,8 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   surround: "black",
   filmstrip: false,
   pencilMode: false,
+  overlayVisible: true, // tracing paper defaults ON (UI §4.4)
+  pencilUndoable: false,
   micArmed: false,
 };
 

@@ -2,7 +2,7 @@
 //! DTOs; the search result contract lives in `search_types` and mirrors
 //! spec/RETRIEVAL.md §5.4 field-for-field instead.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,6 +168,44 @@ pub struct JournalEntryDto {
     pub rating: Option<u8>,
     pub targets: Vec<String>,
     pub linked_event: Option<String>,
+    /// Stroke rows only; None elsewhere (and on scrubbed strokes).
+    pub stroke: Option<StrokeDto>,
+}
+
+/// Stroke geometry riding a journal row (P5.1: the Look overlay and the
+/// journal micro-previews render from this). Wire form is EVENTS §3.3's
+/// integer `[x, y, p, t]` tuples.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrokeDto {
+    pub base_w: u32,
+    pub orientation: u8,
+    pub points: Vec<[i64; 4]>,
+}
+
+/// `add_stroke` input (CAPTURE §8.2, P5.1) — canonical integers only.
+/// `stroke_payload` (commands/capture.rs) re-checks every range for honest
+/// error messages; core's `append` re-validates the converted payload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrokePayloadDto {
+    pub base_w: u32,
+    pub orientation: u8,
+    pub points: Vec<[i64; 4]>,
+    pub tool: String,
+}
+
+/// `add_stroke` output (P5.1): the minted event id plus the session it
+/// landed in. The pencil undo stack is session-scoped (CAPTURE §8.5,
+/// DECISIONS C4 "this-session only") and session closure is LAZY — the
+/// 30-minute boundary applies at the next activity touch (CAPTURE §2.2) —
+/// so the echoed session id is how the frontend observes a rotation and
+/// clears the stack.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrokeCommitDto {
+    pub id: String,
+    pub session_id: String,
 }
 
 /// Read-only EXIF subset + file identity (Metadata tab, K16: from the db's

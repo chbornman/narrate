@@ -97,7 +97,13 @@
     const now = Date.now();
     if (now - lastActivityReport < 60_000) return;
     lastActivityReport = now;
-    void ipc.reportActivity();
+    // The echo is the post-touch session id: a rotation (the 30-minute
+    // idle boundary, CAPTURE §2.2) closed the session the pencil undo
+    // stack belongs to — clear it (§8.5 "cleared at session close").
+    ipc
+      .reportActivity()
+      .then((sessionId) => ui.look.syncUndoSession(sessionId))
+      .catch(() => {});
   }
 
   // ---- backend events ----------------------------------------------------------
@@ -106,7 +112,13 @@
     ui.debugEnabled = Boolean(import.meta.env.PHOTOPROOF_DEBUG);
     void ui.init();
     const unlisteners: Promise<UnlistenFn>[] = [
-      listen<IndicatorPulse>("indicator-pulse", () => ui.shell.onPulse()),
+      listen<IndicatorPulse>("indicator-pulse", (e) => {
+        ui.shell.onPulse();
+        // Stroke-affecting commits (any source: pencil flows, journal
+        // panel, redaction) refresh the Look overlay's fold (P5.1).
+        if (["stroke", "retraction", "redaction"].includes(e.payload.eventKind))
+          ui.look.strokesVersion += 1;
+      }),
       listen<IndicatorState>("indicator-state", (e) => {
         ui.shell.onScopeEcho(e.payload.currentScope);
       }),

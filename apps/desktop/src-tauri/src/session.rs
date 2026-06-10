@@ -140,4 +140,37 @@ mod tests {
         // 10 minutes after the rotating activity: same (new) session.
         assert_eq!(p.on_activity(ms(t1 + 10 * 60 * 1000)), Boundary::Same);
     }
+
+    #[test]
+    fn touch_echoes_the_rotated_session_id_across_the_idle_boundary() {
+        // The contract report_activity/add_stroke surface to the frontend:
+        // session closure is LAZY, so the post-touch echo is how the
+        // session-scoped pencil undo stack observes its session closing
+        // (CAPTURE §8.5 "cleared at session close").
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = EventStore::open(tmp.path().join("photoproof.db")).expect("open store");
+        let ctx = SessionContext {
+            app_version: "0.0.1-test".into(),
+            device_id: "deadbeefdeadbeefdeadbeefdeadbeef".into(),
+            root_context: None,
+        };
+        let mut mgr = SessionManager::open(&store, ctx).expect("open manager");
+        let first = mgr.id().clone();
+
+        // Within the boundary: same session, no echo.
+        let now = UtcMillis::now();
+        assert_eq!(mgr.touch(&store, now).expect("touch"), None);
+        assert_eq!(mgr.id(), &first);
+
+        // 30+ minutes after the last activity: the touch rotates and
+        // echoes the NEW session id; the manager answers with it from
+        // here on (what add_stroke binds the next stroke to).
+        let later = UtcMillis::from_epoch_ms(now.epoch_ms() + IDLE_BOUNDARY_MS + 1);
+        let rotated = mgr
+            .touch(&store, later)
+            .expect("touch")
+            .expect("rotation echoes the new session id");
+        assert_ne!(rotated, first);
+        assert_eq!(mgr.id(), &rotated);
+    }
 }

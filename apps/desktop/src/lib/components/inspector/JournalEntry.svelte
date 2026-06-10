@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * One journal row — STAGE C OWNS THIS FILE. Row states (verbatim remark ·
-   * rating · stroke stub (micro-previews land with M2a) · "[redacted]" stub ·
+   * rating · stroke micro-preview (P5.1) · "[redacted]" stub ·
    * retracted struck-through) + the three quiet hover actions (UI §8.3):
    * Correct (inline revision) · Retract (toast + Undo = RE-STATE, E4) ·
    * Redact… (the one modal). Availability is pure row logic
@@ -11,6 +11,7 @@
   import type { Action } from "../../logic/keymap";
   import { formatTime, ratingLine, rowActions } from "../../logic/journal";
   import type { JournalEntryDto } from "../../types/dto";
+  import StrokePreview from "./StrokePreview.svelte";
 
   let {
     entry,
@@ -57,8 +58,18 @@
   {:else if entry.kind === "rating"}
     <span class="text dim">{ratingLine(entry.rating)}</span>
   {:else if entry.kind === "stroke"}
-    <!-- M2a seat: the micro-preview replaces this stub -->
-    <span class="text dim">[stroke]</span>
+    {#if entry.stroke != null && entry.targets.length > 0}
+      <!-- micro-preview (P5.1): the path over a small thumb; clicking
+           flashes the stroke on the Look overlay (UI §8.2) -->
+      <StrokePreview
+        stroke={entry.stroke}
+        hash={entry.targets[0]}
+        onflash={() =>
+          onaction({ kind: "journal-flash-stroke", eventId: entry.id })}
+      />
+    {:else}
+      <span class="text dim">[stroke]</span>
+    {/if}
   {:else if editing}
     <!-- svelte-ignore a11y_autofocus — the edit is user-summoned -->
     <textarea

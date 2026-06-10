@@ -56,6 +56,10 @@ function genContext(rnd: () => number): ActionContext {
     debugEnabled: bool(),
     asrReady: bool(),
     filmstrip: bool(),
+    // pencil context (live since P5.1): sweep both halves of every gate
+    pencilMode: bool(),
+    overlayVisible: bool(),
+    pencilUndoable: bool(),
   });
 }
 
@@ -172,6 +176,10 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
     "search-nav": "pointer-native: result rows are clickable",
     "search-open-result": "search result row click",
     "remove-last-chip": "chip × buttons in the search overlay",
+    "pencil-eraser":
+      "pointer-native: the stylus eraser end (hold-E is the keyboard form; a menu item cannot hold)",
+    "pencil-undo":
+      "pointer path: the journal panel's stroke-row Retract (the same tombstone)",
   };
 
   it("every non-reserved verb holds a seat or names its chrome/pointer affordance", () => {

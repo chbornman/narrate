@@ -27,12 +27,12 @@ use photoproof_core::library::{ArtifactKind, Library};
 use photoproof_core::sidecar::SidecarEngine;
 use photoproof_core::{
     ContentHash, Event, EventDraft, EventId, EventStore, JournalEntry as FoldedEntry, Kind,
-    Payload, RemarkSource, RetractionSource, SessionId, UtcMillis,
+    Payload, RemarkSource, RetractionSource, SessionId, StrokePayload, UtcMillis,
 };
 use tauri::AppHandle;
 
 use super::{S, emit_pulse};
-use crate::dto::{ImageMetadataDto, JournalEntryDto, RedactReportDto};
+use crate::dto::{ImageMetadataDto, JournalEntryDto, RedactReportDto, StrokeDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
 
@@ -49,6 +49,27 @@ fn parse_hash(hash: &str) -> CmdResult<ContentHash> {
 
 fn hashes(targets: &[ContentHash]) -> Vec<String> {
     targets.iter().map(|h| h.as_str().to_owned()).collect()
+}
+
+/// Stroke geometry → wire form (EVENTS §3.3 `[x, y, p, t]` tuples) for the
+/// Look overlay and the journal micro-previews (P5.1).
+fn stroke_dto(p: &StrokePayload) -> StrokeDto {
+    StrokeDto {
+        base_w: p.base_w,
+        orientation: p.orientation,
+        points: p
+            .points
+            .iter()
+            .map(|pt| {
+                [
+                    i64::from(pt.x),
+                    i64::from(pt.y),
+                    i64::from(pt.p),
+                    i64::from(pt.t),
+                ]
+            })
+            .collect(),
+    }
 }
 
 /// `retracted(id)` := ∃ retraction targeting id (retractions are never
@@ -121,6 +142,7 @@ fn retracted_row(
         rating: None,
         targets: hashes(&e.targets),
         linked_event: None,
+        stroke: None,
     };
     if e.scrubbed() {
         return base;
@@ -150,6 +172,12 @@ fn retracted_row(
         _ => JournalEntryDto {
             kind: "stroke",
             linked_event: e.linked_event.as_ref().map(|l| l.as_str().to_owned()),
+            // Geometry stays renderable behind the toggle (struck-through
+            // micro-preview); a scrubbed stroke returned the stub above.
+            stroke: match &e.payload {
+                Some(Payload::Stroke(p)) => Some(stroke_dto(p)),
+                _ => None,
+            },
             ..base
         },
     }
@@ -202,6 +230,7 @@ pub(crate) fn journal_entries(
                 rating: None,
                 targets: hashes(&targets),
                 linked_event: None,
+                stroke: None,
             },
             FoldedEntry::Rating {
                 id,
@@ -221,13 +250,14 @@ pub(crate) fn journal_entries(
                 rating: Some(value),
                 targets: hashes(&targets),
                 linked_event: None,
+                stroke: None,
             },
             FoldedEntry::Stroke {
                 id,
                 ts,
                 target,
+                payload,
                 linked_event,
-                ..
             } => JournalEntryDto {
                 session_id: raw(&id)?.session_id.as_str().to_owned(),
                 source: raw(&id)?.source.as_str(),
@@ -241,6 +271,7 @@ pub(crate) fn journal_entries(
                 rating: None,
                 targets: vec![target.as_str().to_owned()],
                 linked_event: linked_event.map(|l| l.as_str().to_owned()),
+                stroke: Some(stroke_dto(&payload)),
             },
             FoldedEntry::RedactedStub { id, ts, source, .. } => JournalEntryDto {
                 session_id: raw(&id)?.session_id.as_str().to_owned(),
@@ -255,6 +286,7 @@ pub(crate) fn journal_entries(
                 rating: None,
                 targets: Vec::new(),
                 linked_event: None,
+                stroke: None,
             },
         });
     }
@@ -761,6 +793,74 @@ mod tests {
             None,
             "scrubbed content cannot be re-stated"
         );
+    }
+
+    #[test]
+    fn stroke_rows_carry_geometry_for_overlay_and_previews() {
+        use photoproof_core::{StrokePayload, StrokePoint, Tool};
+        let (_tmp, store, session, hash) = store_fixture();
+        let payload = StrokePayload {
+            base_w: 40,
+            orientation: 6,
+            points: vec![
+                StrokePoint {
+                    x: 100,
+                    y: 200,
+                    p: 1000,
+                    t: 0,
+                },
+                StrokePoint {
+                    x: 180,
+                    y: 260,
+                    p: 640,
+                    t: 12,
+                },
+            ],
+            tool: Tool::Pencil,
+        };
+        let live = store
+            .append(
+                &session,
+                EventDraft::Stroke {
+                    payload: payload.clone(),
+                    target: hash.clone(),
+                    linked_event: None,
+                },
+                None,
+            )
+            .unwrap()
+            .id;
+        let gone = store
+            .append(
+                &session,
+                EventDraft::Stroke {
+                    payload,
+                    target: hash.clone(),
+                    linked_event: None,
+                },
+                None,
+            )
+            .unwrap()
+            .id;
+        retract(&store, &session, &gone);
+        let rows = journal_entries(&store, &hash).unwrap();
+        assert_eq!(rows.len(), 2);
+        let live_row = rows.iter().find(|r| r.id == live.as_str()).unwrap();
+        let gone_row = rows.iter().find(|r| r.id == gone.as_str()).unwrap();
+        // Both rows render the micro-preview; the wire form is §3.3 exact.
+        for row in [live_row, gone_row] {
+            let s = row.stroke.as_ref().expect("geometry rides the row");
+            assert_eq!((s.base_w, s.orientation), (40, 6));
+            assert_eq!(s.points, vec![[100, 200, 1000, 0], [180, 260, 640, 12]]);
+        }
+        assert!(!live_row.retracted);
+        assert!(gone_row.retracted, "behind the toggle, geometry intact");
+        // Scrubbing kills the geometry with the content (EVENTS §7).
+        store.redact(&live).unwrap();
+        let rows = journal_entries(&store, &hash).unwrap();
+        let stub = rows.iter().find(|r| r.id == live.as_str()).unwrap();
+        assert_eq!(stub.kind, "redacted");
+        assert!(stub.stroke.is_none());
     }
 
     #[test]

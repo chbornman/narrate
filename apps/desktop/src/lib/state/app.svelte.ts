@@ -25,7 +25,12 @@ import {
 } from "../logic/sources";
 import type { Action } from "../logic/keymap";
 import type { ActionContext } from "../actions/types";
-import type { AppSettings, FolderNode, RootDto } from "../types/dto";
+import type {
+  AppSettings,
+  FolderNode,
+  RootDto,
+  StrokePayloadWire,
+} from "../types/dto";
 import type { LookEntry } from "../types/display";
 import type { Filter, SearchResults } from "../types/search";
 import * as prefs from "./prefs";
@@ -415,6 +420,83 @@ export class Ui {
   }
 
   // ---------------------------------------------------------------------------
+  // grease pencil flows (P5.1 — CAPTURE §8.4–8.6; PencilOverlay is the glue)
+  // ---------------------------------------------------------------------------
+
+  /** Pen-up commit: mint the stroke bound to the VIEWED image (never the
+   * scope ring buffer), push the undo stack, refresh journal evidence.
+   * The backend echoes the session the stroke landed in — the stack is
+   * session-scoped (§8.5), so a rotation starts a fresh stack. The
+   * indicator pulse rides the backend's existing channel. */
+  async commitStroke(payload: StrokePayloadWire) {
+    const hash = this.look.currentHash;
+    if (hash === null) return;
+    let committed: { id: string; sessionId: string };
+    try {
+      committed = await ipc.addStroke(hash, payload);
+    } catch {
+      return; // backend unavailable: the mark was never an event
+    }
+    this.look.onStrokeCommitted(committed.id, hash, committed.sessionId);
+    await this.refreshJournalFor(hash);
+  }
+
+  /** Eraser tap: whole-stroke retraction through the EXISTING tombstone
+   * path (§8.6) — no toast; the pulse is the feedback (the journal panel's
+   * Retract row keeps its toast+Undo). */
+  async eraseStroke(eventId: string) {
+    const hash = this.look.currentHash;
+    try {
+      if (!(await ipc.retractEvent(eventId))) return;
+    } catch {
+      return;
+    }
+    this.look.onStrokeRetracted(eventId);
+    if (hash !== null) await this.refreshJournalFor(hash);
+  }
+
+  /** Ctrl+Z (§8.5): during pen-down, cancel the in-flight stroke (local,
+   * unlogged — UI §4.4); otherwise mint a retraction for the most recent
+   * stacked stroke. Empty stack = no-op (the def's enabled gate already
+   * keeps the chord unswallowed). NO redo in v1.
+   *
+   * The stack is session-scoped and session closure is LAZY (the
+   * 30-minute boundary applies at the next activity — CAPTURE §2.2), so
+   * this very keypress may BE the close: report it as activity first and
+   * let the echoed session id arbitrate. A rotated session empties the
+   * stack and the press mints nothing — prior-session strokes are
+   * retracted via the journal panel or eraser, never Ctrl+Z. */
+  async pencilUndo() {
+    if (this.look.penDown) {
+      this.look.requestPenCancel();
+      return;
+    }
+    if (this.look.peekUndo() === null) return;
+    try {
+      this.look.syncUndoSession(await ipc.reportActivity());
+    } catch {
+      return; // backend unavailable: the session is unprovable, mint nothing
+    }
+    const top = this.look.peekUndo();
+    if (top === null) return; // the stack belonged to a closed session
+    try {
+      if (!(await ipc.retractEvent(top.id))) return;
+    } catch {
+      return;
+    }
+    this.look.onStrokeRetracted(top.id);
+    await this.refreshJournalFor(top.hash);
+  }
+
+  /** Stroke mutations change journal truth: re-fold an inspector showing
+   * that image and refresh grid badges (the has-journal dot). */
+  private async refreshJournalFor(hash: string) {
+    if (this.inspector.open !== false && this.inspector.hash === hash)
+      await this.inspector.load(hash);
+    await this.refreshItems();
+  }
+
+  // ---------------------------------------------------------------------------
   // Escape — the 12-layer order (logic/escape.ts)
   // ---------------------------------------------------------------------------
 
@@ -516,7 +598,9 @@ export class Ui {
       thumbStep: this.grid.thumbStep,
       surround: this.shell.surround,
       filmstrip: this.look.filmstrip,
-      pencilMode: false, // reserved (M2a)
+      pencilMode: this.look.pencilMode,
+      overlayVisible: this.look.overlayVisible,
+      pencilUndoable: this.look.penDown || this.look.undoStack.length > 0,
       micArmed: false, // reserved (M2b)
     };
   }
@@ -742,10 +826,14 @@ export class Ui {
         this.inspector.editingEventId = action.eventId;
         break;
       case "journal-retract":
-        // Retract → toast+Undo (RE-STATE — the slice owns the flow);
-        // JournalTab routes here AND calls the slice directly: both paths
-        // land on the same method.
-        await this.inspector.retract(action.eventId);
+        // Retract → toast+Undo (RE-STATE — the slice owns the flow). This
+        // dispatch case is the ONLY route for the journal panel's Retract
+        // row: a committed retraction must also leave the Look overlay and
+        // the pencil undo stack (CAPTURE §8.5 — otherwise Ctrl+Z targets
+        // an already-retracted stroke); for non-strokes the cleanup is a
+        // cheap no-op refetch.
+        if (await this.inspector.retract(action.eventId))
+          this.look.onStrokeRetracted(action.eventId);
         break;
       case "journal-redact":
         this.inspector.beginRedact(action.eventId); // → the one modal
@@ -802,12 +890,26 @@ export class Ui {
         if (this.query === "" && this.chips.length > 0)
           await this.removeChip(this.chips.length - 1);
         break;
+      // ---- grease pencil (P5.1 — CAPTURE §8, UI §4.4) --------------------------
+      case "pencil-pen":
+        this.look.togglePencil();
+        break;
+      case "pencil-eraser":
+        // Hold engages here (auto-repeat re-engages harmlessly); the
+        // release is PencilOverlay's raw keyup — the Space-pan precedent.
+        this.look.eraserHeld = true;
+        break;
+      case "cycle-overlay":
+        this.look.toggleOverlay();
+        break;
+      case "pencil-undo":
+        await this.pencilUndo();
+        break;
+      case "journal-flash-stroke":
+        if (this.surface === "look") this.look.flashStroke(action.eventId);
+        break;
       // ---- reserved rows: dispatch to nothing until their packets -------------
       case "toggle-mic":
-      case "pencil-pen":
-      case "pencil-eraser":
-      case "pencil-visibility":
-      case "cycle-overlay":
         break;
     }
   }

@@ -1,8 +1,9 @@
 /**
  * Keyboard map dispatch — the interpreter (logic/keymap.ts) over the typed
- * action registry. Every P3.2 row is asserted; reserved rows (pencil P/E/V,
- * overlay, mic) dispatch to NOTHING; single-letter keys are suppressed
- * while a text input is focused (UI §11).
+ * action registry. Every P3.2 row is asserted; the mic row (M) stays
+ * reserved and dispatches to NOTHING; the pencil band went live in P5.1
+ * (its block below carries the amendment citation); single-letter keys are
+ * suppressed while a text input is focused (UI §11).
  *
  * EXACTLY THREE existing expectations are amended in P4.2, each citing its
  * founder decision in place:
@@ -257,11 +258,19 @@ describe("look rows", () => {
     });
     expect(dispatch(key(" "), { ...look, lookAtFit: false })).toBeNull();
   });
-  it("P/E/V and O (pencil band — M2a) are reserved: dispatch to nothing", () => {
+  it("the pencil band is LIVE (P5.1 keymap reconciliation: spec wins — UI §4.4/§11 put the toggle on B, hold-E erases, O overlays; the reserved P and V rows retired)", () => {
+    // Amended by P5.1: this block previously asserted the P4.2 reserved
+    // rows dispatched to nothing. The packet lights the band up on the
+    // SPEC's keys; P and V now intentionally dispatch nothing in Look.
+    expect(dispatch(key("b"), look)).toEqual({ kind: "pencil-pen" });
     expect(dispatch(key("p"), look)).toBeNull();
-    expect(dispatch(key("e"), look)).toBeNull();
     expect(dispatch(key("v"), look)).toBeNull();
-    expect(dispatch(key("o"), look)).toBeNull();
+    expect(dispatch(key("o"), look)).toEqual({ kind: "cycle-overlay" });
+    // E is the eraser HOLD, eligible only while the pencil is on.
+    expect(dispatch(key("e"), look)).toBeNull();
+    expect(dispatch(key("e"), { ...look, pencilMode: true })).toEqual({
+      kind: "pencil-eraser",
+    });
   });
 });
 

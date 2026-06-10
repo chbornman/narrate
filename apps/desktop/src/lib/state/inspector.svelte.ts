@@ -101,18 +101,22 @@ export class InspectorSlice {
   /** Retract: immediate tombstone, then sanctioned toast 1 with Undo.
    * Undo = RE-STATE (coordinator ruling / DECISIONS E4): the backend
    * appends a NEW remark/rating carrying the folded content — never an
-   * un-retraction. */
-  async retract(eventId: string) {
+   * un-retraction. Returns whether the tombstone committed (the dispatch
+   * case drops a retracted stroke from the pencil undo stack on success
+   * ONLY — CAPTURE §8.5). */
+  async retract(eventId: string): Promise<boolean> {
     try {
       const committed = await ipc.retractEvent(eventId);
-      if (!committed) return;
+      if (!committed) return false;
       await this.#reload();
       toasts.toast("retracted", RETRACTED_TOAST_TEXT, {
         label: "Undo",
         run: () => void this.restate(eventId),
       });
+      return true;
     } catch {
       /* backend unavailable: nothing retracted, nothing toasts */
+      return false;
     }
   }
 

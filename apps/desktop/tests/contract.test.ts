@@ -285,6 +285,10 @@ function genContext(rnd: () => number): ActionContext {
     debugEnabled: bool(),
     asrReady: bool(),
     filmstrip: bool(),
+    // pencil context (live since P5.1): the band's gates need both halves
+    pencilMode: bool(),
+    overlayVisible: bool(),
+    pencilUndoable: bool(),
   });
 }
 

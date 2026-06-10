@@ -85,6 +85,37 @@ export interface RebuildReportDto {
 // stages: journal/metadata — Stage C, paths/OS — Stage A).
 // ---------------------------------------------------------------------------
 
+/** Integer [x, y, p, t] stroke sample (EVENTS §3.3 wire form: x/y in
+ * ten-thousandths of the display-oriented extent −2500..12500, p per-mille
+ * with 1000 = device reports none, t = ms offset from pen-down). */
+export type StrokeWirePoint = [number, number, number, number];
+
+/** CAPTURE §8.2 stroke payload — `add_stroke`'s input (P5.1). Canonical
+ * integers only; the Rust side validates, core re-validates on append. */
+export interface StrokePayloadWire {
+  baseW: number;
+  orientation: number;
+  points: StrokeWirePoint[];
+  tool: "pencil";
+}
+
+/** `add_stroke`'s output: the minted event id plus the session it landed
+ * in. The pencil undo stack is session-scoped (CAPTURE §8.5, DECISIONS C4
+ * "this-session only"); session closure is lazy, so the echoed session id
+ * is how the frontend observes a rotation and clears the stack. */
+export interface StrokeCommitDto {
+  id: string;
+  sessionId: string;
+}
+
+/** Stroke geometry riding a journal row (the Look overlay and the journal
+ * micro-previews render from this; `pencil` is the only tool in v1). */
+export interface StrokeDto {
+  baseW: number;
+  orientation: number;
+  points: StrokeWirePoint[];
+}
+
 /** One folded journal row (inspector Journal tab — featureset §3, D2).
  * Revisions/retractions never appear standalone (EVENTS folds); retracted
  * rows ARE included, flagged, for the per-session "show retracted" toggle. */
@@ -104,6 +135,8 @@ export interface JournalEntryDto {
   rating: number | null;
   targets: string[];
   linkedEvent: string | null;
+  /** Stroke rows only; null/absent elsewhere (and on scrubbed strokes). */
+  stroke?: StrokeDto | null;
 }
 
 /** Read-only EXIF subset + file identity (Metadata tab, K16 stands —

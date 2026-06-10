@@ -15,10 +15,11 @@ export const MODES: readonly ModeDef[] = [
       ctx.autoAdvance ? { text: "A▸", title: "Auto-advance on (A toggles)" } : null,
   },
   {
-    id: "pencil", // M2a: lights up when ctx.pencilMode exists for real
+    id: "pencil", // live since P5.1: the cursor dot + this segment are the
+    // ENTIRE mode announcement (UI §4.4 — zero added chrome)
     isOn: (ctx) => ctx.pencilMode,
     segment: (ctx) =>
-      ctx.pencilMode ? { text: "✎", title: "Pencil mode" } : null,
+      ctx.pencilMode ? { text: "✎", title: "Pencil mode (B toggles)" } : null,
   },
   {
     id: "mic", // M2b: recording state lives HERE, never in a toast (§4)

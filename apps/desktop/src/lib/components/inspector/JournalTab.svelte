@@ -6,10 +6,11 @@
    * first — logic/journal.ts sessionGroups), revision folding with the
    * "edited" affordance, retracted behind the toggle, redacted stubs.
    *
-   * THE row-verb routing point: Correct and the retracted toggle ride
-   * ui.perform; Retract/Redact… call the slice flows directly — their
-   * perform cases are F-frozen stubs until INTEGRATION wires them through
-   * (the flows live in inspector.svelte.ts either way).
+   * THE row-verb routing point: every row verb rides ui.perform — the
+   * dispatch case is the ONE place where a retraction also drops the
+   * stroke from the Look overlay and the pencil undo stack (CAPTURE §8.5);
+   * calling the inspector slice directly would skip that cleanup and let
+   * Ctrl+Z target an already-retracted stroke.
    */
   import { ui } from "../../state/app.svelte";
   import type { Action } from "../../logic/keymap";
@@ -24,16 +25,7 @@
   const groups = $derived(sessionGroups(ui.inspector.entries));
 
   function route(action: Action) {
-    switch (action.kind) {
-      case "journal-retract":
-        void ui.inspector.retract(action.eventId);
-        break;
-      case "journal-redact":
-        ui.inspector.beginRedact(action.eventId);
-        break;
-      default:
-        void ui.perform(action);
-    }
+    void ui.perform(action);
   }
 </script>
 
