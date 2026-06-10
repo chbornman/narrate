@@ -158,10 +158,15 @@ pub fn heuristic_fingerprint(
 // Platform probe
 // ---------------------------------------------------------------------------
 
-/// Real mount probing. Implemented for Linux (`/proc/self/mounts` +
+/// Real mount probing. Implemented for Linux (`/proc/self/mountinfo` +
 /// `/dev/disk/by-uuid`); macOS (DiskArbitration) and Windows
 /// (`GetVolumeInformationW`) need FFI verified on the founder machine and
 /// currently fall back to the heuristic kind — flagged in the packet report.
+///
+/// On btrfs the mountinfo root field carries the subvolume path
+/// (e.g. `/@home`), which disambiguates mounts that share a block device.
+/// Non-btrfs filesystems always report `/`, so `platform_id` remains the
+/// bare UUID on those — backward compat is handled by the caller.
 #[derive(Debug, Default)]
 pub struct PlatformVolumeProbe;
 
@@ -170,27 +175,56 @@ const COARSE_MTIME_FS: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
 impl VolumeProbe for PlatformVolumeProbe {
     #[cfg(target_os = "linux")]
     fn list_mounts(&self) -> io::Result<Vec<ProbedVolume>> {
-        let mounts = std::fs::read_to_string("/proc/self/mounts")?;
+        let raw = std::fs::read_to_string("/proc/self/mountinfo")?;
         let uuid_by_device = linux_uuid_by_device();
         let mut out = Vec::new();
-        for line in mounts.lines() {
-            let mut fields = line.split_whitespace();
-            let (Some(device), Some(mount), Some(fs_type), Some(opts)) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
+        for line in raw.lines() {
+            // mountinfo(5) format:
+            //   id parent_id major:minor root mount_point options [opt...] - fs_type source super_opts
+            // The root (field 4) is the mount root within the filesystem — on
+            // btrfs this is the subvolume path (e.g. /@home, /@);
+            // everywhere else it's just `/`.
+            // The tricky part: fields 7..N before `-` are variable-length
+            // optional tags (e.g. shared:XXX, master:XXX). Split everything,
+            // find the lone `-`, and index from there.
+            let all: Vec<&str> = line.split_whitespace().collect();
+            let sep = match all.iter().position(|&t| t == "-") {
+                Some(i) => i,
+                None => continue,
+            };
+            let (before, after) = all.split_at(sep);
+            let after = &after[1..]; // skip the `-` itself
+
+            let (Some(&root_raw), Some(&mount_raw), Some(&opts)) =
+                (before.get(3), before.get(4), before.get(5))
             else {
                 continue;
             };
+            let (Some(&fs_type), Some(&device)) = (after.first(), after.get(1)) else {
+                continue;
+            };
+
             // Only real block-device-backed (or network) filesystems can host
             // photo libraries; skip pseudo filesystems.
             if !device.starts_with('/') && !matches!(fs_type, "nfs" | "nfs4" | "cifs" | "smb3") {
                 continue;
             }
-            let mount_point = PathBuf::from(unescape_mount_path(mount));
+            let root = unescape_mount_path(root_raw);
+            let mount_point = PathBuf::from(unescape_mount_path(mount_raw));
             let read_only = opts.split(',').any(|o| o == "ro");
             let uuid = uuid_by_device.get(device).cloned();
             let capacity = statvfs_capacity(&mount_point);
             let (platform_id, platform_kind) = match uuid {
-                Some(u) => (Some(u), PlatformIdKind::LinuxFsUuid),
+                Some(u) => {
+                    // Disambiguate btrfs subvolumes by appending the mount
+                    // root when it differs from `/`.
+                    let pid = if root != "/" {
+                        format!("{u}:{root}")
+                    } else {
+                        u
+                    };
+                    (Some(pid), PlatformIdKind::LinuxFsUuid)
+                }
                 None => (None, PlatformIdKind::Heuristic),
             };
             out.push(ProbedVolume {
@@ -275,6 +309,14 @@ fn statvfs_capacity(mount_point: &Path) -> Option<i64> {
     }
 }
 
+/// Extract the bare UUID from a platform_id that may carry a subvol suffix
+/// (`"UUID:/@home"` → `"UUID"`), or return the string unchanged.
+/// This is used for backward-compat matching when upgrading from bare-UUID
+/// rows to subvol-qualified rows.
+pub fn bare_platform_uuid(pid: &str) -> &str {
+    pid.split_once(':').map_or(pid, |(u, _)| u)
+}
+
 /// Test probe: a mutable list of mounted volumes.
 #[derive(Debug, Default, Clone)]
 pub struct FakeVolumeProbe {
@@ -336,5 +378,12 @@ mod tests {
     fn mount_path_unescape() {
         assert_eq!(unescape_mount_path("/mnt/My\\040Drive"), "/mnt/My Drive");
         assert_eq!(unescape_mount_path("/plain"), "/plain");
+    }
+
+    #[test]
+    fn bare_platform_uuid_passthrough() {
+        assert_eq!(bare_platform_uuid("abc-123"), "abc-123");
+        assert_eq!(bare_platform_uuid("abc-123:/@home"), "abc-123");
+        assert_eq!(bare_platform_uuid("abc-123:/"), "abc-123");
     }
 }

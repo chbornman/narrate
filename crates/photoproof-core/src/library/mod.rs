@@ -40,7 +40,7 @@ pub use preview::{
 pub use scan::{ClockShiftReport, ScanOptions, ScanReport};
 pub use volumes::{
     FakeVolumeProbe, MARKER_FILENAME, PlatformIdKind, PlatformVolumeProbe, ProbedVolume,
-    VolumeMarker, VolumeProbe, read_marker, verify_writable, write_marker,
+    VolumeMarker, VolumeProbe, bare_platform_uuid, read_marker, verify_writable, write_marker,
 };
 pub use watcher::{
     DebounceConfig, DebounceCore, PipelineEffect, RawWatchEvent, RootWatcherHandle, Stability,
@@ -332,6 +332,29 @@ impl Library {
             self.mark_online_locked(&conn, &volume_id, probed, &now)?;
             return Ok(volume_id);
         }
+        // Backward compat: the probe may now emit a subvol-qualified
+        // platform_id (`"UUID:/@home"`) but an existing row still stores the
+        // bare UUID (`"UUID"`). Try a bare-UUID lookup and upgrade the row.
+        if kind == PlatformIdKind::LinuxFsUuid {
+            let bare = volumes::bare_platform_uuid(&platform_id);
+            if bare != platform_id.as_str()
+                && let Some(vid) = conn
+                    .query_row(
+                        "SELECT volume_id FROM volumes
+                         WHERE platform_id = ?1 AND platform_kind = ?2",
+                        params![bare, kind.as_str()],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?
+            {
+                conn.execute(
+                    "UPDATE volumes SET platform_id = ?1 WHERE volume_id = ?2",
+                    params![platform_id, &vid],
+                )?;
+                self.mark_online_locked(&conn, &vid, probed, &now)?;
+                return Ok(vid);
+            }
+        }
         drop(conn);
         self.create_volume(probed, false)
     }
@@ -496,16 +519,57 @@ impl Library {
             if matched.is_none()
                 && let Some(pid) = &platform_id
             {
-                matched = mounts
+                // Collect ALL candidates that match by platform id (exact or
+                // backward-compat bare-UUID). When a stored bare-UUID row
+                // matches both a bare mount and a subvol-qualified mount
+                // (btrfs), prefer the qualified mount — it is unambiguous.
+                let is_linux_fs = platform_kind.as_deref() == Some("linux-fsuuid");
+                let candidates: Vec<usize> = mounts
                     .iter()
                     .enumerate()
-                    .find(|(i, m)| {
-                        !claimed_mounts[*i]
-                            && mount_markers[*i].1.is_none()
-                            && m.platform_id.as_deref() == Some(pid.as_str())
-                            && Some(m.platform_kind.as_str()) == platform_kind.as_deref()
+                    .filter(|(i, m)| {
+                        if claimed_mounts[*i] || mount_markers[*i].1.is_some() {
+                            return false;
+                        }
+                        if Some(m.platform_kind.as_str()) != platform_kind.as_deref() {
+                            return false;
+                        }
+                        m.platform_id.as_deref() == Some(pid.as_str())
+                            || (is_linux_fs
+                                && m.platform_id.as_deref().is_some_and(|mp| {
+                                    volumes::bare_platform_uuid(mp)
+                                        == volumes::bare_platform_uuid(pid)
+                                }))
                     })
-                    .map(|(i, _)| i);
+                    .map(|(i, _)| i)
+                    .collect();
+                if candidates.len() == 1 {
+                    matched = Some(candidates[0]);
+                } else if candidates.len() > 1 {
+                    let known_is_qualified = pid.contains(':');
+                    let pick = if known_is_qualified {
+                        candidates
+                            .iter()
+                            .find(|i| {
+                                mounts[**i]
+                                    .platform_id
+                                    .as_deref()
+                                    .is_some_and(|p| p.contains(':'))
+                            })
+                            .or_else(|| candidates.first())
+                    } else {
+                        candidates
+                            .iter()
+                            .find(|i| {
+                                mounts[**i]
+                                    .platform_id
+                                    .as_deref()
+                                    .is_some_and(|p| !p.contains(':'))
+                            })
+                            .or_else(|| candidates.first())
+                    };
+                    matched = pick.copied();
+                }
             }
             match matched {
                 Some(i) => {
@@ -517,6 +581,20 @@ impl Library {
                     self.maybe_write_marker_if_hosting_root(&volume_id, probed)?;
                     if was_offline {
                         to_scan.extend(self.active_roots_of(&volume_id)?);
+                        // Re-queue errored ingest passes whose image sits on
+                        // this volume — the error may have been caused by the
+                        // volume being offline or misbound.
+                        let conn = self.db.lock().expect("poisoned");
+                        let _ = conn.execute(
+                            "UPDATE ingest_passes
+                             SET state = 'pending', not_before = NULL
+                             WHERE state = 'error'
+                               AND image_hash IN (
+                                 SELECT p.image_hash FROM paths p
+                                 WHERE p.volume_id = ?1 AND p.state = 'active'
+                               )",
+                            params![volume_id],
+                        );
                     }
                 }
                 None => {
