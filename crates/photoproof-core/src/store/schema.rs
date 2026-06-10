@@ -346,7 +346,16 @@ CREATE TABLE preview_artifacts (
 /// Migration slot pre-allocated to packet P3.1 (RETRIEVAL §4 search layer).
 /// Only P3.1 edits this constant.
 const SEARCH_SCHEMA_SQL: &str = r#"
--- (P3.1 search indexes/tables go here, if any)
+-- RETRIEVAL §4 filter-only browse orders by capture date descending with a
+-- deterministic hash tiebreak; this index makes the LIMITed page an
+-- early-stop index scan instead of a full sort of `images`.
+CREATE INDEX idx_images_capture_ts ON images(capture_ts DESC, image_hash);
+
+-- Reverse stroke↔utterance resolution for Quote.linked_stroke (RETRIEVAL
+-- §5.4, X2: the link lives on the later-committed event, pointing
+-- backward): a batched lookup over the result set's root event ids.
+CREATE INDEX idx_events_linked ON annotation_events(linked_event)
+  WHERE linked_event IS NOT NULL;
 "#;
 
 /// Create the schema if the database is new (versioned by `user_version`).
