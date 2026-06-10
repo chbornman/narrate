@@ -344,14 +344,38 @@ export class Ui {
     const { state } = note.submit(this.shell.note);
     this.shell.note = state; // vanishes immediately (UI §6)
     const committed = await ipc.addNote(text);
-    if (committed) await this.advanceAfter("note");
+    if (committed) {
+      await this.refreshInspectorIfTargeted();
+      // A remark lights the has-journal dot (B37): refresh badges live too.
+      await this.refreshItems();
+      await this.advanceAfter("note");
+    }
   }
 
   async rate(value: number) {
     // Session scope: rating keys do nothing (CAPTURE §10).
     if (this.shell.scope.kind === "session") return;
     const committed = await ipc.setRating(value);
-    if (committed) await this.advanceAfter("rating");
+    if (committed) {
+      await this.refreshInspectorIfTargeted();
+      await this.advanceAfter("rating");
+    }
+  }
+
+  /** The inspector is LIVE: any commit that targets the inspected image
+   * re-folds its journal/metadata immediately (founder dogfood, round 1) —
+   * never wait for an active-image change. */
+  private async refreshInspectorIfTargeted() {
+    const hash = this.inspector.hash;
+    if (this.inspector.open === false || hash === null) return;
+    const targets = scopeTargets({
+      surface: this.surface,
+      searchOpen: this.searchOpen,
+      gridSelection: this.grid.selectionTargets,
+      searchSelection: this.searchSel.order,
+      lookTargets: this.look.currentTargets,
+    });
+    if (targets.includes(hash)) await this.inspector.load(hash);
   }
 
   /** Auto-advance wiring (logic/advance.ts): multi-select rating never
