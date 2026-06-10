@@ -8,11 +8,13 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
-- [ ] **Zoom centering + pan clamp** (coordinator applies at the P4.2b
-  merge): when the scaled image fits the viewport on an axis, center on
-  that axis; while it overflows, clamp panning so edges never detach from
-  the viewport. One pure `clampOffsets()` in zoom.ts + unit tests.
-  (Founder, dogfood round 1.)
+- [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
+  carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
+- [ ] **Add watched folder from the main window** — currently reachable via
+  drag-a-folder-onto-the-window, Settings (Ctrl+,), and the first-run
+  screen, but the rail itself has no [+] affordance; add a quiet "Add
+  folder…" rail footer row + gutter/rail context-menu entry dispatching the
+  same registered action. (Founder, dogfood round 1.)
 
 - [ ] **Journal entries show sibling targets** — a multi-target note's entry
   carries a quiet "+N others" affordance (targets are already in the event;

@@ -352,6 +352,28 @@ where it amends spec/UI.md, the featureset wins.
   enumeration stays closed (no appearance section).
 - **U7.** Sheet instances are enumerated: cheatsheet and drop-confirm.
   A new Sheet instance is a spec change.
+- **U9 (P4.2b).** Settings gains one row inside Watched folders ("Stacked
+  pairs show: JPEG|RAW"); persisted in the backend settings store (NOT
+  localStorage — it must cross the Settings→main window seam live via the
+  `settings-changed` event).
+- **U10 (P4.2b).** The indicator's scope segment click = `open-inspector`
+  (journal) toggle; note-summon moves to the capsule remainder. The
+  indicator remains a status strip.
+- **U11 (P4.2b).** U4's collapsed-pair target order is *display-member
+  first* — RAW-first when the preference is RAW (`event_targets.position`
+  consumers see the preference-dependent order; tested).
+- **U12 (P4.2b).** The P16 protocol gains `/original/<hash>`: stored-format
+  allowlist (jpeg/png/webp), online-only, immutable cache headers, uniform
+  404 refusal. "Actual" (100%) zoom stays preview-relative even when the
+  original renders (it draws in the preview's layout box so the canonical
+  zoom session carries exactly); true 1:1-of-original is an M1.5 question.
+- **U13 (P4.2b + coordinator).** ActionDef gains optional `checked(ctx)`
+  (menu toggle state stays defs-only). Expanded stack members link via a
+  ±2 px inward nudge + bridging underline (sanctioned micro-deviation from
+  strict column alignment). Zoom transforms normalize through
+  `clampOffsets` in `carryOver`: per-axis centering when the scaled image
+  fits, edge clamping while it overflows — corner anchors pin to edges by
+  design.
 - **U8 (INTEGRATION amendment).** The drag-folder drop-confirm joins the
   Esc order as layer 2 (after the redaction modal, before the context
   menu): Esc is now a **13-layer** order. The Sheet contract promises Esc
