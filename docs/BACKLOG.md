@@ -59,6 +59,15 @@ managing = off-thesis).
   searches; drag-selection-to-rail filing; query-residue indicator segment
   with one-key clear; chip-creation UI (parser-driven); select-from-note ↔
   project filing workflow chain.
+- **M3 additions (founder, dogfood round 2)**: free-text/fuzzy matching
+  over metadata fields (camera/lens/filename — typo-tolerant) as a QUIET
+  TOGGLE: never default-on, never outranks exact matches, never blocks the
+  <100 ms FTS path. **M3 design decision to make**: when projects become
+  browsable grids ("collection view"), does search turn contextual — e.g.
+  a right sidebar scoped to the collection — instead of the full-canvas
+  destination? (Tension: the right edge is reserved for journal/partner;
+  founder suspects he'll want search-as-sidebar there. Decide at M3 design
+  time, not before.) Full-canvas search stands until then.
 - **M4 (time)**: Look bottom-edge stroke scrubber (seat reserved); journal
   timeline rendering upgrade; trajectories as an alternate grid lens.
 - **M5 (partner)**: right-edge dockable panel sharing the inspector slot;
