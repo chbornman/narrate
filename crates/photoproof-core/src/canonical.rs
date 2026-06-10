@@ -177,6 +177,13 @@ const TOP_LEVEL_KEYS: [&str; 12] = [
 /// any non-canonical formatting are rejected (the parsed event must
 /// re-serialize to exactly the input bytes — I5).
 pub fn parse_canonical(bytes: &[u8]) -> PResult<Event> {
+    // Cheap §4.1 rule 1–2 pre-check: canonical bytes are exactly one compact
+    // JSON object — first byte `{`, last byte `}`. Rejects a UTF-8 BOM,
+    // leading whitespace, and trailing newlines before any JSON parsing.
+    // The byte-identical re-serialization below remains the backstop.
+    if bytes.first() != Some(&b'{') || bytes.last() != Some(&b'}') {
+        return Err(CanonicalParseError::NotCanonical);
+    }
     let value: Value =
         serde_json::from_slice(bytes).map_err(|e| CanonicalParseError::Json(e.to_string()))?;
     let obj = value.as_object().ok_or(CanonicalParseError::NotObject)?;

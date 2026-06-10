@@ -236,6 +236,111 @@ fn rejects_floats_nulls_unknown_keys_and_non_canonical_bytes() {
 }
 
 #[test]
+fn rejects_duplicate_keys_and_noncanonical_numbers() {
+    // Duplicate JSON keys, top-level (rule 3/8: one sorted closed key set).
+    let dup_top = VECTOR_A.replace("\"v\":1}", "\"v\":1,\"v\":1}");
+    assert!(parse_canonical(dup_top.as_bytes()).is_err());
+    // Duplicate payload key.
+    let dup_payload = VECTOR_B_REMARK.replace("\"conf_pm\":912", "\"conf_pm\":912,\"conf_pm\":912");
+    assert!(parse_canonical(dup_payload.as_bytes()).is_err());
+
+    // Negative zero (rule 5: no -0).
+    let neg_zero = VECTOR_B_REMARK.replace("\"conf_pm\":912", "\"conf_pm\":-0");
+    assert!(parse_canonical(neg_zero.as_bytes()).is_err());
+
+    // Exponent-form numbers, fractional and integral value (rule 5).
+    let exp_frac = VECTOR_B_REMARK.replace("\"dur_ms\":4210", "\"dur_ms\":4.21e3");
+    assert!(parse_canonical(exp_frac.as_bytes()).is_err());
+    let exp_int = VECTOR_B_REMARK.replace("\"dur_ms\":4210", "\"dur_ms\":421e1");
+    assert!(parse_canonical(exp_int.as_bytes()).is_err());
+
+    // Leading zeros (rule 5: base 10, no leading zeros).
+    let leading_zero = VECTOR_B_REMARK.replace("\"conf_pm\":912", "\"conf_pm\":0912");
+    assert!(parse_canonical(leading_zero.as_bytes()).is_err());
+
+    // Over-width integers: in-range JSON, out of range for the field.
+    let wide_conf = VECTOR_B_REMARK.replace("\"conf_pm\":912", "\"conf_pm\":70000");
+    assert!(parse_canonical(wide_conf.as_bytes()).is_err());
+    // u64::MAX (exceeds i64), and one past u64::MAX (exceeds u64 entirely).
+    let u64_max = VECTOR_B_REMARK.replace("\"dur_ms\":4210", "\"dur_ms\":18446744073709551615");
+    assert!(parse_canonical(u64_max.as_bytes()).is_err());
+    let past_u64 = VECTOR_B_REMARK.replace("\"dur_ms\":4210", "\"dur_ms\":18446744073709551616");
+    assert!(parse_canonical(past_u64.as_bytes()).is_err());
+}
+
+#[test]
+fn rejects_surrogate_escapes_bom_and_leading_whitespace() {
+    // Lone surrogate escape: not a Unicode scalar value.
+    let lone = VECTOR_A.replace("\"text\":\"these", "\"text\":\"\\ud800these");
+    assert!(parse_canonical(lone.as_bytes()).is_err());
+    // Well-formed surrogate PAIR escape: decodes fine, but rule 4 demands
+    // raw UTF-8 for non-control characters — not canonical.
+    let pair = VECTOR_A.replace("\"text\":\"these", "\"text\":\"\\ud83d\\ude00these");
+    assert!(parse_canonical(pair.as_bytes()).is_err());
+
+    // UTF-8 BOM (rule 1: no BOM).
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend_from_slice(VECTOR_A.as_bytes());
+    assert!(parse_canonical(&bom).is_err());
+
+    // Leading whitespace (rule 2: compact, nothing outside the object).
+    for ws in [" ", "\n", "\t"] {
+        let padded = format!("{ws}{VECTOR_A}");
+        assert!(parse_canonical(padded.as_bytes()).is_err());
+    }
+}
+
+// Property round-trip over arbitrary text (I5): any Rust string in `text`
+// serializes to canonical bytes that parse back to the identical event and
+// re-serialize byte-exactly.
+#[test]
+fn property_round_trip_arbitrary_text() {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0x5eed);
+    let mut tested = 0;
+    while tested < 300 {
+        let len = rng.gen_range(1..=60);
+        let s: String = (0..len)
+            .map(|_| {
+                loop {
+                    let c = match rng.gen_range(0..6u8) {
+                        0 => char::from(rng.gen_range(0x00..=0x1Fu8)), // control chars
+                        1 => char::from(rng.gen_range(0x20..=0x7Eu8)), // ASCII printable
+                        2 => ['"', '\\', '/', '\u{7F}'][rng.gen_range(0..4)],
+                        3 => match char::from_u32(rng.gen_range(0xA0..=0xD7FF)) {
+                            Some(c) => c, // BMP non-ASCII
+                            None => continue,
+                        },
+                        4 => match char::from_u32(rng.gen_range(0xE000..=0xFFFD)) {
+                            Some(c) => c, // BMP above the surrogate gap
+                            None => continue,
+                        },
+                        _ => match char::from_u32(rng.gen_range(0x1_0000..=0x10_FFFF)) {
+                            Some(c) => c, // astral planes (incl. emoji)
+                            None => continue,
+                        },
+                    };
+                    break c;
+                }
+            })
+            .collect();
+        if s.trim().is_empty() {
+            continue; // remark text must be non-empty after trim (§3.1)
+        }
+        let mut e = vector_a_event();
+        e.text = Some(s);
+        let bytes = canonical_json(&e);
+        let parsed = parse_canonical(&bytes)
+            .unwrap_or_else(|err| panic!("round-trip parse failed for {e:?}: {err}"));
+        assert_eq!(parsed, e);
+        assert_eq!(canonical_json(&parsed), bytes, "byte-exact (I5)");
+        tested += 1;
+    }
+}
+
+#[test]
 fn control_chars_and_unicode_escape_rules() {
     // Text with newline, tab, quote, backslash, raw non-ASCII, and a control
     // char without a short escape (U+0001) — exercises rule 4 both ways.

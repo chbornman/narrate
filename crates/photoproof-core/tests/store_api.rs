@@ -6,8 +6,8 @@ mod common;
 
 use common::*;
 use photoproof_core::{
-    AppendError, EventDraft, JournalEntry, Kind, RedactError, RemarkSource, SessionContext,
-    SessionId, SessionRecord, UtcMillis,
+    AppendError, Event, EventDraft, JournalEntry, Kind, RedactError, RemarkSource, SessionContext,
+    SessionId, SessionRecord, StoreError, UtcMillis, canonical_json,
 };
 
 // -- sessions (§9, E7) --------------------------------------------------------
@@ -498,6 +498,431 @@ fn merge_large_batch_uses_chunked_path() {
     let before = dump_derived(&conn, true);
     ts.store.rebuild_derived().unwrap();
     assert_eq!(dump_derived(&conn, true), before);
+}
+
+// -- §8 step-3 corruption defenses (positive coverage) -------------------------
+
+#[test]
+fn merge_structural_mismatch_local_wins_and_warns() {
+    let ts = new_store();
+    let a = hash(1);
+    let local = ts
+        .store
+        .append(
+            &ts.session,
+            d_remark("the local truth", vec![a.clone()]),
+            None,
+        )
+        .unwrap();
+
+    // Same id, structurally different content: corruption upstream — the
+    // local row wins and the report carries an integrity warning.
+    let mut impostor = local.clone();
+    impostor.text = Some("upstream corruption".into());
+    impostor.targets = vec![hash(2)];
+    let report = ts.store.merge(&[impostor]).unwrap();
+    assert_eq!(report.inserted, 0);
+    assert_eq!(report.duplicates, 1);
+    assert_eq!(report.newly_scrubbed, 0);
+    assert_eq!(report.integrity_warnings, vec![local.id.clone()]);
+
+    let e = ts.store.raw_event(&local.id).unwrap().unwrap();
+    assert_eq!(e.text.as_deref(), Some("the local truth"), "local wins");
+    assert_eq!(e.targets, vec![a], "local target rows untouched");
+}
+
+#[test]
+fn merge_incoming_scrubbed_form_scrubs_unscrubbed_local() {
+    // §8 step 3 "learn it": an incoming scrubbed-FORM event (redacted_by
+    // set) with NO redaction event anywhere — not in the batch, not in the
+    // store — must still scrub the unscrubbed local row in place.
+    let ts = new_store();
+    let a = hash(1);
+    let v = ts
+        .store
+        .append(
+            &ts.session,
+            d_voice("searchable bergamot words", vec![a.clone()], None),
+            None,
+        )
+        .unwrap();
+    let conn = ts.raw_conn();
+    insert_vector(&conn, v.id.as_str());
+    assert_eq!(fts_roots(&conn, "bergamot"), vec![v.id.to_string()]);
+
+    let marker = ts.store.mint().id; // no redaction event carries this id
+    let scrubbed = v.scrubbed_form(marker.clone());
+    let report = ts.store.merge(&[scrubbed]).unwrap();
+    assert_eq!(report.newly_scrubbed, 1);
+    assert_eq!(report.inserted, 0);
+    assert!(report.integrity_warnings.is_empty());
+
+    let e = ts.store.raw_event(&v.id).unwrap().unwrap();
+    assert!(e.scrubbed() && e.text.is_none() && e.payload.is_none());
+    assert_eq!(e.redacted_by, Some(marker), "marker learned from the form");
+    // Purged from FTS and vectors; folds to a stub; dirty mark escalated.
+    assert!(fts_roots(&conn, "bergamot").is_empty());
+    assert_eq!(vector_count_for(&conn, v.id.as_str()), 0);
+    let folded = ts.store.folded_journal(&a).unwrap();
+    assert!(matches!(folded[0], JournalEntry::RedactedStub { .. }));
+    let row = ts
+        .store
+        .dirty_images()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.image == a)
+        .unwrap();
+    assert_eq!(row.reason, photoproof_core::DirtyReason::Redaction);
+}
+
+// -- dirty-queue ack high-water mark (§5.3, P1) ---------------------------------
+
+#[test]
+fn ack_dirty_cannot_lose_newer_marks() {
+    let ts = new_store();
+    let a = hash(1);
+    ts.store
+        .append(&ts.session, d_remark("first", vec![a.clone()]), None)
+        .unwrap();
+    let t1 = ts
+        .store
+        .dirty_images()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.image == a)
+        .unwrap()
+        .since_ts;
+
+    // A newer mark lands after the sidecar writer read the queue — possibly
+    // within the same wall-clock millisecond. since_ts must advance
+    // strictly, or the ack below would delete dirtiness it never saw.
+    ts.store
+        .append(&ts.session, d_remark("second", vec![a.clone()]), None)
+        .unwrap();
+    let t2 = ts
+        .store
+        .dirty_images()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.image == a)
+        .unwrap()
+        .since_ts;
+    assert!(
+        t2 > t1,
+        "since_ts advances strictly on re-mark ({t1} -> {t2})"
+    );
+
+    // The ack computed from the stale read must not delete the newer mark.
+    ts.store.ack_dirty(&a, t1).unwrap();
+    assert!(
+        ts.store
+            .dirty_images()
+            .unwrap()
+            .iter()
+            .any(|d| d.image == a),
+        "ack with a stale since_ts lost a newer dirty mark"
+    );
+    // Acking the observed high-water mark clears the row.
+    ts.store.ack_dirty(&a, t2).unwrap();
+    assert!(
+        ts.store
+            .dirty_images()
+            .unwrap()
+            .iter()
+            .all(|d| d.image != a)
+    );
+}
+
+// -- blocked wal_checkpoint(TRUNCATE) surfaces (§5.1, §7 step 8, P2) -------------
+
+#[test]
+fn blocked_wal_checkpoint_is_an_error_not_silent() {
+    let ts = new_store();
+    let a = hash(1);
+    let v = ts
+        .store
+        .append(&ts.session, d_voice("private words", vec![a], None), None)
+        .unwrap();
+
+    // A long-lived reader holding an open read transaction blocks the WAL
+    // truncation (exactly what §5.1 forbids UI code from doing).
+    let blocker = ts.raw_conn();
+    blocker.execute_batch("BEGIN").unwrap();
+    let _: i64 = blocker
+        .query_row("SELECT COUNT(*) FROM annotation_events", [], |r| r.get(0))
+        .unwrap();
+
+    // redact() must surface the failed §7-step-8 hygiene, not swallow it.
+    let err = ts.store.redact(&v.id).unwrap_err();
+    assert!(
+        matches!(err, RedactError::Store(StoreError::CheckpointBlocked)),
+        "expected CheckpointBlocked, got {err:?}"
+    );
+    // The scrub itself is committed and durable; only WAL hygiene is pending.
+    assert!(ts.store.raw_event(&v.id).unwrap().unwrap().scrubbed());
+
+    // Once the reader releases, idle maintenance completes the truncation.
+    blocker.execute_batch("ROLLBACK").unwrap();
+    ts.store.maintain().unwrap();
+    let wal_len = std::fs::metadata(ts.path().with_file_name("journal.db-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert_eq!(wal_len, 0, "WAL truncated once unblocked");
+}
+
+// -- idempotent re-merge heals an interrupted merge (§8, P3) ---------------------
+
+fn payload_column(e: &Event) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&canonical_json(e)).unwrap();
+    v.get("payload").map(|p| serde_json::to_string(p).unwrap())
+}
+
+/// Insert truth rows exactly as a committed merge chunk would, bypassing all
+/// derived maintenance — the on-disk state after a crash between the §8
+/// truth-union transactions and the final derived recompute.
+fn raw_insert_truth(conn: &rusqlite::Connection, e: &Event) {
+    conn.execute(
+        "INSERT INTO annotation_events \
+         (id, v, session_id, ts, source, kind, text, payload, target_event, linked_event, redacted_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            e.id.as_str(),
+            e.v as i64,
+            e.session_id.as_str(),
+            e.ts.to_rfc3339(),
+            e.source.as_str(),
+            e.kind.as_str(),
+            e.text,
+            payload_column(e),
+            e.target_event.as_ref().map(|t| t.as_str().to_owned()),
+            e.linked_event.as_ref().map(|t| t.as_str().to_owned()),
+            e.redacted_by.as_ref().map(|t| t.as_str().to_owned()),
+        ],
+    )
+    .unwrap();
+    for (i, h) in e.targets.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO event_targets (event_id, image_hash, position) VALUES (?1, ?2, ?3)",
+            rusqlite::params![e.id.as_str(), h.as_str(), i as i64],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn re_merge_heals_interrupted_merge() {
+    let ts = new_store();
+    let g = Gen::new(ts.session.clone());
+    let (a, b) = (hash(1), hash(2));
+    let m1 = g.remark("healable zeppelin note", vec![a.clone()]);
+    let m2 = g.voice_remark("verbal cormorant note", vec![a.clone(), b.clone()]);
+    let m3 = g.remark("condemned heliotrope note", vec![b.clone()]);
+    let rating = g.rating(4, vec![b.clone()]);
+    let rev = g.revision(m1.id.clone(), "healable zeppelin note corrected");
+    let retr = g.retraction(m2.id.clone());
+    let red = g.redaction(m3.id.clone());
+    let events = vec![m1.clone(), m2.clone(), m3.clone(), rating, rev, retr, red];
+
+    // Simulate the interruption: truth rows committed, derived state never
+    // recomputed (even the per-chunk scrub of m3 is missing — strictly worse
+    // than any real crash point).
+    let conn = ts.raw_conn();
+    for e in &events {
+        raw_insert_truth(&conn, e);
+    }
+    assert!(
+        fts_roots(&conn, "zeppelin").is_empty(),
+        "derived state stale"
+    );
+    assert_eq!(ts.store.current_rating(&b).unwrap(), None);
+    assert!(!ts.store.raw_event(&m3.id).unwrap().unwrap().scrubbed());
+
+    // The idempotent re-merge of the same events must heal everything:
+    // duplicates may not short-circuit the recompute.
+    let report = ts.store.merge(&events).unwrap();
+    assert_eq!(report.inserted, 0);
+    assert_eq!(report.duplicates, events.len());
+    assert_eq!(report.newly_scrubbed, 1, "m3's pending scrub applied");
+    assert!(report.quarantined.is_empty());
+
+    assert_eq!(fts_roots(&conn, "corrected"), vec![m1.id.to_string()]);
+    assert!(
+        fts_roots(&conn, "cormorant").is_empty(),
+        "retraction folded"
+    );
+    assert!(
+        fts_roots(&conn, "heliotrope").is_empty(),
+        "redaction purged"
+    );
+    assert!(ts.store.raw_event(&m3.id).unwrap().unwrap().scrubbed());
+    assert_eq!(ts.store.current_rating(&b).unwrap(), Some(4));
+
+    // Healed incremental state equals a from-scratch rebuild (I7).
+    let before = dump_derived(&conn, true);
+    ts.store.rebuild_derived().unwrap();
+    assert_eq!(dump_derived(&conn, true), before);
+}
+
+// -- redaction closure over dangling chains (§3.6, §7 step 2, P4) ----------------
+
+#[test]
+fn redact_dangling_chain_scrubs_reachable_members() {
+    let ts = new_store();
+    let g = Gen::new(ts.session.clone());
+
+    // A revision chain whose ancestor sits on an unplugged drive: ghost is
+    // never inserted; r1 arrives via merge (dangling, inert); r2 is a local
+    // correction of r1.
+    let ghost = ts.store.mint();
+    let r1 = g.revision(ghost.id.clone(), "dangling secret one");
+    ts.store.merge(std::slice::from_ref(&r1)).unwrap();
+    let r2 = ts
+        .store
+        .append(
+            &ts.session,
+            d_revision(r1.id.clone(), "dangling secret two"),
+            None,
+        )
+        .unwrap();
+
+    // Redacting the local sub-root scrubs the whole reachable sub-chain.
+    let acts = ts.store.redact(&r1.id).unwrap();
+    assert_eq!(acts.len(), 2, "target + reachable revision descendant");
+    for id in [&r1.id, &r2.id] {
+        let e = ts.store.raw_event(id).unwrap().unwrap();
+        assert!(e.scrubbed() && e.text.is_none(), "{id} scrubbed");
+    }
+
+    // Redacting a tail member walks up to the local sub-root first.
+    let ghost2 = ts.store.mint();
+    let r3 = g.revision(ghost2.id.clone(), "dangling secret three");
+    ts.store.merge(std::slice::from_ref(&r3)).unwrap();
+    let r4 = ts
+        .store
+        .append(
+            &ts.session,
+            d_revision(r3.id.clone(), "dangling secret four"),
+            None,
+        )
+        .unwrap();
+    let acts = ts.store.redact(&r4.id).unwrap();
+    assert_eq!(acts.len(), 2, "reachable ancestor + target");
+    for id in [&r3.id, &r4.id] {
+        assert!(ts.store.raw_event(id).unwrap().unwrap().scrubbed());
+    }
+}
+
+// -- append consults the redactions registry (§7 supremacy, P5) ------------------
+
+#[test]
+fn append_consults_redactions_registry() {
+    // A dangling redaction learned via merge condemns an id whose row does
+    // not exist yet; appending content for that id must be refused —
+    // "every insert path checks the registry first" (§7).
+    let ts = new_store();
+    let minted = ts.store.mint();
+    let g = Gen::new(ts.session.clone());
+    let red = g.redaction(minted.id.clone());
+    let report = ts.store.merge(&[red]).unwrap();
+    assert_eq!(report.inserted, 1, "dangling redaction unions in (inert)");
+
+    let err = ts
+        .store
+        .append(
+            &ts.session,
+            d_remark("posthumous plaintext", vec![hash(1)]),
+            Some(minted.clone()),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, AppendError::CondemnedId(ref id) if *id == minted.id),
+        "expected CondemnedId, got {err:?}"
+    );
+    assert!(
+        ts.store.raw_event(&minted.id).unwrap().is_none(),
+        "no plaintext row may land for a condemned id"
+    );
+}
+
+// -- idle maintenance hook (§5.1 operational rules, P6) --------------------------
+
+#[test]
+fn maintain_runs_idle_checkpoint_and_optimize() {
+    let ts = new_store();
+    ts.store
+        .append(&ts.session, d_remark("note", vec![hash(1)]), None)
+        .unwrap();
+    let wal = ts.path().with_file_name("journal.db-wal");
+    assert!(
+        std::fs::metadata(&wal).unwrap().len() > 0,
+        "sanity: WAL non-empty after writes"
+    );
+
+    ts.store.maintain().unwrap();
+    assert_eq!(
+        std::fs::metadata(&wal).unwrap().len(),
+        0,
+        "idle checkpoint truncates the WAL (§5.1)"
+    );
+
+    // The store keeps working normally after maintenance.
+    ts.store
+        .append(&ts.session, d_remark("after idle", vec![hash(1)]), None)
+        .unwrap();
+    assert_eq!(ts.store.folded_journal(&hash(1)).unwrap().len(), 2);
+}
+
+// -- retraction-of-redaction invalid at append AND merge (§3.5–3.6, P7) ----------
+
+#[test]
+fn retraction_of_redaction_rejected_at_append_and_quarantined_at_merge() {
+    let ts = new_store();
+    let a = hash(1);
+    let r = ts
+        .store
+        .append(
+            &ts.session,
+            d_remark("to be scrubbed", vec![a.clone()]),
+            None,
+        )
+        .unwrap();
+    let acts = ts.store.redact(&r.id).unwrap();
+    let red_id = acts[0].clone();
+
+    // Append: retracting a redaction is invalid.
+    let err = ts
+        .store
+        .append(&ts.session, d_retract(red_id.clone()), None)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AppendError::InvalidTargetKind {
+                meta: Kind::Retraction,
+                target_kind: Kind::Redaction
+            }
+        ),
+        "expected InvalidTargetKind, got {err:?}"
+    );
+
+    // Merge, the redaction already local: quarantined, never inserted.
+    let g = Gen::new(ts.session.clone());
+    let bad = g.retraction(red_id.clone());
+    let report = ts.store.merge(&[bad]).unwrap();
+    assert_eq!(report.quarantined.len(), 1);
+    assert_eq!(report.inserted, 0);
+
+    // Merge, the redaction arriving in the same batch: still quarantined.
+    let r2 = ts
+        .store
+        .append(&ts.session, d_remark("second victim", vec![a]), None)
+        .unwrap();
+    let red2 = g.redaction(r2.id.clone());
+    let bad2 = g.retraction(red2.id.clone());
+    let report = ts.store.merge(&[red2, bad2]).unwrap();
+    assert_eq!(report.quarantined.len(), 1);
+    assert_eq!(report.inserted, 1);
+    assert_eq!(report.newly_scrubbed, 1);
 }
 
 // -- redaction chain closure (§3.6, §7) ---------------------------------------------

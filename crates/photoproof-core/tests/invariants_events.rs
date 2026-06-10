@@ -1074,12 +1074,14 @@ fn i16_fold_reads_batched() {
     }
 
     // §10.1: covering scan + batched id fetch + one meta-closure round.
+    // The lower bound keeps the assertion non-vacuous: reads routed around
+    // the traced read pool would count 0 and silently pass a `<=`-only check.
     let before = photoproof_core::store::read_select_count();
     let folded = ts.store.folded_journal(&a).unwrap();
     let used = photoproof_core::store::read_select_count() - before;
     assert!(
-        used <= 3,
-        "folded_journal used {used} SELECTs (max 3, §10.1)"
+        (2..=3).contains(&used),
+        "folded_journal used {used} SELECTs (expected 2..=3, §10.1)"
     );
     assert_eq!(folded.len(), 20); // 5 remarks + 10 ratings + 5 strokes live
 
@@ -1087,8 +1089,8 @@ fn i16_fold_reads_batched() {
     ts.store.events_for_image(&a).unwrap();
     let used = photoproof_core::store::read_select_count() - before;
     assert!(
-        used <= 3,
-        "events_for_image used {used} SELECTs (max 3, §10.1)"
+        (2..=3).contains(&used),
+        "events_for_image used {used} SELECTs (expected 2..=3, §10.1)"
     );
 
     // With a revision chain present the fixpoint needs exactly one more
@@ -1103,7 +1105,11 @@ fn i16_fold_reads_batched() {
     let before = photoproof_core::store::read_select_count();
     ts.store.folded_journal(&a).unwrap();
     let used = photoproof_core::store::read_select_count() - before;
-    assert!(used <= 4, "one extra closure round max, got {used}");
+    assert!(
+        (2..=4).contains(&used),
+        "one extra closure round max (and the plan must actually run through \
+         the traced pool), got {used}"
+    );
 }
 
 #[test]
@@ -1168,6 +1174,205 @@ fn i16_fold_5k_events_timing() {
 // as an explicitly-named test): merge is set-union by event id and the
 // result is independent of insertion order.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// I6/§2.3 — within-batch dedupe: a scrubbed copy always beats an unscrubbed
+// one (stale backup sidecar + current sidecar in ONE rebuild batch), in both
+// input orders, with the redaction event absent; structurally-differing
+// same-id copies log an integrity warning.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i06_within_batch_scrubbed_copy_beats_unscrubbed() {
+    let marker = "withinbatchplaintextpetrichor";
+    let session =
+        photoproof_core::SessionId::from_str_strict("01JZ5C3HW0RD8PT2M6QK4V9XEA").unwrap();
+    let g = Gen::new(session);
+    let plain = g.voice_remark(&format!("contains {marker} secret"), vec![hash(1)]);
+    let marker_id = g.minter.mint().id;
+    let scrubbed = plain.scrubbed_form(marker_id);
+
+    let mut states = Vec::new();
+    for batch in [
+        vec![plain.clone(), scrubbed.clone()],
+        vec![scrubbed.clone(), plain.clone()],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("j.db");
+        {
+            let store = EventStore::open(&path).unwrap();
+            let report = store.merge(&batch).unwrap();
+            assert_eq!(report.inserted, 1);
+            assert_eq!(report.duplicates, 1);
+            assert!(
+                report.integrity_warnings.is_empty(),
+                "scrubbed-vs-unscrubbed dedupe is the sanctioned case, not corruption (§2.3)"
+            );
+            let e = store.raw_event(&plain.id).unwrap().unwrap();
+            assert!(e.scrubbed(), "the scrubbed copy must win");
+            assert!(e.text.is_none() && e.payload.is_none());
+        }
+        // Redacted plaintext must not survive anywhere in the store's files.
+        for suffix in ["j.db", "j.db-wal", "j.db-shm"] {
+            let p = dir.path().join(suffix);
+            if p.exists() {
+                let bytes = std::fs::read(&p).unwrap();
+                assert!(
+                    !bytes.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                    "resurrected plaintext found in {p:?}"
+                );
+            }
+        }
+        states.push(full_state(&path));
+    }
+    assert_eq!(states[0], states[1], "same set, same result (I6)");
+}
+
+#[test]
+fn i06_within_batch_structural_mismatch_warns_and_keeps_first() {
+    let session =
+        photoproof_core::SessionId::from_str_strict("01JZ5C3HW0RD8PT2M6QK4V9XEA").unwrap();
+    let g = Gen::new(session);
+
+    // Same id, different text: corruption upstream — keep the first, warn.
+    let a = g.remark("first copy text", vec![hash(1)]);
+    let mut b = a.clone();
+    b.text = Some("second copy text".into());
+    let ts = new_store();
+    let report = ts.store.merge(&[a.clone(), b]).unwrap();
+    assert_eq!(report.inserted, 1);
+    assert_eq!(report.duplicates, 1);
+    assert_eq!(report.integrity_warnings, vec![a.id.clone()]);
+    let e = ts.store.raw_event(&a.id).unwrap().unwrap();
+    assert_eq!(e.text.as_deref(), Some("first copy text"), "keep the first");
+
+    // Same id, different core fields (targets): also a warning.
+    let c = g.remark("same words", vec![hash(2)]);
+    let mut d = c.clone();
+    d.targets = vec![hash(3)];
+    let report = ts.store.merge(&[c.clone(), d]).unwrap();
+    assert_eq!(report.integrity_warnings, vec![c.id.clone()]);
+    let e = ts.store.raw_event(&c.id).unwrap().unwrap();
+    assert_eq!(e.targets, vec![hash(2)], "first copy's targets kept");
+}
+
+// ---------------------------------------------------------------------------
+// I8/§7 step 8 — the ≤10k merge path that newly scrubs must truncate the
+// WAL after commit: byte-scan the LIVE store's WAL, before Drop (Drop also
+// checkpoints, which would mask this regression).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i08_small_merge_scrub_truncates_live_wal() {
+    let marker = "smallmergewalmarkerquince";
+    let ts = new_store();
+    let a = hash(1);
+    let v = ts
+        .store
+        .append(
+            &ts.session,
+            d_voice(&format!("contains {marker} secret"), vec![a.clone()], None),
+            None,
+        )
+        .unwrap();
+
+    // Sanity (non-vacuity): the plaintext sits in the WAL before the merge.
+    let wal = ts.path().with_file_name("journal.db-wal");
+    let bytes = std::fs::read(&wal).unwrap();
+    assert!(
+        bytes.windows(marker.len()).any(|w| w == marker.as_bytes()),
+        "sanity: appended plaintext must be in the WAL before the scrubbing merge"
+    );
+
+    // A small (≤10k) merge that newly scrubs: §8 step 2 runs §7 steps 5–8,
+    // step 8 included.
+    let g = Gen::new(ts.session.clone());
+    let red = g.redaction(v.id.clone());
+    let report = ts.store.merge(&[red]).unwrap();
+    assert_eq!(report.newly_scrubbed, 1);
+
+    // Scan the live store's files: no plaintext in DB or WAL before drop.
+    for suffix in ["journal.db", "journal.db-wal"] {
+        let p = ts.path().with_file_name(suffix);
+        if p.exists() {
+            let bytes = std::fs::read(&p).unwrap();
+            assert!(
+                !bytes.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                "scrubbed plaintext lingers in {p:?} while the store is live"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I10 — cycle coverage beyond a two-node single-batch cycle: a 3-node cycle
+// assembled one edge per merge (every prefix dangling), a self-targeting
+// revision, and redaction closure over a cyclic chain.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i10_cycles_across_batches_self_cycle_and_redaction() {
+    let ts = new_store();
+    let a = hash(1);
+    ts.store
+        .append(&ts.session, d_remark("anchor text", vec![a.clone()]), None)
+        .unwrap();
+
+    let mk_rev = |minted: &Minted, target: photoproof_core::EventId, text: &str| Event {
+        id: minted.id.clone(),
+        v: 1,
+        session_id: ts.session.clone(),
+        ts: minted.ts,
+        source: photoproof_core::Source::Typed,
+        kind: Kind::Revision,
+        targets: vec![],
+        text: Some(text.into()),
+        payload: None,
+        target_event: Some(target),
+        linked_event: None,
+        redacted_by: None,
+    };
+    let c1 = ts.store.mint();
+    let c2 = ts.store.mint();
+    let c3 = ts.store.mint();
+    let r1 = mk_rev(&c1, c2.id.clone(), "cycle one");
+    let r2 = mk_rev(&c2, c3.id.clone(), "cycle two");
+    let r3 = mk_rev(&c3, c1.id.clone(), "cycle three");
+
+    // One edge per merge: dangling after each prefix, cyclic after the last;
+    // folds terminate and the chain stays inert throughout.
+    for e in [&r1, &r2, &r3] {
+        let report = ts.store.merge(std::slice::from_ref(e)).unwrap();
+        assert_eq!(report.inserted, 1);
+        let folded = ts.store.folded_journal(&a).unwrap();
+        assert_eq!(folded.len(), 1, "cycle members never surface");
+        let JournalEntry::Remark { text, .. } = &folded[0] else {
+            panic!("expected remark");
+        };
+        assert_eq!(text, "anchor text");
+    }
+
+    // Self-targeting revision: the degenerate one-node cycle.
+    let s = ts.store.mint();
+    let selfrev = mk_rev(&s, s.id.clone(), "self cycle");
+    let report = ts.store.merge(std::slice::from_ref(&selfrev)).unwrap();
+    assert_eq!(report.inserted, 1);
+    let session_fold = ts.store.folded_session(&ts.session).unwrap();
+    assert!(
+        session_fold
+            .iter()
+            .all(|e| !matches!(e, JournalEntry::Remark { text, .. } if text.contains("cycle")))
+    );
+
+    // Redaction closure terminates on the cycle and scrubs every reachable
+    // member (corrected copies of sensitive content are still sensitive).
+    let acts = ts.store.redact(&r1.id).unwrap();
+    assert_eq!(acts.len(), 3, "whole cyclic chain scrubbed");
+    for e in [&r1, &r2, &r3] {
+        assert!(ts.store.raw_event(&e.id).unwrap().unwrap().scrubbed());
+    }
+    assert_eq!(ts.store.folded_journal(&a).unwrap().len(), 1);
+}
 
 #[test]
 fn merge_order_shuffle_property() {

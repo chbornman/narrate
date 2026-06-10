@@ -168,6 +168,16 @@ pub(crate) fn run_pragma(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// One `PRAGMA wal_checkpoint(TRUNCATE)` attempt. Returns `true` when the
+/// checkpoint completed and the WAL was truncated (`busy == 0`); `false`
+/// when a concurrent reader blocked it. §7 step 8 / §5.1 require the
+/// truncation to actually happen — the busy result must not be treated as
+/// success (it leaves scrubbed plaintext in the WAL).
+pub(crate) fn checkpoint_truncate_once(conn: &Connection) -> rusqlite::Result<bool> {
+    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    Ok(busy == 0)
+}
+
 /// §5.1 connection pragmas, applied to every connection.
 pub(crate) fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     run_pragma(conn, "PRAGMA journal_mode = WAL")?;

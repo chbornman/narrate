@@ -4,7 +4,7 @@
 //! Contract: spec/EVENTS.md §5–10.
 
 mod fold;
-mod schema;
+pub(crate) mod schema;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -36,6 +36,15 @@ pub enum StoreError {
     SessionNotFound(String),
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// `PRAGMA wal_checkpoint(TRUNCATE)` stayed blocked by a concurrent
+    /// reader after bounded retries (§5.1, §7 step 8). The triggering write
+    /// is committed and durable; only the WAL hygiene is incomplete — retry
+    /// via `maintain()` once long-lived readers have released.
+    #[error(
+        "wal_checkpoint(TRUNCATE) blocked by a concurrent reader; \
+         freed bytes linger in the WAL until the next successful checkpoint"
+    )]
+    CheckpointBlocked,
 }
 
 #[derive(Debug, Error)]
@@ -50,6 +59,12 @@ pub enum AppendError {
     RetractionOfRetraction,
     #[error("duplicate event id: {0}")]
     DuplicateId(EventId),
+    /// The id is in the redactions registry: redaction supremacy (§7) — no
+    /// insert path may write content for a condemned id, append included.
+    #[error(
+        "event id {0} is condemned by the redactions registry (§7); content may not be written"
+    )]
+    CondemnedId(EventId),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -305,6 +320,12 @@ impl EventStore {
         if get_event(&tx, &event.id)?.is_some() {
             return Err(AppendError::DuplicateId(event.id));
         }
+        // Redaction supremacy (§7): every insert path checks the registry
+        // first. A dangling redaction learned via merge condemns the id even
+        // before any row exists; appending content for it is corruption.
+        if registry_lookup(&tx, &event.id)?.is_some() {
+            return Err(AppendError::CondemnedId(event.id));
+        }
         insert_event(&tx, &event)?;
 
         let mut roots: BTreeSet<EventId> = BTreeSet::new();
@@ -466,12 +487,16 @@ impl EventStore {
             return Err(RedactError::AlreadyScrubbed(target.clone()));
         }
         // 2. Chain closure: C = chain(root(target)) for remark/revision;
-        //    C = {target} for a stroke. A dangling chain scrubs the reachable
-        //    sub-chain rooted at the target itself.
+        //    C = {target} for a stroke. When root(target) is undefined
+        //    (dangling hop or cycle, §6.1) the chain closure rule still
+        //    applies to everything locally reachable: anchor at the highest
+        //    reachable ancestor and scrub it plus every local revision
+        //    resolving to it — corrected copies of sensitive content are
+        //    still sensitive (§3.6), known or not to be a full chain.
         let (anchor, members) = if t.kind == Kind::Stroke {
             (t.clone(), vec![t.clone()])
         } else {
-            let anchor = db_root_event(&tx, &t)?.unwrap_or_else(|| t.clone());
+            let anchor = db_chain_anchor(&tx, &t)?;
             let members = db_chain_members(&tx, &anchor)?;
             (anchor, members)
         };
@@ -519,7 +544,9 @@ impl EventStore {
         recompute_derived(&tx, &roots, &dirty)?;
         tx.commit().map_err(StoreError::from)?;
         // 8. Physical hygiene: scrubbed plaintext must not linger in the WAL.
-        schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)").map_err(StoreError::from)?;
+        //    The scrub above is already committed; a CheckpointBlocked error
+        //    here means hygiene is incomplete, not that the redaction failed.
+        checkpoint_truncate(&w)?;
         Ok(out)
     }
 
@@ -531,23 +558,35 @@ impl EventStore {
         let mut report = MergeReport::default();
 
         // 0. Validate; quarantine invalid events (never silently dropped,
-        //    never inserted). Dedupe within the batch (set semantics).
+        //    never inserted). Dedupe within the batch (set semantics):
+        //    same-id copies that differ structurally are corruption — keep
+        //    the first, log an integrity warning, EXCEPT a scrubbed copy
+        //    always beats an unscrubbed one (§2.3, §8) — so the kept copy is
+        //    independent of input order (I6) and redacted plaintext can
+        //    never be resurrected by a stale sibling sidecar in the batch.
         let mut valid: Vec<(usize, &Event)> = Vec::with_capacity(incoming.len());
-        let mut seen: HashMap<&EventId, &Event> = HashMap::new();
+        let mut seen: HashMap<&EventId, usize> = HashMap::new();
         for (i, e) in incoming.iter().enumerate() {
             if let Err(err) = e.validate() {
                 report.quarantined.push((i, err.to_string()));
                 continue;
             }
-            if let Some(first) = seen.get(&e.id) {
-                report.duplicates += 1;
-                if structural_mismatch(first, e) {
-                    report.integrity_warnings.push(e.id.clone());
+            match seen.get(&e.id) {
+                Some(&kept_idx) => {
+                    report.duplicates += 1;
+                    let kept = valid[kept_idx].1;
+                    if structural_mismatch(kept, e) {
+                        report.integrity_warnings.push(e.id.clone());
+                    }
+                    if e.scrubbed() && !kept.scrubbed() {
+                        valid[kept_idx].1 = e; // scrubbed beats unscrubbed
+                    }
                 }
-                continue;
+                None => {
+                    seen.insert(&e.id, valid.len());
+                    valid.push((i, e));
+                }
             }
-            seen.insert(&e.id, e);
-            valid.push((i, e));
         }
         let incoming_kinds: HashMap<&EventId, Kind> =
             valid.iter().map(|(_, e)| (&e.id, e.kind)).collect();
@@ -566,6 +605,12 @@ impl EventStore {
             let (roots, dirty) = merge_affected(&tx, &touched)?;
             recompute_derived(&tx, &roots, &dirty)?;
             tx.commit()?;
+            // §8 step 2 scrubs in place per §7 steps 5–8; step 8 is the WAL
+            // truncate — mandatory on every merge path that newly scrubs,
+            // the ≤10k path included, or the plaintext lingers in the WAL.
+            if report.newly_scrubbed > 0 {
+                checkpoint_truncate(&w)?;
+            }
         } else {
             // Commit in ~10k-event transactions; populate FTS and the derived
             // tables in a single pass after the union completes (§8).
@@ -580,7 +625,7 @@ impl EventStore {
             tx.commit()?;
             schema::run_pragma(&w, "ANALYZE")?;
             w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
-            schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)")?;
+            checkpoint_truncate(&w)?;
         }
         Ok(report)
     }
@@ -648,6 +693,10 @@ impl EventStore {
     }
 
     /// Rows are removed via ack only after a successful sidecar write.
+    /// Pass the `since_ts` observed in the `dirty_images()` read that fed
+    /// the write: the row is deleted only if no newer mark has landed since
+    /// (`since_ts` advances strictly on every re-mark), so an ack can never
+    /// lose dirtiness recorded after the writer's snapshot.
     pub fn ack_dirty(&self, image: &ContentHash, upto_ts: UtcMillis) -> Result<(), StoreError> {
         let w = self.writer.lock().expect("writer mutex poisoned");
         w.prepare_cached("DELETE FROM sidecar_dirty WHERE image_hash = ?1 AND since_ts <= ?2")?
@@ -794,7 +843,30 @@ impl EventStore {
         // §5.1/§5.4 operational rules after rebuild.
         schema::run_pragma(&w, "ANALYZE")?;
         w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
-        schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)")?;
+        checkpoint_truncate(&w)?;
+        Ok(())
+    }
+
+    // -- maintenance (§5.1 operational rules) -----------------------------------
+
+    /// §5.1 operational rules for long-lived connections, to be run at app
+    /// idle (RUNTIME owns the scheduling; this is the hook it calls):
+    /// `PRAGMA optimize` on every connection, periodically, and
+    /// `PRAGMA wal_checkpoint(TRUNCATE)` at idle.
+    ///
+    /// Returns [`StoreError::CheckpointBlocked`] if a concurrent reader kept
+    /// the WAL from truncating after bounded retries; calling again at the
+    /// next idle interval is the intended recovery.
+    pub fn maintain(&self) -> Result<(), StoreError> {
+        {
+            let w = self.writer.lock().expect("writer mutex poisoned");
+            schema::run_pragma(&w, "PRAGMA optimize").map_err(StoreError::from)?;
+            checkpoint_truncate(&w)?;
+        }
+        for r in &self.readers {
+            let c = r.lock().expect("reader mutex poisoned");
+            schema::run_pragma(&c, "PRAGMA optimize").map_err(StoreError::from)?;
+        }
         Ok(())
     }
 }
@@ -802,8 +874,15 @@ impl EventStore {
 impl Drop for EventStore {
     fn drop(&mut self) {
         // §5.1: checkpoint at shutdown; PRAGMA optimize on connection close.
+        // Drop cannot return an error: a blocked checkpoint is retried
+        // (bounded, inside checkpoint_truncate) and then reported loudly.
         if let Ok(w) = self.writer.lock() {
-            let _ = schema::run_pragma(&w, "PRAGMA wal_checkpoint(TRUNCATE)");
+            if matches!(checkpoint_truncate(&w), Err(StoreError::CheckpointBlocked)) {
+                eprintln!(
+                    "photoproof-core: wal_checkpoint(TRUNCATE) at shutdown blocked \
+                     by a concurrent reader; the WAL was not truncated (spec/EVENTS.md §5.1)"
+                );
+            }
             let _ = schema::run_pragma(&w, "PRAGMA optimize");
         }
         for r in &self.readers {
@@ -811,6 +890,36 @@ impl Drop for EventStore {
                 let _ = schema::run_pragma(&c, "PRAGMA optimize");
             }
         }
+    }
+}
+
+/// §5.1/§7-step-8 checkpoint with the busy result handled (not swallowed):
+/// bounded retries with a short per-attempt busy wait, then a hard
+/// [`StoreError::CheckpointBlocked`] so callers know the WAL still holds the
+/// pre-checkpoint bytes. The connection's §5.1 `busy_timeout` is restored
+/// afterwards regardless of outcome.
+fn checkpoint_truncate(w: &Connection) -> Result<(), StoreError> {
+    const ATTEMPTS: usize = 4;
+    const RETRY_SLEEP_MS: u64 = 50;
+    schema::run_pragma(w, "PRAGMA busy_timeout = 250").map_err(StoreError::from)?;
+    let result = (|| {
+        for attempt in 0..ATTEMPTS {
+            if schema::checkpoint_truncate_once(w)? {
+                return Ok(true);
+            }
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MS));
+            }
+        }
+        Ok(false)
+    })();
+    let restore = schema::run_pragma(w, "PRAGMA busy_timeout = 5000");
+    let truncated = result.map_err(StoreError::Sqlite)?;
+    restore.map_err(StoreError::Sqlite)?;
+    if truncated {
+        Ok(())
+    } else {
+        Err(StoreError::CheckpointBlocked)
     }
 }
 
@@ -1049,15 +1158,60 @@ fn db_effective_targets(conn: &Connection, e: &Event) -> Result<Vec<ContentHash>
     Ok(cur.targets)
 }
 
-/// `chain(R)` = {R} ∪ revisions resolving to R, ascending id (§6.1).
-fn db_chain_members(conn: &Connection, root: &Event) -> Result<Vec<Event>, StoreError> {
+/// Highest locally reachable chain ancestor of `e` (§7 step 2): the chain
+/// root for an intact chain; the last reachable revision before a dangling
+/// hop; the last revision before a repeat for a cyclic chain. Never `None`:
+/// where `root(e)` is undefined (§6.1) the redaction closure still anchors
+/// at the deepest event it can reach.
+fn db_chain_anchor(conn: &Connection, e: &Event) -> Result<Event, StoreError> {
+    let mut seen: HashSet<EventId> = HashSet::new();
+    let mut cur = e.clone();
+    while cur.kind == Kind::Revision {
+        if !seen.insert(cur.id.clone()) {
+            break; // cycle: corrupt data; anchor where the walk closed
+        }
+        let Some(target) = cur.target_event.clone() else {
+            break;
+        };
+        match get_event(conn, &target)? {
+            Some(next) if !(next.kind == Kind::Revision && seen.contains(&next.id)) => cur = next,
+            _ => break, // dangling hop (or the next hop closes a cycle)
+        }
+    }
+    Ok(cur)
+}
+
+/// `chain(anchor)` = {anchor} ∪ every local revision whose `target_event`
+/// walk reaches `anchor`, ascending id (§6.1, §7 step 2). Resolution stops
+/// at the anchor rather than requiring a full `root()`, so the closure of a
+/// dangling or cyclic sub-chain still includes its reachable members.
+fn db_chain_members(conn: &Connection, anchor: &Event) -> Result<Vec<Event>, StoreError> {
     let mut set = BTreeMap::new();
-    set.insert(root.id.clone(), root.clone());
+    set.insert(anchor.id.clone(), anchor.clone());
     closure_descendants(conn, &mut set)?;
-    let fs = FoldSet::new(set);
-    let mut members: Vec<Event> = vec![root.clone()];
-    for e in fs.events.values() {
-        if e.kind == Kind::Revision && fs.root_id(e).as_ref() == Some(&root.id) {
+    let mut members: Vec<Event> = vec![anchor.clone()];
+    for e in set.values() {
+        if e.kind != Kind::Revision || e.id == anchor.id {
+            continue;
+        }
+        let mut seen: HashSet<&EventId> = HashSet::new();
+        let mut cur = e;
+        let reaches = loop {
+            if !seen.insert(&cur.id) {
+                break false; // cycle not passing through the anchor
+            }
+            let Some(t) = cur.target_event.as_ref() else {
+                break false;
+            };
+            if *t == anchor.id {
+                break true;
+            }
+            match set.get(t) {
+                Some(next) if next.kind == Kind::Revision => cur = next,
+                _ => break false, // dangling, or resolves to another root
+            }
+        };
+        if reaches {
             members.push(e.clone());
         }
     }
@@ -1292,6 +1446,9 @@ fn merge_chunk(
     }
 
     // 1. Redactions first — supremacy in force before content lands.
+    //    Duplicates also enter `touched`: re-merging events whose earlier
+    //    merge was interrupted before the §8 step-4 recompute must heal the
+    //    derived tables, so duplicates may not short-circuit recomputation.
     for e in ok.iter().filter(|e| e.kind == Kind::Redaction) {
         let target = e.target_event.as_ref().expect("validated");
         match get_event(tx, &e.id)? {
@@ -1300,7 +1457,10 @@ fn merge_chunk(
                 report.inserted += 1;
                 touched.push((*e).clone());
             }
-            Some(_) => report.duplicates += 1,
+            Some(local) => {
+                report.duplicates += 1;
+                touched.push(local);
+            }
         }
         registry_upsert(tx, target, &e.id, e.ts)?;
         // 2. Scrub local victims of newly learned redactions.
@@ -1340,6 +1500,7 @@ fn merge_chunk(
                     if structural_mismatch(&local, &arriving) {
                         report.integrity_warnings.push(arriving.id.clone());
                     }
+                    touched.push(local);
                 } else if arriving.scrubbed() && !local.scrubbed() {
                     // Learn it.
                     let marker = arriving.redacted_by.clone().expect("scrubbed");
@@ -1354,6 +1515,8 @@ fn merge_chunk(
                         // Same id MUST mean same event; local wins, warn.
                         report.integrity_warnings.push(arriving.id.clone());
                     }
+                    // Duplicates still recompute (interrupted-merge healing).
+                    touched.push(local);
                 }
             }
         }
@@ -1567,20 +1730,38 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
 }
 
 /// `'redaction'` outranks and overwrites other reasons for a hash, never
-/// vice versa (§5.3); otherwise the first mark wins until acked.
+/// vice versa (§5.3). `since_ts` is a strictly increasing high-water mark:
+/// every re-mark advances it to `max(now, previous + 1 ms)`, so an
+/// `ack_dirty(image, observed_since_ts)` computed from an earlier
+/// `dirty_images()` read can never delete a mark made after that read —
+/// acks lose no dirtiness, even within one wall-clock millisecond.
 fn upsert_dirty(
     tx: &Connection,
     hash: &ContentHash,
     reason: DirtyReason,
     now: UtcMillis,
 ) -> Result<(), StoreError> {
+    let existing: Option<(String, String)> = tx
+        .prepare_cached("SELECT reason, since_ts FROM sidecar_dirty WHERE image_hash = ?1")?
+        .query_row([hash.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let (reason, ts) = match existing {
+        None => (reason, now),
+        Some((old_reason, old_ts)) => {
+            let old = UtcMillis::parse(&old_ts).map_err(corrupt)?;
+            let bumped = UtcMillis::from_epoch_ms(now.epoch_ms().max(old.epoch_ms() + 1));
+            let kept_reason = if DirtyReason::parse(&old_reason) == Some(DirtyReason::Redaction) {
+                DirtyReason::Redaction // never coalesced away by later writes
+            } else {
+                reason
+            };
+            (kept_reason, bumped)
+        }
+    };
     tx.prepare_cached(
-        "INSERT INTO sidecar_dirty(image_hash, reason, since_ts) VALUES (?1, ?2, ?3) \
-         ON CONFLICT(image_hash) DO UPDATE SET \
-           reason = excluded.reason, since_ts = excluded.since_ts \
-         WHERE excluded.reason = 'redaction' AND sidecar_dirty.reason <> 'redaction'",
+        "INSERT OR REPLACE INTO sidecar_dirty(image_hash, reason, since_ts) VALUES (?1, ?2, ?3)",
     )?
-    .execute(params![hash.as_str(), reason.as_str(), now.to_rfc3339()])?;
+    .execute(params![hash.as_str(), reason.as_str(), ts.to_rfc3339()])?;
     Ok(())
 }
 
