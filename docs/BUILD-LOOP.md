@@ -147,7 +147,7 @@ ledger as founder-machine-deferred with a checklist entry.
 | P3.1 Search core | ✅ done | fmt/clippy/test green; plan-shape + snippet-post-LIMIT asserted; §7.2 reproduced (spec erratum B31); 1.18M-row latency coordinator-verified: p50 9.3 ms / p95 36 ms | `ee6e386` |
 | P3.2 Desktop shell | ✅ done | svelte-check 0/0, vitest 95, cargo green both feature configs; release-excludes-debug-panel asserted; Tauri .deb bundle built (8.8 MB); search wired in `38b4a61` (254 tests) | `9143b72` |
 | P4.1 M1 hardening | ✅ done — **M1 dogfood-ready** | 268 tests debug+release; E2E: round-trip w/ search parity, resume+relink, kill -9 harness (integrity_check per kill), redaction byte-scan; perf (this machine): ingest 1349 files/s, search p95 3.55 ms @50k, rebuild 5.8 s @50k events; DOGFOOD-M1.md + M1 traceability matrix | `46dc10e` |
-| P5.1 Pencil + journal panel | not started | — | — |
+| P5.1 Pencil + journal panel | ✅ done | workflow build (implement → 3-lens adversarial review → 1 fix round, review-clean); coordinator gate on merged tree: cargo 297 fmt/clippy/test green, svelte-check 0/0, vitest 498, build green; §13.3 traced (named + 40 randomized zoom/pan round-trips ≤1 src px, ×8 orientation, wire-integer pin), §13.4 command/controller slice traced; U14 + B40–B45 recorded; pencil feel/pressure founder-machine (DOGFOOD-M2) | `1e06f1e` |
 | P6.1 Capture engine (mocked) | not started | — | — |
 | P6.2 Runtime supervision (mocked) | not started | — | — |
 | P6.3 Model spike | founder-machine | — | — |

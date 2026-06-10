@@ -33,12 +33,24 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   indicator and an open note input stay visible under Tab lights-out
   (coordinator ruling). Veto either and it's a small remap.
 
+- [ ] **U14 sign-off (P5.1)**: pencil toggle moved P→B per spec; Space-tap
+  at fit no longer closes Look while pencil is on; no pencil toolbar ever
+  appears (zero-chrome reading — Pencil/Overlay live on the look-backdrop
+  context menu instead); pencil undo is keyboard-only (Ctrl+Z; the journal
+  panel's Retract row is the pointer path). Veto any of it and it's a
+  registry remap.
+
 ## 2. Founder-machine verification — **docs/DOGFOOD-M1.md is the script**
 
 Platform note: the NVIDIA+Wayland WebKit crash is handled in-app now
 (`b142477`); no env var needed. Dev builds generate previews at full speed
 since `e60cb15` (optimized deps).
 
+- [ ] **Pencil feel + pressure (P5.1)** — **docs/DOGFOOD-M2.md is the
+  script**: live-stroke latency, marks-zoom-with-image feel, pressure per
+  platform (Wacom needs "Use Windows Ink" ON; your Linux stylus is the
+  open question), eraser radius + 12-px floor, cursor visibility, pen-up →
+  pulse < 50 ms.
 - [ ] **Real 50k RAW library ingest** (M1 step 9) — resumability, perf
   budgets (≤90 min NVMe target, first 1k thumbs ≤60 s), preview quality.
 - [ ] **Real-RAW orientation fixtures** — portrait-orientation Nikon/Fuji

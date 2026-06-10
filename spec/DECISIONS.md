@@ -390,6 +390,55 @@ where it amends spec/UI.md, the featureset wins.
   un-retraction; retraction-of-retraction stays forbidden (E4).
   Double-Undo is idempotent (the backend declines non-retracted targets).
 
+## P5.1 pencil decisions (June 2026)
+
+Build-pass readings (continuing the B series) and one UI amendment
+(continuing the U series), recorded by the P5.1 grease-pencil packet.
+
+- **U14 (P5.1).** Spec keys win over the P4.2 reserved band: **B** = sticky
+  pencil toggle, **hold-E** = eraser, **O** = the single overlay toggle (UI
+  §4.4/§11). `pencil-visibility` (V) and its Action kind are removed — the
+  "union extended, never narrowed" rule does not protect a never-dispatched
+  reserved kind replaced by its own packet; the `pencil-pen` /
+  `pencil-eraser` / `cycle-overlay` ids are kept. New look-scope
+  `pencil-undo` (Ctrl+Z) row, enabled only when pencil work exists so the
+  layer never swallows the chord (keyboard-only via named exemption; the
+  journal panel's Retract row is the pointer path). Space-at-fit no longer
+  closes Look while pencil is ON (§11's pencil-on Space row beats U1's
+  symmetry; closing mid-mark would also destroy the mode).
+  UI-ARCHITECTURE §8's anticipated pencil toolbar stays unbuilt and the
+  `look-toolbar` seat reserved/empty — §4.4's zero-chrome mandate wins;
+  pointer reachability is satisfied by Pencil/Overlay rows on the
+  look-backdrop menu.
+- **B40 (P5.1).** Over-8192-point strokes: §8.2 bounds the count but not
+  the overflow behavior. Capture decimates the in-flight buffer by stride 2
+  (first/last samples always kept) and continues — tail truncation rejected
+  because silently losing the END of a gesture is the worse integrity
+  violation. Triggers only after ~65 s of continuous 125 Hz drawing; below
+  the bound C4's raw-unsmoothed rule holds.
+- **B41 (P5.1).** §8.4's commit-threshold duration = pen-down → pen-UP wall
+  time (not t_last): the only reading under which a motionless
+  press-and-hold dot (one sample, t = [0]) can commit. Consequence of X1's
+  schema: a held dot's dwell is unrecoverable from the payload, and
+  `ts − t_last` reconstructs the span only to the last move sample —
+  P6.1's §9.1 span math must reckon with under-spanned dots (recorded fix
+  if linking needs it: a terminal pen-up sample, dedupe-exempt).
+- **B42 (P5.1).** `add_stroke` bounds `base_w` to 1..10000 (core leaves it
+  unbounded; a stroke wider than the entire long edge is rejected as
+  hostile input). The spec default 40 is unaffected.
+- **B43 (P5.1).** Pencil retractions (Ctrl+Z undo, eraser) pulse the
+  indicator but do NOT toast: UI §7.5's retraction toast is the
+  journal-panel Retract flow (§8.3); a toast Undo (U10 re-state) on pencil
+  undo would be de-facto redo, which §8.5 forbids in v1.
+- **B44 (P5.1).** Journal-panel stroke micro-previews render as stored,
+  without §8.1 orientation-mismatch compensation (rows don't fetch current
+  image metadata); the Look overlay compensates where the current display
+  orientation is known. Drift occurs only if an external tool rewrites
+  EXIF orientation post-capture.
+- **B45 (P5.1).** The eraser fires on pointer-DOWN (§8.6's "click/tap" read
+  as press — snappier, with no drag semantics to wait out); the stylus
+  eraser end is detected via PointerEvent button 5 / buttons bit 32.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

@@ -44,6 +44,7 @@ managing = off-thesis).
   size through the progressive route when zooming a RAW past the preview
   (no RAW decode needed); true decoded 1:1 stays M1.5. (Founder, dogfood
   round 2.)
+- [ ] clicking esc closes the Journal / metadata inspector sidebar when returning to the grid. We dont want this behavior. When we return to the grid, an image will still be selected. We probably do need to think about if multiple images are selected, how do we show the sidebar content?
 
 ## M1.5 (scheduled concept, not yet a packet)
 
@@ -55,8 +56,13 @@ managing = off-thesis).
 
 ## Milestone-attached extras (build with their milestone)
 
-- **M2a (pencil)**: pencil toolbar from the reserved P/E/V band; overlay
-  cycle key; stroke rendering in journal entries (stub exists).
+- **M2a (pencil) — P5.1 SHIPPED** (`1e06f1e`): B/E/O keys, overlay, undo/eraser, journal stroke micro-previews. The toolbar idea is ruled out for good — zero-chrome wins (U14); the old P/E/V band is retired. Review-sourced polish below:
+- [ ] Pencil: jitter dedupe compares against a lastScreen captured under the pre-zoom transform when wheel-zooming mid-stroke — sub-pixel keep/drop only; recompute the baseline on transform change. (P5.1 review.)
+- [ ] Pencil: eraser intent is evaluated before the button-0 gate — middle/right-click with E held erases and pre-empts the look-backdrop menu for that click. (P5.1 review.)
+- [ ] Pencil: PencilOverlay tracks Space with its own raw listener, skipping LookStage's stageOwnsRawKeys ownership check — share the ui.look slice (eraserHeld precedent). (P5.1 review.)
+- [ ] Pencil: consider an "Undo stroke" row on the look-backdrop seat (enabled: pencilUndoable) instead of the named keyboard-only exemption. (P5.1 review.)
+- [ ] Pencil: one-euro live-stroke filter (CAPTURE §8.3 MAY) — add only if real-pen dogfood shows live wobble. (P5.1, DOGFOOD-M2.)
+- [ ] Pencil: terminal pen-up sample (dedupe-exempt) to make ts − t_last exact for held dots — decide before P6.1 builds the §9.1 span math. (B41.)
 - **M2b (voice)**: mic indicator segment (seat reserved); hold-to-talk
   duality; journal-changed event (above) becomes load-bearing.
 - **M3 (retrieval/projects)**: rail source-list grows projects + saved
