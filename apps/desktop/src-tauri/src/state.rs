@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use photoproof_core::library::{Library, RootWatcherHandle};
+use photoproof_core::search::Searcher;
 use photoproof_core::sidecar::SidecarEngine;
 use photoproof_core::{EventStore, SessionContext, SessionId, UtcMillis};
 
@@ -33,6 +34,9 @@ pub struct App {
     pub settings: Mutex<AppSettings>,
     /// Last query echo for the debug panel's Search tab.
     pub last_search: Mutex<Option<search_types::QueryEcho>>,
+    /// The M1 search engine (RETRIEVAL §4, packet P3.1) on its own
+    /// connection; `interrupt()` cancels in-flight queries on new keystrokes.
+    pub searcher: Searcher,
     pub shutdown: Arc<AtomicBool>,
 }
 
@@ -46,6 +50,7 @@ impl App {
         let library = Arc::new(Library::open(&db_path, &cache_dir)?);
         let engine = SidecarEngine::new(store, &db_path, &app_data, LibLocator(library.clone()))?;
         let readq = gridq::open_read_only(&db_path)?;
+        let searcher = Searcher::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?;
 
         // CAPTURE §2.4 crash recovery, before opening the launch session:
         // any session left open by a dead process closes at its last event's
@@ -79,6 +84,7 @@ impl App {
             watchers: Mutex::new(HashMap::new()),
             settings: Mutex::new(app_settings),
             last_search: Mutex::new(None),
+            searcher,
             shutdown: Arc::new(AtomicBool::new(false)),
         })
     }

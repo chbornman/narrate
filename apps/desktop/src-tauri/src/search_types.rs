@@ -173,7 +173,8 @@ pub struct RelativeRange {
     pub year: Option<i32>,
 }
 
-/// The M1 stub result: empty, well-formed, contract-shaped.
+/// An empty, well-formed, contract-shaped result (shape regression tests).
+#[cfg(test)]
 pub fn empty_results(raw: String, filters: Vec<Filter>) -> SearchResults {
     SearchResults {
         query: QueryEcho {

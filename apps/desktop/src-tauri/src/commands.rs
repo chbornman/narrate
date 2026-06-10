@@ -19,7 +19,7 @@ use crate::dto::{
 };
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
-use crate::search_types::{self, Filter, SearchResults};
+use crate::search_types::{Filter, SearchResults};
 use crate::settings::AppSettings;
 use crate::state::App;
 use crate::{gridq, pump};
@@ -133,17 +133,16 @@ pub fn report_activity(app: S<'_>) -> CmdResult<()> {
 // Search (RETRIEVAL §4 / §5.4 — M1 contract)
 // ---------------------------------------------------------------------------
 
-/// M1 search over the journal.
+/// M1 search over the journal (RETRIEVAL §4 engine, packet P3.1).
 ///
-/// TODO(coordinator): wire photoproof_core::search — this is the stub seam
-/// for parallel packet P3.1. The signature and the DTOs in `search_types.rs`
-/// mirror RETRIEVAL §5.1/§5.4 so the wiring is mechanical:
-/// `photoproof_core::search::query(store, &query, &filters)` (or equivalent)
-/// replaces `empty_results`. Until then every query returns zero results.
+/// A new keystroke's query interrupts any in-flight statement first
+/// (§4 search-as-you-type); the interrupted call surfaces as an error
+/// its (stale) caller discards.
 #[tauri::command]
 pub fn search(app: S<'_>, query: String, filters: Vec<Filter>) -> CmdResult<SearchResults> {
     app.touch()?;
-    let results = search_types::empty_results(query, filters);
+    app.searcher.interrupt();
+    let results = crate::search_wire::run_search(&app.searcher, query, filters)?;
     *app.last_search.lock().expect("last_search mutex") = Some(results.query.clone());
     Ok(results)
 }

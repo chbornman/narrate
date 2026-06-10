@@ -21,6 +21,7 @@ mod protocol;
 mod pump;
 mod scope;
 mod search_types;
+mod search_wire;
 mod session;
 mod settings;
 mod state;
