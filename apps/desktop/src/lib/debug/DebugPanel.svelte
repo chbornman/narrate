@@ -57,8 +57,8 @@
   }
 
   async function forceRescan() {
-    if (ui.rootId === null) return;
-    await invoke("debug_force_rescan", { rootId: ui.rootId });
+    if (ui.grid.rootId === null) return;
+    await invoke("debug_force_rescan", { rootId: ui.grid.rootId });
     await refresh();
   }
 </script>

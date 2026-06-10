@@ -137,3 +137,91 @@ pub struct RebuildReportDto {
     pub files_parsed: usize,
     pub failures: usize,
 }
+
+// ---------------------------------------------------------------------------
+// P4.2 additions — twins of types/dto.ts, declared contracts-first by
+// FOUNDATIONS. Constructed by Stage C (journal/metadata) and Stage A
+// (paths); the dead_code allowance retires with their command bodies.
+// ---------------------------------------------------------------------------
+
+/// One folded journal row (inspector Journal tab — featureset §3, D2).
+/// Retracted rows ARE included, flagged, for the per-session "show
+/// retracted" toggle; redacted events fold to inert stubs.
+#[allow(dead_code)] // constructed by Stage C (commands/journal.rs)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalEntryDto {
+    pub id: String,
+    pub session_id: String,
+    /// RFC 3339.
+    pub ts: String,
+    /// "remark" | "rating" | "stroke" | "redacted".
+    pub kind: &'static str,
+    /// "voice" | "typed" | "system".
+    pub source: &'static str,
+    /// Effective (folded) text for remarks; None for ratings/stubs.
+    pub text: Option<String>,
+    /// Pre-revision original when corrected ("edited" expand affordance).
+    pub original_text: Option<String>,
+    pub corrected: bool,
+    pub retracted: bool,
+    pub rating: Option<u8>,
+    pub targets: Vec<String>,
+    pub linked_event: Option<String>,
+}
+
+/// Read-only EXIF subset + file identity (Metadata tab, K16: from the db's
+/// EXIF subset; no new parsing).
+#[allow(dead_code)] // constructed by Stage C (commands/journal.rs)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageMetadataDto {
+    pub hash: String,
+    pub file_name: String,
+    pub rel_path: String,
+    pub abs_path: Option<String>,
+    pub byte_size: i64,
+    pub format: String,
+    pub pixel_width: Option<i64>,
+    pub pixel_height: Option<i64>,
+    pub orientation: u16,
+    pub capture_ts: Option<String>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub focal_length_mm: Option<f64>,
+    pub iso: Option<i64>,
+    pub f_number: Option<f64>,
+    pub exposure_time: Option<String>,
+    /// Formatted GPS text (the UI renders text only).
+    pub gps: Option<String>,
+    pub preview_source: Option<String>,
+    /// Preview backfill still pending (e.g. RAW full-decode).
+    pub preview_pending: bool,
+    pub first_ingested_at: String,
+}
+
+/// `redact_event` outcome — drives the sanctioned "Redacted" toast copy,
+/// including "— N offline sidecar(s) pending" (UI §7.5/§8.4).
+#[allow(dead_code)] // constructed by Stage C (commands/journal.rs)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactReportDto {
+    /// Event ids scrubbed (target + revision chain).
+    pub redacted: Vec<String>,
+    pub sidecars_updated: usize,
+    /// Labels of offline volumes whose sidecars are scrubbed on next mount.
+    pub offline_pending: Vec<String>,
+}
+
+/// `image_abs_path` result (D4: reveal / copy path / open-default).
+#[allow(dead_code)] // constructed by Stage A (commands/os.rs)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePathsDto {
+    /// Best online absolute path; None when every path is offline.
+    pub abs_path: Option<String>,
+    pub rel_path: String,
+    pub volume_label: Option<String>,
+    pub online: bool,
+}

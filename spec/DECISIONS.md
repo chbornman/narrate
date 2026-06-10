@@ -320,6 +320,54 @@ chosen readings.
   (B29's home); `SidecarEngine::new_shared(Arc<EventStore>, …)` added, the
   borrowed `new` retained to avoid churning the sidecars suite.
 
+## UI build decisions (P4.2, June 2026)
+
+The featureset/architecture amendments recorded by UI-ARCHITECTURE §11,
+landed by the P4.2 build (INTEGRATION). Featureset = docs/UI-FEATURESET.md;
+where it amends spec/UI.md, the featureset wins.
+
+- **U1.** Space opens AND closes Look (featureset §0 symmetric open/close
+  supersedes UI.md §3.4's Space-toggles-selection); keyboard
+  selection-toggle moves to **Ctrl+Space**. Not a chorded hot-path verb:
+  selection-toggle is not a per-image annotation verb, so the §8
+  no-chorded-verbs guardrail stands.
+- **U2.** `Tab` is consumed globally for lights-out (D5); webview Tab
+  focus-traversal is forfeited in the main window only (Settings keeps it).
+  A11y note: arrows/Enter/Esc remain the keyboard path; recorded as a
+  deliberate trade against UI.md §12 keyboard completeness.
+- **U3.** The rail and inspector are **push** panels (no auto-hide, no
+  dwell, no pin) — supersedes UI.md §3.7 "overlay, not push" and §8.1's
+  slide-over journal panel. Inspector width persists; openness does not.
+  The §3.7 "summoning never reflows the grid" acceptance line is replaced
+  by integer-column re-snap during panel resize (perf item in DOGFOOD).
+- **U4.** Collapsed-stack write events target both members as ONE ordered
+  multi-target list, display member (JPEG) first, then RAW
+  (`event_targets.position` — CAPTURE §3). One cell, two targets: the
+  indicator truthfully reads "● 2".
+- **U5.** The capture indicator and an open note input are EXEMPT from Tab
+  lights-out (the indicator is capture-state truth; modes must stay
+  visible — coordinator ruling; founder sign-off requested at P4.2 gate).
+- **U6.** Surround luminance (D6) surfaces ONLY via the gutter and
+  Look-backdrop right-click seats + the persisted pref; the Settings §2.4
+  enumeration stays closed (no appearance section).
+- **U7.** Sheet instances are enumerated: cheatsheet and drop-confirm.
+  A new Sheet instance is a spec change.
+- **U8 (INTEGRATION amendment).** The drag-folder drop-confirm joins the
+  Esc order as layer 2 (after the redaction modal, before the context
+  menu): Esc is now a **13-layer** order. The Sheet contract promises Esc
+  dismisses, and Esc routes only through logic/escape.ts.
+- **U9 (INTEGRATION).** Window geometry persists via
+  `tauri-plugin-window-state` (settings window denylisted — it stays the
+  one modest window). `tauri-plugin-opener` was NOT adopted: commands/os.rs
+  ships tested xdg-open-class spawns; swapping the launcher in later
+  touches no command surface. Wayland restore-drift is a named DOGFOOD
+  §visual check, with a manual save/restore fallback path reserved in
+  commands/app.rs if the plugin misbehaves.
+- **U10.** The retract-toast Undo performs **RE-STATE** (a new event
+  carrying the folded content into the current session) — never an
+  un-retraction; retraction-of-retraction stays forbidden (E4).
+  Double-Undo is idempotent (the backend declines non-retracted targets).
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

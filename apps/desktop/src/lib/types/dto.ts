@@ -76,3 +76,76 @@ export interface RebuildReportDto {
   filesParsed: number;
   failures: number;
 }
+
+// ---------------------------------------------------------------------------
+// P4.2 additions (contracts frozen by FOUNDATIONS; bodies land with their
+// stages: journal/metadata — Stage C, paths/OS — Stage A).
+// ---------------------------------------------------------------------------
+
+/** One folded journal row (inspector Journal tab — featureset §3, D2).
+ * Revisions/retractions never appear standalone (EVENTS folds); retracted
+ * rows ARE included, flagged, for the per-session "show retracted" toggle. */
+export interface JournalEntryDto {
+  id: string;
+  sessionId: string;
+  /** RFC 3339. */
+  ts: string;
+  kind: "remark" | "rating" | "stroke" | "redacted";
+  source: "voice" | "typed" | "system";
+  /** Effective (folded) text for remarks; null for ratings/stubs. */
+  text: string | null;
+  /** Pre-revision original when corrected ("edited" expand affordance). */
+  originalText: string | null;
+  corrected: boolean;
+  retracted: boolean;
+  rating: number | null;
+  targets: string[];
+  linkedEvent: string | null;
+}
+
+/** Read-only EXIF subset + file identity (Metadata tab, K16 stands —
+ * from the db's EXIF subset; no new parsing). */
+export interface ImageMetadataDto {
+  hash: string;
+  fileName: string;
+  relPath: string;
+  absPath: string | null;
+  byteSize: number;
+  format: string;
+  pixelWidth: number | null;
+  pixelHeight: number | null;
+  orientation: number;
+  captureTs: string | null;
+  cameraMake: string | null;
+  cameraModel: string | null;
+  lensModel: string | null;
+  focalLengthMm: number | null;
+  iso: number | null;
+  fNumber: number | null;
+  exposureTime: string | null;
+  /** Formatted GPS text (UI renders text only). */
+  gps: string | null;
+  previewSource: string | null;
+  /** Preview backfill still pending (e.g. RAW full-decode). */
+  previewPending: boolean;
+  firstIngestedAt: string;
+}
+
+/** redact_event outcome — drives the sanctioned "Redacted" toast copy,
+ * including "— N offline sidecar(s) pending" (UI §7.5/§8.4). */
+export interface RedactReportDto {
+  /** Event ids scrubbed (target + revision chain). */
+  redacted: string[];
+  sidecarsUpdated: number;
+  /** Labels of offline volumes whose sidecars are scrubbed on next mount. */
+  offlinePending: string[];
+}
+
+/** image_abs_path result (D4: reveal / copy path / open-default). */
+export interface ImagePathsDto {
+  /** Best online absolute path, null when every path is offline. */
+  absPath: string | null;
+  relPath: string;
+  volumeLabel: string | null;
+  online: boolean;
+}

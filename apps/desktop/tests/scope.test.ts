@@ -1,6 +1,10 @@
 /**
  * Write-scope derivation and the note-input snapshot machine (CAPTURE §3–4,
- * UI §6/§7.2). Pure logic — the UI reports targets, renders echoes.
+ * UI §6/§7.2). Pure logic — the UI reports targets, renders echoes. P4.2:
+ * scope.ts consumes PRE-EXPANDED target lists (stack expansion happens
+ * upstream in the grid/look slices — D1), so the collapsed-pair CAPTURE
+ * conformance (one multi-target event, display member first: JPEG then
+ * RAW) is asserted here over the expanded lists.
  */
 import { describe, expect, it } from "vitest";
 import { notePlaceholder, scopeLabel, scopeTargets } from "../src/lib/logic/scope";
@@ -12,7 +16,7 @@ const base = {
   searchOpen: false,
   gridSelection: [] as string[],
   searchSelection: [] as string[],
-  lookHash: null as string | null,
+  lookTargets: [] as string[],
 };
 
 describe("scope targets (CAPTURE §3 table)", () => {
@@ -38,7 +42,7 @@ describe("scope targets (CAPTURE §3 table)", () => {
         ...base,
         surface: "look",
         gridSelection: ["a", "b", "c"],
-        lookHash: "b",
+        lookTargets: ["b"],
       }),
     ).toEqual(["b"]);
   });
@@ -52,6 +56,30 @@ describe("scope targets (CAPTURE §3 table)", () => {
         searchSelection: ["x", "y"],
       }),
     ).toEqual(["x", "y"]);
+  });
+});
+
+describe("collapsed RAW+JPEG stacks (D1 / CAPTURE conformance)", () => {
+  // The slices pre-expand: one selected collapsed pair arrives as TWO
+  // ordered hashes — display member (JPEG) FIRST, then RAW. That order is
+  // what event_targets.position records (DECISIONS entry 4).
+  it("a collapsed pair in the grid selection passes through as one ordered multi-target list", () => {
+    expect(scopeTargets({ ...base, gridSelection: ["jpegHash", "rawHash"] })).toEqual([
+      "jpegHash",
+      "rawHash",
+    ]);
+  });
+
+  it("a viewed collapsed pair in Look targets both members, display first", () => {
+    expect(
+      scopeTargets({ ...base, surface: "look", lookTargets: ["jpegHash", "rawHash"] }),
+    ).toEqual(["jpegHash", "rawHash"]);
+  });
+
+  it("the indicator reads the TARGET count truthfully: 1 cell, ● 2", () => {
+    // One collapsed cell = two targets; the echoed scope kind is multi,
+    // count 2 — the indicator must NOT paper over it with the cell count.
+    expect(scopeLabel("multi", 2)).toBe("2");
   });
 });
 

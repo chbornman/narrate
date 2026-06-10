@@ -11,5 +11,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["tests/**/*.test.ts"],
+    // This jsdom config has no localStorage; the shim keeps the prefs/panel
+    // persistence paths testable.
+    setupFiles: ["tests/setup.ts"],
   },
 });

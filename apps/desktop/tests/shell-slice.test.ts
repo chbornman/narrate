@@ -1,0 +1,93 @@
+/**
+ * Shell slice (state/shell.svelte.ts — the one slice FOUNDATIONS ships
+ * complete): lights-out, rail open/focus handoff, the context-menu host
+ * state, surround persistence, the note transient + scope echo, and pulse
+ * coalescing.
+ */
+import { beforeEach, describe, expect, it } from "vitest";
+import { ShellSlice } from "../src/lib/state/shell.svelte";
+import type { ScopeView } from "../src/lib/types/dto";
+
+const scope = (kind: ScopeView["kind"], count: number, hashes: string[] = []): ScopeView => ({
+  kind,
+  count,
+  previewHashes: hashes,
+});
+
+let shell: ShellSlice;
+beforeEach(() => {
+  localStorage.clear();
+  shell = new ShellSlice();
+});
+
+describe("lights-out (featureset §0)", () => {
+  it("toggles one boolean; chrome OPEN state is never touched", () => {
+    shell.railOpen = true;
+    shell.toggleLightsOut();
+    expect(shell.chromeHidden).toBe(true);
+    expect(shell.railOpen).toBe(true); // restore-on-untoggle is automatic
+    shell.toggleLightsOut();
+    expect(shell.chromeHidden).toBe(false);
+  });
+});
+
+describe("rail (push panel, D5)", () => {
+  it("\\ toggle hands the rail keyboard focus on open, returns it on close", () => {
+    shell.toggleRail();
+    expect(shell.railOpen).toBe(true);
+    expect(shell.railFocused).toBe(true);
+    shell.toggleRail();
+    expect(shell.railOpen).toBe(false);
+    expect(shell.railFocused).toBe(false);
+  });
+
+  it("openness persists (push-persistent rail)", () => {
+    shell.toggleRail();
+    const fresh = new ShellSlice();
+    fresh.loadPrefs();
+    expect(fresh.railOpen).toBe(true);
+  });
+});
+
+describe("context-menu host state", () => {
+  it("one menu at a time; seat + anchor + arg travel together", () => {
+    shell.openContextMenu("thumb", { x: 10, y: 20 });
+    expect(shell.contextMenu?.seat).toBe("thumb");
+    shell.openContextMenu("rail-folder", null, { rootId: "r", folder: "f" });
+    expect(shell.contextMenu?.seat).toBe("rail-folder");
+    expect(shell.contextMenu?.anchor).toBeNull(); // keyboard-summoned
+    shell.closeContextMenu();
+    expect(shell.contextMenu).toBeNull();
+  });
+});
+
+describe("surround (D6)", () => {
+  it("sets and persists the level", () => {
+    shell.setSurround("middle");
+    expect(shell.surround).toBe("middle");
+    const fresh = new ShellSlice();
+    fresh.loadPrefs();
+    expect(fresh.surround).toBe("middle");
+  });
+});
+
+describe("note transient + scope echo", () => {
+  it("summon snapshots the current echo; a scope CHANGE cancels the note", () => {
+    shell.onScopeEcho(scope("multi", 2, ["a", "b"]));
+    shell.summonNote();
+    expect(shell.note.open).toBe(true);
+    shell.onScopeEcho(scope("multi", 2, ["a", "b"])); // identical: stays
+    expect(shell.note.open).toBe(true);
+    shell.onScopeEcho(scope("single", 1, ["a"])); // changed: cancels
+    expect(shell.note.open).toBe(false);
+  });
+});
+
+describe("pulse coalescing (UI §7.4)", () => {
+  it("rapid events coalesce above ~5/s", () => {
+    shell.onPulse(1000);
+    shell.onPulse(1050); // < 200 ms: coalesced
+    shell.onPulse(1300);
+    expect(shell.pulseCount).toBe(2);
+  });
+});

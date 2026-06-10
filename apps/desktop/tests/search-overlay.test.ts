@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (p: string, proto = "asset") => `${proto}://localhost/${p}`,
 }));
 
-import SearchResultRow from "../src/lib/components/SearchResultRow.svelte";
+import SearchResultRow from "../src/lib/components/search/SearchResultRow.svelte";
 import type { ImageResult } from "../src/lib/types/search";
 
 const result = (provenance: ImageResult["provenance"]): ImageResult => ({

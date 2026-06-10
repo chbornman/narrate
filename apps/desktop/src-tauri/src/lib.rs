@@ -33,6 +33,17 @@ use state::App;
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Window geometry persisted (featureset §6). The settings window is
+        // denylisted: it stays the one modest window (UI §2.4). Known risk
+        // (UI-ARCHITECTURE Appendix B): restore drift with custom titlebars
+        // on some Wayland compositors — named in DOGFOOD §visual; the
+        // fallback, if it misbehaves, is manual save/restore in
+        // commands/app.rs keyed off the same RunEvent hooks.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&["settings"])
+                .build(),
+        )
         // Thumbnails + Look images: photoproof://localhost/{thumb|display}/{hash}
         // straight from the preview cache. Bytes never cross IPC, never
         // base64 (UI §3.3, DECISIONS P16).
@@ -94,27 +105,41 @@ pub fn run() {
         });
 }
 
+// OS-launcher verbs stay on the os.rs xdg-open-class spawns (Stage A) —
+// tauri-plugin-opener was deliberately NOT adopted: the command surface is
+// implemented and tested without it (deviation recorded in DECISIONS).
 #[cfg(not(feature = "debug-panel"))]
 fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
-        commands::set_scope,
-        commands::indicator_state,
-        commands::add_note,
-        commands::set_rating,
-        commands::report_activity,
-        commands::search,
-        commands::list_roots,
-        commands::add_root,
-        commands::remove_root,
-        commands::folder_tree,
-        commands::list_folder,
-        commands::ingest_status,
-        commands::settings_get,
-        commands::runtime_status,
-        commands::export_journal,
-        commands::rebuild_index,
-        commands::open_settings_window,
-        commands::quit,
+        commands::capture::set_scope,
+        commands::capture::indicator_state,
+        commands::capture::add_note,
+        commands::capture::set_rating,
+        commands::capture::report_activity,
+        commands::search::search,
+        commands::library::list_roots,
+        commands::library::add_root,
+        commands::library::remove_root,
+        commands::library::rescan_root,
+        commands::library::folder_tree,
+        commands::library::list_folder,
+        commands::library::ingest_status,
+        commands::app::settings_get,
+        commands::app::runtime_status,
+        commands::app::export_journal,
+        commands::app::rebuild_index,
+        commands::app::open_settings_window,
+        commands::app::quit,
+        commands::journal::image_journal,
+        commands::journal::image_metadata,
+        commands::journal::revise_event,
+        commands::journal::retract_event,
+        commands::journal::unretract_event,
+        commands::journal::redact_event,
+        commands::os::image_abs_path,
+        commands::os::reveal_in_file_manager,
+        commands::os::reveal_folder,
+        commands::os::open_with_default,
     ]
 }
 
@@ -124,24 +149,35 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
 #[cfg(feature = "debug-panel")]
 fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
-        commands::set_scope,
-        commands::indicator_state,
-        commands::add_note,
-        commands::set_rating,
-        commands::report_activity,
-        commands::search,
-        commands::list_roots,
-        commands::add_root,
-        commands::remove_root,
-        commands::folder_tree,
-        commands::list_folder,
-        commands::ingest_status,
-        commands::settings_get,
-        commands::runtime_status,
-        commands::export_journal,
-        commands::rebuild_index,
-        commands::open_settings_window,
-        commands::quit,
+        commands::capture::set_scope,
+        commands::capture::indicator_state,
+        commands::capture::add_note,
+        commands::capture::set_rating,
+        commands::capture::report_activity,
+        commands::search::search,
+        commands::library::list_roots,
+        commands::library::add_root,
+        commands::library::remove_root,
+        commands::library::rescan_root,
+        commands::library::folder_tree,
+        commands::library::list_folder,
+        commands::library::ingest_status,
+        commands::app::settings_get,
+        commands::app::runtime_status,
+        commands::app::export_journal,
+        commands::app::rebuild_index,
+        commands::app::open_settings_window,
+        commands::app::quit,
+        commands::journal::image_journal,
+        commands::journal::image_metadata,
+        commands::journal::revise_event,
+        commands::journal::retract_event,
+        commands::journal::unretract_event,
+        commands::journal::redact_event,
+        commands::os::image_abs_path,
+        commands::os::reveal_in_file_manager,
+        commands::os::reveal_folder,
+        commands::os::open_with_default,
         debug::debug_tail_events,
         debug::debug_capture,
         debug::debug_ingest,

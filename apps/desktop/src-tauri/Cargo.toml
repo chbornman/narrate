@@ -17,6 +17,11 @@ tauri-build = { version = "2", features = [] }
 photoproof-core = { path = "../../../crates/photoproof-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Window geometry persistence (featureset §6) — new dependency, flagged:
+# named as INTEGRATION's to add in UI-ARCHITECTURE §5/Appendix A. Wayland
+# restore-drift risk is tracked in DOGFOOD §visual; the manual fallback
+# path (commands/app.rs) is named in lib.rs beside the registration.
+tauri-plugin-window-state = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

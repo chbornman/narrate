@@ -1,9 +1,18 @@
 /**
- * UI preference persistence (implementation latitude per UI.md): sort per
- * folder, thumbnail size globally, rail pin, filmstrip. localStorage —
- * small, synchronous, webview-local.
+ * UI preference persistence (implementation latitude per UI.md):
+ * localStorage — small, synchronous, webview-local. ALL P4.2 keys are
+ * declared up front (contract freeze): sort per folder · thumbnail size ·
+ * filmstrip · surround (D6) · auto-advance (D7, default OFF) · cell-info
+ * level · rail width/open · inspector width · global stack collapse ·
+ * last folder. The rail PIN pref is gone with the pin affordance (the
+ * rail is push-persistent — D5/DECISIONS 3).
  */
 import { DEFAULT_SORT, DEFAULT_THUMB_STEP, type SortMode } from "../logic/sort";
+import {
+  DEFAULT_SURROUND,
+  parseSurround,
+  type SurroundLevel,
+} from "../theme/surround";
 
 const safeGet = (k: string): string | null => {
   try {
@@ -21,6 +30,15 @@ const safeSet = (k: string, v: string) => {
   }
 };
 
+const loadBool = (k: string, fallback: boolean): boolean => {
+  const v = safeGet(k);
+  return v === null ? fallback : v === "1";
+};
+
+const saveBool = (k: string, v: boolean) => safeSet(k, v ? "1" : "0");
+
+// ---- sort (per folder) ------------------------------------------------------
+
 export function loadSort(rootId: string, folder: string): SortMode {
   const v = safeGet(`pp.sort.${rootId}/${folder}`);
   if (v === "capture-desc" || v === "capture-asc" || v === "filename" || v === "added")
@@ -32,6 +50,8 @@ export function saveSort(rootId: string, folder: string, mode: SortMode) {
   safeSet(`pp.sort.${rootId}/${folder}`, mode);
 }
 
+// ---- grid -------------------------------------------------------------------
+
 export function loadThumbStep(): number {
   const v = Number(safeGet("pp.thumbStep"));
   return Number.isInteger(v) && v >= 0 && v <= 3 ? v : DEFAULT_THUMB_STEP;
@@ -41,21 +61,73 @@ export function saveThumbStep(step: number) {
   safeSet("pp.thumbStep", String(step));
 }
 
-export function loadRailPinned(): boolean {
-  return safeGet("pp.railPinned") === "1";
+export type CellInfoLevel = "none" | "minimal" | "annotated";
+
+export function loadCellInfo(): CellInfoLevel {
+  const v = safeGet("pp.cellInfo");
+  return v === "minimal" || v === "annotated" ? v : "none";
 }
 
-export function saveRailPinned(pinned: boolean) {
-  safeSet("pp.railPinned", pinned ? "1" : "0");
+export function saveCellInfo(level: CellInfoLevel) {
+  safeSet("pp.cellInfo", level);
 }
+
+/** Global stack collapse (featureset §5 — live, reversible). */
+export function loadStackGlobal(): boolean {
+  return loadBool("pp.stackGlobal", true);
+}
+
+export function saveStackGlobal(collapsed: boolean) {
+  saveBool("pp.stackGlobal", collapsed);
+}
+
+// ---- panels -----------------------------------------------------------------
+
+/** Width prefs share keys with primitives/panel.ts persistKey storage. */
+export const RAIL_WIDTH_KEY = "pp.railWidth";
+export const INSPECTOR_WIDTH_KEY = "pp.inspectorWidth";
+
+export function loadRailOpen(): boolean {
+  return loadBool("pp.railOpen", false);
+}
+
+export function saveRailOpen(open: boolean) {
+  saveBool("pp.railOpen", open);
+}
+
+// Inspector OPENNESS deliberately does not persist (DECISIONS 3): width
+// does (via INSPECTOR_WIDTH_KEY), openness resets each launch.
+
+// ---- look -------------------------------------------------------------------
 
 export function loadFilmstrip(): boolean {
-  return safeGet("pp.filmstrip") === "1";
+  return loadBool("pp.filmstrip", false);
 }
 
 export function saveFilmstrip(on: boolean) {
-  safeSet("pp.filmstrip", on ? "1" : "0");
+  saveBool("pp.filmstrip", on);
 }
+
+// ---- capture / viewing ------------------------------------------------------
+
+/** Auto-advance, default OFF (D7). */
+export function loadAutoAdvance(): boolean {
+  return loadBool("pp.autoAdvance", false);
+}
+
+export function saveAutoAdvance(on: boolean) {
+  saveBool("pp.autoAdvance", on);
+}
+
+export function loadSurround(): SurroundLevel {
+  return parseSurround(safeGet("pp.surround")) ?? DEFAULT_SURROUND;
+}
+
+export function saveSurround(level: SurroundLevel) {
+  safeSet("pp.surround", level);
+}
+
+// ---- session ----------------------------------------------------------------
 
 export function loadLastFolder(): { rootId: string; folder: string } | null {
   const v = safeGet("pp.lastFolder");

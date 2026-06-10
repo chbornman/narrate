@@ -1,16 +1,22 @@
 /**
- * The keyboard map — single source of truth is spec/UI.md §11; this module
- * is its executable form. Anything not produced here does not exist.
+ * The keyboard map — single source of truth is the typed action registry
+ * (actions/registry.ts); this module is the INTERPRETER. `dispatch` keeps
+ * its exact P3.2 signature and is now a thin wrapper over
+ * actions/match.ts running against the registry; the executable key table
+ * lives in actions/defs/*.
  *
- * M1 boundaries: `J` (journal panel) and `B`/`E`/`O` (pencil) belong to
- * later packets; `M` exists only once ASR is ready (never in M1). They
- * dispatch to nothing here — the rows stay in the spec, the actions arrive
- * with their packets.
- *
- * Single-letter shortcuts are suppressed while any text input is focused
- * (§11). Search-overlay navigation keys (arrows/Enter/Escape) still work
- * with the search input focused — they never insert text.
+ * P4.2 boundaries: pencil rows (P/E/V, overlay cycle) and the mic row (M)
+ * are RESERVED registry rows — they dispatch to nothing here; the actions
+ * arrive with their packets (M2a/M2b). Single-letter shortcuts are
+ * suppressed while any text input is focused (UI §11; rule owned by
+ * actions/match.ts).
  */
+import { match } from "../actions/match";
+import { REGISTRY } from "../actions/registry";
+import type { ActionContext } from "../actions/types";
+import type { SortMode } from "./sort";
+import { DEFAULT_SORT, DEFAULT_THUMB_STEP } from "./sort";
+import type { SurroundLevel } from "../theme/surround";
 
 export interface KeyInput {
   key: string;
@@ -18,125 +24,126 @@ export interface KeyInput {
   shift: boolean;
 }
 
-export interface KeyContext {
-  surface: "grid" | "look";
-  searchOpen: boolean;
-  /** Any text input focused (note input, search input, settings fields). */
-  inputFocused: boolean;
-  /** The focused input is the search input (overlay nav keys allowed). */
-  searchInputFocused: boolean;
-  hasSelection: boolean;
-  railOpen: boolean;
-  /** Compile-time debug builds only. */
-  debugEnabled: boolean;
-  /** ASR ready (never true in M1). */
-  asrReady: boolean;
-}
-
+/**
+ * One Action type, one perform sink (state/app.svelte.ts), four renderings
+ * of one table (keys, menus, cheatsheet, tooltips). The union is EXTENDED,
+ * never narrowed — contract frozen by FOUNDATIONS.
+ */
 export type Action =
+  // contract / global
   | { kind: "escape" }
+  | { kind: "go-grid" }
+  | { kind: "toggle-lights-out" }
+  | { kind: "toggle-rail" }
+  | { kind: "toggle-cheatsheet" }
   | { kind: "open-search" }
   | { kind: "summon-note" }
+  | { kind: "toggle-auto-advance" }
+  | { kind: "toggle-fullscreen" }
   | { kind: "open-settings" }
   | { kind: "quit" }
   | { kind: "toggle-debug-panel" }
   | { kind: "rate"; value: number }
-  | { kind: "open-look" } // Enter on focused thumb / search result
-  | { kind: "toggle-rail" }
-  | { kind: "rail-nav"; dir: "up" | "down" | "left" | "right" }
-  | { kind: "rail-enter" }
+  | { kind: "set-surround"; level: SurroundLevel }
+  // grid
+  | { kind: "open-look" }
   | { kind: "focus-move"; dir: "up" | "down" | "left" | "right"; extend: boolean }
+  | { kind: "focus-edge"; edge: "home" | "end"; extend: boolean }
+  | { kind: "focus-page"; dir: "up" | "down"; extend: boolean }
   | { kind: "toggle-select-focused" }
   | { kind: "select-all" }
+  | { kind: "select-none" }
   | { kind: "open-sort-menu" }
+  | { kind: "set-sort"; mode: SortMode }
   | { kind: "thumb-size"; delta: 1 | -1 }
+  | { kind: "set-thumb-step"; step: number }
+  | { kind: "cycle-cell-info" }
+  | { kind: "stack-toggle-active" }
+  | { kind: "stack-collapse-all" }
+  | { kind: "stack-expand-all" }
+  | { kind: "flip-stack-member" } // R: viewed member in Look, active in Grid (D1)
+  // look
   | { kind: "look-nav"; delta: 1 | -1 }
+  | { kind: "look-close" }
   | { kind: "zoom-toggle" }
   | { kind: "zoom-step"; delta: 1 | -1 }
   | { kind: "zoom-fit" }
+  | { kind: "zoom-100" }
   | { kind: "toggle-filmstrip" }
+  // panels
+  | { kind: "rail-nav"; dir: "up" | "down" | "left" | "right" }
+  | { kind: "rail-enter" }
+  | { kind: "rail-folder-open"; rootId: string; folder: string }
+  | { kind: "rail-folder-reveal"; rootId: string; folder: string }
+  | { kind: "rescan-root"; rootId: string }
+  | { kind: "open-inspector"; tab: "metadata" | "journal" }
+  | { kind: "close-inspector" }
+  // journal row verbs (pointer-seated; Stage C wires the flows)
+  | { kind: "journal-correct"; eventId: string }
+  | { kind: "journal-retract"; eventId: string }
+  | { kind: "journal-redact"; eventId: string }
+  | { kind: "journal-toggle-retracted" }
+  // OS integration (D4 — no deletion verbs, D3)
+  | { kind: "reveal-in-file-manager" }
+  | { kind: "copy-file-path" }
+  | { kind: "open-with-default" }
+  // search
   | { kind: "search-nav"; dir: "up" | "down" | "left" | "right" }
   | { kind: "search-open-result" }
-  | { kind: "remove-last-chip" };
+  | { kind: "remove-last-chip" }
+  // reserved rows — dispatch to nothing in P4.2 (M2a/M2b packets)
+  | { kind: "toggle-mic" }
+  | { kind: "pencil-pen" }
+  | { kind: "pencil-eraser" }
+  | { kind: "pencil-visibility" }
+  | { kind: "cycle-overlay" };
 
+/** The P3.2 KeyContext fields — still required, so existing fixtures and
+ * callers compile unchanged. */
+type LegacyContextKeys =
+  | "surface"
+  | "searchOpen"
+  | "inputFocused"
+  | "searchInputFocused"
+  | "hasSelection"
+  | "railOpen"
+  | "debugEnabled"
+  | "asrReady";
+
+/**
+ * KeyContext = ActionContext with the P4.2 fields optional-with-defaults
+ * (UI-ARCHITECTURE §3). New code should assemble a full ActionContext via
+ * ui.actionContext(); this alias exists for signature stability.
+ */
+export type KeyContext = Pick<ActionContext, LegacyContextKeys> &
+  Partial<Omit<ActionContext, LegacyContextKeys>>;
+
+/** Defaults for the P4.2 ActionContext fields (reserved fields falsy). */
+export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
+  selectionCount: 0,
+  activeHash: null,
+  activeIsPair: false,
+  activePairCollapsed: false,
+  railFocused: false,
+  inspectorOpen: false,
+  cheatsheetOpen: false,
+  contextMenuOpen: false,
+  chromeHidden: false,
+  autoAdvance: false,
+  lookAtFit: true,
+  sort: DEFAULT_SORT,
+  thumbStep: DEFAULT_THUMB_STEP,
+  surround: "black",
+  filmstrip: false,
+  pencilMode: false,
+  micArmed: false,
+};
+
+export function withDefaults(ctx: KeyContext): ActionContext {
+  return { ...CONTEXT_DEFAULTS, ...ctx };
+}
+
+/** Signature preserved from P3.2; internally match(e, ctx, REGISTRY). */
 export function dispatch(e: KeyInput, ctx: KeyContext): Action | null {
-  const k = e.key;
-
-  // ---- always-on chords -----------------------------------------------
-  if (e.ctrlOrMeta && (k === "q" || k === "Q")) return { kind: "quit" };
-  if (e.ctrlOrMeta && k === ",") return { kind: "open-settings" };
-  if (e.ctrlOrMeta && (k === "f" || k === "F")) return { kind: "open-search" };
-  if (k === "F12") return ctx.debugEnabled ? { kind: "toggle-debug-panel" } : null;
-  if (k === "Escape") return { kind: "escape" };
-
-  // ---- search overlay: navigation works with the input focused ---------
-  if (ctx.searchOpen) {
-    if (k === "Enter") return { kind: "search-open-result" };
-    if (k === "ArrowUp") return { kind: "search-nav", dir: "up" };
-    if (k === "ArrowDown") return { kind: "search-nav", dir: "down" };
-    if (k === "ArrowLeft" && !ctx.searchInputFocused)
-      return { kind: "search-nav", dir: "left" };
-    if (k === "ArrowRight" && !ctx.searchInputFocused)
-      return { kind: "search-nav", dir: "right" };
-    if (k === "Backspace" && ctx.searchInputFocused)
-      return { kind: "remove-last-chip" }; // only on empty input — caller gates
-    if (ctx.inputFocused) return null;
-    if (/^[0-5]$/.test(k) && ctx.hasSelection)
-      return { kind: "rate", value: Number(k) };
-    return null;
-  }
-
-  // ---- suppression rule (§11) ------------------------------------------
-  if (ctx.inputFocused) {
-    // Note input owns Enter/Shift+Enter itself; nothing global fires.
-    return null;
-  }
-
-  // ---- global single keys ----------------------------------------------
-  if (k === "/") return { kind: "open-search" };
-  if (k === "n" || k === "N") return { kind: "summon-note" };
-  if ((k === "m" || k === "M") && ctx.asrReady) return null; // M2b packet
-  if (e.ctrlOrMeta && k === "0" && ctx.surface === "look") return { kind: "zoom-fit" };
-  if (/^[0-5]$/.test(k) && !e.ctrlOrMeta) {
-    // Grid needs a selection; Look always rates the viewed image (CAPTURE §10).
-    if (ctx.surface === "look" || ctx.hasSelection)
-      return { kind: "rate", value: Number(k) };
-    return null; // session scope: rating keys do nothing
-  }
-
-  // ---- grid -------------------------------------------------------------
-  if (ctx.surface === "grid") {
-    if (k === "Tab") return { kind: "toggle-rail" };
-    if (k === "Enter") return ctx.railOpen ? { kind: "rail-enter" } : { kind: "open-look" };
-    if (k === "s" || k === "S") return { kind: "open-sort-menu" };
-    if (k === "-") return { kind: "thumb-size", delta: -1 };
-    if (k === "=") return { kind: "thumb-size", delta: 1 };
-    if (k === " ") return { kind: "toggle-select-focused" };
-    if (e.ctrlOrMeta && (k === "a" || k === "A")) return { kind: "select-all" };
-    const dir =
-      k === "ArrowUp"
-        ? ("up" as const)
-        : k === "ArrowDown"
-          ? ("down" as const)
-          : k === "ArrowLeft"
-            ? ("left" as const)
-            : k === "ArrowRight"
-              ? ("right" as const)
-              : null;
-    if (dir) {
-      if (ctx.railOpen) return { kind: "rail-nav", dir };
-      return { kind: "focus-move", dir, extend: e.shift };
-    }
-    return null;
-  }
-
-  // ---- look ---------------------------------------------------------------
-  if (k === "ArrowLeft") return { kind: "look-nav", delta: -1 };
-  if (k === "ArrowRight") return { kind: "look-nav", delta: 1 };
-  if (k === "z" || k === "Z") return { kind: "zoom-toggle" };
-  if (k === "+" || (k === "=" && e.shift)) return { kind: "zoom-step", delta: 1 };
-  if (k === "-") return { kind: "zoom-step", delta: -1 };
-  if (k === "f" || k === "F") return { kind: "toggle-filmstrip" };
-  // B / E / O / Cmd+Z: grease pencil — M2a packet (P5.1).
-  return null;
+  return match(e, withDefaults(ctx), REGISTRY);
 }

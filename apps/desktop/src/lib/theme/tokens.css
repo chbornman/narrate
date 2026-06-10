@@ -1,0 +1,86 @@
+/* Photoproof design tokens — the ONLY place colors/levels are defined
+ * (UI-ARCHITECTURE §1: theming is token-only; no inline styles anywhere).
+ *
+ * Chrome stays dark (the quiet philosophy, UI §12 / DECISIONS I5). The
+ * IMAGE SURROUND (Grid canvas + Look backdrop) is user-tunable (D6):
+ * [data-surround] blocks retune --surround and the evidence/selection
+ * tokens for legibility at each luminance. Full interface themes
+ * (post-M1) will be a [data-theme] block here — no component changes.
+ *
+ * THE SATURATED PENCIL RED IS RESERVED for the grease pencil (M2a) —
+ * it appears nowhere in P4.2. The has-journal dot uses the dulled reds
+ * below. Everything else is achromatic.
+ */
+:root {
+  /* chrome (fixed, dark) */
+  --scrim: rgba(0, 0, 0, 0.5); /* sheet/modal backdrop, all surrounds */
+  --bg: #0e0e0e;
+  --bg-raised: #161616;
+  --bg-overlay: #1b1b1b;
+  --chrome: #2a2a2a;
+  --chrome-strong: #3a3a3a;
+  --text: #d6d6d6;
+  --text-dim: #8a8a8a;
+  --text-faint: #5a5a5a;
+  /* chrome focus ring (focusables in panels/menus/inputs) */
+  --focus: #cfcfcf;
+  /* RESERVED — do not use anywhere in P4.2 (the grease pencil owns it, M2a):
+     --red-pencil: #e03131; */
+  --font:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
+
+  /* surround-tuned tokens — defaults = "black" (mirrored in
+   * theme/surround.ts SURROUND_CONTRAST; the table is unit-tested) */
+  --surround: #0e0e0e;
+  --journal-dot: #a33c3c;
+  --selection: #cfcfcf;
+  --focus-cell: #8a8a8a;
+  --marquee: rgba(207, 207, 207, 0.35);
+}
+
+/* D6: image-surround luminance levels. Each block retunes the surround
+ * plus the tokens that must stay legible against it. */
+[data-surround="black"] {
+  --surround: #0e0e0e;
+  --journal-dot: #a33c3c;
+  --selection: #cfcfcf;
+  --focus-cell: #8a8a8a;
+  --marquee: rgba(207, 207, 207, 0.35);
+}
+
+[data-surround="dark"] {
+  --surround: #2e2e2e;
+  --journal-dot: #b04545;
+  --selection: #e0e0e0;
+  --focus-cell: #9a9a9a;
+  --marquee: rgba(224, 224, 224, 0.35);
+}
+
+[data-surround="middle"] {
+  --surround: #7f7f7f;
+  --journal-dot: #8c2f2f;
+  --selection: #f5f5f5;
+  --focus-cell: #2a2a2a;
+  --marquee: rgba(20, 20, 20, 0.3);
+}
+
+[data-surround="light"] {
+  --surround: #c9c9c9;
+  --journal-dot: #872c2c;
+  --selection: #1b1b1b;
+  --focus-cell: #4a4a4a;
+  --marquee: rgba(20, 20, 20, 0.25);
+}
+
+[data-surround="white"] {
+  --surround: #f4f4f4;
+  --journal-dot: #7e2828;
+  --selection: #0e0e0e;
+  --focus-cell: #5a5a5a;
+  --marquee: rgba(14, 14, 14, 0.22);
+}

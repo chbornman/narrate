@@ -1,32 +1,7 @@
-/* Photoproof — dark theme only (spec/UI.md §12, DECISIONS I5).
- *
- * Color discipline: near-black UI, low-contrast gray chrome, white text where
- * needed. THE SATURATED PENCIL RED IS RESERVED for the grease pencil (M2a) —
- * it appears nowhere in M1. The has-journal dot uses the dulled red below.
- * Everything else is achromatic.
- */
-:root {
-  --bg: #0e0e0e;
-  --bg-raised: #161616;
-  --bg-overlay: #1b1b1b;
-  --chrome: #2a2a2a;
-  --chrome-strong: #3a3a3a;
-  --text: #d6d6d6;
-  --text-dim: #8a8a8a;
-  --text-faint: #5a5a5a;
-  --focus: #cfcfcf;
-  /* the ONLY chromatic value in M1: the dulled journal red (I5) */
-  --red-dull: #a33c3c;
-  /* RESERVED — do not use anywhere in M1 (the grease pencil owns it, M2a):
-     --red-pencil: #e03131; */
-  --font:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
-  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
-}
+/* Photoproof base styles. All design tokens live in lib/theme/tokens.css
+ * (token-only theming — UI-ARCHITECTURE §1); this file carries only base
+ * element styles. Dark chrome, quiet (UI §12, DECISIONS I5). */
+@import "./lib/theme/tokens.css";
 
 * {
   box-sizing: border-box;
@@ -90,4 +65,37 @@ mark {
   text-decoration: underline;
   text-decoration-color: var(--text-dim);
   text-underline-offset: 2px;
+}
+
+/* Key-hinted tooltip body (primitives/tooltip.ts creates the element
+ * imperatively, so its style lives here rather than in a component). */
+.pp-tooltip {
+  position: fixed;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--chrome);
+  border-radius: 4px;
+  padding: 3px 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.pp-tooltip .key {
+  color: var(--text-faint);
+  border: 1px solid var(--chrome);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+
+/* Off-screen scratch element for the execCommand clipboard fallback
+ * (state/app.svelte.ts copyText — created imperatively, styled here). */
+.pp-offscreen {
+  position: fixed;
+  left: -9999px;
+  top: 0;
 }

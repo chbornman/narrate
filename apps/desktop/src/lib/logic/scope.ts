@@ -8,22 +8,30 @@
  *   Grid, selection of N ≥ 2 → selected images, in selection order
  *   Grid, no selection       → session (zero targets)
  *   Search results           → same rules over result selection
+ *
+ * P4.2 stacks (D1): this module consumes PRE-EXPANDED target lists — stack
+ * expansion happens upstream (grid.selectionTargets via stacks.ts, display
+ * member first, JPEG then RAW; the Look slice does the same for a viewed
+ * collapsed pair). A collapsed RAW+JPEG stack is one cell but TWO targets:
+ * the indicator truthfully reads "● 2" (coordinator ruling; the backend is
+ * untouched — K13).
  */
 
 export interface ScopeSource {
   surface: "grid" | "look";
   searchOpen: boolean;
-  /** Grid selection order (hashes). */
+  /** Stack-expanded grid selection targets, in selection order. */
   gridSelection: string[];
   /** Selection within search results (hashes). */
   searchSelection: string[];
-  /** Hash shown in Look, null when not in Look. */
-  lookHash: string | null;
+  /** Hashes shown in Look — [display] or [display, alt] for a collapsed
+   * pair; empty when not in Look. */
+  lookTargets: string[];
 }
 
 export function scopeTargets(src: ScopeSource): string[] {
   if (src.searchOpen) return [...src.searchSelection];
-  if (src.surface === "look") return src.lookHash ? [src.lookHash] : [];
+  if (src.surface === "look") return [...src.lookTargets];
   return [...src.gridSelection];
 }
 

@@ -1,0 +1,217 @@
+/**
+ * INTEGRATION cross-slice flows over the composition root with mocked IPC
+ * (ui-store.test.ts pattern): the Look navigation set = entry selection
+ * (featureset §2 via looknav.navigationSet), flip-aware Look→Grid focus
+ * restore, the collapsed-pair "● 2" truth END TO END through openLook and
+ * R (coordinator ruling), the inspector following the active image
+ * (featureset §3), and the drag-folder → register-root confirmation flow
+ * (featureset §6, escape layer 2).
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { GridItem, ScopeView } from "../src/lib/types/dto";
+
+const ipcLog = vi.hoisted(() => ({
+  calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
+  failAddRoot: false,
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+    ipcLog.calls.push({ cmd, args });
+    switch (cmd) {
+      case "set_scope": {
+        const targets = (args?.targets ?? []) as string[];
+        const kind =
+          targets.length === 0 ? "session" : targets.length === 1 ? "single" : "multi";
+        return {
+          kind,
+          count: targets.length,
+          previewHashes: targets.slice(0, 8),
+        } satisfies ScopeView;
+      }
+      case "add_root":
+        if (ipcLog.failAddRoot) throw new Error("not a folder");
+        return {
+          rootId: `root:${args?.path as string}`,
+          displayName: String(args?.path),
+          relPath: "",
+          volumeId: "v1",
+          online: true,
+          absPath: String(args?.path),
+        };
+      case "image_journal":
+        return [];
+      case "image_metadata":
+        return null;
+      case "list_folder":
+      case "folder_tree":
+      case "list_roots":
+        return [];
+      case "ingest_status":
+        return { running: false, done: 0, total: 0, errors: 0 };
+      default:
+        return null;
+    }
+  }),
+  convertFileSrc: (p: string, proto = "asset") => `${proto}://localhost/${p}`,
+}));
+
+import { Ui } from "../src/lib/state/app.svelte";
+import * as sel from "../src/lib/logic/selection";
+
+const item = (hash: string, fileName = `${hash}.jpg`): GridItem => ({
+  hash,
+  fileName,
+  relPath: fileName,
+  captureTs: null,
+  addedTs: "2026-02-01T00:00:00Z",
+  hasJournal: false,
+  rating: null,
+  offline: false,
+});
+
+const lastCall = (cmd: string) =>
+  [...ipcLog.calls].reverse().find((c) => c.cmd === cmd);
+
+let ui: Ui;
+beforeEach(() => {
+  ipcLog.calls.length = 0;
+  ipcLog.failAddRoot = false;
+  localStorage.clear();
+  ui = new Ui();
+  // a..d solo JPEGs in filename order (capture-desc falls back to name).
+  ui.grid.rawItems = ["a", "b", "c", "d"].map((h) => item(h));
+});
+
+describe("navigation set = entry selection (featureset §2)", () => {
+  it("a ≥2 selection including the entry cycles within it, in GRID order", async () => {
+    // Select d then b (selection order d,b) — navigation order stays b,d.
+    let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 3);
+    s = sel.toggle(s, ui.grid.unitHashes, 1);
+    await ui.applySelection(s);
+    await ui.openLook("d", false);
+    expect(ui.look.order.map((e) => e.display)).toEqual(["b", "d"]);
+    expect(ui.look.currentHash).toBe("d");
+    // ←/→ stay inside the entry selection.
+    await ui.lookNav(-1);
+    expect(ui.look.currentHash).toBe("b");
+    expect(ui.look.next(-1)).toBe(false); // edge of the set, not the folder
+  });
+
+  it("single-image entry cycles the whole folder", async () => {
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 2));
+    await ui.openLook("c", false);
+    expect(ui.look.order.map((e) => e.display)).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("an entry OUTSIDE the selection cycles the folder (scope narrows anyway)", async () => {
+    let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 0);
+    s = sel.toggle(s, ui.grid.unitHashes, 1);
+    await ui.applySelection(s);
+    await ui.openLook("d", false);
+    expect(ui.look.order).toHaveLength(4);
+  });
+
+  it("the same rule governs search-result entry", async () => {
+    await ui.openSearch();
+    ui.results = {
+      query: { raw: "q", filters: [], dropped: [], fallback: false },
+      images: ["r1", "r2", "r3"].map((h) => ({ image_hash: h })),
+      session_hits: [],
+    } as never;
+    ui.searchSel = { order: ["r3", "r1"], focus: 0, anchor: 0 };
+    await ui.openLook("r1", true);
+    expect(ui.look.order.map((e) => e.display)).toEqual(["r1", "r3"]); // result order
+    expect(ui.searchOpen).toBe(false); // Look entered from Search
+  });
+});
+
+describe("collapsed RAW+JPEG pair — the ● 2 truth end to end (D1)", () => {
+  beforeEach(() => {
+    // One collapsed pair (IMG_1.jpg + IMG_1.cr3) between solos a and z.
+    ui.grid.rawItems = [
+      item("a", "a.jpg"),
+      item("jpegHash", "IMG_1.jpg"),
+      item("rawHash", "IMG_1.cr3"),
+      item("z", "z.jpg"),
+    ];
+    ui.grid.stackGlobalCollapsed = true;
+  });
+
+  it("selecting the one cell reports two ordered targets (JPEG first)", async () => {
+    const idx = ui.grid.unitHashes.indexOf("jpegHash");
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, idx));
+    expect(lastCall("set_scope")?.args?.targets).toEqual(["jpegHash", "rawHash"]);
+    expect(ui.shell.scope).toMatchObject({ kind: "multi", count: 2 });
+  });
+
+  it("viewing the pair in Look keeps both targets; R re-orders display-first", async () => {
+    await ui.openLook("jpegHash", false);
+    expect(lastCall("set_scope")?.args?.targets).toEqual(["jpegHash", "rawHash"]);
+    await ui.perform({ kind: "flip-stack-member" });
+    expect(ui.look.currentHash).toBe("rawHash");
+    expect(lastCall("set_scope")?.args?.targets).toEqual(["rawHash", "jpegHash"]);
+  });
+
+  it("leaving Look after R lands focus on the pair's cell (flip-aware)", async () => {
+    await ui.openLook("jpegHash", false);
+    await ui.perform({ kind: "flip-stack-member" }); // viewing the RAW now
+    await ui.leaveLook();
+    expect(ui.surface).toBe("grid");
+    expect(ui.grid.unitHashes[ui.grid.sel.focus]).toBe("jpegHash"); // the cell
+  });
+});
+
+describe("the inspector follows the active image (featureset §3)", () => {
+  it("tracks focus moves in Grid and ←/→ in Look while open", async () => {
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 0));
+    await ui.perform({ kind: "open-inspector", tab: "journal" });
+    expect(ui.inspector.hash).toBe("a");
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 1));
+    expect(ui.inspector.hash).toBe("b");
+    await ui.openLook("b", false);
+    await ui.lookNav(1);
+    expect(ui.inspector.hash).toBe("c");
+  });
+
+  it("does not load while closed", async () => {
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 0));
+    expect(lastCall("image_journal")).toBeUndefined();
+  });
+});
+
+describe("drag-folder → register-root confirmation (featureset §6)", () => {
+  it("drop offers, Esc dismisses FIRST (escape layer 2), nothing registers", async () => {
+    ui.offerDrop(["/shoots/iceland"]);
+    ui.shell.openContextMenu("gutter", null); // deeper layer stays open
+    await ui.escape();
+    expect(ui.dropPaths).toBeNull();
+    expect(ui.shell.contextMenu).not.toBeNull(); // exactly one layer peeled
+    expect(lastCall("add_root")).toBeUndefined();
+  });
+
+  it("confirm registers every path and opens the first root", async () => {
+    ui.offerDrop(["/shoots/iceland", "/shoots/harbor"]);
+    await ui.confirmDrop();
+    const added = ipcLog.calls.filter((c) => c.cmd === "add_root");
+    expect(added.map((c) => c.args?.path)).toEqual([
+      "/shoots/iceland",
+      "/shoots/harbor",
+    ]);
+    expect(ui.dropPaths).toBeNull();
+    expect(ui.grid.rootId).toBe("root:/shoots/iceland");
+  });
+
+  it("a refused path reports one inline line and keeps the sheet open", async () => {
+    ipcLog.failAddRoot = true;
+    ui.offerDrop(["/not/a/folder.jpg"]);
+    await ui.confirmDrop();
+    expect(ui.dropPaths).not.toBeNull();
+    expect(ui.dropError).toContain("not a folder");
+  });
+
+  it("an empty drop never opens the sheet", () => {
+    ui.offerDrop([]);
+    expect(ui.dropPaths).toBeNull();
+  });
+});

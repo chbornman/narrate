@@ -1,35 +1,45 @@
 <script lang="ts">
   /**
-   * The application shell (UI §2): three surfaces — Grid, Look, Search —
-   * plus the ambient indicator, the transient note input, the auto-hiding
-   * rail, and (dev builds only) the debug panel. Quiet: no dashboards, no
-   * onboarding, no toasts in M1.
+   * The application shell (UI §2 + featureset): chrome REGIONS — Titlebar,
+   * SourceRail, GridSurface, LookSurface, Inspector, overlays — each gated
+   * {#if !ui.shell.chromeHidden} (Tab lights-out, featureset §0; future
+   * chrome obeys by construction because App mounts chrome only through
+   * gated regions). EXEMPT by ruling: the capture indicator (capture-state
+   * truth — modes must stay visible) and an open note input.
+   *
+   * The edge-dwell hotzone is DELETED — no auto-hide fly-outs (featureset
+   * §3); the rail is a push panel on `\`. ContextMenuHost + ToastHost +
+   * Cheatsheet + DropConfirm (drag-folder → register-root, featureset §6)
+   * mount here.
    */
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { ui } from "./lib/state/app.svelte";
-  import { dispatch, type KeyContext } from "./lib/logic/keymap";
+  import { dispatch } from "./lib/logic/keymap";
   import * as ipc from "./lib/ipc/commands";
   import type { IndicatorPulse, IndicatorState, IngestStatus } from "./lib/types/dto";
-  import Titlebar from "./lib/components/Titlebar.svelte";
-  import Grid from "./lib/components/Grid.svelte";
-  import Look from "./lib/components/Look.svelte";
-  import Rail from "./lib/components/Rail.svelte";
-  import SortMenu from "./lib/components/SortMenu.svelte";
-  import SearchOverlay from "./lib/components/SearchOverlay.svelte";
-  import Indicator from "./lib/components/Indicator.svelte";
-  import NoteInput from "./lib/components/NoteInput.svelte";
-  import FirstRun from "./lib/components/FirstRun.svelte";
-  import { THUMB_STEPS } from "./lib/logic/sort";
-
-  let railRef: Rail | undefined = $state();
+  import Titlebar from "./lib/components/shell/Titlebar.svelte";
+  import Indicator from "./lib/components/shell/Indicator.svelte";
+  import NoteInput from "./lib/components/shell/NoteInput.svelte";
+  import FirstRun from "./lib/components/shell/FirstRun.svelte";
+  import Cheatsheet from "./lib/components/shell/Cheatsheet.svelte";
+  import ContextMenuHost from "./lib/components/shell/ContextMenuHost.svelte";
+  import DropConfirm from "./lib/components/shell/DropConfirm.svelte";
+  import SourceRail from "./lib/components/rail/SourceRail.svelte";
+  import GridSurface from "./lib/components/grid/GridSurface.svelte";
+  import LookSurface from "./lib/components/look/LookSurface.svelte";
+  import Inspector from "./lib/components/inspector/Inspector.svelte";
+  import SearchOverlay from "./lib/components/search/SearchOverlay.svelte";
+  import EmptyState from "./lib/primitives/EmptyState.svelte";
+  import ToastHost from "./lib/primitives/ToastHost.svelte";
 
   // Debug panel: compile-time gated (UI §10.1). With the define off, this
   // whole branch — and the chunk behind the dynamic import — is dead code.
   let DebugPanel: (typeof import("./lib/debug/DebugPanel.svelte"))["default"] | null =
     $state(null);
   $effect(() => {
-    if (import.meta.env.PHOTOPROOF_DEBUG && ui.debugOpen && DebugPanel === null) {
+    if (import.meta.env.PHOTOPROOF_DEBUG && ui.shell.debugOpen && DebugPanel === null) {
       void import("./lib/debug/DebugPanel.svelte").then((m) => (DebugPanel = m.default));
     }
   });
@@ -37,13 +47,13 @@
   const title = $derived.by(() => {
     if (ui.searchOpen) return "Search";
     if (ui.surface === "look") {
-      const item = ui.items.find((i) => i.hash === ui.lookHash);
+      const item = ui.grid.items.find((i) => i.hash === ui.look.currentHash);
       return item?.fileName ?? "Photoproof";
     }
     return ui.folderName;
   });
 
-  // ---- keyboard (UI §11 — the map lives in logic/keymap.ts) ----------------
+  // ---- keyboard (one registry; dispatch = match over it) --------------------
 
   function isTextInput(el: Element | null): boolean {
     return (
@@ -55,30 +65,23 @@
 
   function onKeydown(e: KeyboardEvent) {
     const active = document.activeElement;
-    const ctx: KeyContext = {
-      surface: ui.surface,
-      searchOpen: ui.searchOpen,
+    const ctx = ui.actionContext({
       inputFocused: isTextInput(active),
       searchInputFocused:
         active instanceof HTMLElement && active.dataset.searchInput !== undefined,
-      hasSelection: ui.searchOpen
-        ? ui.searchSel.order.length > 0
-        : ui.sel.order.length > 0,
-      railOpen: ui.railOpen,
-      debugEnabled: import.meta.env.PHOTOPROOF_DEBUG,
-      asrReady: false, // M1: no ASR
-    };
+    });
     const action = dispatch(
       { key: e.key, ctrlOrMeta: e.ctrlKey || e.metaKey, shift: e.shiftKey },
       ctx,
     );
-    if (action === null) return;
-    // Backspace chip removal only fires on an EMPTY input (UI §11).
-    if (action.kind === "remove-last-chip" && ui.query !== "") return;
+    if (action === null) {
+      // Tab is consumed globally in the main window even when suppressed —
+      // webview focus traversal is forfeited (DECISIONS 2, a11y note).
+      if (e.key === "Tab") e.preventDefault();
+      return;
+    }
     e.preventDefault();
-    if (action.kind === "rail-nav") railRef?.nav(action.dir);
-    else if (action.kind === "rail-enter") railRef?.enter();
-    else void ui.perform(action);
+    void ui.perform(action);
     touchActivity();
   }
 
@@ -92,35 +95,31 @@
     void ipc.reportActivity();
   }
 
-  // ---- rail dwell (UI §3.2: ~150 ms at the left edge) ------------------------
-
-  let dwellTimer: ReturnType<typeof setTimeout> | undefined;
-  function onEdgeEnter() {
-    dwellTimer = setTimeout(() => (ui.railOpen = true), 150);
-  }
-  function onEdgeLeave() {
-    clearTimeout(dwellTimer);
-  }
-
   // ---- backend events ----------------------------------------------------------
 
   onMount(() => {
+    ui.debugEnabled = Boolean(import.meta.env.PHOTOPROOF_DEBUG);
     void ui.init();
     const unlisteners: Promise<UnlistenFn>[] = [
-      listen<IndicatorPulse>("indicator-pulse", () => ui.onPulse()),
+      listen<IndicatorPulse>("indicator-pulse", () => ui.shell.onPulse()),
       listen<IndicatorState>("indicator-state", (e) => {
-        ui.scope = e.payload.currentScope;
+        ui.shell.onScopeEcho(e.payload.currentScope);
       }),
       listen<IngestStatus>("ingest-progress", (e) => {
-        ui.ingest = e.payload;
+        ui.shell.ingest = e.payload;
+      }),
+      // Drag a folder onto the window → register-root confirm (featureset
+      // §6; the OS hands paths only on drop — DropConfirm renders them).
+      getCurrentWebview().onDragDropEvent((e) => {
+        if (e.payload.type === "drop") ui.offerDrop(e.payload.paths);
       }),
     ];
     // While ingest runs, the grid populates incrementally (UI §3.3/§9.1).
     const poll = setInterval(() => {
-      if (ui.ingest.running) {
+      if (ui.shell.ingest.running) {
         void ui.refreshItems();
         void ipc.ingestStatus().then((s) => {
-          ui.ingest = s;
+          ui.shell.ingest = s;
         });
       }
     }, 2000);
@@ -133,59 +132,61 @@
 
 <svelte:window onkeydown={onKeydown} onpointerdown={touchActivity} />
 
-<div class="shell">
-  <Titlebar {title} />
+<div class="shell" data-surround={ui.shell.surround}>
+  {#if !ui.shell.chromeHidden}
+    <Titlebar {title} />
+  {/if}
 
-  <div class="surface">
-    {#if ui.surface === "grid"}
-      {#if ui.roots.length === 0}
-        <FirstRun />
+  <div class="main">
+    <!-- push panel: openness gated through lights-out inside the region -->
+    <SourceRail />
+
+    <div class="surface">
+      {#if ui.surface === "grid"}
+        {#if ui.roots.length === 0}
+          <FirstRun />
+        {:else}
+          <GridSurface />
+          {#if ui.grid.units.length === 0}
+            <!-- empty folder: say the next action (featureset §6); during
+                 ingest photographs stream in, so the line stays honest -->
+            <div class="grid-empty">
+              {#if ui.shell.ingest.running}
+                <EmptyState line="Indexing — photographs appear as they are found." />
+              {:else}
+                <EmptyState line="No photographs in this folder.">
+                  {#snippet action()}
+                    <button onclick={() => void ui.perform({ kind: "toggle-rail" })}>
+                      Browse sources
+                    </button>
+                  {/snippet}
+                </EmptyState>
+              {/if}
+            </div>
+          {/if}
+        {/if}
       {:else}
-        <header class="grid-header">
-          <span class="folder-name">▍{ui.folderName}</span>
-          <span class="spacer"></span>
-          <button class="quiet" onclick={() => (ui.sortMenuOpen = !ui.sortMenuOpen)}>
-            sort ▾
-          </button>
-          <input
-            class="thumb-slider"
-            type="range"
-            min="0"
-            max={THUMB_STEPS.length - 1}
-            step="1"
-            value={ui.thumbStep}
-            aria-label="Thumbnail size"
-            oninput={(e) => ui.setThumbStep(Number(e.currentTarget.value))}
-          />
-        </header>
-        <div class="grid-area">
-          <Grid />
-        </div>
+        <LookSurface />
       {/if}
-      {#if ui.sortMenuOpen}<SortMenu />{/if}
-    {:else}
-      <Look />
-    {/if}
 
-    {#if ui.railOpen}
-      <Rail bind:this={railRef} />
-    {/if}
-    <div
-      class="edge-hotzone"
-      role="presentation"
-      onpointerenter={onEdgeEnter}
-      onpointerleave={onEdgeLeave}
-    ></div>
+      {#if ui.searchOpen}
+        <SearchOverlay />
+      {/if}
+    </div>
 
-    {#if ui.searchOpen}
-      <SearchOverlay />
-    {/if}
+    <Inspector />
   </div>
 
+  <!-- exempt from lights-out: transient note input + the indicator -->
   <NoteInput />
   <Indicator />
 
-  {#if import.meta.env.PHOTOPROOF_DEBUG && ui.debugOpen && DebugPanel !== null}
+  <ContextMenuHost />
+  <ToastHost />
+  <Cheatsheet />
+  <DropConfirm />
+
+  {#if import.meta.env.PHOTOPROOF_DEBUG && ui.shell.debugOpen && DebugPanel !== null}
     <DebugPanel />
   {/if}
 </div>
@@ -196,52 +197,25 @@
     display: flex;
     flex-direction: column;
   }
+  .main {
+    flex: 1;
+    display: flex;
+    min-height: 0; /* the flex row, panels push — never overlay */
+  }
   .surface {
     position: relative;
     flex: 1;
     overflow: hidden;
+    min-width: 0;
   }
-  .grid-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    height: 30px;
-    padding: 0 12px;
-  }
-  .folder-name {
-    color: var(--text-dim);
-  }
-  .spacer {
-    flex: 1;
-  }
-  .quiet {
-    border: none;
-    background: transparent;
-    color: var(--text-faint);
-  }
-  .quiet:hover {
-    color: var(--text);
-  }
-  .thumb-slider {
-    width: 90px;
-    accent-color: var(--text-faint);
-    background: transparent;
-    border: none;
-    padding: 0;
-  }
-  .grid-area {
+  /* The empty-folder line floats over the (header-bearing) grid surface
+   * without intercepting its pointer seats; only the action clicks. */
+  .grid-empty {
     position: absolute;
-    top: 30px;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    inset: 0;
+    pointer-events: none;
   }
-  .edge-hotzone {
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 5px;
-    z-index: 25;
+  .grid-empty :global(button) {
+    pointer-events: auto;
   }
 </style>

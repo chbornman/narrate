@@ -1,77 +1,136 @@
 /**
- * Escape = strictly back-one-layer (UI §2.2, DECISIONS I1), exact order:
- * transients → search → look → selection → nothing. Never quits.
+ * Escape = strictly back-one-layer (featureset §0: Esc is sacred), the
+ * full P4.2 13-layer order, exhaustively: redaction modal → drop-confirm →
+ * context menu → inline journal correction → note input → cheatsheet →
+ * indicator popover → debug panel → inspector → search → Look→Grid →
+ * clear selection → none. Never quits.
+ *
+ * AMENDED BY INTEGRATION: the drag-folder drop-confirm sheet (featureset
+ * §6) joins as layer 2 — it is scrim-covered topmost chrome like the
+ * modal, and the Sheet contract promises Esc dismisses while Esc routes
+ * only through this order (recorded in DECISIONS, UI build U-entries).
  */
 import { describe, expect, it } from "vitest";
 import { escapeAction, type EscapeContext } from "../src/lib/logic/escape";
 
 const none: EscapeContext = {
+  redactionModalOpen: false,
+  dropConfirmOpen: false,
+  contextMenuOpen: false,
+  journalEditOpen: false,
   noteInputOpen: false,
-  sortMenuOpen: false,
+  cheatsheetOpen: false,
   indicatorPopoverOpen: false,
   debugPanelOpen: false,
+  inspectorOpen: false,
   searchOpen: false,
   surface: "grid",
   hasSelection: false,
 };
 
-describe("escape layering", () => {
-  it("(1) closes an open transient before anything else", () => {
-    // Worst case: everything open at once — the note input wins.
-    const everything: EscapeContext = {
-      noteInputOpen: true,
-      sortMenuOpen: true,
-      indicatorPopoverOpen: true,
-      debugPanelOpen: true,
-      searchOpen: true,
-      surface: "look",
-      hasSelection: true,
-    };
-    expect(escapeAction(everything)).toBe("close-note-input");
-    expect(escapeAction({ ...everything, noteInputOpen: false })).toBe(
-      "close-sort-menu",
-    );
-    expect(
-      escapeAction({ ...everything, noteInputOpen: false, sortMenuOpen: false }),
-    ).toBe("close-indicator-popover");
-    expect(
-      escapeAction({
-        ...everything,
-        noteInputOpen: false,
-        sortMenuOpen: false,
-        indicatorPopoverOpen: false,
-      }),
-    ).toBe("close-debug-panel");
+/** Every layer open at once — peeling must follow the exact order. */
+const everything: EscapeContext = {
+  redactionModalOpen: true,
+  dropConfirmOpen: true,
+  contextMenuOpen: true,
+  journalEditOpen: true,
+  noteInputOpen: true,
+  cheatsheetOpen: true,
+  indicatorPopoverOpen: true,
+  debugPanelOpen: true,
+  inspectorOpen: true,
+  searchOpen: true,
+  surface: "look",
+  hasSelection: true,
+};
+
+// (flag to clear, expected action) in layer order, 1..12.
+const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
+  ["redactionModalOpen", "close-redaction-modal"],
+  ["dropConfirmOpen", "close-drop-confirm"],
+  ["contextMenuOpen", "close-context-menu"],
+  ["journalEditOpen", "close-journal-edit"],
+  ["noteInputOpen", "close-note-input"],
+  ["cheatsheetOpen", "close-cheatsheet"],
+  ["indicatorPopoverOpen", "close-indicator-popover"],
+  ["debugPanelOpen", "close-debug-panel"],
+  ["inspectorOpen", "close-inspector"],
+  ["searchOpen", "leave-search"],
+  ["surface", "leave-look"],
+  ["hasSelection", "clear-selection"],
+];
+
+describe("the 13-layer order, exhaustively", () => {
+  it("peels exactly one layer per press, in order, ending at none", () => {
+    let ctx = { ...everything };
+    for (const [flag, expected] of LAYERS) {
+      expect(escapeAction(ctx)).toBe(expected);
+      // Clear the layer the action would close and press Escape again.
+      ctx = { ...ctx, [flag]: flag === "surface" ? "grid" : false };
+    }
+    expect(escapeAction(ctx)).toBe("none"); // layer 13 — NEVER quits
   });
 
-  it("(2) leaves Search back to the invoking surface", () => {
+  it("each layer wins over everything beneath it", () => {
+    for (let i = 0; i < LAYERS.length; i++) {
+      // Open layer i and all deeper layers; i must win.
+      let ctx: EscapeContext = { ...everything };
+      for (let j = 0; j < i; j++) {
+        const [flag] = LAYERS[j];
+        ctx = { ...ctx, [flag]: flag === "surface" ? "grid" : false };
+      }
+      expect(escapeAction(ctx)).toBe(LAYERS[i][1]);
+    }
+  });
+});
+
+describe("contract spot checks", () => {
+  it("text-edit layers exit before chrome (§0: exits text inputs first)", () => {
+    // An inline journal correction beats the note input beats everything.
+    expect(
+      escapeAction({ ...none, journalEditOpen: true, noteInputOpen: true }),
+    ).toBe("close-journal-edit");
+    expect(escapeAction({ ...none, noteInputOpen: true, inspectorOpen: true })).toBe(
+      "close-note-input",
+    );
+  });
+
+  it("the redaction modal (the app's one modal) always cancels first", () => {
+    expect(escapeAction(everything)).toBe("close-redaction-modal");
+  });
+
+  it("the drop-confirm sheet closes before menus, after the one modal", () => {
+    expect(
+      escapeAction({ ...none, dropConfirmOpen: true, contextMenuOpen: true }),
+    ).toBe("close-drop-confirm");
+    expect(
+      escapeAction({ ...none, dropConfirmOpen: true, redactionModalOpen: true }),
+    ).toBe("close-redaction-modal");
+  });
+
+  it("the context menu (incl. sort ▾) closes before any panel", () => {
+    expect(
+      escapeAction({ ...none, contextMenuOpen: true, inspectorOpen: true }),
+    ).toBe("close-context-menu");
+  });
+
+  it("inspector closes before search; search before Look", () => {
+    expect(escapeAction({ ...none, inspectorOpen: true, searchOpen: true })).toBe(
+      "close-inspector",
+    );
     expect(escapeAction({ ...none, searchOpen: true, surface: "look" })).toBe(
       "leave-search",
     );
   });
 
-  it("(3) leaves Look back to Grid", () => {
-    expect(escapeAction({ ...none, surface: "look" })).toBe("leave-look");
-    // Search closes BEFORE Look even when both are active.
-    expect(escapeAction({ ...none, surface: "look", searchOpen: true })).toBe(
-      "leave-search",
+  it("leaves Look back to Grid, then clears the selection", () => {
+    expect(escapeAction({ ...none, surface: "look", hasSelection: true })).toBe(
+      "leave-look",
     );
-  });
-
-  it("(4) clears a grid selection", () => {
     expect(escapeAction({ ...none, hasSelection: true })).toBe("clear-selection");
   });
 
   it("at the bottom of the stack does nothing — NEVER quits", () => {
     expect(escapeAction(none)).toBe("none");
-  });
-
-  it("transients close before search; search before selection", () => {
-    expect(
-      escapeAction({ ...none, sortMenuOpen: true, searchOpen: true, hasSelection: true }),
-    ).toBe("close-sort-menu");
-    expect(escapeAction({ ...none, searchOpen: true, hasSelection: true })).toBe(
-      "leave-search",
-    );
   });
 });

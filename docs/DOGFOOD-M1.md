@@ -91,8 +91,9 @@ Work through it top to bottom and check boxes. Every step says **what to do**,
   spinner between adjacent frames.*
 - [ ] **Surface transitions < 100 ms perceived** (Grid ⇄ Look ⇄ Search,
   `Escape` strictly back one layer — I1).
-- [ ] **Rail dwell/pin feel** (UI §2): summon/hide < 100 ms, no grid reflow
-  when it appears.
+- [ ] **Rail toggle feel** (P4.2 amends UI §2: the rail is a PUSH panel on
+  `\`, no dwell/pin — DECISIONS U3): summon/hide < 100 ms; the grid
+  re-snaps integer columns rather than overlaying.
 - [ ] **Has-journal dot** (UI §3.5/§3.7, B34): annotate one image with a typed
   note → dulled-red dot appears on its thumbnail. Rate another image 0–5 →
   **no visual change to that thumbnail at all** (rating-only journals do
@@ -107,6 +108,50 @@ Work through it top to bottom and check boxes. Every step says **what to do**,
   < 50 ms after Enter; the pulse never obscures image pixels at fit.
 - [ ] **Settings window** opens as one modest separate window; exactly four
   sections; "rebuild index" and "export" present.
+
+### 3b. P4.2 UI build — §visual (the eyes-only half of the featureset gate)
+
+- [ ] **Push-panel resize at 60 fps over 20k items**: drag the rail and
+  inspector edges with your largest folder open — the grid re-snaps
+  integer columns live. *Failure: stutter, blank tiles, or the scroll
+  anchor jumping while dragging (DECISIONS U3 perf trade).*
+- [ ] **Marquee feel**: drag from empty gutter — rubber-band selects; a
+  drag STARTING on a thumb never marquees; Ctrl-drag adds to the
+  selection; a plain gutter click clears, Ctrl-click on gutter doesn't.
+- [ ] **Zoom-at-cursor on a trackpad**: pinch/scroll in Look — the point
+  under the cursor must not drift on EITHER axis, including near
+  letterboxed edges (the P3.x anchor bug, fixed in logic/zoom.ts). Zoom
+  must persist across `←`/`→` and re-anchor (not drift) on panel resize.
+- [ ] **Space triple role in Look**: at fit a tap closes; zoomed, hold+drag
+  pans and a clean tap closes. *Failure: a pan that closes Look on
+  release, or a wedged hold after Tab/overlay changes mid-hold.*
+- [ ] **Stacks `● 2` truth**: select one collapsed RAW+JPEG cell — the
+  indicator reads `● 2`; a note lands on both members (flip with `R`,
+  check the journal on each). Collapse/expand is live both directions.
+- [ ] **Surround legibility on real images** (D6): cycle black → white via
+  backdrop right-click — selection borders, focus ring, marquee, and the
+  journal dot stay readable at every level (token contrast tuning).
+- [ ] **Lights-out instantaneity**: `Tab` hides rail/inspector/titlebar/
+  header/filmstrip in one frame; the indicator and an open note input
+  stay (DECISIONS U5); `Tab` again restores exactly what was open.
+- [ ] **Toast placement**: retract a journal entry — "Retracted • Undo"
+  appears above the indicator, auto-dismisses in 5 s, never stacks over
+  image pixels at fit; Undo RE-STATES the content (DECISIONS U10).
+- [ ] **F11 + window geometry on Linux/Wayland**: F11 round-trips; resize/
+  move, quit, relaunch — geometry restores without drift with the custom
+  titlebar (tauri-plugin-window-state, DECISIONS U9). *Failure here =
+  switch to the manual fallback in commands/app.rs.*
+- [ ] **Context-menu completeness by hand, all four seats**: thumb (Open ·
+  Rate ▸ · stack toggle · Inspector ▸ · reveal/copy-path/open-default),
+  gutter (select all/none · Sort ▸ · Size ▸ · Stacks ▸ · Surround ▸),
+  rail folder (Open · Show in file manager · Rescan), Look backdrop
+  (zoom rows · Surround ▸). Every verb shows its key hint.
+- [ ] **"Copy file path" clipboard smoke** (webkit2gtk secure-context
+  quirk): copy from the thumb menu, paste in a terminal — the absolute
+  path arrives; on an offline volume the verb quietly does nothing.
+- [ ] **Drag a folder onto the window**: the quiet confirm sheet appears;
+  Esc dismisses; confirming registers the root and the folder opens with
+  ingest streaming in.
 
 ## 4. Typed notes & scope discipline (CAPTURE §3–4 M1 slice)
 
