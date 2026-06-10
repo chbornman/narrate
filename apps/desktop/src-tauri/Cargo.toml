@@ -1,0 +1,13 @@
+[package]
+name = "photoproof-desktop"
+description = "Photoproof desktop shell: Tauri 2 command layer over photoproof-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Stub crate staking the workspace slot for packet P3.2, which owns
+# everything under apps/desktop/ and will replace this with the real
+# Tauri 2 application.
+
+[dependencies]

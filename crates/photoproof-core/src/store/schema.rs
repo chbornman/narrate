@@ -343,6 +343,12 @@ CREATE TABLE preview_artifacts (
 );
 "#;
 
+/// Migration slot pre-allocated to packet P3.1 (RETRIEVAL §4 search layer).
+/// Only P3.1 edits this constant.
+const SEARCH_SCHEMA_SQL: &str = r#"
+-- (P3.1 search indexes/tables go here, if any)
+"#;
+
 /// Create the schema if the database is new (versioned by `user_version`).
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -357,6 +363,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version < 3 {
         conn.execute_batch(LIBRARY_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 3")?;
+    }
+    if version < 4 {
+        conn.execute_batch(SEARCH_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 4")?;
     }
     Ok(())
 }
