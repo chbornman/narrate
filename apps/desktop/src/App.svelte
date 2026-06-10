@@ -119,7 +119,9 @@
     const poll = setInterval(() => {
       if (ui.ingest.running) {
         void ui.refreshItems();
-        void ipc.ingestStatus().then((s) => (ui.ingest = s));
+        void ipc.ingestStatus().then((s) => {
+          ui.ingest = s;
+        });
       }
     }, 2000);
     return () => {
