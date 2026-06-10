@@ -24,11 +24,7 @@ managing = off-thesis).
   `add_root`/`remove_root` emit a `roots-changed` event (same pattern as
   P4.2b's `settings-changed`); App listens → `refreshRoots()`. Same class
   as the journal-staleness fix (`ecf6e26`). (Founder, dogfood round 2.)
-- [ ] **Add watched folder from the main window** — currently reachable via
-  drag-a-folder-onto-the-window, Settings (Ctrl+,), and the first-run
-  screen, but the rail itself has no [+] affordance; add a quiet "Add
-  folder…" rail footer row + gutter/rail context-menu entry dispatching the
-  same registered action. (Founder, dogfood round 1.)
+- [ ] **Add watched folder from the rail, one button click** — a visible "Add folder…" button in the rail (footer row) + context-menu entry opening the folder picker directly; founder wants this working ahead of any deeper sidebar redesign. Currently only drag-onto-window / Settings / first-run. (Founder, dogfood rounds 1+2.)
 
 - [ ] **Compose entries from the journal panel** — the Journal tab gets an inline way to add a new entry directly (not just the N transient), and generally every entry kind a user can author (remark, rating, revision/correction) should be addable via UI from there; retract/redact already exist per-row. (Founder, dogfood round 2.)
 - [ ] **Journal entries show sibling targets** — a multi-target note's entry
