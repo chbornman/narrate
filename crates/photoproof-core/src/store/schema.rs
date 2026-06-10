@@ -363,8 +363,10 @@ CREATE INDEX idx_events_linked ON annotation_events(linked_event)
   WHERE linked_event IS NOT NULL;
 "#;
 
-/// Create the schema if the database is new (versioned by `user_version`).
-pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+/// Create or upgrade the schema (versioned by `user_version`). Returns the
+/// version found before any migration ran, so the caller can trigger
+/// post-migration recomputes (the schema layer cannot run folds).
+pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
         conn.execute_batch(SCHEMA_SQL)?;
@@ -382,5 +384,25 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(SEARCH_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 4")?;
     }
-    Ok(())
+    if version < 5 {
+        // v5: `image_journal_stats.has_text` (B37). Fresh databases get the
+        // column from the v1 DDL; databases created before P4.1 need the
+        // ALTER. Values are recomputed by the caller (EventStore::open runs
+        // rebuild_derived when migrating from 1..5) — the DEFAULT here is a
+        // placeholder, never trusted.
+        let has_column: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('image_journal_stats')
+             WHERE name = 'has_text'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_column {
+            conn.execute_batch(
+                "ALTER TABLE image_journal_stats
+                 ADD COLUMN has_text INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        run_pragma(conn, "PRAGMA user_version = 5")?;
+    }
+    Ok(version)
 }

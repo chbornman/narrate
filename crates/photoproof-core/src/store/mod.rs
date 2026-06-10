@@ -283,19 +283,26 @@ impl EventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let writer = schema::open_connection(path)?;
-        schema::migrate(&writer)?;
+        let from_version = schema::migrate(&writer)?;
         let mut readers = Vec::with_capacity(READ_POOL_SIZE);
         for _ in 0..READ_POOL_SIZE {
             let mut conn = schema::open_connection(path)?;
             conn.trace(Some(trace_read));
             readers.push(Mutex::new(conn));
         }
-        Ok(Self {
+        let store = Self {
             writer: Mutex::new(writer),
             readers,
             next_reader: AtomicUsize::new(0),
             minter: Minter::new(),
-        })
+        };
+        // v5 added `has_text` with a placeholder DEFAULT; databases migrated
+        // from an earlier version need the real fold values (B37). Fresh
+        // databases (from_version 0) and current ones skip this.
+        if (1..5).contains(&from_version) {
+            store.rebuild_derived()?;
+        }
+        Ok(store)
     }
 
     /// Monotonic ULID + UTC ts, for pre-allocation at capture onset (§1.2).

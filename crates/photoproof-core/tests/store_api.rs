@@ -982,3 +982,43 @@ fn redaction_chain_closure_scrubs_whole_chain() {
     ));
     assert!(fts_roots(&conn, "sensitive").is_empty());
 }
+
+// -- v5 migration (B37/B38): pre-P4.1 databases gain has_text ----------------
+
+#[test]
+fn v5_migration_restores_has_text_on_pre_p41_databases() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("journal.db");
+    let target = hash(77);
+    {
+        let store = photoproof_core::EventStore::open(&db).unwrap();
+        let sid = store
+            .open_session(SessionContext {
+                app_version: "0.1.0".into(),
+                device_id: DEVICE_ID.into(),
+                root_context: None,
+            })
+            .unwrap();
+        store
+            .append(&sid, d_remark("words evidence", vec![target.clone()]), None)
+            .unwrap();
+    }
+    // Simulate a database created before P4.1: no has_text column, v4.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE image_journal_stats DROP COLUMN has_text;
+             PRAGMA user_version = 4;",
+        )
+        .unwrap();
+    }
+    // Reopen: migrate adds the column, rebuild_derived recomputes the fold.
+    let store = photoproof_core::EventStore::open(&db).unwrap();
+    let stats = store.journal_stats(std::slice::from_ref(&target)).unwrap();
+    assert_eq!(stats.len(), 1);
+    assert!(
+        stats[0].has_text,
+        "migrated stats must carry real fold values"
+    );
+    assert!(stats[0].has_journal());
+}
