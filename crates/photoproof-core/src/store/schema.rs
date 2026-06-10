@@ -201,7 +201,57 @@ pub(crate) fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
 /// Migration slot pre-allocated to packet P2.1 (spec/SIDECARS.md tables).
 /// Only P2.1 edits this constant.
 const SIDECARS_SCHEMA_SQL: &str = r#"
--- (P2.1 sidecar tables go here)
+-- SIDECARS §11 step 4: durable propagation queue for redactions whose
+-- adjacent sidecars sit on offline/unwritable volumes. Drained at volume
+-- mount and at each reconciliation scan: rewrite, verify by re-read, dequeue.
+-- One row per (scrubbed chain member, target image).
+CREATE TABLE redaction_queue (
+  event_id    TEXT NOT NULL CHECK (length(event_id) = 26),
+  image_hash  TEXT NOT NULL
+                CHECK (length(image_hash) = 64 AND image_hash NOT GLOB '*[^0-9a-f]*'),
+  volume_id   TEXT NOT NULL DEFAULT '',   -- LIBRARY volume id when known, else ''
+  queued_at   TEXT NOT NULL,
+  PRIMARY KEY (event_id, image_hash)
+) STRICT, WITHOUT ROWID;
+
+-- SIDECARS §3.1/§12.1: the advisory image snapshot (filename + byte_size)
+-- used when serializing a sidecar from the index. Refreshed on rewrite when
+-- the image is reachable; learned from parsed sidecars otherwise. Advisory
+-- only — hash always wins.
+CREATE TABLE sidecar_image_snapshots (
+  image_hash  TEXT PRIMARY KEY
+                CHECK (length(image_hash) = 64 AND image_hash NOT GLOB '*[^0-9a-f]*'),
+  filename    TEXT NOT NULL,
+  byte_size   INTEGER NOT NULL CHECK (byte_size >= 0)
+) STRICT, WITHOUT ROWID;
+
+-- SIDECARS §5.2: unknown-field preservation. Unknown members found at the
+-- top level ('top'), inside `image` ('image'), inside a `sessions` value
+-- ('session:<ulid>'), or a whole non-conforming `sessions` value
+-- ('sessions'). Keyed by the journal owner (image hash or session ulid) so
+-- a rewrite from the index loses nothing. Values are compact canonical JSON.
+CREATE TABLE sidecar_unknown_fields (
+  owner_kind  TEXT NOT NULL CHECK (owner_kind IN ('image','session')),
+  owner_key   TEXT NOT NULL,
+  scope       TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  value_json  TEXT NOT NULL,
+  PRIMARY KEY (owner_kind, owner_key, scope, key)
+) STRICT, WITHOUT ROWID;
+
+-- SIDECARS §4/§5.2: events that fail v1 canonical validation (unknown kinds,
+-- unknown fields, future event versions) are preserved verbatim as opaque
+-- blobs: kept on rewrite, not indexed, surfaced in the integrity report.
+-- sort_key = the entry's `id` member when it is a string (sorts among real
+-- events), else the compact canonical bytes. Redaction supremacy scrubs
+-- opaque bodies whose id enters the redaction registry (§3.4).
+CREATE TABLE sidecar_opaque_events (
+  owner_kind  TEXT NOT NULL CHECK (owner_kind IN ('image','session')),
+  owner_key   TEXT NOT NULL,
+  sort_key    TEXT NOT NULL,
+  body_json   TEXT NOT NULL,
+  PRIMARY KEY (owner_kind, owner_key, sort_key)
+) STRICT, WITHOUT ROWID;
 "#;
 
 /// Migration slot pre-allocated to packet P2.2 (spec/LIBRARY.md tables).
