@@ -8,12 +8,13 @@ quality, core correctness, connectors conformance, canonical-bytes attack)
 code-behavior, materiality angles); a finding is **confirmed** only if ≥2
 refuters fail to kill it.
 
-**Status: partially complete.** First run (workflow `wf_a2535d35-43b`,
-95 agents) produced 30 raw findings; a session rate-limit killed 47
-verifier agents mid-run, leaving 16 findings unverified. A resumed run
-(same run id, cached prefix) is re-verifying those. This file is the
-durable record; update it when the resume completes, then close out via
-the fix packet (see "Disposition").
+**Status: closed early, by decision.** First run (workflow
+`wf_a2535d35-43b`, 95 agents) produced 30 raw findings; a session
+rate-limit killed 47 verifier agents mid-run, leaving 16 findings
+unverified. A resumed run was started and then deliberately stopped to
+conserve the founder's token budget. The pending items P1–P8 below will
+NOT get refuter panels; the fix packet settles each one directly
+(verify-then-fix by a single agent). This file is the durable record.
 
 ## Confirmed findings (survived 3-refuter adversarial verification)
 
