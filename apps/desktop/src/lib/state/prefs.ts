@@ -88,7 +88,7 @@ export const RAIL_WIDTH_KEY = "pp.railWidth";
 export const INSPECTOR_WIDTH_KEY = "pp.inspectorWidth";
 
 export function loadRailOpen(): boolean {
-  return loadBool("pp.railOpen", false);
+  return loadBool("pp.railOpen", true);
 }
 
 export function saveRailOpen(open: boolean) {
