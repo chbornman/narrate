@@ -59,6 +59,20 @@ managing = off-thesis).
   searches; drag-selection-to-rail filing; query-residue indicator segment
   with one-key clear; chip-creation UI (parser-driven); select-from-note ↔
   project filing workflow chain.
+- **M3 north star (founder)**: ONE unified retrieval system across all
+  surfaces — toggles, filters, and sorting modes power users can configure
+  precisely, over an excellent zero-config default where a quick search
+  just pops the right image. Power-user depth must never tax the quick
+  path (the <100 ms as-you-type budget and quiet defaults are the floor).
+- **Stroke-aware retrieval (founder + design, pre-M3)**: strokes are
+  already searchable via has_strokes (built), the stroke↔utterance link
+  (K9 — words spoken while drawing find the stroke; provenance carries
+  linked_stroke), and stroke provenance in results. NEW: (a) gesture
+  semantics — classify stroke geometry (circle/X/underline/arrow) into
+  searchable intent ("images I X'd out"); raw points are stored, pure
+  downstream consumer. (b) region-conditioned visual embeddings — embed
+  the CIRCLED CROP, not the frame: visual search conditioned on where the
+  photographer's attention went. Both M3+/M4 candidates.
 - **M3 additions (founder, dogfood round 2)**: free-text/fuzzy matching
   over metadata fields (camera/lens/filename — typo-tolerant) as a QUIET
   TOGGLE: never default-on, never outranks exact matches, never blocks the
