@@ -28,6 +28,11 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   unreachable). Tests assert engine truth; confirm and the spec text gets
   fixed in a future edit.
 
+- [ ] **U1 / U5 sign-off (P4.2)**: U1 — Space now opens/closes Look;
+  selection-toggle moved to Ctrl+Space (UI.md §3.4 amendment). U5 — the
+  indicator and an open note input stay visible under Tab lights-out
+  (coordinator ruling). Veto either and it's a small remap.
+
 ## 2. Founder-machine verification — **docs/DOGFOOD-M1.md is the script**
 
 Platform note: the NVIDIA+Wayland WebKit crash is handled in-app now
