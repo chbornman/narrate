@@ -1,4 +1,7 @@
 //! Photoproof desktop shell. Contract: spec/UI.md, spec/CAPTURE.md §3–4.
-//! Owned by work packet P3.2; this stub stakes the workspace member.
 
-fn main() {}
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    photoproof_desktop::run();
+}

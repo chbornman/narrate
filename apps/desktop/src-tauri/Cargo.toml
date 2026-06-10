@@ -6,8 +6,32 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Stub crate staking the workspace slot for packet P3.2, which owns
-# everything under apps/desktop/ and will replace this with the real
-# Tauri 2 application.
+[lib]
+name = "photoproof_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
+photoproof-core = { path = "../../../crates/photoproof-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+blake3 = { workspace = true }
+ulid = { workspace = true }
+http = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+# The debug side panel (spec/UI.md §10, DECISIONS I6): its commands and event
+# emitters do not exist in release binaries. Pair with the frontend
+# PHOTOPROOF_DEBUG=1 compile-time define.
+debug-panel = []
+# Tauri convention: enabled by `cargo tauri build` for bundled apps.
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,93 @@
+/* Photoproof — dark theme only (spec/UI.md §12, DECISIONS I5).
+ *
+ * Color discipline: near-black UI, low-contrast gray chrome, white text where
+ * needed. THE SATURATED PENCIL RED IS RESERVED for the grease pencil (M2a) —
+ * it appears nowhere in M1. The has-journal dot uses the dulled red below.
+ * Everything else is achromatic.
+ */
+:root {
+  --bg: #0e0e0e;
+  --bg-raised: #161616;
+  --bg-overlay: #1b1b1b;
+  --chrome: #2a2a2a;
+  --chrome-strong: #3a3a3a;
+  --text: #d6d6d6;
+  --text-dim: #8a8a8a;
+  --text-faint: #5a5a5a;
+  --focus: #cfcfcf;
+  /* the ONLY chromatic value in M1: the dulled journal red (I5) */
+  --red-dull: #a33c3c;
+  /* RESERVED — do not use anywhere in M1 (the grease pencil owns it, M2a):
+     --red-pencil: #e03131; */
+  --font:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--chrome);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--chrome-strong);
+}
+
+input,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--chrome);
+  border-radius: 4px;
+  padding: 5px 8px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Accessibility baseline (§12): visible focus ring on all focusables. */
+:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 1px;
+}
+
+mark {
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--text-dim);
+  text-underline-offset: 2px;
+}
