@@ -15,6 +15,16 @@ serde_json.workspace = true
 thiserror.workspace = true
 # --- sidecar deps (owned by packet P2.1; append below this line only) ---
 # --- library deps (owned by packet P2.2; append below this line only) ---
+rayon = "1.12.0"
+notify = "8.2.0"
+walkdir = "2.5.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp", "rayon"] }
+webp = "0.3.1"
+kamadak-exif = "0.6.1"
+rawler = "0.7.2"
+qcms = "0.3.0"
+fastrand = "2.4.1"
+libc = "0.2.186"
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -23,3 +33,4 @@ serde_json.workspace = true
 rand = "0.8"
 # --- sidecar dev-deps (owned by packet P2.1; append below this line only) ---
 # --- library dev-deps (owned by packet P2.2; append below this line only) ---
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp"] }

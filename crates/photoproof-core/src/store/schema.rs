@@ -196,8 +196,91 @@ const SIDECARS_SCHEMA_SQL: &str = r#"
 
 /// Migration slot pre-allocated to packet P2.2 (spec/LIBRARY.md tables).
 /// Only P2.2 edits this constant.
+///
+/// spec/LIBRARY.md §6 verbatim, plus one free column addition
+/// (`ingest_passes.not_before`, retry backoff eligibility — §10.5; column
+/// additions are free per §6).
 const LIBRARY_SCHEMA_SQL: &str = r#"
--- (P2.2 library tables go here)
+CREATE TABLE volumes (
+  volume_id       TEXT PRIMARY KEY,             -- app-assigned ULID
+  marker_ulid     TEXT UNIQUE,                  -- from .photoproof-volume; NULL if none
+  platform_id     TEXT,                         -- platform-native id; NULL if unavailable
+  platform_kind   TEXT CHECK (platform_kind IN ('macos-uuid','win-serial','linux-fsuuid','heuristic')),
+  label TEXT, fs_type TEXT, capacity_bytes INTEGER,
+  read_only       INTEGER NOT NULL DEFAULT 0,
+  state           TEXT NOT NULL DEFAULT 'offline' CHECK (state IN ('online','offline')),
+  mount_point     TEXT,                         -- current; NULL when offline
+  first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE roots (
+  root_id       TEXT PRIMARY KEY,               -- ULID
+  volume_id     TEXT NOT NULL REFERENCES volumes(volume_id),
+  rel_path      TEXT NOT NULL,                  -- '' = volume root; '/'-separated UTF-8
+  display_name  TEXT,
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','removed')),
+  created_at TEXT NOT NULL, removed_at TEXT,
+  UNIQUE (volume_id, rel_path)
+);
+
+CREATE TABLE images (
+  image_hash        TEXT PRIMARY KEY,           -- blake3-256, 64 lowercase hex
+  byte_size         INTEGER NOT NULL,
+  format            TEXT NOT NULL,              -- 'jpeg','png','tiff','webp','heic','raw'
+  raw_subtype       TEXT,                       -- 'cr3','nef',…; NULL for non-RAW
+  pixel_width INTEGER, pixel_height INTEGER,    -- as stored (pre-orientation)
+  exif_orientation  INTEGER NOT NULL DEFAULT 1, -- 1..8; 1 if absent
+  -- EXIF subset (§9.6): nullable, read-only, rebuildable
+  capture_ts TEXT,                              -- RFC3339 UTC; NULL if undated
+  capture_tz_offset TEXT,                       -- '+02:00' etc.
+  camera_make TEXT, camera_model TEXT, lens_model TEXT,
+  focal_length_mm REAL, iso INTEGER, f_number REAL,
+  exposure_time TEXT, gps_lat REAL, gps_lon REAL,  -- exposure as written, e.g. '1/250'
+  first_ingested_at TEXT NOT NULL
+);
+
+CREATE TABLE paths (
+  path_id          TEXT PRIMARY KEY,            -- ULID
+  image_hash       TEXT NOT NULL REFERENCES images(image_hash),
+  volume_id        TEXT NOT NULL REFERENCES volumes(volume_id),
+  root_id          TEXT REFERENCES roots(root_id),
+  rel_path         TEXT NOT NULL,
+  size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,  -- mtime: ns since epoch, fs precision
+  state            TEXT NOT NULL CHECK (state IN ('active','stale')),
+  stale_reason     TEXT CHECK (stale_reason IN ('moved','deleted','superseded','root-removed')),
+  first_seen_at TEXT NOT NULL, last_verified_at TEXT NOT NULL, stale_since TEXT
+);
+CREATE UNIQUE INDEX paths_active_loc ON paths(volume_id, rel_path) WHERE state = 'active';
+CREATE INDEX paths_by_image ON paths(image_hash, state);
+CREATE INDEX paths_stale_loc ON paths(volume_id, rel_path) WHERE state = 'stale';
+
+CREATE TABLE ingest_passes (
+  image_hash    TEXT NOT NULL REFERENCES images(image_hash),
+  pass_name     TEXT NOT NULL,                  -- registry, §10.1
+  pass_version  INTEGER NOT NULL,
+  model_id      TEXT,                           -- NULL for non-model passes
+  state         TEXT NOT NULL CHECK (state IN ('pending','running','done','error','skipped')),
+  priority      INTEGER NOT NULL DEFAULT 2,     -- §10.3
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  error         TEXT,                           -- last error; NULL unless 'error'
+  enqueued_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+  not_before  TEXT,                             -- retry backoff eligibility (§10.5)
+  PRIMARY KEY (image_hash, pass_name, pass_version)
+);
+CREATE INDEX ingest_queue ON ingest_passes(state, priority, enqueued_at)
+  WHERE state = 'pending';
+
+CREATE TABLE preview_artifacts (
+  image_hash         TEXT NOT NULL REFERENCES images(image_hash),
+  kind               TEXT NOT NULL CHECK (kind IN ('thumb','display')),
+  source             TEXT NOT NULL CHECK (source IN ('embedded','full-decode','original')),
+  width INTEGER NOT NULL, height INTEGER NOT NULL,  -- display-oriented dimensions
+  bytes INTEGER NOT NULL, format TEXT NOT NULL DEFAULT 'webp',
+  needs_full_decode  INTEGER NOT NULL DEFAULT 0,    -- §9.3 threshold miss
+  generator_version  INTEGER NOT NULL,              -- bump → regeneration (§9.8)
+  generated_at       TEXT NOT NULL,
+  PRIMARY KEY (image_hash, kind)
+);
 "#;
 
 /// Create the schema if the database is new (versioned by `user_version`).

@@ -3,3 +3,2021 @@
 //! thumbnail cache.
 //!
 //! Contract: spec/LIBRARY.md. Owned by work packet P2.2.
+//!
+//! Everything here is the **index side** of the system: every table is
+//! rebuildable from the filesystem plus the sidecar set. Identity is the
+//! BLAKE3-256 of file bytes — images are known by hash, never by path.
+
+mod exclusions;
+mod hashing;
+mod ingest;
+mod metadata;
+mod paths;
+mod placeholder;
+mod preview;
+mod scan;
+mod volumes;
+mod watcher;
+
+pub use exclusions::{
+    ImageFormat, MAX_FILE_BYTES, classify_extension, is_excluded_dir_name, is_excluded_file_name,
+};
+pub use hashing::{hash_file, hash_invocation_count, hashed_byte_count};
+pub use ingest::{
+    PASS_VERSION, PRIORITY_BACKFILL, PRIORITY_GPU, PRIORITY_SCAN, PRIORITY_WATCHER, PassCounters,
+    PassName, PassState, placeholder_sentinel,
+};
+pub use paths::{Availability, BestPath, PathRow, StaleReason};
+pub use placeholder::{
+    PlaceholderDetector, PlatformPlaceholderDetector, SharedSetPlaceholderDetector,
+};
+pub use preview::{
+    ArtifactKind, DISPLAY_EDGE, EMBEDDED_ACCEPT_EDGE, EmbeddedOrientationReason,
+    EmbeddedPreviewExtractor, ExtractedPreview, GENERATOR_VERSION, PreviewError, PreviewSource,
+    RawlerExtractor, THUMB_EDGE, apply_exif_orientation, artifact_path,
+    embedded_orientation_decision, oriented_dims,
+};
+pub use scan::{ClockShiftReport, ScanOptions, ScanReport};
+pub use volumes::{
+    FakeVolumeProbe, MARKER_FILENAME, PlatformIdKind, PlatformVolumeProbe, ProbedVolume,
+    VolumeMarker, VolumeProbe, read_marker, verify_writable, write_marker,
+};
+pub use watcher::{
+    DebounceConfig, DebounceCore, PipelineEffect, RawWatchEvent, RootWatcherHandle, Stability,
+    WatchPipeline,
+};
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use thiserror::Error;
+
+use crate::id::{ContentHash, UtcMillis};
+use crate::store::StoreError;
+
+pub type VolumeId = String;
+pub type RootId = String;
+
+#[derive(Debug, Error)]
+pub enum LibraryError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("store error: {0}")]
+    Store(#[from] StoreError),
+    #[error("watch error: {0}")]
+    Watch(String),
+    #[error("nested roots are forbidden: {0}")]
+    NestedRoot(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("volume offline: {0}")]
+    VolumeOffline(String),
+    #[error("invalid input: {0}")]
+    Invalid(String),
+}
+
+/// Cancellation for long operations (interrupt-safety tests drive this; a
+/// real `kill -9` is strictly weaker than cancelling between work units plus
+/// SQLite transactionality, since transactions are atomic either way).
+pub type CancelFlag = Arc<AtomicBool>;
+
+/// Injectable collaborators (defaults are the platform implementations).
+pub struct LibraryOptions {
+    pub probe: Arc<dyn VolumeProbe>,
+    pub placeholders: Arc<dyn PlaceholderDetector>,
+    pub extractor: Arc<dyn EmbeddedPreviewExtractor>,
+}
+
+impl Default for LibraryOptions {
+    fn default() -> Self {
+        Self {
+            probe: Arc::new(PlatformVolumeProbe),
+            placeholders: Arc::new(PlatformPlaceholderDetector),
+            extractor: Arc::new(RawlerExtractor),
+        }
+    }
+}
+
+/// Strictly-increasing wall-clock timestamps: `(priority, enqueued_at)`
+/// dequeue order (§10.3) and the ascending-size hash ordering (§1.2) need
+/// distinct, ordered `enqueued_at` values even within one millisecond.
+struct MonotonicMillis {
+    last: Mutex<i64>,
+}
+
+impl MonotonicMillis {
+    fn new() -> Self {
+        Self {
+            last: Mutex::new(0),
+        }
+    }
+
+    fn now(&self) -> UtcMillis {
+        let wall = UtcMillis::now().epoch_ms();
+        let mut last = self.last.lock().expect("poisoned");
+        let v = wall.max(*last + 1);
+        *last = v;
+        UtcMillis::from_epoch_ms(v)
+    }
+}
+
+/// The library: one writer connection (all writes serialize through it), the
+/// preview cache directory, and the injectable platform seams.
+pub struct Library {
+    db: Mutex<Connection>,
+    cache_dir: PathBuf,
+    probe: Arc<dyn VolumeProbe>,
+    placeholders: Arc<dyn PlaceholderDetector>,
+    extractor: Arc<dyn EmbeddedPreviewExtractor>,
+    clock: MonotonicMillis,
+    debug_log: Mutex<Vec<String>>,
+}
+
+impl Library {
+    /// Open the shared photoproof database (creating/migrating if necessary)
+    /// with platform collaborators. `cache_dir` hosts the preview cache.
+    pub fn open(
+        db_path: impl AsRef<Path>,
+        cache_dir: impl Into<PathBuf>,
+    ) -> Result<Self, LibraryError> {
+        Self::open_with(db_path, cache_dir, LibraryOptions::default())
+    }
+
+    pub fn open_with(
+        db_path: impl AsRef<Path>,
+        cache_dir: impl Into<PathBuf>,
+        options: LibraryOptions,
+    ) -> Result<Self, LibraryError> {
+        let db_path = db_path.as_ref();
+        // Schema + migrations (including LIBRARY_SCHEMA_SQL, user_version 3)
+        // live in `store::schema`, which is private to the events engine;
+        // opening the EventStore runs them. The library then opens its own
+        // writer connection with the same §5.1 pragmas (flagged: a
+        // `pub(crate) mod schema` would remove both the throwaway open and
+        // the pragma duplicate below).
+        drop(crate::store::EventStore::open(db_path)?);
+        let conn = open_library_connection(db_path)?;
+        // §10.2 crash recovery: every `running` row reverts to `pending`;
+        // §10.5: `error` rows auto-retry on app restart.
+        let recovered = ingest::recover_running(&conn)?;
+        ingest::retry_errors(&conn)?;
+        // §9.8 regeneration: a `generator_version` bump (compile-time
+        // constant covering encoder, sizes, color pipeline) re-enqueues the
+        // preview pass at backfill priority for every stale artifact.
+        let regen = conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'pending', not_before = NULL, priority = ?2
+             WHERE pass_name = 'preview' AND state = 'done'
+               AND image_hash IN (SELECT image_hash FROM preview_artifacts
+                                  WHERE generator_version < ?1)",
+            params![preview::GENERATOR_VERSION, ingest::PRIORITY_BACKFILL],
+        )?;
+        let cache_dir = cache_dir.into();
+        // §9.8 crash hygiene: stranded temp files from a mid-write crash.
+        let swept = preview::sweep_temp_files(&cache_dir)?;
+        let lib = Self {
+            db: Mutex::new(conn),
+            cache_dir,
+            probe: options.probe,
+            placeholders: options.placeholders,
+            extractor: options.extractor,
+            clock: MonotonicMillis::new(),
+            debug_log: Mutex::new(Vec::new()),
+        };
+        if recovered > 0 {
+            lib.log(format!(
+                "crash recovery: {recovered} running passes re-pended"
+            ));
+        }
+        if regen > 0 {
+            lib.log(format!(
+                "generator_version bump: {regen} preview passes re-enqueued at backfill priority"
+            ));
+        }
+        if swept > 0 {
+            lib.log(format!("cache hygiene: {swept} temp files swept"));
+        }
+        Ok(lib)
+    }
+
+    /// §9.8 / §10.6: preview-cache size for settings and the debug panel.
+    pub fn preview_cache_stats(&self) -> Result<(i64, i64), LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM preview_artifacts",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    fn now(&self) -> UtcMillis {
+        self.clock.now()
+    }
+
+    fn mint_ulid(&self) -> String {
+        ulid::Ulid::new().to_string()
+    }
+
+    /// Debug-panel log line (§4.1 warnings, clock-shift events, exclusions).
+    pub(crate) fn log(&self, msg: String) {
+        self.debug_log.lock().expect("poisoned").push(msg);
+    }
+
+    /// Drain the debug log (tests assert "warning logged" through this).
+    pub fn take_debug_log(&self) -> Vec<String> {
+        std::mem::take(&mut *self.debug_log.lock().expect("poisoned"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Volumes (§4)
+    // -----------------------------------------------------------------------
+
+    /// Resolve a probed mount to a volume identity per the §4.1 recipe
+    /// (marker beats platform id beats heuristic), creating or updating the
+    /// row and marking it online at the probed mount point.
+    pub(crate) fn resolve_volume(&self, probed: &ProbedVolume) -> Result<VolumeId, LibraryError> {
+        let now = self.now().to_rfc3339();
+        let marker = volumes::read_marker(&probed.mount_point);
+        let conn = self.db.lock().expect("poisoned");
+
+        if let Some(marker) = &marker {
+            let existing: Option<(String, Option<String>, Option<String>, String)> = conn
+                .query_row(
+                    "SELECT volume_id, platform_id, mount_point, state
+                     FROM volumes WHERE marker_ulid = ?1",
+                    params![marker.volume_ulid],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if let Some((volume_id, platform_id, mount_point, state)) = existing {
+                // Full-clone detection: the matched volume is online at a
+                // *different* mount point that still carries the same marker
+                // → this mount is a clone; it registers as a NEW volume with
+                // a fresh marker (§4.1).
+                let clone = state == "online"
+                    && mount_point
+                        .as_deref()
+                        .is_some_and(|mp| Path::new(mp) != probed.mount_point)
+                    && mount_point
+                        .as_deref()
+                        .and_then(|mp| volumes::read_marker(Path::new(mp)))
+                        .is_some_and(|m| m.volume_ulid == marker.volume_ulid);
+                if clone {
+                    drop(conn);
+                    self.log(format!(
+                        "volume clone detected: marker {} mounted twice; registering {} as a new volume",
+                        marker.volume_ulid,
+                        probed.mount_point.display()
+                    ));
+                    return self.create_volume(probed, /* force_fresh_marker = */ true);
+                }
+                // Marker wins over platform ids (§4.1): a changed platform id
+                // is adopted; any other row claiming it is cleared.
+                if let Some(pid) = &probed.platform_id
+                    && platform_id.as_deref() != Some(pid.as_str())
+                {
+                    conn.execute(
+                        "UPDATE volumes SET platform_id = NULL
+                             WHERE platform_id = ?1 AND volume_id <> ?2",
+                        params![pid, volume_id],
+                    )?;
+                    conn.execute(
+                        "UPDATE volumes SET platform_id = ?1, platform_kind = ?2
+                             WHERE volume_id = ?3",
+                        params![pid, probed.platform_kind.as_str(), volume_id],
+                    )?;
+                    self.log(format!(
+                        "marker precedence: volume {volume_id} platform id changed to {pid} \
+                             (marker {} wins)",
+                        marker.volume_ulid
+                    ));
+                }
+                self.mark_online_locked(&conn, &volume_id, probed, &now)?;
+                return Ok(volume_id);
+            }
+            // Marker present but unknown to this DB: adopt the marker's ULID
+            // as the volume identity — it survives DB rebuilds.
+            drop(conn);
+            return self.create_volume(probed, false);
+        }
+        // No marker: platform id (level 2), else heuristic (level 3).
+        let platform_id = probed.platform_id.clone().unwrap_or_else(|| {
+            volumes::heuristic_fingerprint(
+                probed.fs_type.as_deref(),
+                probed.label.as_deref(),
+                probed.capacity_bytes,
+            )
+        });
+        let kind = if probed.platform_id.is_some() {
+            probed.platform_kind
+        } else {
+            PlatformIdKind::Heuristic
+        };
+        let existing: Option<VolumeId> = conn
+            .query_row(
+                "SELECT volume_id FROM volumes WHERE platform_id = ?1 AND platform_kind = ?2",
+                params![platform_id, kind.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(volume_id) = existing {
+            self.mark_online_locked(&conn, &volume_id, probed, &now)?;
+            return Ok(volume_id);
+        }
+        drop(conn);
+        self.create_volume(probed, false)
+    }
+
+    fn create_volume(
+        &self,
+        probed: &ProbedVolume,
+        force_fresh_marker: bool,
+    ) -> Result<VolumeId, LibraryError> {
+        let now = self.now().to_rfc3339();
+        let marker = if force_fresh_marker {
+            None
+        } else {
+            volumes::read_marker(&probed.mount_point)
+        };
+        let volume_id = marker
+            .as_ref()
+            .map(|m| m.volume_ulid.clone())
+            .unwrap_or_else(|| self.mint_ulid());
+        let (platform_id, kind) = match &probed.platform_id {
+            Some(pid) => (Some(pid.clone()), probed.platform_kind),
+            None => (
+                Some(volumes::heuristic_fingerprint(
+                    probed.fs_type.as_deref(),
+                    probed.label.as_deref(),
+                    probed.capacity_bytes,
+                )),
+                PlatformIdKind::Heuristic,
+            ),
+        };
+        let conn = self.db.lock().expect("poisoned");
+        conn.execute(
+            "INSERT INTO volumes (volume_id, marker_ulid, platform_id, platform_kind, label,
+                                  fs_type, capacity_bytes, read_only, state, mount_point,
+                                  first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'online', ?9, ?10, ?10)",
+            params![
+                volume_id,
+                marker.as_ref().map(|m| m.volume_ulid.clone()),
+                platform_id,
+                kind.as_str(),
+                probed.label,
+                probed.fs_type,
+                probed.capacity_bytes,
+                probed.read_only_flag as i64,
+                probed.mount_point.to_string_lossy(),
+                now,
+            ],
+        )?;
+        drop(conn);
+        if force_fresh_marker {
+            self.maybe_write_marker(&volume_id, probed);
+        }
+        Ok(volume_id)
+    }
+
+    fn mark_online_locked(
+        &self,
+        conn: &Connection,
+        volume_id: &str,
+        probed: &ProbedVolume,
+        now: &str,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "UPDATE volumes SET state = 'online', mount_point = ?2, last_seen_at = ?3,
+                                read_only = ?4, label = COALESCE(?5, label),
+                                fs_type = COALESCE(?6, fs_type),
+                                capacity_bytes = COALESCE(?7, capacity_bytes)
+             WHERE volume_id = ?1",
+            params![
+                volume_id,
+                probed.mount_point.to_string_lossy(),
+                now,
+                probed.read_only_flag as i64,
+                probed.label,
+                probed.fs_type,
+                probed.capacity_bytes,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Marker policy (§4.1): written automatically on first ingest of any
+    /// writable volume hosting a watched root; never on system roots;
+    /// opportunistically on a later writable mount.
+    fn maybe_write_marker(&self, volume_id: &str, probed: &ProbedVolume) {
+        if probed.is_system_root {
+            return;
+        }
+        let existing_marker: Option<String> = {
+            let conn = self.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT marker_ulid FROM volumes WHERE volume_id = ?1",
+                params![volume_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        };
+        if existing_marker.is_some() && volumes::read_marker(&probed.mount_point).is_some() {
+            return;
+        }
+        let now = self.now().to_rfc3339();
+        match volumes::write_marker(&probed.mount_point, volume_id, &now) {
+            Ok(()) => {
+                let conn = self.db.lock().expect("poisoned");
+                let _ = conn.execute(
+                    "UPDATE volumes SET marker_ulid = ?2 WHERE volume_id = ?1",
+                    params![volume_id, volume_id],
+                );
+            }
+            Err(e) => self.log(format!(
+                "marker write failed on {} (will retry on a writable mount): {e}",
+                probed.mount_point.display()
+            )),
+        }
+    }
+
+    /// Startup / periodic mount probe (§4.2): match every known volume
+    /// against the currently mounted set, flip states, update mount points,
+    /// refresh read-only, and return the active roots of volumes that came
+    /// online (each needs a reconciliation scan).
+    pub fn probe_volumes(&self) -> Result<Vec<RootId>, LibraryError> {
+        let mounts = self.probe.list_mounts()?;
+        // Pre-read each mount's marker once.
+        let mount_markers: Vec<(usize, Option<VolumeMarker>)> = mounts
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, volumes::read_marker(&m.mount_point)))
+            .collect();
+        type KnownVolume = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        );
+        let known: Vec<KnownVolume> = {
+            let conn = self.db.lock().expect("poisoned");
+            let mut stmt = conn.prepare(
+                "SELECT volume_id, marker_ulid, platform_id, platform_kind, state FROM volumes",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut claimed_mounts = vec![false; mounts.len()];
+        let mut to_scan = Vec::new();
+        for (volume_id, marker_ulid, platform_id, platform_kind, state) in known {
+            // Marker first, then platform id.
+            let mut matched: Option<usize> = None;
+            if let Some(mu) = &marker_ulid {
+                matched = mount_markers
+                    .iter()
+                    .find(|(i, m)| {
+                        !claimed_mounts[*i] && m.as_ref().is_some_and(|m| &m.volume_ulid == mu)
+                    })
+                    .map(|(i, _)| *i);
+            }
+            if matched.is_none()
+                && let Some(pid) = &platform_id
+            {
+                matched = mounts
+                    .iter()
+                    .enumerate()
+                    .find(|(i, m)| {
+                        !claimed_mounts[*i]
+                            && mount_markers[*i].1.is_none()
+                            && m.platform_id.as_deref() == Some(pid.as_str())
+                            && Some(m.platform_kind.as_str()) == platform_kind.as_deref()
+                    })
+                    .map(|(i, _)| i);
+            }
+            match matched {
+                Some(i) => {
+                    claimed_mounts[i] = true;
+                    let probed = &mounts[i];
+                    let was_offline = state == "offline";
+                    self.resolve_volume(probed)?;
+                    self.refresh_read_only(&volume_id, probed)?;
+                    self.maybe_write_marker_if_hosting_root(&volume_id, probed)?;
+                    if was_offline {
+                        to_scan.extend(self.active_roots_of(&volume_id)?);
+                    }
+                }
+                None => {
+                    if state == "online" {
+                        let conn = self.db.lock().expect("poisoned");
+                        conn.execute(
+                            "UPDATE volumes SET state = 'offline', mount_point = NULL
+                             WHERE volume_id = ?1",
+                            params![volume_id],
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(to_scan)
+    }
+
+    /// §4.3: flags lie; verify with a create-and-delete probe in the watched
+    /// root (or skip the probe when the volume hosts none).
+    fn refresh_read_only(
+        &self,
+        volume_id: &str,
+        probed: &ProbedVolume,
+    ) -> Result<(), LibraryError> {
+        let mut read_only = probed.read_only_flag;
+        if !read_only
+            && let Some(root_dir) = self.first_active_root_dir(volume_id, &probed.mount_point)?
+        {
+            read_only = !volumes::verify_writable(&root_dir);
+        }
+        let conn = self.db.lock().expect("poisoned");
+        conn.execute(
+            "UPDATE volumes SET read_only = ?2 WHERE volume_id = ?1",
+            params![volume_id, read_only as i64],
+        )?;
+        Ok(())
+    }
+
+    fn maybe_write_marker_if_hosting_root(
+        &self,
+        volume_id: &str,
+        probed: &ProbedVolume,
+    ) -> Result<(), LibraryError> {
+        let has_root = !self.active_roots_of(volume_id)?.is_empty();
+        let marker_known: Option<String> = {
+            let conn = self.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT marker_ulid FROM volumes WHERE volume_id = ?1",
+                params![volume_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten()
+        };
+        if has_root && marker_known.is_none() && !probed.read_only_flag {
+            self.maybe_write_marker(volume_id, probed);
+        }
+        Ok(())
+    }
+
+    fn first_active_root_dir(
+        &self,
+        volume_id: &str,
+        mount_point: &Path,
+    ) -> Result<Option<PathBuf>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let rel: Option<String> = conn
+            .query_row(
+                "SELECT rel_path FROM roots WHERE volume_id = ?1 AND state = 'active'
+                 ORDER BY root_id LIMIT 1",
+                params![volume_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(rel.map(|r| join_rel(mount_point, &r)))
+    }
+
+    fn active_roots_of(&self, volume_id: &str) -> Result<Vec<RootId>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT root_id FROM roots WHERE volume_id = ?1 AND state = 'active' ORDER BY root_id",
+        )?;
+        let rows = stmt.query_map(params![volume_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn volume(&self, volume_id: &str) -> Result<Option<VolumeRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT volume_id, marker_ulid, platform_id, platform_kind, label, fs_type,
+                        capacity_bytes, read_only, state, mount_point
+                 FROM volumes WHERE volume_id = ?1",
+                params![volume_id],
+                volume_record,
+            )
+            .optional()?)
+    }
+
+    pub fn volumes(&self) -> Result<Vec<VolumeRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT volume_id, marker_ulid, platform_id, platform_kind, label, fs_type,
+                    capacity_bytes, read_only, state, mount_point
+             FROM volumes ORDER BY volume_id",
+        )?;
+        let rows = stmt.query_map([], volume_record)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Watched roots (§5)
+    // -----------------------------------------------------------------------
+
+    /// Register a watched root: resolve volume + relative path, write the
+    /// marker if applicable, reject nesting, enqueue nothing — the caller
+    /// runs `scan_root` for the initial scan.
+    pub fn register_root(
+        &self,
+        dir: &Path,
+        display_name: Option<&str>,
+    ) -> Result<RootId, LibraryError> {
+        let meta = std::fs::metadata(dir)?;
+        if !meta.is_dir() {
+            return Err(LibraryError::Invalid(format!(
+                "not a directory: {}",
+                dir.display()
+            )));
+        }
+        let probed = self.probe.probe_path(dir)?;
+        let volume_id = self.resolve_volume(&probed)?;
+        let rel = rel_path_str(&probed.mount_point, dir).ok_or_else(|| {
+            LibraryError::Invalid(format!(
+                "path is not valid UTF-8 under its volume root: {}",
+                dir.display()
+            ))
+        })?;
+        // Nested roots are forbidden (§5): inside or above an existing
+        // active root, on the same volume.
+        {
+            let conn = self.db.lock().expect("poisoned");
+            let mut stmt = conn
+                .prepare("SELECT rel_path FROM roots WHERE volume_id = ?1 AND state = 'active'")?;
+            let existing: Vec<String> = stmt
+                .query_map(params![volume_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for other in existing {
+                if rel_contains(&other, &rel) || rel_contains(&rel, &other) {
+                    return Err(LibraryError::NestedRoot(format!(
+                        "'{rel}' overlaps existing active root '{other}'"
+                    )));
+                }
+            }
+        }
+        let now = self.now().to_rfc3339();
+        // Re-registering the exact location of a removed root revives that
+        // row (§5: "re-registering an overlapping root later relinks
+        // everything"; the §6 UNIQUE (volume_id, rel_path) makes the root's
+        // location its identity). Flagged reading in the packet report.
+        let revived: Option<RootId> = {
+            let conn = self.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT root_id FROM roots
+                 WHERE volume_id = ?1 AND rel_path = ?2 AND state = 'removed'",
+                params![volume_id, rel],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
+        let root_id = match revived {
+            Some(root_id) => {
+                let conn = self.db.lock().expect("poisoned");
+                conn.execute(
+                    "UPDATE roots SET state = 'active', removed_at = NULL,
+                                      display_name = COALESCE(?2, display_name)
+                     WHERE root_id = ?1",
+                    params![root_id, display_name],
+                )?;
+                root_id
+            }
+            None => {
+                let root_id = self.mint_ulid();
+                let conn = self.db.lock().expect("poisoned");
+                conn.execute(
+                    "INSERT INTO roots (root_id, volume_id, rel_path, display_name, state, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+                    params![root_id, volume_id, rel, display_name, now],
+                )?;
+                root_id
+            }
+        };
+        // Read-only verification probe in the new root (§4.3), then the
+        // marker (§4.1: first ingest of a writable volume hosting a root).
+        self.refresh_read_only(&volume_id, &probed)?;
+        let read_only = self
+            .volume(&volume_id)?
+            .map(|v| v.read_only)
+            .unwrap_or(true);
+        if !read_only {
+            self.maybe_write_marker(&volume_id, &probed);
+        }
+        // Cloud-sync advisory (§5.2): detection only; the root is allowed.
+        if let Some(service) = sync_service_hint(dir) {
+            self.log(format!(
+                "cloud-sync advisory: root {} appears to live in {service}; sidecar writes \
+                 will appear as synced revisions there",
+                dir.display()
+            ));
+        }
+        Ok(root_id)
+    }
+
+    /// Root removal (§5): state → removed, its path rows → stale
+    /// (`root-removed`). Nothing else — journals kept, previews retained.
+    pub fn remove_root(&self, root_id: &str) -> Result<(), LibraryError> {
+        let now = self.now().to_rfc3339();
+        let conn = self.db.lock().expect("poisoned");
+        let n = conn.execute(
+            "UPDATE roots SET state = 'removed', removed_at = ?2
+             WHERE root_id = ?1 AND state = 'active'",
+            params![root_id, now],
+        )?;
+        if n == 0 {
+            return Err(LibraryError::NotFound(format!("active root {root_id}")));
+        }
+        conn.execute(
+            "UPDATE paths SET state = 'stale', stale_reason = 'root-removed', stale_since = ?2
+             WHERE root_id = ?1 AND state = 'active'",
+            params![root_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn root(&self, root_id: &str) -> Result<Option<RootRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT root_id, volume_id, rel_path, display_name, state
+                 FROM roots WHERE root_id = ?1",
+                params![root_id],
+                root_record,
+            )
+            .optional()?)
+    }
+
+    pub fn roots(&self) -> Result<Vec<RootRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT root_id, volume_id, rel_path, display_name, state FROM roots ORDER BY root_id",
+        )?;
+        let rows = stmt.query_map([], root_record)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The absolute directory of an active root on an online volume.
+    pub(crate) fn root_location(
+        &self,
+        root_id: &str,
+    ) -> Result<(RootRecord, VolumeRecord, PathBuf), LibraryError> {
+        let root = self
+            .root(root_id)?
+            .ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+        let volume = self
+            .volume(&root.volume_id)?
+            .ok_or_else(|| LibraryError::NotFound(format!("volume {}", root.volume_id)))?;
+        if !volume.online {
+            return Err(LibraryError::VolumeOffline(root.volume_id.clone()));
+        }
+        let mount = volume
+            .mount_point
+            .clone()
+            .ok_or_else(|| LibraryError::VolumeOffline(root.volume_id.clone()))?;
+        let dir = join_rel(Path::new(&mount), &root.rel_path);
+        Ok((root, volume, dir))
+    }
+
+    // -----------------------------------------------------------------------
+    // Reconciliation (§7.3) and the single per-path algorithm (§7.2)
+    // -----------------------------------------------------------------------
+
+    pub fn scan_root(&self, root_id: &str, opts: &ScanOptions) -> Result<ScanReport, LibraryError> {
+        scan::scan_root(self, root_id, opts)
+    }
+
+    /// Scan every active root on an online volume (startup, resume-from-
+    /// sleep, the 6-hour tick).
+    pub fn reconcile_all(
+        &self,
+        opts: &ScanOptions,
+    ) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+        let roots = self.roots()?;
+        let mut out = Vec::new();
+        for root in roots {
+            if root.state != "active" {
+                continue;
+            }
+            match self.scan_root(&root.root_id, opts) {
+                Ok(report) => out.push((root.root_id, report)),
+                Err(LibraryError::VolumeOffline(_)) => {} // §11: waits out the remount
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Wake trigger (§7.3): watcher gaps across sleep are a canonical
+    /// missed-event source.
+    pub fn on_system_resume(&self) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+        self.probe_volumes()?;
+        self.reconcile_all(&ScanOptions::default())
+    }
+
+    /// The 6-hour tick (§7.3, §10.5): error-row retry + full reconciliation.
+    pub fn maintenance_tick(&self) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+        {
+            let conn = self.db.lock().expect("poisoned");
+            ingest::retry_errors(&conn)?;
+        }
+        self.probe_volumes()?;
+        self.reconcile_all(&ScanOptions::default())
+    }
+
+    /// §7.2 for one observed (stable) file. `move_window_start` bounds the
+    /// remove→create move-correlation flip.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_file(
+        &self,
+        volume_id: &str,
+        root_id: Option<&str>,
+        rel_path: &str,
+        abs_path: &Path,
+        size: i64,
+        mtime_ns: i64,
+        priority: i64,
+        tolerance_ns: i64,
+        move_window_start: UtcMillis,
+    ) -> Result<Observed, LibraryError> {
+        let existing = {
+            let conn = self.db.lock().expect("poisoned");
+            paths::active_row_at(&conn, volume_id, rel_path)?
+        };
+        match existing {
+            Some(row) => {
+                if row.size == size && (row.mtime_ns - mtime_ns).abs() <= tolerance_ns {
+                    let conn = self.db.lock().expect("poisoned");
+                    paths::touch_verified(&conn, &row.path_id, self.now())?;
+                    return Ok(Observed::FastPath);
+                }
+                let (hash, hashed_size) = hashing::hash_file(abs_path)?;
+                if hash == row.image_hash {
+                    let conn = self.db.lock().expect("poisoned");
+                    paths::update_size_mtime(
+                        &conn,
+                        &row.path_id,
+                        hashed_size as i64,
+                        mtime_ns,
+                        self.now(),
+                    )?;
+                    Ok(Observed::Updated)
+                } else {
+                    // §1.3 in-place change protocol.
+                    self.supersede_tx(
+                        &row.path_id,
+                        &hash,
+                        hashed_size as i64,
+                        mtime_ns,
+                        volume_id,
+                        root_id,
+                        rel_path,
+                        priority,
+                    )?;
+                    Ok(Observed::Superseded {
+                        old: row.image_hash,
+                        new: hash,
+                    })
+                }
+            }
+            None => {
+                // §5 re-registration fast path: a `root-removed` stale row at
+                // this location whose size+mtime still match relinks with
+                // zero hashing (the hash is the one the row carries).
+                if let Some(stale) =
+                    self.reactivatable_row(volume_id, rel_path, size, mtime_ns, tolerance_ns)?
+                {
+                    let conn = self.db.lock().expect("poisoned");
+                    paths::reactivate(&conn, &stale.path_id, root_id.unwrap_or(""), self.now())?;
+                    return Ok(Observed::Relinked(stale.image_hash));
+                }
+                let (hash, hashed_size) = hashing::hash_file(abs_path)?;
+                let known = self.image_exists(&hash)?;
+                if known {
+                    self.relink_tx(
+                        &hash,
+                        volume_id,
+                        root_id,
+                        rel_path,
+                        hashed_size as i64,
+                        mtime_ns,
+                        move_window_start,
+                    )?;
+                    Ok(Observed::Relinked(hash))
+                } else {
+                    self.new_image_tx(
+                        &hash,
+                        hashed_size as i64,
+                        volume_id,
+                        root_id,
+                        rel_path,
+                        mtime_ns,
+                        priority,
+                    )?;
+                    Ok(Observed::NewImage(hash))
+                }
+            }
+        }
+    }
+
+    /// §7.2 step R: mark the active row stale (`deleted`); a later relink of
+    /// the same hash within the correlation window flips it to `moved`. The
+    /// reverse order (create observed before the remove — the copy-then-
+    /// delete move pattern) is correlated here: the hash already gained an
+    /// active path inside the window, so the reason is `moved` immediately.
+    pub(crate) fn observe_removed(
+        &self,
+        volume_id: &str,
+        rel_path: &str,
+        move_window_start: UtcMillis,
+    ) -> Result<bool, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        match paths::active_row_at(&conn, volume_id, rel_path)? {
+            Some(row) => {
+                paths::mark_stale(&conn, &row.path_id, StaleReason::Deleted, self.now())?;
+                let relinked_recently: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM paths
+                     WHERE image_hash = ?1 AND state = 'active' AND first_seen_at >= ?2",
+                    params![row.image_hash.as_str(), move_window_start.to_rfc3339()],
+                    |r| r.get(0),
+                )?;
+                if relinked_recently > 0 {
+                    conn.execute(
+                        "UPDATE paths SET stale_reason = 'moved' WHERE path_id = ?1",
+                        params![row.path_id],
+                    )?;
+                }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn reactivatable_row(
+        &self,
+        volume_id: &str,
+        rel_path: &str,
+        size: i64,
+        mtime_ns: i64,
+        tolerance_ns: i64,
+    ) -> Result<Option<PathRow>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT path_id, image_hash, volume_id, root_id, rel_path, size, mtime_ns,
+                    state, stale_reason
+             FROM paths
+             WHERE volume_id = ?1 AND rel_path = ?2 AND state = 'stale'
+               AND stale_reason = 'root-removed'
+             ORDER BY stale_since DESC",
+        )?;
+        let rows: Vec<PathRow> = stmt
+            .query_map(params![volume_id, rel_path], paths::row_to_path)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows
+            .into_iter()
+            .find(|r| r.size == size && (r.mtime_ns - mtime_ns).abs() <= tolerance_ns))
+    }
+
+    pub(crate) fn image_exists(&self, hash: &ContentHash) -> Result<bool, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(image_exists_on(&conn, hash)?)
+    }
+
+    /// Relink (§7.4): insert/activate a path row for an existing hash. Never
+    /// touches images, events, previews, or sidecar content.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn relink_tx(
+        &self,
+        hash: &ContentHash,
+        volume_id: &str,
+        root_id: Option<&str>,
+        rel_path: &str,
+        size: i64,
+        mtime_ns: i64,
+        move_window_start: UtcMillis,
+    ) -> Result<(), LibraryError> {
+        let mut conn = self.db.lock().expect("poisoned");
+        let tx = conn.transaction()?;
+        self.relink_in_tx(
+            &tx,
+            hash,
+            volume_id,
+            root_id,
+            rel_path,
+            size,
+            mtime_ns,
+            move_window_start,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn relink_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        hash: &ContentHash,
+        volume_id: &str,
+        root_id: Option<&str>,
+        rel_path: &str,
+        size: i64,
+        mtime_ns: i64,
+        move_window_start: UtcMillis,
+    ) -> Result<(), LibraryError> {
+        let path_id = self.mint_ulid();
+        let now = self.now();
+        paths::insert_active(
+            tx, &path_id, hash, volume_id, root_id, rel_path, size, mtime_ns, now,
+        )?;
+        paths::correlate_move(tx, hash, move_window_start)?;
+        ingest::clear_placeholder(tx, volume_id, rel_path)?;
+        Ok(())
+    }
+
+    /// New image: `images` row + `hash` done-row + sibling enqueues + the
+    /// first path row — one transaction (§10.4).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_image_tx(
+        &self,
+        hash: &ContentHash,
+        byte_size: i64,
+        volume_id: &str,
+        root_id: Option<&str>,
+        rel_path: &str,
+        mtime_ns: i64,
+        priority: i64,
+    ) -> Result<(), LibraryError> {
+        let mut conn = self.db.lock().expect("poisoned");
+        let tx = conn.transaction()?;
+        self.new_image_in_tx(
+            &tx, hash, byte_size, volume_id, root_id, rel_path, mtime_ns, priority,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_image_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        hash: &ContentHash,
+        byte_size: i64,
+        volume_id: &str,
+        root_id: Option<&str>,
+        rel_path: &str,
+        mtime_ns: i64,
+        priority: i64,
+    ) -> Result<(), LibraryError> {
+        let file_name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+        let (format, raw_subtype) = classify_extension(file_name).ok_or_else(|| {
+            LibraryError::Invalid(format!("off-allowlist file reached ingest: {rel_path}"))
+        })?;
+        let path_id = self.mint_ulid();
+        let now = self.now();
+        tx.execute(
+            "INSERT INTO images (image_hash, byte_size, format, raw_subtype, exif_orientation,
+                                 first_ingested_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)
+             ON CONFLICT(image_hash) DO NOTHING",
+            params![
+                hash.as_str(),
+                byte_size,
+                format.as_str(),
+                raw_subtype,
+                now.to_rfc3339()
+            ],
+        )?;
+        // The hash pass row is written `done` atomically with the insert
+        // (§10.1 — exists for uniform progress reporting).
+        ingest::enqueue(
+            tx,
+            hash,
+            PassName::Hash,
+            PassState::Done,
+            priority,
+            None,
+            now,
+        )?;
+        ingest::enqueue(
+            tx,
+            hash,
+            PassName::Exif,
+            PassState::Pending,
+            priority,
+            None,
+            now,
+        )?;
+        match format {
+            ImageFormat::Heic => {
+                // §9.5: HEIC preview generation is deferred to the
+                // libheif-capable backfill; placeholder until then.
+                ingest::enqueue(
+                    tx,
+                    hash,
+                    PassName::Preview,
+                    PassState::Skipped,
+                    priority,
+                    Some("deferred-heic"),
+                    now,
+                )?;
+                ingest::enqueue(
+                    tx,
+                    hash,
+                    PassName::FullRawDecode,
+                    PassState::Pending,
+                    PRIORITY_BACKFILL,
+                    None,
+                    now,
+                )?;
+            }
+            ImageFormat::Raw => {
+                // The preview pass routes full-raw-decode (§9.3): pending on
+                // threshold miss / no preview, skipped when the embedded
+                // preview suffices.
+                ingest::enqueue(
+                    tx,
+                    hash,
+                    PassName::Preview,
+                    PassState::Pending,
+                    priority,
+                    None,
+                    now,
+                )?;
+            }
+            _ => {
+                ingest::enqueue(
+                    tx,
+                    hash,
+                    PassName::Preview,
+                    PassState::Pending,
+                    priority,
+                    None,
+                    now,
+                )?;
+                // §10.1: `skipped` marks structurally inapplicable work so
+                // progress math stays honest.
+                ingest::enqueue(
+                    tx,
+                    hash,
+                    PassName::FullRawDecode,
+                    PassState::Skipped,
+                    PRIORITY_BACKFILL,
+                    Some("inapplicable"),
+                    now,
+                )?;
+            }
+        }
+        paths::insert_active(
+            tx, &path_id, hash, volume_id, root_id, rel_path, byte_size, mtime_ns, now,
+        )?;
+        ingest::clear_placeholder(tx, volume_id, rel_path)?;
+        Ok(())
+    }
+
+    /// §1.3 in-place change protocol, one transaction: old path row → stale
+    /// (`superseded`), new active row binds the path to the new hash, new
+    /// image + passes if the hash is unseen. The old image row, journal,
+    /// previews, and sidecar content are untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn supersede_tx(
+        &self,
+        old_path_id: &str,
+        new_hash: &ContentHash,
+        size: i64,
+        mtime_ns: i64,
+        volume_id: &str,
+        root_id: Option<&str>,
+        rel_path: &str,
+        priority: i64,
+    ) -> Result<(), LibraryError> {
+        let mut conn = self.db.lock().expect("poisoned");
+        let tx = conn.transaction()?;
+        paths::mark_stale(&tx, old_path_id, StaleReason::Superseded, self.now())?;
+        if image_exists_on(&tx, new_hash)? {
+            self.relink_in_tx(
+                &tx,
+                new_hash,
+                volume_id,
+                root_id,
+                rel_path,
+                size,
+                mtime_ns,
+                UtcMillis::from_epoch_ms(0),
+            )?;
+        } else {
+            self.new_image_in_tx(
+                &tx, new_hash, size, volume_id, root_id, rel_path, mtime_ns, priority,
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record a placeholder sighting (§5.2): never read, never hashed; a
+    /// skipped `hash` row with a `placeholder` error-code, re-checked at
+    /// each reconciliation.
+    pub(crate) fn record_placeholder(
+        &self,
+        volume_id: &str,
+        rel_path: &str,
+    ) -> Result<(), LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        ingest::record_placeholder(&conn, volume_id, rel_path, self.now())?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Queue processing (§10)
+    // -----------------------------------------------------------------------
+
+    /// Drain runnable pending passes (exif + preview — the M1 workers).
+    /// `full-raw-decode` and the model passes stay queued by design: the
+    /// queue knows their pass kinds; their workers are later milestones.
+    pub fn process_queue(&self, opts: &QueueOptions) -> Result<QueueReport, LibraryError> {
+        let mut report = QueueReport::default();
+        loop {
+            if let Some(cancel) = &opts.cancel
+                && cancel.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                report.cancelled = true;
+                return Ok(report);
+            }
+            if let Some(max) = opts.max_items
+                && report.processed >= max
+            {
+                return Ok(report);
+            }
+            let item = {
+                let conn = self.db.lock().expect("poisoned");
+                ingest::claim_next(&conn, self.now())?
+            };
+            let Some(item) = item else {
+                return Ok(report);
+            };
+            report.processed += 1;
+            self.run_pass(&item, &mut report)?;
+        }
+    }
+
+    fn run_pass(
+        &self,
+        item: &ingest::QueueItem,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        let image = match self.image(&item.image_hash)? {
+            Some(image) => image,
+            None => {
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, "missing-image-row", false, self.now())?;
+                report.errors += 1;
+                return Ok(());
+            }
+        };
+        // Resolve a readable original (§3.1); offline = ordinary transient.
+        let located = {
+            let conn = self.db.lock().expect("poisoned");
+            paths::best_path(&conn, &item.image_hash)?
+        };
+        let abs = located.as_ref().and_then(|bp| {
+            if bp.online {
+                bp.mount_point
+                    .as_deref()
+                    .map(|mp| join_rel(Path::new(mp), &bp.row.rel_path))
+            } else {
+                None
+            }
+        });
+        let Some(abs) = abs else {
+            let conn = self.db.lock().expect("poisoned");
+            ingest::mark_failed(
+                &conn,
+                item,
+                "volume-offline: no online active path",
+                true,
+                self.now(),
+            )?;
+            report.transient_retries += 1;
+            return Ok(());
+        };
+        match item.pass {
+            PassName::Exif => self.run_exif_pass(item, &image, &abs, report),
+            PassName::Preview => self.run_preview_pass(item, &image, &abs, report),
+            _ => {
+                // No M1 worker; claim_next never returns these.
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, "no-worker", false, self.now())?;
+                report.errors += 1;
+                Ok(())
+            }
+        }
+    }
+
+    fn run_exif_pass(
+        &self,
+        item: &ingest::QueueItem,
+        image: &ImageRecord,
+        abs: &Path,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        match metadata::extract(abs, image.format) {
+            Ok(subset) => {
+                let conn = self.db.lock().expect("poisoned");
+                conn.execute(
+                    "UPDATE images SET
+                       pixel_width = COALESCE(?2, pixel_width),
+                       pixel_height = COALESCE(?3, pixel_height),
+                       exif_orientation = ?4,
+                       capture_ts = ?5, capture_tz_offset = ?6,
+                       camera_make = ?7, camera_model = ?8, lens_model = ?9,
+                       focal_length_mm = ?10, iso = ?11, f_number = ?12,
+                       exposure_time = ?13, gps_lat = ?14, gps_lon = ?15
+                     WHERE image_hash = ?1",
+                    params![
+                        item.image_hash.as_str(),
+                        subset.pixel_width,
+                        subset.pixel_height,
+                        subset.orientation,
+                        subset.capture_ts,
+                        subset.capture_tz_offset,
+                        subset.camera_make,
+                        subset.camera_model,
+                        subset.lens_model,
+                        subset.focal_length_mm,
+                        subset.iso,
+                        subset.f_number,
+                        subset.exposure_time,
+                        subset.gps_lat,
+                        subset.gps_lon,
+                    ],
+                )?;
+                ingest::mark_done(&conn, item, self.now())?;
+                report.done += 1;
+            }
+            Err(e) => {
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, &format!("io: {e}"), true, self.now())?;
+                report.transient_retries += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn run_preview_pass(
+        &self,
+        item: &ingest::QueueItem,
+        image: &ImageRecord,
+        abs: &Path,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        match image.format {
+            ImageFormat::Heic => {
+                // Structurally deferred in M1 (§9.5); enqueue-time writes
+                // `skipped`, so a claimed row here is a stray — keep honest.
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_skipped(&conn, item, "deferred-heic", self.now())?;
+                report.skipped += 1;
+                Ok(())
+            }
+            ImageFormat::Raw => self.run_preview_pass_raw(item, abs, report),
+            _ => self.run_preview_pass_original(item, image, abs, report),
+        }
+    }
+
+    fn run_preview_pass_original(
+        &self,
+        item: &ingest::QueueItem,
+        image: &ImageRecord,
+        abs: &Path,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        match preview::decode_original_display_oriented(abs, image.exif_orientation) {
+            Ok((img, _orientation)) => {
+                let artifacts = preview::write_artifacts(&self.cache_dir, &item.image_hash, &img)?;
+                let conn = self.db.lock().expect("poisoned");
+                self.record_artifacts_locked(
+                    &conn,
+                    &item.image_hash,
+                    &artifacts,
+                    PreviewSource::Original,
+                    false,
+                )?;
+                ingest::mark_done(&conn, item, self.now())?;
+                report.done += 1;
+                Ok(())
+            }
+            Err(e) => self.fail_preview(item, e, report),
+        }
+    }
+
+    fn run_preview_pass_raw(
+        &self,
+        item: &ingest::QueueItem,
+        abs: &Path,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        let extracted = match self.extractor.extract(abs) {
+            Ok(x) => x,
+            Err(e) => return self.fail_preview(item, e, report),
+        };
+        let now = self.now();
+        match extracted {
+            None => {
+                // No embedded preview at all (§9.3): UI placeholder;
+                // full-raw-decode at elevated backfill priority.
+                let conn = self.db.lock().expect("poisoned");
+                ingest::enqueue(
+                    &conn,
+                    &item.image_hash,
+                    PassName::FullRawDecode,
+                    PassState::Pending,
+                    PRIORITY_SCAN,
+                    None,
+                    now,
+                )?;
+                ingest::mark_skipped(&conn, item, "no-embedded-preview", now)?;
+                report.skipped += 1;
+                Ok(())
+            }
+            Some(extracted) => {
+                let raw_dims = (extracted.raw_width, extracted.raw_height);
+                let (oriented, _applied, reason) = preview::orient_embedded_preview(extracted);
+                if matches!(reason, EmbeddedOrientationReason::SquareDefault) {
+                    self.log(format!(
+                        "embedded-preview orientation: square-ish geometry on {}, defaulted to \
+                         the EXIF tag (§9.3.1 fixture-coverage log)",
+                        item.image_hash
+                    ));
+                }
+                use image::GenericImageView;
+                let (pw, ph) = oriented.dimensions();
+                let meets_threshold = pw.max(ph) >= EMBEDDED_ACCEPT_EDGE;
+                let artifacts =
+                    preview::write_artifacts(&self.cache_dir, &item.image_hash, &oriented)?;
+                let conn = self.db.lock().expect("poisoned");
+                self.record_artifacts_locked(
+                    &conn,
+                    &item.image_hash,
+                    &artifacts,
+                    PreviewSource::Embedded,
+                    !meets_threshold,
+                )?;
+                if let (Some(w), Some(h)) = raw_dims {
+                    conn.execute(
+                        "UPDATE images SET pixel_width = COALESCE(pixel_width, ?2),
+                                           pixel_height = COALESCE(pixel_height, ?3)
+                         WHERE image_hash = ?1",
+                        params![item.image_hash.as_str(), w, h],
+                    )?;
+                }
+                if meets_threshold {
+                    // §9.4: never flagged, skipped by the backfill — doubly
+                    // load-bearing for images carrying journal strokes.
+                    ingest::enqueue(
+                        &conn,
+                        &item.image_hash,
+                        PassName::FullRawDecode,
+                        PassState::Skipped,
+                        PRIORITY_BACKFILL,
+                        Some("threshold-met"),
+                        now,
+                    )?;
+                } else {
+                    // Threshold miss: small artifacts now beat a placeholder;
+                    // flag and queue the upgrade (§9.3). Strokes promote it
+                    // above plain P2 backfills (§10.3).
+                    let priority = if self.image_has_strokes_locked(&conn, &item.image_hash)? {
+                        PRIORITY_SCAN
+                    } else {
+                        PRIORITY_BACKFILL
+                    };
+                    ingest::enqueue(
+                        &conn,
+                        &item.image_hash,
+                        PassName::FullRawDecode,
+                        PassState::Pending,
+                        priority,
+                        None,
+                        now,
+                    )?;
+                    ingest::promote(&conn, &item.image_hash, PassName::FullRawDecode, priority)?;
+                }
+                ingest::mark_done(&conn, item, now)?;
+                report.done += 1;
+                Ok(())
+            }
+        }
+    }
+
+    fn fail_preview(
+        &self,
+        item: &ingest::QueueItem,
+        e: PreviewError,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        let transient = matches!(e, PreviewError::Io(_));
+        let conn = self.db.lock().expect("poisoned");
+        ingest::mark_failed(&conn, item, &e.to_string(), transient, self.now())?;
+        if transient {
+            report.transient_retries += 1;
+        } else {
+            report.errors += 1;
+        }
+        Ok(())
+    }
+
+    fn record_artifacts_locked(
+        &self,
+        conn: &Connection,
+        hash: &ContentHash,
+        artifacts: &[preview::GeneratedArtifact],
+        source: PreviewSource,
+        needs_full_decode: bool,
+    ) -> rusqlite::Result<()> {
+        let now = self.now().to_rfc3339();
+        for a in artifacts {
+            conn.execute(
+                "INSERT INTO preview_artifacts
+                   (image_hash, kind, source, width, height, bytes, format,
+                    needs_full_decode, generator_version, generated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'webp', ?7, ?8, ?9)
+                 ON CONFLICT(image_hash, kind) DO UPDATE SET
+                   source = ?3, width = ?4, height = ?5, bytes = ?6,
+                   needs_full_decode = ?7, generator_version = ?8, generated_at = ?9",
+                params![
+                    hash.as_str(),
+                    a.kind.as_str(),
+                    source.as_str(),
+                    a.width,
+                    a.height,
+                    a.bytes,
+                    needs_full_decode as i64,
+                    preview::GENERATOR_VERSION,
+                    now,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Promotion-rule input (§10.3): live strokes from the events engine's
+    /// derived stats (P1.1's `image_journal_stats`).
+    fn image_has_strokes_locked(
+        &self,
+        conn: &Connection,
+        hash: &ContentHash,
+    ) -> rusqlite::Result<bool> {
+        let n: Option<i64> = conn
+            .query_row(
+                "SELECT has_strokes FROM image_journal_stats WHERE image_hash = ?1",
+                params![hash.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(n.unwrap_or(0) != 0)
+    }
+
+    pub fn pass_counters(
+        &self,
+    ) -> Result<std::collections::BTreeMap<(String, i64), PassCounters>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(ingest::pass_counters(&conn)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Watcher entry points (§7.1)
+    // -----------------------------------------------------------------------
+
+    /// A deterministic watch pipeline for one root (the §7.1 state machine
+    /// with an injected clock). The notify-backed thread drives the same
+    /// pipeline with the real clock.
+    pub fn watch_pipeline(
+        self: &Arc<Self>,
+        root_id: &str,
+        cfg: DebounceConfig,
+    ) -> Result<WatchPipeline, LibraryError> {
+        watcher::WatchPipeline::new(Arc::clone(self), root_id, cfg)
+    }
+
+    /// Start a live `notify` watcher for a root. Errors/overflow trigger an
+    /// immediate scan and degrade the root to polled mode (§7.1).
+    pub fn start_watcher(
+        self: &Arc<Self>,
+        root_id: &str,
+    ) -> Result<watcher::RootWatcherHandle, LibraryError> {
+        watcher::start_root_watcher(self, root_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Queries (availability §8, best path §3.1, records)
+    // -----------------------------------------------------------------------
+
+    pub fn availability(&self, hash: &ContentHash) -> Result<Availability, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(paths::availability(&conn, hash)?)
+    }
+
+    pub fn best_path(&self, hash: &ContentHash) -> Result<Option<BestPath>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(paths::best_path(&conn, hash)?)
+    }
+
+    pub fn dormant_prior_versions(
+        &self,
+        volume_id: &str,
+        rel_path: &str,
+    ) -> Result<Vec<ContentHash>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(paths::dormant_prior_versions(&conn, volume_id, rel_path)?)
+    }
+
+    pub fn paths_for_image(&self, hash: &ContentHash) -> Result<Vec<PathRow>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(paths::rows_for_image(&conn, hash)?)
+    }
+
+    pub fn image_count(&self) -> Result<i64, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))?)
+    }
+
+    pub fn image_hashes(&self) -> Result<Vec<ContentHash>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare("SELECT image_hash FROM images ORDER BY image_hash")?;
+        let rows = stmt.query_map([], |r| {
+            let h: String = r.get(0)?;
+            ContentHash::from_hex(&h).map_err(|_| rusqlite::Error::InvalidQuery)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn image(&self, hash: &ContentHash) -> Result<Option<ImageRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT image_hash, byte_size, format, raw_subtype, pixel_width, pixel_height,
+                        exif_orientation, capture_ts, capture_tz_offset, camera_make,
+                        camera_model, lens_model, focal_length_mm, iso, f_number,
+                        exposure_time, gps_lat, gps_lon, first_ingested_at
+                 FROM images WHERE image_hash = ?1",
+                params![hash.as_str()],
+                image_record,
+            )
+            .optional()?)
+    }
+
+    pub fn preview_artifact(
+        &self,
+        hash: &ContentHash,
+        kind: ArtifactKind,
+    ) -> Result<Option<ArtifactRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let rec = conn
+            .query_row(
+                "SELECT source, width, height, bytes, needs_full_decode, generator_version
+                 FROM preview_artifacts WHERE image_hash = ?1 AND kind = ?2",
+                params![hash.as_str(), kind.as_str()],
+                |r| {
+                    Ok(ArtifactRecord {
+                        kind,
+                        source: match r.get::<_, String>(0)?.as_str() {
+                            "embedded" => PreviewSource::Embedded,
+                            "full-decode" => PreviewSource::FullDecode,
+                            _ => PreviewSource::Original,
+                        },
+                        width: r.get(1)?,
+                        height: r.get(2)?,
+                        bytes: r.get(3)?,
+                        needs_full_decode: r.get::<_, i64>(4)? != 0,
+                        generator_version: r.get(5)?,
+                        file: PathBuf::new(),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(rec.map(|mut r| {
+            r.file = preview::artifact_path(&self.cache_dir, hash, kind);
+            r
+        }))
+    }
+
+    /// Test/maintenance: drop artifact rows + files so the preview pass can
+    /// be exercised again ("clear preview cache" command, §9.8).
+    pub fn clear_preview_cache(&self, hash: &ContentHash) -> Result<(), LibraryError> {
+        let now = self.now();
+        {
+            let conn = self.db.lock().expect("poisoned");
+            conn.execute(
+                "DELETE FROM preview_artifacts WHERE image_hash = ?1",
+                params![hash.as_str()],
+            )?;
+            conn.execute(
+                "UPDATE ingest_passes SET state = 'pending', not_before = NULL
+                 WHERE image_hash = ?1 AND pass_name = 'preview' AND state IN ('done','error')",
+                params![hash.as_str()],
+            )?;
+            let _ = now;
+        }
+        for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+            let p = preview::artifact_path(&self.cache_dir, hash, kind);
+            if p.exists() {
+                std::fs::remove_file(&p)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Effective mtime tolerance for a volume (§7.3: 2 s on FAT/exFAT).
+    pub(crate) fn mtime_tolerance_ns(&self, fs_type: Option<&str>) -> i64 {
+        const COARSE: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
+        match fs_type {
+            Some(t) if COARSE.contains(&t.to_ascii_lowercase().as_str()) => 2_000_000_000,
+            _ => 0,
+        }
+    }
+}
+
+/// Outcome of the §7.2 algorithm for one path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observed {
+    FastPath,
+    Updated,
+    Relinked(ContentHash),
+    NewImage(ContentHash),
+    Superseded { old: ContentHash, new: ContentHash },
+}
+
+#[derive(Debug, Default)]
+pub struct QueueOptions {
+    pub cancel: Option<CancelFlag>,
+    pub max_items: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct QueueReport {
+    pub processed: usize,
+    pub done: usize,
+    pub errors: usize,
+    pub skipped: usize,
+    pub transient_retries: usize,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageRecord {
+    pub image_hash: ContentHash,
+    pub byte_size: i64,
+    pub format: ImageFormat,
+    pub raw_subtype: Option<String>,
+    pub pixel_width: Option<i64>,
+    pub pixel_height: Option<i64>,
+    pub exif_orientation: u16,
+    pub capture_ts: Option<String>,
+    pub capture_tz_offset: Option<String>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub focal_length_mm: Option<f64>,
+    pub iso: Option<i64>,
+    pub f_number: Option<f64>,
+    pub exposure_time: Option<String>,
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
+    pub first_ingested_at: String,
+}
+
+fn image_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
+    Ok(ImageRecord {
+        image_hash: ContentHash::from_hex(&r.get::<_, String>(0)?)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        byte_size: r.get(1)?,
+        format: ImageFormat::parse(&r.get::<_, String>(2)?).ok_or(rusqlite::Error::InvalidQuery)?,
+        raw_subtype: r.get(3)?,
+        pixel_width: r.get(4)?,
+        pixel_height: r.get(5)?,
+        exif_orientation: r.get::<_, i64>(6)? as u16,
+        capture_ts: r.get(7)?,
+        capture_tz_offset: r.get(8)?,
+        camera_make: r.get(9)?,
+        camera_model: r.get(10)?,
+        lens_model: r.get(11)?,
+        focal_length_mm: r.get(12)?,
+        iso: r.get(13)?,
+        f_number: r.get(14)?,
+        exposure_time: r.get(15)?,
+        gps_lat: r.get(16)?,
+        gps_lon: r.get(17)?,
+        first_ingested_at: r.get(18)?,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRecord {
+    pub kind: ArtifactKind,
+    pub source: PreviewSource,
+    pub width: i64,
+    pub height: i64,
+    pub bytes: i64,
+    pub needs_full_decode: bool,
+    pub generator_version: i64,
+    pub file: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeRecord {
+    pub volume_id: VolumeId,
+    pub marker_ulid: Option<String>,
+    pub platform_id: Option<String>,
+    pub platform_kind: Option<String>,
+    pub label: Option<String>,
+    pub fs_type: Option<String>,
+    pub capacity_bytes: Option<i64>,
+    pub read_only: bool,
+    pub online: bool,
+    pub mount_point: Option<String>,
+}
+
+fn volume_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<VolumeRecord> {
+    Ok(VolumeRecord {
+        volume_id: r.get(0)?,
+        marker_ulid: r.get(1)?,
+        platform_id: r.get(2)?,
+        platform_kind: r.get(3)?,
+        label: r.get(4)?,
+        fs_type: r.get(5)?,
+        capacity_bytes: r.get(6)?,
+        read_only: r.get::<_, i64>(7)? != 0,
+        online: r.get::<_, String>(8)? == "online",
+        mount_point: r.get(9)?,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootRecord {
+    pub root_id: RootId,
+    pub volume_id: VolumeId,
+    pub rel_path: String,
+    pub display_name: Option<String>,
+    pub state: String,
+}
+
+fn root_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
+    Ok(RootRecord {
+        root_id: r.get(0)?,
+        volume_id: r.get(1)?,
+        rel_path: r.get(2)?,
+        display_name: r.get(3)?,
+        state: r.get(4)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Connection + path helpers
+// ---------------------------------------------------------------------------
+
+/// The §5.1 connection pragmas (EVENTS.md; operational values per DECISIONS
+/// P18), applied to the library's writer connection. Duplicated from the
+/// store-private `schema::apply_pragmas` — flagged in the packet report.
+fn open_library_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    for pragma in [
+        "PRAGMA journal_mode = WAL",
+        "PRAGMA synchronous = NORMAL",
+        "PRAGMA secure_delete = ON",
+        "PRAGMA foreign_keys = OFF",
+        "PRAGMA cache_size = -65536",
+        "PRAGMA mmap_size = 268435456",
+        "PRAGMA temp_store = MEMORY",
+        "PRAGMA busy_timeout = 5000",
+    ] {
+        let mut stmt = conn.prepare(pragma)?;
+        let mut rows = stmt.query([])?;
+        let _ = rows.next()?;
+    }
+    Ok(conn)
+}
+
+pub(crate) fn image_exists_on(conn: &Connection, hash: &ContentHash) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM images WHERE image_hash = ?1",
+        params![hash.as_str()],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// File mtime as nanoseconds since the epoch, at filesystem precision (§6).
+pub(crate) fn mtime_ns_of(meta: &std::fs::Metadata) -> i64 {
+    match meta.modified() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+            Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+        },
+        Err(_) => 0,
+    }
+}
+
+/// Join a volume mount point with a volume-relative `/`-separated path.
+pub(crate) fn join_rel(mount_point: &Path, rel: &str) -> PathBuf {
+    if rel.is_empty() {
+        mount_point.to_path_buf()
+    } else {
+        let mut p = mount_point.to_path_buf();
+        for comp in rel.split('/') {
+            p.push(comp);
+        }
+        p
+    }
+}
+
+/// Volume-relative path string: UTF-8, `/`-separated on all platforms (§3).
+/// `None` = non-UTF-8 (skipped and logged by callers — lossy storage would
+/// break relinking).
+pub(crate) fn rel_path_str(mount_point: &Path, abs: &Path) -> Option<String> {
+    let rel = abs.strip_prefix(mount_point).ok()?;
+    let mut parts = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::Normal(c) => parts.push(c.to_str()?.to_owned()),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Component-wise: is `outer` equal to or an ancestor of `inner`?
+fn rel_contains(outer: &str, inner: &str) -> bool {
+    if outer == inner {
+        return true;
+    }
+    if outer.is_empty() {
+        return true; // volume root contains everything
+    }
+    inner.starts_with(outer) && inner.as_bytes().get(outer.len()) == Some(&b'/')
+}
+
+/// §5.2 detection of well-known sync-service paths (advisory only).
+fn sync_service_hint(dir: &Path) -> Option<&'static str> {
+    let s = dir.to_string_lossy().to_ascii_lowercase();
+    if s.contains("dropbox") {
+        Some("Dropbox")
+    } else if s.contains("onedrive") {
+        Some("OneDrive")
+    } else if s.contains("google drive") || s.contains("googledrive") {
+        Some("Google Drive")
+    } else if s.contains("mobile documents") || s.contains("icloud") {
+        Some("iCloud Drive")
+    } else if dir.join(".dropbox").exists() {
+        Some("Dropbox")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rel_contains_is_component_wise() {
+        assert!(rel_contains("a/b", "a/b/c"));
+        assert!(rel_contains("a/b", "a/b"));
+        assert!(!rel_contains("a/b", "a/bc"));
+        assert!(rel_contains("", "anything"));
+        assert!(!rel_contains("a/b/c", "a/b"));
+    }
+
+    #[test]
+    fn rel_path_round_trip() {
+        let mp = Path::new("/mnt/vol");
+        let abs = Path::new("/mnt/vol/photos/2026/IMG_1.jpg");
+        let rel = rel_path_str(mp, abs).unwrap();
+        assert_eq!(rel, "photos/2026/IMG_1.jpg");
+        assert_eq!(join_rel(mp, &rel), abs);
+        assert_eq!(rel_path_str(mp, mp).unwrap(), "");
+    }
+
+    #[test]
+    fn monotonic_clock_strictly_increases() {
+        let c = MonotonicMillis::new();
+        let a = c.now();
+        let b = c.now();
+        let d = c.now();
+        assert!(b > a);
+        assert!(d > b);
+    }
+}
