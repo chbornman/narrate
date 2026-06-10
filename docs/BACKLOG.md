@@ -41,6 +41,13 @@ managing = off-thesis).
   M2b voice (events will land without UI actions); the M1 writers are
   covered by direct refresh hooks (`ecf6e26`).
 
+- [ ] **RAW 1:1 via the embedded full-res JPEG** — most cameras embed a
+  full-resolution JPEG in the RAW; ingest extracts it then downscales to
+  2560, discarding pixels we already had. Serve the embedded JPEG at native
+  size through the progressive route when zooming a RAW past the preview
+  (no RAW decode needed); true decoded 1:1 stays M1.5. (Founder, dogfood
+  round 2.)
+
 ## M1.5 (scheduled concept, not yet a packet)
 
 - [ ] Full RAW decode backfill pass (rawler/libheif worker; queue already
