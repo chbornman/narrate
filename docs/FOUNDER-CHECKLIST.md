@@ -78,7 +78,7 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
 ## Update log
 
 - 2026-06-10: created after Phase 2 completion (P1.1, P1.2, P2.1, P2.2,
+  audit fix packet all green; 193 workspace tests).
 - 2026-06-10: Phase 3 complete (P3.1 search core, P3.2 desktop shell, search
   wired; 254 workspace tests + 95 vitest). Added B31 erratum, app visual
   checklist, HEIC count check.
-  audit fix packet all green; 193 workspace tests).
