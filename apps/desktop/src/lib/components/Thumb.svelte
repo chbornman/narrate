@@ -33,26 +33,41 @@
   // load the neutral placeholder shows instead of the webview's broken-image
   // icon. Capped: images whose previews are deferred (e.g. RAW full-decode
   // backfill) settle on the placeholder.
+  //
+  // Load state is KEYED BY HASH, never reset by effects: cached images can
+  // complete before the first effect runs, so an effect-driven reset races
+  // onload and permanently hides the img. The complete-check below covers
+  // loads that finish before handlers observe them.
   const MAX_RETRIES = 30;
-  let attempt = $state(0);
-  let loaded = $state(false);
+  let el: HTMLImageElement | undefined = $state();
+  let loadedHash = $state<string | null>(null);
+  let retry = $state({ hash: "", n: 0 });
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
+  const attempt = $derived(retry.hash === hash ? retry.n : 0);
+  const loaded = $derived(loadedHash === hash);
+
   $effect(() => {
-    void hash; // recycled cell: new item resets load state
-    attempt = 0;
-    loaded = false;
+    void hash;
+    const img = el;
+    if (img && img.complete && img.naturalWidth > 0) {
+      loadedHash = hash;
+    }
     return () => clearTimeout(retryTimer);
   });
 
   function handleError() {
-    if (attempt >= MAX_RETRIES) return;
+    const n = retry.hash === hash ? retry.n : 0;
+    if (n >= MAX_RETRIES) return;
+    const forHash = hash;
     clearTimeout(retryTimer);
     retryTimer = setTimeout(
       () => {
-        attempt += 1;
+        if (hash === forHash) {
+          retry = { hash: forHash, n: n + 1 };
+        }
       },
-      Math.min(1000 * (attempt + 1), 5000),
+      Math.min(1000 * (n + 1), 5000),
     );
   }
 </script>
@@ -71,6 +86,7 @@
   tabindex="-1"
 >
   <img
+    bind:this={el}
     src={attempt > 0 ? `${thumbUrl(hash)}?r=${attempt}` : thumbUrl(hash)}
     alt=""
     draggable="false"
@@ -78,7 +94,7 @@
     decoding="async"
     class:loaded
     onload={() => {
-      loaded = true;
+      loadedHash = hash;
     }}
     onerror={handleError}
   />

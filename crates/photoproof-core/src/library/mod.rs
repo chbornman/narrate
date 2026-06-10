@@ -1740,12 +1740,231 @@ impl Library {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Batched grid listing (P4.1 A2 — the shell's one folder read)
+    // -----------------------------------------------------------------------
+
+    /// Direct-children images of one folder under one root, with badge data
+    /// (has-journal dot, folded rating, offline) in ONE query — the grid's
+    /// batched read (UI §3.5; per-image reads over a 20k folder are the N+1
+    /// this replaces). `folder` is root-relative ("" = the root itself);
+    /// order: ascending rel_path. Joins the events-side derived folds
+    /// (`image_journal_stats`, `image_ratings` — P5/B4/B34), which live in
+    /// the same database.
+    pub fn list_folder(
+        &self,
+        root_id: &str,
+        folder: &str,
+    ) -> Result<Vec<FolderImage>, LibraryError> {
+        let root = self
+            .root(root_id)?
+            .ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+        // Volume-relative prefix images in the folder must carry.
+        let mut prefix = String::new();
+        if !root.rel_path.is_empty() {
+            prefix.push_str(&root.rel_path);
+            prefix.push('/');
+        }
+        if !folder.is_empty() {
+            prefix.push_str(folder);
+            prefix.push('/');
+        }
+        let root_prefix_len = if root.rel_path.is_empty() {
+            0
+        } else {
+            root.rel_path.len() + 1
+        };
+        let conn = self.db.lock().expect("poisoned");
+        // has_journal: the dulled-red dot is evidence of *annotations* —
+        // words OR marks (B34: `has_text OR has_strokes`). Rating keys must
+        // produce "no visual change to any thumbnail" (UI §3.7), so a
+        // rating-only journal does not light the dot.
+        let mut stmt = conn.prepare_cached(
+            "SELECT p.rel_path, p.image_hash, i.capture_ts, i.first_ingested_at,
+                    COALESCE(s.has_text, 0) OR COALESCE(s.has_strokes, 0) AS has_journal,
+                    r.rating,
+                    NOT EXISTS (
+                      SELECT 1 FROM paths p2
+                      JOIN volumes v2 ON v2.volume_id = p2.volume_id
+                      WHERE p2.image_hash = p.image_hash
+                        AND p2.state = 'active' AND v2.state = 'online'
+                    ) AS offline
+             FROM paths p
+             JOIN images i ON i.image_hash = p.image_hash
+             LEFT JOIN image_journal_stats s ON s.image_hash = p.image_hash
+             LEFT JOIN image_ratings r ON r.image_hash = p.image_hash
+             WHERE p.root_id = ?1 AND p.state = 'active'
+               AND substr(p.rel_path, 1, length(?2)) = ?2
+               AND instr(substr(p.rel_path, length(?2) + 1), '/') = 0
+             ORDER BY p.rel_path",
+        )?;
+        let rows = stmt.query_map(params![root_id, prefix], |r| {
+            let rel: String = r.get(0)?;
+            let hash: String = r.get(1)?;
+            let root_relative = rel.get(root_prefix_len..).unwrap_or("").to_owned();
+            let file_name = root_relative
+                .rsplit('/')
+                .next()
+                .unwrap_or(&root_relative)
+                .to_owned();
+            Ok(FolderImage {
+                hash: ContentHash::from_hex(&hash).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                file_name,
+                rel_path: root_relative,
+                capture_ts: r.get(2)?,
+                first_ingested_at: r.get(3)?,
+                has_journal: r.get::<_, i64>(4)? != 0,
+                rating: r.get::<_, Option<i64>>(5)?.map(|v| v as u8),
+                offline: r.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Folder tree of one root (the rail), derived from active path rows.
+    /// `rel_path`s are root-relative; children sorted by name.
+    pub fn folder_tree(&self, root_id: &str) -> Result<Vec<FolderTreeNode>, LibraryError> {
+        let root = self
+            .root(root_id)?
+            .ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+        let root_prefix_len = if root.rel_path.is_empty() {
+            0
+        } else {
+            root.rel_path.len() + 1
+        };
+        let rels: Vec<String> = {
+            let conn = self.db.lock().expect("poisoned");
+            let mut stmt = conn.prepare_cached(
+                "SELECT DISTINCT rel_path FROM paths WHERE root_id = ?1 AND state = 'active'",
+            )?;
+            let rows = stmt.query_map(params![root_id], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        // Every ancestor directory (root-relative), parents before children.
+        let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for rel in &rels {
+            let Some(rr) = rel.get(root_prefix_len..) else {
+                continue;
+            };
+            let mut acc = String::new();
+            let segs: Vec<&str> = rr.split('/').collect();
+            for seg in &segs[..segs.len().saturating_sub(1)] {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(seg);
+                dirs.insert(acc.clone());
+            }
+        }
+        Ok(build_folder_tree(&dirs))
+    }
+
     /// Effective mtime tolerance for a volume (§7.3: 2 s on FAT/exFAT).
     pub(crate) fn mtime_tolerance_ns(&self, fs_type: Option<&str>) -> i64 {
         const COARSE: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
         match fs_type {
             Some(t) if COARSE.contains(&t.to_ascii_lowercase().as_str()) => 2_000_000_000,
             _ => 0,
+        }
+    }
+}
+
+/// One grid row of [`Library::list_folder`] (UI §3.5 badge data).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderImage {
+    pub hash: ContentHash,
+    pub file_name: String,
+    /// Root-relative path of the file.
+    pub rel_path: String,
+    /// EXIF capture timestamp (RFC 3339) when known.
+    pub capture_ts: Option<String>,
+    /// First-ingested timestamp (RFC 3339) — the "date added" sort key.
+    pub first_ingested_at: String,
+    /// Has-journal dot (UI §3.5/§3.7, B34): remark-or-stroke evidence
+    /// (`has_text OR has_strokes`); a rating-only journal lights no dot.
+    pub has_journal: bool,
+    /// Folded current rating (0..=5); `None` = unrated (E4: 0 is explicit).
+    pub rating: Option<u8>,
+    /// Every active path for this image sits on an offline volume.
+    pub offline: bool,
+}
+
+/// One node of [`Library::folder_tree`] (the rail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderTreeNode {
+    pub name: String,
+    /// Root-relative folder path.
+    pub rel_path: String,
+    pub children: Vec<FolderTreeNode>,
+}
+
+fn build_folder_tree(dirs: &std::collections::BTreeSet<String>) -> Vec<FolderTreeNode> {
+    let mut index: std::collections::BTreeMap<String, FolderTreeNode> =
+        std::collections::BTreeMap::new();
+    for d in dirs {
+        let name = d.rsplit('/').next().unwrap_or(d).to_owned();
+        index.insert(
+            d.clone(),
+            FolderTreeNode {
+                name,
+                rel_path: d.clone(),
+                children: Vec::new(),
+            },
+        );
+    }
+    // Attach children to parents, deepest first so parents collect built
+    // subtrees (BTreeMap iterates parents before children, so reverse).
+    let mut roots: Vec<FolderTreeNode> = Vec::new();
+    let keys: Vec<String> = index.keys().rev().cloned().collect();
+    for k in keys {
+        let node = index.remove(&k).expect("present");
+        match k.rsplit_once('/') {
+            Some((parent, _)) if index.contains_key(parent) => {
+                index
+                    .get_mut(parent)
+                    .expect("parent present")
+                    .children
+                    .insert(0, node);
+            }
+            _ => roots.insert(0, node),
+        }
+    }
+    roots
+}
+
+/// B29's stated home: the library layer implements the sidecar engine's
+/// `ImageLocator` seam directly — hash → current adjacent sidecar location,
+/// from `best_path` + volume writability.
+impl crate::sidecar::ImageLocator for Library {
+    fn locate(&self, image: &ContentHash) -> crate::sidecar::AdjacentLocation {
+        use crate::sidecar::AdjacentLocation;
+        let Ok(Some(best)) = self.best_path(image) else {
+            return AdjacentLocation::Offline { volume_id: None };
+        };
+        if !best.online {
+            return AdjacentLocation::Offline {
+                volume_id: Some(best.row.volume_id),
+            };
+        }
+        let Some(mount) = best.mount_point.as_deref() else {
+            return AdjacentLocation::Offline {
+                volume_id: Some(best.row.volume_id),
+            };
+        };
+        let image_path = join_rel(Path::new(mount), &best.row.rel_path);
+        let read_only = self
+            .volume(&best.row.volume_id)
+            .ok()
+            .flatten()
+            .map(|v| v.read_only)
+            .unwrap_or(true);
+        if read_only {
+            AdjacentLocation::Unwritable {
+                image_path: Some(image_path),
+                volume_id: Some(best.row.volume_id),
+            }
+        } else {
+            AdjacentLocation::Writable { image_path }
         }
     }
 }

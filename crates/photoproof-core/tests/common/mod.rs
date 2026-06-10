@@ -1,6 +1,9 @@
 //! Shared helpers for the spec/EVENTS.md test suites.
 #![allow(dead_code)]
 
+pub mod m1env;
+pub mod synthlib;
+
 use std::path::PathBuf;
 
 use photoproof_core::{
@@ -288,8 +291,8 @@ pub fn dump_derived(conn: &Connection, with_dirty_ts: bool) -> Vec<String> {
     ));
     out.extend(dump_query(
         conn,
-        "SELECT image_hash, event_count, has_strokes, last_ts FROM image_journal_stats \
-         ORDER BY image_hash",
+        "SELECT image_hash, event_count, has_text, has_strokes, last_ts \
+         FROM image_journal_stats ORDER BY image_hash",
     ));
     out.extend(dump_query(
         conn,

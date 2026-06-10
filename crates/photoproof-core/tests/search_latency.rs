@@ -352,8 +352,8 @@ fn build_corpus(path: &PathBuf) -> (u64, u64) {
     // Derived stats fold (P5), grouped once like rebuild does.
     let stats: u64 = conn
         .execute(
-            "INSERT INTO image_journal_stats(image_hash, event_count, has_strokes, last_ts) \
-             SELECT t.image_hash, COUNT(*), MAX(e.kind = 'stroke'), MAX(e.ts) \
+            "INSERT INTO image_journal_stats(image_hash, event_count, has_text, has_strokes, last_ts) \
+             SELECT t.image_hash, COUNT(*), MAX(e.kind = 'remark'), MAX(e.kind = 'stroke'), MAX(e.ts) \
              FROM event_targets t JOIN annotation_events e ON e.id = t.event_id \
              GROUP BY t.image_hash",
             [],

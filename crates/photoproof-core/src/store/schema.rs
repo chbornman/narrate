@@ -90,9 +90,14 @@ CREATE TABLE image_ratings (
 ) STRICT, WITHOUT ROWID;
 
 -- Journal-stats fold: one row per image with any live journal presence (P5).
+-- `has_text` added in P4.1 (DECISIONS B34): the has-journal dot needs
+-- remark-or-stroke evidence, so a rating-only journal must be
+-- distinguishable without a per-image fold. Extended in place in the v1 DDL:
+-- no deployed databases exist pre-dogfood (flagged in the P4.1 report).
 CREATE TABLE image_journal_stats (
   image_hash   TEXT PRIMARY KEY,
   event_count  INTEGER NOT NULL,    -- live (non-retracted) events targeting the image
+  has_text     INTEGER NOT NULL,    -- 0/1: any live, non-scrubbed remark (B34)
   has_strokes  INTEGER NOT NULL,    -- 0/1: any live stroke
   last_ts      TEXT NOT NULL        -- ts of the most recent live event
 ) STRICT, WITHOUT ROWID;

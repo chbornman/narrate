@@ -19,10 +19,10 @@ use crate::dto::{
 };
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
+use crate::pump;
 use crate::search_types::{Filter, SearchResults};
 use crate::settings::AppSettings;
 use crate::state::App;
-use crate::{gridq, pump};
 
 type S<'a> = State<'a, Arc<App>>;
 
@@ -261,39 +261,47 @@ pub async fn remove_root(app: S<'_>, root_id: String) -> CmdResult<()> {
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+fn folder_node(n: photoproof_core::library::FolderTreeNode) -> FolderNode {
+    FolderNode {
+        name: n.name,
+        rel_path: n.rel_path,
+        children: n.children.into_iter().map(folder_node).collect(),
+    }
+}
+
 #[tauri::command]
 pub async fn folder_tree(app: S<'_>, root_id: String) -> CmdResult<Vec<FolderNode>> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let root = app
-            .library
-            .root(&root_id)?
-            .ok_or_else(|| CmdError::Invalid(format!("unknown root: {root_id}")))?;
-        let conn = app.readq.lock().expect("readq mutex");
-        Ok(gridq::folder_tree(&conn, &root_id, &root.rel_path)?)
+        let tree = app.library.folder_tree(&root_id)?;
+        Ok(tree.into_iter().map(folder_node).collect())
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Grid listing: direct-children images of one folder with badge data
-/// (has-journal, rating fold, offline) in one batched read. Thumbnails load
-/// via `photoproof://` URLs the frontend derives from `hash`.
+/// (has-journal, rating fold, offline) in one batched read
+/// (`Library::list_folder`). Thumbnails load via `photoproof://` URLs the
+/// frontend derives from `hash`.
 #[tauri::command]
 pub async fn list_folder(app: S<'_>, root_id: String, folder: String) -> CmdResult<Vec<GridItem>> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let root = app
-            .library
-            .root(&root_id)?
-            .ok_or_else(|| CmdError::Invalid(format!("unknown root: {root_id}")))?;
-        let conn = app.readq.lock().expect("readq mutex");
-        Ok(gridq::list_folder(
-            &conn,
-            &root_id,
-            &root.rel_path,
-            &folder,
-        )?)
+        let items = app.library.list_folder(&root_id, &folder)?;
+        Ok(items
+            .into_iter()
+            .map(|i| GridItem {
+                hash: i.hash.as_str().to_owned(),
+                file_name: i.file_name,
+                rel_path: i.rel_path,
+                capture_ts: i.capture_ts,
+                added_ts: i.first_ingested_at,
+                has_journal: i.has_journal,
+                rating: i.rating,
+                offline: i.offline,
+            })
+            .collect())
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?

@@ -216,6 +216,28 @@ pub struct SessionRecord {
     pub root_context: Option<String>,
 }
 
+/// One `image_journal_stats` row (P5, B4, B34): the grid-badge fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalStats {
+    pub image: ContentHash,
+    /// Live (non-retracted) content events targeting the image; scrubbed
+    /// stubs count (B4).
+    pub event_count: i64,
+    /// Any live, non-scrubbed remark (B34) — words evidence.
+    pub has_text: bool,
+    /// Any live, non-scrubbed stroke (B4) — marks evidence.
+    pub has_strokes: bool,
+    /// ts of the greatest-id live event.
+    pub last_ts: UtcMillis,
+}
+
+impl JournalStats {
+    /// UI §3.7 over B34: the dulled-red dot lights on words or marks only.
+    pub fn has_journal(&self) -> bool {
+        self.has_text || self.has_strokes
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Read instrumentation (I16): every SELECT issued by a read-pool connection
 // on the current thread is counted, so tests can assert the §10.1 batched
@@ -418,6 +440,39 @@ impl EventStore {
                 .query_row([image.as_str()], |r| r.get(0))
                 .optional()?;
             Ok(v.map(|v| v as u8))
+        })
+    }
+
+    /// Batched journal-stats read for grid badges (UI §3.5, P5, B34): one
+    /// SELECT per IN-list chunk over the derived `image_journal_stats` fold.
+    /// Images with no live journal have no row and are absent from the
+    /// result. Order: ascending image hash.
+    pub fn journal_stats(&self, images: &[ContentHash]) -> Result<Vec<JournalStats>, StoreError> {
+        self.with_reader(|conn| {
+            let mut out = Vec::new();
+            for chunk in images.chunks(IN_LIST_CHUNK) {
+                let marks = vec!["?"; chunk.len()].join(",");
+                let sql = format!(
+                    "SELECT image_hash, event_count, has_text, has_strokes, last_ts \
+                     FROM image_journal_stats WHERE image_hash IN ({marks}) \
+                     ORDER BY image_hash"
+                );
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let params: Vec<&str> = chunk.iter().map(ContentHash::as_str).collect();
+                let mut rows = stmt.query(params_from_iter(params.iter()))?;
+                while let Some(row) = rows.next()? {
+                    let hash: String = row.get(0)?;
+                    let last_ts: String = row.get(4)?;
+                    out.push(JournalStats {
+                        image: ContentHash::from_hex(&hash).map_err(corrupt)?,
+                        event_count: row.get(1)?,
+                        has_text: row.get::<_, i64>(2)? != 0,
+                        has_strokes: row.get::<_, i64>(3)? != 0,
+                        last_ts: UtcMillis::parse(&last_ts).map_err(corrupt)?,
+                    });
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -744,6 +799,44 @@ impl EventStore {
     /// Read one session row (storage only; lifecycle in CAPTURE).
     pub fn session(&self, id: &SessionId) -> Result<Option<SessionRecord>, StoreError> {
         self.with_reader(|conn| get_session(conn, id))
+    }
+
+    /// Sessions with no `ended_ts`, ascending id — the crash-recovery input
+    /// (CAPTURE §2.4): sessions left open by a dead process. Recovery mints
+    /// no events; callers close each at its last event's ts (else its start)
+    /// via [`EventStore::last_event_ts`] + [`EventStore::close_session`].
+    pub fn open_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
+        self.with_reader(|conn| {
+            let ids: Vec<String> = {
+                let mut stmt = conn
+                    .prepare_cached("SELECT id FROM sessions WHERE ended_ts IS NULL ORDER BY id")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let sid = SessionId::from_str_strict(&id).map_err(corrupt)?;
+                out.push(get_session(conn, &sid)?.expect("row just selected"));
+            }
+            Ok(out)
+        })
+    }
+
+    /// `ts` of the greatest-id event in a session, `None` if the session has
+    /// no events. Crash recovery closes a recovered session here (CAPTURE
+    /// §2.2's no-dead-air rule: a session's span ends at its last activity).
+    pub fn last_event_ts(&self, session: &SessionId) -> Result<Option<UtcMillis>, StoreError> {
+        self.with_reader(|conn| {
+            let ts: Option<String> = conn
+                .prepare_cached(
+                    "SELECT ts FROM annotation_events WHERE session_id = ?1 \
+                     ORDER BY id DESC LIMIT 1",
+                )?
+                .query_row([session.as_str()], |r| r.get(0))
+                .optional()?;
+            ts.map(|t| UtcMillis::parse(&t).map_err(corrupt))
+                .transpose()
+        })
     }
 
     // -- rebuild (§5.3–5.4, I7) ---------------------------------------------------
@@ -1665,6 +1758,7 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
     )?;
     let mut rows = stmt.query([hash])?;
     let mut event_count: i64 = 0;
+    let mut has_text = false;
     let mut has_strokes = false;
     let mut last_ts: Option<String> = None;
     let mut winner: Option<(String, String, i64)> = None; // (event_id, ts, value)
@@ -1681,6 +1775,10 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
         event_count += 1;
         last_ts = Some(ts.clone());
         match kind.as_str() {
+            // B34: words evidence, symmetric with `has_strokes` — live AND
+            // non-scrubbed. A redacted remark renders as a "[redacted]" stub
+            // (Q2) but carries no words; it lights no dot.
+            "remark" if !scrubbed => has_text = true,
             "stroke" if !scrubbed => has_strokes = true,
             "rating" if !scrubbed => {
                 if let Some(p) = payload
@@ -1710,15 +1808,16 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
     }
     if event_count > 0 {
         tx.prepare_cached(
-            "INSERT INTO image_journal_stats(image_hash, event_count, has_strokes, last_ts) \
-             VALUES (?1, ?2, ?3, ?4) \
+            "INSERT INTO image_journal_stats(image_hash, event_count, has_text, has_strokes, last_ts) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT(image_hash) DO UPDATE SET \
-               event_count = excluded.event_count, has_strokes = excluded.has_strokes, \
-               last_ts = excluded.last_ts",
+               event_count = excluded.event_count, has_text = excluded.has_text, \
+               has_strokes = excluded.has_strokes, last_ts = excluded.last_ts",
         )?
         .execute(params![
             hash,
             event_count,
+            has_text as i64,
             has_strokes as i64,
             last_ts.expect("count > 0")
         ])?;

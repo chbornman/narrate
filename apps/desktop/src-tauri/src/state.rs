@@ -12,23 +12,24 @@ use photoproof_core::sidecar::SidecarEngine;
 use photoproof_core::{EventStore, SessionContext, SessionId, UtcMillis};
 
 use crate::error::CmdError;
-use crate::locator::LibLocator;
 use crate::scope::ScopeTracker;
+use crate::search_types;
 use crate::session::SessionManager;
 use crate::settings::{self, AppSettings};
-use crate::{gridq, search_types};
 
 pub struct App {
-    /// Leaked on purpose: the store lives for the process (the sidecar
-    /// engine borrows it for `'static`; the app never tears it down before
-    /// exit, and shutdown flushing is explicit, not Drop-driven).
-    pub store: &'static EventStore,
+    /// Shared with the sidecar engine (`SidecarEngine::new_shared`); lives
+    /// for the process. Shutdown flushing is explicit, not Drop-driven.
+    pub store: Arc<EventStore>,
     pub library: Arc<Library>,
-    pub engine: SidecarEngine<'static, LibLocator>,
+    /// The library implements `ImageLocator` directly (DECISIONS B29).
+    pub engine: SidecarEngine<'static, Arc<Library>>,
     pub app_data: PathBuf,
     pub scope: Mutex<ScopeTracker>,
     pub session: Mutex<SessionManager>,
-    /// Read-only sibling connection for batched grid reads (see gridq.rs).
+    /// Read-only sibling connection for the debug panel's raw-row reads
+    /// (dev builds only; every product-facing read goes through core APIs).
+    #[cfg(feature = "debug-panel")]
     pub readq: Mutex<rusqlite::Connection>,
     pub watchers: Mutex<HashMap<String, RootWatcherHandle>>,
     pub settings: Mutex<AppSettings>,
@@ -46,23 +47,19 @@ impl App {
         let db_path = app_data.join("photoproof.db");
         let cache_dir = app_data.join("previews");
 
-        let store: &'static EventStore = Box::leak(Box::new(EventStore::open(&db_path)?));
+        let store = Arc::new(EventStore::open(&db_path)?);
         let library = Arc::new(Library::open(&db_path, &cache_dir)?);
-        let engine = SidecarEngine::new(store, &db_path, &app_data, LibLocator(library.clone()))?;
-        let readq = gridq::open_read_only(&db_path)?;
+        let engine =
+            SidecarEngine::new_shared(store.clone(), &db_path, &app_data, library.clone())?;
         let searcher = Searcher::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?;
 
         // CAPTURE §2.4 crash recovery, before opening the launch session:
         // any session left open by a dead process closes at its last event's
         // ts (else its start), `closed_clean = false` semantics are the
         // store's. Recovery mints no events.
-        for sid in gridq::open_sessions(&readq)? {
-            let ended = gridq::last_event_ts_ms(&readq, &sid)?
-                .or(gridq::session_started_ms(&readq, &sid)?)
-                .unwrap_or_else(|| UtcMillis::now().epoch_ms());
-            let session_id = SessionId::from_str_strict(&sid)
-                .map_err(|e| CmdError::Invalid(format!("recovered session id: {e}")))?;
-            store.close_session(&session_id, UtcMillis::from_epoch_ms(ended))?;
+        for rec in store.open_sessions()? {
+            let ended = store.last_event_ts(&rec.id)?.unwrap_or(rec.started_ts);
+            store.close_session(&rec.id, ended)?;
         }
 
         let ctx = SessionContext {
@@ -70,7 +67,7 @@ impl App {
             device_id: settings::device_id(&app_data)?,
             root_context: None,
         };
-        let session = SessionManager::open(store, ctx)?;
+        let session = SessionManager::open(&store, ctx)?;
         let app_settings = settings::load(&app_data);
 
         Ok(Self {
@@ -80,7 +77,8 @@ impl App {
             app_data,
             scope: Mutex::new(ScopeTracker::new()),
             session: Mutex::new(session),
-            readq: Mutex::new(readq),
+            #[cfg(feature = "debug-panel")]
+            readq: Mutex::new(open_read_only(&db_path)?),
             watchers: Mutex::new(HashMap::new()),
             settings: Mutex::new(app_settings),
             last_search: Mutex::new(None),
@@ -93,7 +91,7 @@ impl App {
     /// the session across a 30-minute boundary.
     pub fn touch(&self) -> Result<(), CmdError> {
         let mut session = self.session.lock().expect("session mutex");
-        session.touch(self.store, UtcMillis::now())?;
+        session.touch(&self.store, UtcMillis::now())?;
         Ok(())
     }
 
@@ -114,7 +112,7 @@ impl App {
             .session
             .lock()
             .expect("session mutex")
-            .close(self.store)
+            .close(&self.store)
         {
             eprintln!("photoproof: session close failed at shutdown: {e}");
         }
@@ -126,6 +124,19 @@ impl App {
             eprintln!("photoproof: session journal flush failed at shutdown: {e}");
         }
     }
+}
+
+/// Read-only sibling connection over the shared WAL database (the debug
+/// panel's raw tail reads bypass core on purpose: they render raw rows).
+#[cfg(feature = "debug-panel")]
+fn open_read_only(db_path: &std::path::Path) -> rusqlite::Result<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(conn)
 }
 
 #[cfg(test)]

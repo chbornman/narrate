@@ -86,6 +86,12 @@ impl<T: ImageLocator + ?Sized> ImageLocator for &T {
     }
 }
 
+impl<T: ImageLocator + ?Sized> ImageLocator for std::sync::Arc<T> {
+    fn locate(&self, image: &ContentHash) -> AdjacentLocation {
+        (**self).locate(image)
+    }
+}
+
 /// In-memory locator for tests and pre-P2.2 wiring. Unknown hashes are
 /// `Offline { volume_id: None }`.
 #[derive(Debug, Default)]
@@ -237,8 +243,27 @@ impl Owner<'_> {
 // The engine
 // ---------------------------------------------------------------------------
 
+/// How the engine holds its `EventStore`: borrowed (tests, scoped callers)
+/// or shared (the process-lifetime app shell — no `Box::leak`). Both deref
+/// to `EventStore`, so engine internals are handle-agnostic.
+pub(crate) enum StoreHandle<'s> {
+    Borrowed(&'s EventStore),
+    Shared(std::sync::Arc<EventStore>),
+}
+
+impl std::ops::Deref for StoreHandle<'_> {
+    type Target = EventStore;
+
+    fn deref(&self) -> &EventStore {
+        match self {
+            StoreHandle::Borrowed(s) => s,
+            StoreHandle::Shared(s) => s,
+        }
+    }
+}
+
 pub struct SidecarEngine<'s, L: ImageLocator> {
-    pub(crate) store: &'s EventStore,
+    pub(crate) store: StoreHandle<'s>,
     /// Own connection to the same database for the P2.1 tables (the
     /// EventStore's pool is private; WAL makes a sibling connection safe).
     pub(crate) conn: Mutex<Connection>,
@@ -252,6 +277,27 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
     /// migrations create the P2.1 tables).
     pub fn new(
         store: &'s EventStore,
+        db_path: impl AsRef<Path>,
+        app_data: impl Into<PathBuf>,
+        locator: L,
+    ) -> Result<Self, SidecarError> {
+        Self::with_handle(StoreHandle::Borrowed(store), db_path, app_data, locator)
+    }
+
+    /// [`SidecarEngine::new`] over a shared store: the engine co-owns the
+    /// `EventStore` for the life of the process (P4.1 A4 — removes the
+    /// shell's `Box::leak`).
+    pub fn new_shared(
+        store: std::sync::Arc<EventStore>,
+        db_path: impl AsRef<Path>,
+        app_data: impl Into<PathBuf>,
+        locator: L,
+    ) -> Result<SidecarEngine<'static, L>, SidecarError> {
+        SidecarEngine::with_handle(StoreHandle::Shared(store), db_path, app_data, locator)
+    }
+
+    fn with_handle(
+        store: StoreHandle<'s>,
         db_path: impl AsRef<Path>,
         app_data: impl Into<PathBuf>,
         locator: L,

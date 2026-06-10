@@ -14,8 +14,6 @@ mod commands;
 mod debug;
 mod dto;
 mod error;
-mod gridq;
-mod locator;
 mod note;
 mod protocol;
 mod pump;
