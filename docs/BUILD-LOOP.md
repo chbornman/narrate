@@ -141,6 +141,7 @@ ledger as founder-machine-deferred with a checklist entry.
 | P1.1 Events engine | ✅ done | fmt/clippy/test green (40 tests: I1–I16, §4.3 byte-exact vectors, shuffled-merge property, ≤3-query fold assert, 5k fold 7.9 ms release) | `ddc77bd` |
 | P1.2 Connector traits | ✅ done | fmt/clippy/test green (53 tests: config TOML valid+invalid, scripted-timing mock Transcriber, deterministic mock Embedder/LLM/VectorStore/Reranker, VAD contract) | `f604666` |
 | P2.1 Sidecars | in progress | — | — |
+| Audit fix packet (Phase 1) | ✅ done | fmt/clippy/test green, 163 tests (16 new regressions, each verified failing pre-fix); docs/AUDIT-PHASE1.md resolved | `b52bba6` |
 | P2.2 Library | ✅ done | fmt/clippy/test green (147 workspace tests; §13 1–15 traced; 50k-scan/10k-clock-shift verified in release, shipped `#[ignore]`; real-RAW orientation + macOS/Win volume ids founder-machine) | `80c7ccd` |
 | P3.1 Search core | not started | — | — |
 | P3.2 Desktop shell | not started | — | — |

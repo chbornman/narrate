@@ -8,13 +8,19 @@ quality, core correctness, connectors conformance, canonical-bytes attack)
 code-behavior, materiality angles); a finding is **confirmed** only if ≥2
 refuters fail to kill it.
 
-**Status: closed early, by decision.** First run (workflow
-`wf_a2535d35-43b`, 95 agents) produced 30 raw findings; a session
-rate-limit killed 47 verifier agents mid-run, leaving 16 findings
-unverified. A resumed run was started and then deliberately stopped to
-conserve the founder's token budget. The pending items P1–P8 below will
-NOT get refuter panels; the fix packet settles each one directly
-(verify-then-fix by a single agent). This file is the durable record.
+**Status: RESOLVED — fix packet landed as `b52bba6`.** First run
+(workflow `wf_a2535d35-43b`, 95 agents) produced 30 raw findings; a
+session rate-limit killed 47 verifier agents mid-run; the resumed run
+was deliberately stopped to conserve token budget, and the fix packet
+settled every item directly. Verdicts: A1–A5 all fixed. P1 (dirty-ack
+race), P2 (busy checkpoint), P3 (re-merge healing), P4 (dangling-chain
+closure), P5 (append vs registry), P6 (maintain() hook) — verified REAL
+and fixed. P7 — code already correct, test gap closed. P8 — partially
+real (redaction-over-cycle scrubbed 1 of 3 members; fixed by the P4
+rework). Every fix's regression test was run against the pre-fix crate
+and failed there, proving non-vacuity. New API: `EventStore::maintain()`,
+`StoreError::CheckpointBlocked`, `AppendError::CondemnedId`; dirty-queue
+API unchanged. Chosen readings recorded as DECISIONS B21–B23.
 
 ## Confirmed findings (survived 3-refuter adversarial verification)
 

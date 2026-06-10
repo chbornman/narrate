@@ -238,6 +238,19 @@ chosen readings.
   §10.3's async dispatcher/GPU-yield is shell wiring: the packet ships queue
   semantics, synchronous `process_queue`, and `maintenance_tick` /
   `on_system_resume` / `probe_volumes` hooks for the shell's scheduler.
+- **B21 (audit fix).** Redaction closure on dangling/cyclic chains (where
+  §6.1's `root()` is undefined): anchor at the highest locally reachable
+  ancestor and scrub every local revision resolving to it — the
+  privacy-conservative closure; reachable *ancestors* of the target are
+  scrubbed too.
+- **B22 (audit fix).** `append()` of a registry-condemned id is rejected
+  (`AppendError::CondemnedId`) rather than inserted scrubbed: local append
+  of condemned content is producer corruption, unlike merge, where the
+  scrubbed-form insert is correct union semantics.
+- **B23 (audit fix).** A blocked post-commit `wal_checkpoint(TRUNCATE)`
+  surfaces as `Err(StoreError::CheckpointBlocked)` after bounded retry —
+  the write is already durable; `maintain()` completes the hygiene. Silent
+  swallowing (what the audit flagged) was rejected.
 
 ## Open questions deliberately left to the founder
 
