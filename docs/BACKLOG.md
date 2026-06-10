@@ -30,6 +30,7 @@ managing = off-thesis).
   folder…" rail footer row + gutter/rail context-menu entry dispatching the
   same registered action. (Founder, dogfood round 1.)
 
+- [ ] **Compose entries from the journal panel** — the Journal tab gets an inline way to add a new entry directly (not just the N transient), and generally every entry kind a user can author (remark, rating, revision/correction) should be addable via UI from there; retract/redact already exist per-row. (Founder, dogfood round 2.)
 - [ ] **Journal entries show sibling targets** — a multi-target note's entry
   carries a quiet "+N others" affordance (targets are already in the event;
   the journal DTO needs them surfaced). (Founder, dogfood round 1.)
