@@ -218,6 +218,26 @@ chosen readings.
 - **B14 (P1.2).** Native `async fn` in traits kept per RUNTIME §4: traits are
   not dyn-compatible and futures carry no `Send` bound — later packets use
   static/generic dispatch.
+- **B15 (P2.2).** Cloud placeholders get a skipped `ingest_passes` row keyed
+  by a deterministic sentinel hash `blake3("photoproof-placeholder\0" +
+  volume + "\0" + rel_path)` (placeholders have no content hash by
+  definition); the sentinel clears on hydration.
+- **B16 (P2.2).** Re-registering a removed root revives the removed row
+  (roots are identified by location under `UNIQUE(volume_id, rel_path)`),
+  consistent with §5's relink-everything-on-re-register.
+- **B17 (P2.2).** §13.1's "zero extra hashing" applies to the paired-rename
+  path; an unpaired remove+create hashes once to prove content identity
+  (§12 explicitly budgets re-hash on moves). Both asserted in tests.
+- **B18 (P2.2).** The `image` crate's TIFF decoder doesn't surface IFD
+  orientation; the preview pass falls back to the §9.6 orientation stored by
+  the EXIF pass (kamadak-exif reads it).
+- **B19 (P2.2).** Capture time without `OffsetTimeOriginal` is stored as
+  wall time + `Z` with `capture_tz_offset` NULL.
+- **B20 (P2.2).** Hash pool sizes from `available_parallelism` (logical),
+  capped at 8. `ingest_passes` gains a `not_before` column (§10.5 backoff).
+  §10.3's async dispatcher/GPU-yield is shell wiring: the packet ships queue
+  semantics, synchronous `process_queue`, and `maintenance_tick` /
+  `on_system_resume` / `probe_volumes` hooks for the shell's scheduler.
 
 ## Open questions deliberately left to the founder
 
