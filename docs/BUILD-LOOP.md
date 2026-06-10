@@ -143,8 +143,8 @@ ledger as founder-machine-deferred with a checklist entry.
 | P2.1 Sidecars | ✅ done | fmt/clippy/test green (193 workspace tests debug+release; §13 1–11 traced incl. round-trip, kill-during-write ×1000, mtime-stable, offline redaction queue; cross-OS byte-compare deferred to CI matrix) | `34a0f9c` |
 | Audit fix packet (Phase 1) | ✅ done | fmt/clippy/test green, 163 tests (16 new regressions, each verified failing pre-fix); docs/AUDIT-PHASE1.md resolved | `b52bba6` |
 | P2.2 Library | ✅ done | fmt/clippy/test green (147 workspace tests; §13 1–15 traced; 50k-scan/10k-clock-shift verified in release, shipped `#[ignore]`; real-RAW orientation + macOS/Win volume ids founder-machine) | `80c7ccd` |
-| P3.1 Search core | not started | — | — |
-| P3.2 Desktop shell | not started | — | — |
+| P3.1 Search core | ✅ done | fmt/clippy/test green; plan-shape + snippet-post-LIMIT asserted; §7.2 reproduced (spec erratum B31); 1.18M-row latency coordinator-verified: p50 9.3 ms / p95 36 ms | `ee6e386` |
+| P3.2 Desktop shell | ✅ done | svelte-check 0/0, vitest 95, cargo green both feature configs; release-excludes-debug-panel asserted; Tauri .deb bundle built (8.8 MB); search wired in `38b4a61` (254 tests) | `9143b72` |
 | P4.1 M1 hardening | not started | — | — |
 | P5.1 Pencil + journal panel | not started | — | — |
 | P6.1 Capture engine (mocked) | not started | — | — |

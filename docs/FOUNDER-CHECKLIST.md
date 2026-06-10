@@ -23,6 +23,10 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   real previews on your monitor during dogfood before declaring final.
 - [ ] **Q4 — M3 gates** (later): sentiment quality evaluation; dedicated
   text-embedder benchmark during dogfooding.
+- [ ] **B31 — RETRIEVAL §7.2 erratum**: FTS5's real bm25 orders the worked
+  example's image Z before X (the spec's expected order is mathematically
+  unreachable). Tests assert engine truth; confirm and the spec text gets
+  fixed in a future edit.
 
 ## 2. Founder-machine verification (feeds DOGFOOD-M1.md at P4.1)
 
@@ -38,8 +42,16 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   you target those platforms).
 - [ ] **Offline-volume browsing, visual half** — unplug an ingested drive,
   confirm grid still browses cached previews and annotations queue.
-- [ ] **Visual/UX feel of the running app** (after P3.2): grid scrolling at
-  60 fps, Look transitions, pencil feel, capture indicator behavior.
+- [ ] **Visual/UX feel of the running app** (P3.2 shipped; install
+  `target/release/bundle/deb/Photoproof_0.1.0_amd64.deb` or `cargo tauri dev`):
+  grid at 60 fps on 20k items with webview memory ≤ 800 MB, Look swap
+  < 150 ms, indicator pulse < 50 ms, rail dwell/pin feel, indicator never
+  obscuring pixels at fit, dark-theme + no-saturated-red audit, first-run
+  flow with a real folder, live-ingest incremental grid population, settings
+  window, window titles.
+- [ ] **HEIC count check**: previews for HEIC/HEIF wait for the M1.5
+  full-decode backfill (B-deferred; journal works day one). Count HEICs in
+  your library to decide whether that gap matters for your dogfood.
 - [ ] **P6.3 model spike** (Phase 6, yours by design): real llama.cpp +
   sherpa-onnx + silero-vad recipes, token-timestamp/VAD-onset measurement,
   VRAM tier numbers. Until then voice ships mock-verified.
@@ -66,4 +78,7 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
 ## Update log
 
 - 2026-06-10: created after Phase 2 completion (P1.1, P1.2, P2.1, P2.2,
+- 2026-06-10: Phase 3 complete (P3.1 search core, P3.2 desktop shell, search
+  wired; 254 workspace tests + 95 vitest). Added B31 erratum, app visual
+  checklist, HEIC count check.
   audit fix packet all green; 193 workspace tests).

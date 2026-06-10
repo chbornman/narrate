@@ -271,6 +271,42 @@ chosen readings.
 - **B29 (P2.1).** Volume identity crosses the packet boundary through the
   `ImageLocator` trait (`Writable`/`Unwritable{image_path}`/`Offline`) +
   `VolumeInfo` — owned by sidecars, implemented by the library layer.
+- **B30 (P3.1).** The executed §4 statement orders by FTS5 `rank` (default
+  bm25) instead of the spec's `ORDER BY s` alias form: the alias is not
+  consumed by xBestIndex → temp B-tree → `snippet()` evaluated per candidate
+  pre-LIMIT (measured 20,000 calls vs 500) — the exact failure §4 itself
+  forbids. Ordering identical; everything else verbatim.
+- **B31 (P3.1, spec erratum).** §7.2's X-before-Z ordering is unreproducible
+  under real FTS5 bm25 with the spec's own texts (equal tf, X longer, IDF
+  clamped → length normalization always favors Z). Tests assert the engine's
+  true ordering [Z, X] and every other §7.2 artifact exactly. RETRIEVAL §7.2
+  should swap the expected order when next edited.
+- **B32 (P3.1).** Session hits resolve in the same statement via LEFT-joined
+  `event_targets` (re-running MATCH doubled the dominant cost); image-scoped
+  chips use the inner-join form and suppress session hits (R4). Prefix-term
+  highlights trim to the typed prefix; diacritic-folded matches keep the
+  whole-token highlight. Provenance text is re-read from truth tables, never
+  the FTS index.
+- **B33 (P3.1).** Filter minutiae: camera/lens ASCII-case-insensitive;
+  `Folder::Subtree` = volume-relative segment prefix; `NameContains` matches
+  directories only; M3-only filters (`Project`, `Kind`) hard-error rather
+  than silently drop; the core result contract carries no serde — the shell
+  maps to its own DTOs (`search_wire`).
+- **B34 (P3.2).** Grid thumbnails render exactly two badges (UI §3.5);
+  rating data ships in `GridItem` but is never rendered on thumbnails. The
+  has-journal dot requires remark/stroke evidence — rating-only journals
+  don't light it (UI §3.7 over the B4 event_count); a derived `has_text`
+  stats column is the clean fix → P4.1.
+- **B35 (P3.2).** The typed-note transient cancels on any scope change, making
+  UI §6's summon-time scope and CAPTURE §4's submit-time binding identical by
+  construction. Look always narrows scope to the viewed image (CAPTURE owns
+  scope; UI §4.5's parenthetical loses).
+- **B36 (P3.2).** M1 ships chip rendering/removal but NO chip-creation
+  affordance (no parser, no manual builder specced — quiet wins); 50 ms
+  search debounce (UI normative over RETRIEVAL's 100 ms), ≥2 chars; the
+  model-consent screen waits for P6.2's `runtime_status` contract;
+  Settings' "rebuild index" = in-process union-merge + `rebuild_derived()`,
+  the fresh-database restore stays an offline path.
 
 ## Open questions deliberately left to the founder
 
