@@ -328,3 +328,34 @@ describe("add-root from the rail (founder dogfood, rounds 1+2)", () => {
     expect(lastCall("add_root")).toBeUndefined();
   });
 });
+
+describe("mid-scan grid re-list (founder, SMB, June 2026)", () => {
+  it("running ingest re-lists on a 2 s throttle; the idle edge re-lists once more", async () => {
+    const ui2 = new Ui();
+    ui2.grid.rootId = "R1";
+    ui2.grid.folder = "";
+    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder").length;
+    const before = calls();
+    const nowSpy = vi.spyOn(Date, "now");
+
+    nowSpy.mockReturnValue(100_000);
+    await ui2.onIngestProgress({ running: true, done: 1, total: 10, errors: 0 });
+    expect(calls()).toBe(before + 1); // first running tick lists
+
+    nowSpy.mockReturnValue(100_500);
+    await ui2.onIngestProgress({ running: true, done: 2, total: 10, errors: 0 });
+    expect(calls()).toBe(before + 1); // inside the 2 s throttle: no re-list
+
+    nowSpy.mockReturnValue(103_000);
+    await ui2.onIngestProgress({ running: true, done: 5, total: 10, errors: 0 });
+    expect(calls()).toBe(before + 2); // throttle elapsed
+
+    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0 });
+    expect(calls()).toBe(before + 3); // running→idle edge: exact final state
+    expect(ui2.shell.ingest.running).toBe(false);
+
+    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0 });
+    expect(calls()).toBe(before + 3); // already idle: indicator only
+    nowSpy.mockRestore();
+  });
+});

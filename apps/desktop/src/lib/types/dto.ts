@@ -25,6 +25,12 @@ export interface GridItem {
   /** Folded rating — DATA only; never rendered on thumbnails (UI §3.5). */
   rating: number | null;
   offline: boolean;
+  /** A thumb artifact exists in the cache: the grid requests the protocol
+   * URL only when true — mid-scan on a network volume, eager requests are
+   * thousands of doomed 404 round-trips (founder, SMB, June 2026).
+   * Optional so test fixtures predate it; absent = true (request as
+   * before — the retry/heal machinery still backstops a 404). */
+  previewReady?: boolean;
 }
 
 export type ScopeKind = "single" | "multi" | "session";

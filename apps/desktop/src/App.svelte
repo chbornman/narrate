@@ -138,9 +138,10 @@
       listen<IndicatorState>("indicator-state", (e) => {
         ui.shell.onIndicatorState(e.payload);
       }),
-      listen<IngestStatus>("ingest-progress", (e) => {
-        ui.shell.ingest = e.payload;
-      }),
+      // Indicator pill + the mid-scan grid re-list (2 s throttle inside —
+      // a slow network-volume scan otherwise shows an EMPTY grid until
+      // some unrelated refresh happens to fire).
+      listen<IngestStatus>("ingest-progress", (e) => void ui.onIngestProgress(e.payload)),
       // The Settings window's edits land live (set_stack_display emits to
       // every window; the grid re-pairs stacks on the spot).
       listen<AppSettings>("settings-changed", (e) => ui.applySettings(e.payload)),

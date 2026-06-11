@@ -22,6 +22,7 @@
 
   let {
     hash,
+    previewReady = true,
     previewPing,
     hasJournal,
     offline,
@@ -38,6 +39,11 @@
     oncontextmenu,
   }: {
     hash: string;
+    /** A thumb artifact exists (GridItem.previewReady): only then is the
+     * protocol URL requested at all — mid-scan on a network volume, eager
+     * requests are thousands of doomed 404 round-trips (founder, SMB,
+     * June 2026). A previews-changed ping flips a not-ready cell live. */
+    previewReady?: boolean;
     /** `previews-changed` ping (grid slice): when `hashes` carries this
      * cell's image, its artifact just landed — reload now. */
     previewPing: { seq: number; hashes: ReadonlySet<string> };
@@ -89,6 +95,10 @@
   const attempt = $derived(retry.hash === hash ? retry.n : 0);
   const pingSeq = $derived(applied.hash === hash ? applied.seq : 0);
   const loaded = $derived(loadedHash === hash);
+  /** Request gate: the artifact is known to exist (backend flag), or its
+   * previews-changed ping arrived after listing. Until then the <img>
+   * never mounts — placeholder only, zero protocol traffic. */
+  const ready = $derived(previewReady || pingSeq > 0);
 
   const src = $derived.by(() => {
     const parts = [];
@@ -152,22 +162,24 @@
   role="gridcell"
   tabindex="-1"
 >
-  <img
-    bind:this={el}
-    {src}
-    alt=""
-    draggable="false"
-    loading="eager"
-    decoding="async"
-    class:loaded
-    onload={() => {
-      // A load event can arrive for the PREVIOUS occupant's src after the
-      // slot was recycled — mark loaded only when the element's bitmap is
-      // this hash's (recycled-img guard above).
-      if (el !== undefined && srcHash(el.currentSrc) === hash) loadedHash = hash;
-    }}
-    onerror={handleError}
-  />
+  {#if ready}
+    <img
+      bind:this={el}
+      {src}
+      alt=""
+      draggable="false"
+      loading="eager"
+      decoding="async"
+      class:loaded
+      onload={() => {
+        // A load event can arrive for the PREVIOUS occupant's src after the
+        // slot was recycled — mark loaded only when the element's bitmap is
+        // this hash's (recycled-img guard above).
+        if (el !== undefined && srcHash(el.currentSrc) === hash) loadedHash = hash;
+      }}
+      onerror={handleError}
+    />
+  {/if}
   {#if info.name !== null}
     <span class="info">
       <span class="info-name">{info.name}</span>

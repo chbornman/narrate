@@ -29,6 +29,7 @@ import type { ActionContext } from "../actions/types";
 import type {
   AppSettings,
   FolderNode,
+  IngestStatus,
   RootDto,
   StrokePayloadWire,
 } from "../types/dto";
@@ -246,6 +247,28 @@ export class Ui {
   async refreshItems() {
     if (this.grid.rootId === null) return;
     this.grid.setItems(await ipc.listFolder(this.grid.rootId, this.grid.folder));
+  }
+
+  /** Coalesced ingest progress (pump.rs, ≤1 per 400 ms): the indicator
+   * pill always updates; while ingest RUNS the open folder also re-lists
+   * on a 2 s throttle — new images and previewReady flips only enter the
+   * grid through list_folder, and without this the grid sat EMPTY for the
+   * whole first scan of a slow network volume (founder, SMB, June 2026).
+   * The running→idle edge re-lists once more, unthrottled, so the settled
+   * state is exact. */
+  private lastIngestRefresh = 0;
+  async onIngestProgress(status: IngestStatus) {
+    const wasRunning = this.shell.ingest.running;
+    this.shell.ingest = status;
+    if (this.grid.rootId === null) return;
+    if (status.running) {
+      const now = Date.now();
+      if (now - this.lastIngestRefresh < 2_000) return;
+      this.lastIngestRefresh = now;
+      await this.refreshItems();
+    } else if (wasRunning) {
+      await this.refreshItems();
+    }
   }
 
   async applySelection(next: sel.SelState) {

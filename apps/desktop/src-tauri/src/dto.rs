@@ -45,6 +45,10 @@ pub struct GridItem {
     pub rating: Option<u8>,
     /// Every active path for this image sits on an offline volume (⏏ badge).
     pub offline: bool,
+    /// A thumb artifact exists — the grid requests the protocol URL only
+    /// when true (no doomed 404 round-trips mid-scan; `previews-changed`
+    /// flips cells live as artifacts land).
+    pub preview_ready: bool,
 }
 
 /// CAPTURE §11 `ScopeView`: what the indicator renders.

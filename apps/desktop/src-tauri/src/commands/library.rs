@@ -220,6 +220,7 @@ pub async fn list_folder(app: S<'_>, root_id: String, folder: String) -> CmdResu
                 has_journal: i.has_journal,
                 rating: i.rating,
                 offline: i.offline,
+                preview_ready: i.preview_ready,
             })
             .collect())
     })

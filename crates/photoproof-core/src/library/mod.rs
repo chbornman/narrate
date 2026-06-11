@@ -2217,7 +2217,11 @@ impl Library {
                       JOIN volumes v2 ON v2.volume_id = p2.volume_id
                       WHERE p2.image_hash = p.image_hash
                         AND p2.state = 'active' AND v2.state = 'online'
-                    ) AS offline
+                    ) AS offline,
+                    EXISTS (
+                      SELECT 1 FROM preview_artifacts pa
+                      WHERE pa.image_hash = p.image_hash AND pa.kind = 'thumb'
+                    ) AS preview_ready
              FROM paths p
              JOIN images i ON i.image_hash = p.image_hash
              LEFT JOIN image_journal_stats s ON s.image_hash = p.image_hash
@@ -2245,6 +2249,7 @@ impl Library {
                 has_journal: r.get::<_, i64>(4)? != 0,
                 rating: r.get::<_, Option<i64>>(5)?.map(|v| v as u8),
                 offline: r.get::<_, i64>(6)? != 0,
+                preview_ready: r.get::<_, i64>(7)? != 0,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2316,6 +2321,11 @@ pub struct FolderImage {
     pub rating: Option<u8>,
     /// Every active path for this image sits on an offline volume.
     pub offline: bool,
+    /// A thumb artifact exists in the cache. While false the grid shows
+    /// the placeholder WITHOUT requesting the protocol URL — during a
+    /// large (network-volume) scan, thumbs otherwise fire thousands of
+    /// doomed 404 round-trips (founder dogfood, SMB, June 2026).
+    pub preview_ready: bool,
 }
 
 /// One node of [`Library::folder_tree`] (the rail).
