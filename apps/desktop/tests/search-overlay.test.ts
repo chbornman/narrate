@@ -1,18 +1,26 @@
 /**
  * Search-surface rendering against the mocked §5.4 contract: verbatim
  * quotes with ⟦⟧ → <mark>, provenance variants, the zero-result line, and
- * the no-raw-HTML guarantee, asserted on real DOM.
+ * the no-raw-HTML guarantee, asserted on real DOM — plus the two-stage
+ * presentation (backlog "Search entry as overlay, results as canvas"):
+ * entry floats the input over a dim scrim with the invoking surface
+ * visible behind (honest overlay, DECISIONS I1); results expand to the
+ * full-canvas contact sheet the moment they exist.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen } from "@testing-library/svelte";
+import { tick } from "svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => null),
   convertFileSrc: (p: string, proto = "asset") => `${proto}://localhost/${p}`,
 }));
 
+import { ui } from "../src/lib/state/app.svelte";
+import { ZERO_RESULTS_LINE } from "../src/lib/search/render";
+import SearchOverlay from "../src/lib/components/search/SearchOverlay.svelte";
 import SearchResultRow from "../src/lib/components/search/SearchResultRow.svelte";
-import type { ImageResult } from "../src/lib/types/search";
+import type { ImageResult, SearchResults } from "../src/lib/types/search";
 
 const result = (provenance: ImageResult["provenance"]): ImageResult => ({
   image_hash: "ab".repeat(32),
@@ -25,8 +33,107 @@ const result = (provenance: ImageResult["provenance"]): ImageResult => ({
 
 const noop = () => {};
 
+/** A §5.4 results payload with the given images (echo fields inert here). */
+const searchResults = (images: ImageResult[]): SearchResults => ({
+  query: { raw: "fog", filters: [], dropped: [], fallback: false },
+  images,
+  session_hits: [],
+});
+
 beforeEach(() => {
   document.body.innerHTML = "";
+  // The ui singleton persists across cases — reset the search slice so
+  // each stage assertion starts from a closed, queryless overlay.
+  ui.searchOpen = false;
+  ui.query = "";
+  ui.chips = [];
+  ui.results = null;
+  ui.searchFocus = -1;
+  ui.searchSel = { order: [], focus: -1, anchor: -1 };
+});
+
+describe("entry overlay vs results canvas (backlog: search entry as overlay)", () => {
+  it("empty query floats the input over a dim scrim — context visible behind", () => {
+    const { container } = render(SearchOverlay);
+    const overlay = container.querySelector(".overlay") as HTMLElement;
+    expect(overlay.dataset.stage).toBe("entry");
+    // The honest overlay: a translucent dim layer, NOT an opaque canvas —
+    // the invoking surface stays visible behind it (I1).
+    expect(container.querySelector(".dim")).not.toBeNull();
+    expect(container.querySelector("[role='listbox']")).toBeNull();
+    // One input, present and ready (§5.1) — and nothing else: no trending,
+    // no recents, no tips below it (§5.2).
+    expect(container.querySelector("[data-search-input]")).not.toBeNull();
+    expect(container.textContent).not.toContain(ZERO_RESULTS_LINE);
+  });
+
+  it("zero results stay in the entry overlay with the single dimmed line", () => {
+    ui.results = searchResults([]);
+    const { container } = render(SearchOverlay);
+    // No results arrived → the canvas is never spent on an empty answer;
+    // the §5.2 line renders inside the floating panel instead.
+    expect((container.querySelector(".overlay") as HTMLElement).dataset.stage).toBe(
+      "entry",
+    );
+    expect(container.querySelector(".dim")).not.toBeNull();
+    expect(screen.getByText(ZERO_RESULTS_LINE)).toBeTruthy();
+    expect(container.querySelector("[role='listbox']")).toBeNull();
+  });
+
+  it("results expand to the full canvas contact sheet as they arrive", async () => {
+    const { container } = render(SearchOverlay);
+    expect((container.querySelector(".overlay") as HTMLElement).dataset.stage).toBe(
+      "entry",
+    );
+    // Results land (as-you-type flow writes ui.results) → canvas stage.
+    ui.results = searchResults([result({ type: "visual_match" })]);
+    await tick();
+    const overlay = container.querySelector(".overlay") as HTMLElement;
+    expect(overlay.dataset.stage).toBe("canvas");
+    // The dim scrim is gone — the canvas is the surface now.
+    expect(container.querySelector(".dim")).toBeNull();
+    // The contact sheet is unchanged: provenance rows under the listbox.
+    const listbox = container.querySelector("[role='listbox']");
+    expect(listbox).not.toBeNull();
+    expect(listbox?.querySelectorAll("[role='option']").length).toBe(1);
+    // The input survives the stage flip (same element — no remount while
+    // the user is mid-keystroke).
+    expect(container.querySelector("[data-search-input]")).not.toBeNull();
+  });
+
+  it("emptying the answer honestly collapses the canvas back to the overlay", async () => {
+    ui.results = searchResults([result({ type: "filter_only" })]);
+    const { container } = render(SearchOverlay);
+    expect((container.querySelector(".overlay") as HTMLElement).dataset.stage).toBe(
+      "canvas",
+    );
+    // The query shrinks below the threshold → runSearch nulls results →
+    // the stage is DERIVED, so the floating entry overlay returns.
+    ui.results = null;
+    await tick();
+    expect((container.querySelector(".overlay") as HTMLElement).dataset.stage).toBe(
+      "entry",
+    );
+    expect(container.querySelector(".dim")).not.toBeNull();
+  });
+
+  it("scrim pointerdown leaves search to the invoking surface (I1)", async () => {
+    await ui.openSearch();
+    expect(ui.searchOpen).toBe(true);
+    const { container } = render(SearchOverlay);
+    await fireEvent.pointerDown(container.querySelector(".dim") as HTMLElement);
+    // Same exit as Esc's leave-search layer: search closes; the surface
+    // was never changed, so we are back where search was invoked from.
+    expect(ui.searchOpen).toBe(false);
+    expect(ui.surface).toBe("grid");
+  });
+
+  it("clicks inside the floating panel do NOT dismiss (only scrim/Esc leave)", async () => {
+    await ui.openSearch();
+    const { container } = render(SearchOverlay);
+    await fireEvent.pointerDown(container.querySelector(".bar") as HTMLElement);
+    expect(ui.searchOpen).toBe(true);
+  });
 });
 
 describe("quote provenance", () => {

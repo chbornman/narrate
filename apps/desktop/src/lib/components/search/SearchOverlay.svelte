@@ -1,8 +1,23 @@
 <script lang="ts">
   /**
-   * Search (UI §5): one input, results as provenance rows, an overlay that
-   * remembers its return point (Escape leaves to the invoking surface — I1).
-   * Empty query: blank canvas. Zero results: one dimmed line. Quiet.
+   * Search (UI §5; ENTRY PRESENTATION amended by the dogfood-round-2
+   * backlog ruling "Search entry as overlay, results as canvas"): `/`
+   * floats ONE input over the DIMMED invoking surface — the context stays
+   * visible through the scrim, an honest overlay per DECISIONS I1 (search
+   * remembers its return point; Escape leaves to the invoking surface).
+   * The moment results EXIST they expand to the full canvas: the same
+   * contact sheet as before — provenance rows, selection, write scope,
+   * and Enter→Look untouched (UI §5 stands; only entry presentation
+   * changed).
+   *
+   * The stage is DERIVED from result state, never stored: an empty/short
+   * query (results === null) and ZERO results both keep the floating
+   * input — while a query is coming up empty you keep your context to
+   * refine against; results arriving is the only thing that earns the
+   * canvas. §5.2's "blank canvas" under an empty query becomes the dimmed
+   * surface itself — still no trending, no recents, no tips. The
+   * zero-result line (§5.2) renders as the single dimmed line inside the
+   * floating panel.
    *
    * Filter chips render the executed Filter values (RETRIEVAL §4: chips are
    * part of the M1 query input); removing one re-runs the query. The M3
@@ -17,6 +32,16 @@
 
   let inputEl: HTMLInputElement | undefined = $state();
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** entry = floating input over the dimmed surface; canvas = full-bleed
+   * contact sheet. Purely derived, so editing a query back to nothing
+   * honestly collapses the canvas to the overlay again. */
+  const stage: "entry" | "canvas" = $derived(
+    ui.results !== null &&
+      (ui.results.images.length > 0 || ui.results.session_hits.length > 0)
+      ? "canvas"
+      : "entry",
+  );
 
   $effect(() => {
     inputEl?.focus();
@@ -68,72 +93,122 @@
   }
 </script>
 
-<div class="overlay" role="dialog" aria-label="Search">
-  <div class="bar">
-    <span class="glyph" aria-hidden="true">🔍</span>
-    <input
-      bind:this={inputEl}
-      bind:value={ui.query}
-      oninput={onInput}
-      placeholder=""
-      spellcheck="false"
-      autocomplete="off"
-      data-search-input
-    />
-  </div>
-
-  {#if ui.chips.length > 0}
-    <div class="chips">
-      {#each ui.chips as chip, i (i)}
-        <span class="chip">
-          {chipLabel(chip)}
-          <button aria-label="Remove filter" onclick={() => void ui.removeChip(i)}>×</button>
-        </span>
-      {/each}
-    </div>
+<div class="overlay" data-stage={stage} role="dialog" aria-label="Search">
+  {#if stage === "entry"}
+    <!-- The scrim IS the honest overlay: the invoking surface stays
+         visible (dimmed) behind it. Pointerdown leaves search exactly like
+         Esc's leave-search layer — the Sheet primitive's scrim contract,
+         reused here so click-out and Esc agree on where you land. -->
+    <div class="dim" role="presentation" onpointerdown={() => void ui.closeSearch()}></div>
   {/if}
 
-  <div class="results" role="listbox" aria-label="Results">
-    {#if ui.results !== null}
-      {#if ui.results.images.length === 0 && ui.results.session_hits.length === 0}
-        <p class="zero">{ZERO_RESULTS_LINE}</p>
-      {:else}
-        {#each ui.results.images as result, i (result.image_hash)}
-          <SearchResultRow
-            {result}
-            focused={ui.searchFocus === i}
-            selected={sel.isSelected(ui.searchSel, result.image_hash)}
-            onopen={() => void ui.openLook(result.image_hash, true)}
-            onselect={(e) => onRowSelect(i, e)}
-          />
+  <!-- The panel (input + chips) is one persistent element across stages so
+       the focused input never remounts mid-keystroke as results arrive. -->
+  <div class="panel">
+    <div class="bar">
+      <span class="glyph" aria-hidden="true">🔍</span>
+      <input
+        bind:this={inputEl}
+        bind:value={ui.query}
+        oninput={onInput}
+        placeholder=""
+        spellcheck="false"
+        autocomplete="off"
+        data-search-input
+      />
+    </div>
+
+    {#if ui.chips.length > 0}
+      <div class="chips">
+        {#each ui.chips as chip, i (i)}
+          <span class="chip">
+            {chipLabel(chip)}
+            <button aria-label="Remove filter" onclick={() => void ui.removeChip(i)}>×</button>
+          </span>
         {/each}
-        {#if ui.results.session_hits.length > 0}
-          <div class="session-hits">
-            {#each ui.results.session_hits as hit (hit.quote.event_id)}
-              <p class="session-quote">“{hit.quote.text}”</p>
-            {/each}
-          </div>
-        {/if}
-      {/if}
+      </div>
     {/if}
-    <!-- empty query: blank canvas — no trending, no recents, no tips (§5.2) -->
+
+    {#if stage === "entry" && ui.results !== null}
+      <!-- Zero results: the single dimmed line (§5.2), inside the panel —
+           the canvas is never spent on an empty answer. -->
+      <p class="zero">{ZERO_RESULTS_LINE}</p>
+    {/if}
+    <!-- empty query: nothing below the input — the dimmed surface itself is
+         the blank canvas (§5.2); no trending, no recents, no tips -->
   </div>
+
+  {#if stage === "canvas"}
+    <!-- Results exist → full canvas. The contact sheet is unchanged:
+         provenance rows, Grid-like selection as a write scope, Enter→Look
+         with result order as the nav set (UI §5.1/§5.3). -->
+    <div class="results" role="listbox" aria-label="Results">
+      {#each ui.results?.images ?? [] as result, i (result.image_hash)}
+        <SearchResultRow
+          {result}
+          focused={ui.searchFocus === i}
+          selected={sel.isSelected(ui.searchSel, result.image_hash)}
+          onopen={() => void ui.openLook(result.image_hash, true)}
+          onselect={(e) => onRowSelect(i, e)}
+        />
+      {/each}
+      {#if (ui.results?.session_hits.length ?? 0) > 0}
+        <div class="session-hits">
+          {#each ui.results?.session_hits ?? [] as hit (hit.quote.event_id)}
+            <p class="session-quote">“{hit.quote.text}”</p>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
   .overlay {
     position: absolute;
     inset: 0;
-    background: var(--bg);
     z-index: 20;
     display: flex;
     flex-direction: column;
+  }
+  /* canvas: the opaque full-surface contact sheet (pre-amendment look) */
+  .overlay[data-stage="canvas"] {
+    background: var(--bg);
+  }
+  /* entry: the overlay frame paints nothing itself — the dim layer and the
+   * floating panel are its only visible/interactive children, so the
+   * surface behind genuinely shows through (honest overlay, I1) */
+  .overlay[data-stage="entry"] {
+    pointer-events: none;
+  }
+  .dim {
+    position: absolute;
+    inset: 0;
+    background: var(--scrim);
+    pointer-events: auto;
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+  }
+  .overlay[data-stage="entry"] .panel {
+    pointer-events: auto;
+    position: relative; /* paints above the .dim sibling */
+    margin: 16vh auto 0;
+    width: min(640px, 86vw);
+    background: var(--bg-overlay);
+    border: 1px solid var(--chrome);
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   }
   .bar {
     display: flex;
     align-items: center;
     gap: 10px;
     padding: 18px 24px 6px;
+  }
+  .overlay[data-stage="entry"] .bar {
+    padding: 14px 18px 10px;
   }
   .glyph {
     color: var(--text-faint);
@@ -153,6 +228,9 @@
     gap: 6px;
     padding: 6px 24px 0 48px;
     flex-wrap: wrap;
+  }
+  .overlay[data-stage="entry"] .chips {
+    padding: 0 18px 10px 42px;
   }
   .chip {
     display: inline-flex;
@@ -182,7 +260,7 @@
   .zero {
     text-align: center;
     color: var(--text-faint);
-    margin-top: 18vh;
+    margin: 6px 0 16px;
   }
   .session-hits {
     margin-top: 18px;
