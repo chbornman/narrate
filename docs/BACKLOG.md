@@ -8,6 +8,19 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
+- [ ] **Pair targets vs "+N others"** — a journal entry on a collapsed
+  RAW+JPEG pair targets both members (DECISIONS 4), so the sibling mark
+  reads "+1 other" even though no OTHER image is involved — misleading.
+  Decide the right indication: suppress the mark when every extra target
+  is the inspected image's own pair member ("● 2" already says it), or a
+  distinct quiet register for pair-mate targets. (Founder, dogfood
+  round 3, June 2026.)
+- [ ] **"Rebuild previews…" on the rail folder menu** — a recovery/
+  maintenance verb SEPARATE from Rescan (different semantics: Rescan
+  reconciles files↔index and enqueues missing passes; Rebuild re-enqueues
+  the preview pass for everything under the root, the generator_version
+  machinery's manual trigger). Becomes more load-bearing with M1.5
+  preview-policy knobs. (Founder, dogfood round 3, June 2026.)
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
 - [ ] **Search entry as overlay, results as canvas** — `/` opens a floating
