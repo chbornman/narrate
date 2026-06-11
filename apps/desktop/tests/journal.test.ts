@@ -98,51 +98,64 @@ describe("retracted toggle (UI §8.2: hidden until toggled)", () => {
   });
 });
 
-describe("row actions (UI §8.3 gated by EVENTS §3.4–3.6)", () => {
-  it("live remark: all three", () => {
+describe("row actions (UI §8.3 gated by EVENTS §3.4–3.6; Select on every kind except redacted stubs — founder, June 2026)", () => {
+  it("live remark: select + all three", () => {
     expect(rowActions(entry({ id: "01A" }))).toEqual({
+      select: true,
       correct: true,
       retract: true,
       redact: true,
     });
   });
 
-  it("rating: retract only (nothing to scrub, nothing to revise)", () => {
+  it("rating: select + retract (nothing to scrub, nothing to revise)", () => {
     expect(rowActions(entry({ id: "01A", kind: "rating", rating: 4 }))).toEqual({
+      select: true,
       correct: false,
       retract: true,
       redact: false,
     });
   });
 
-  it("stroke: retract (erase) and redact, never correct", () => {
+  it("stroke: select, retract (erase) and redact, never correct", () => {
     expect(rowActions(entry({ id: "01A", kind: "stroke", text: null }))).toEqual({
+      select: true,
       correct: false,
       retract: true,
       redact: true,
     });
   });
 
-  it("retracted remark: ONLY redact (content persists in log + sidecars; retraction-of-retraction is forbidden, E4)", () => {
+  it("retracted remark: select + redact only (content persists in log + sidecars; retraction-of-retraction is forbidden, E4)", () => {
     expect(rowActions(entry({ id: "01A", retracted: true }))).toEqual({
+      select: true,
       correct: false,
       retract: false,
       redact: true,
     });
   });
 
-  it("retracted rating: nothing", () => {
+  it("retracted rating: select only (its targets are still real)", () => {
     expect(
       rowActions(entry({ id: "01A", kind: "rating", rating: 3, retracted: true })),
-    ).toEqual({ correct: false, retract: false, redact: false });
+    ).toEqual({ select: true, correct: false, retract: false, redact: false });
   });
 
-  it("redacted stub: nothing — content is already gone", () => {
-    expect(rowActions(entry({ id: "01A", kind: "redacted", text: null }))).toEqual({
+  it("redacted stub: nothing — content is already gone, and a stub offers no verbs even when the DTO still carries targets", () => {
+    expect(
+      rowActions(
+        entry({ id: "01A", kind: "redacted", text: null, targets: ["ab".repeat(32)] }),
+      ),
+    ).toEqual({
+      select: false,
       correct: false,
       retract: false,
       redact: false,
     });
+  });
+
+  it("a targetless row never offers Select (nothing to pick)", () => {
+    expect(rowActions(entry({ id: "01A", targets: [] })).select).toBe(false);
   });
 });
 

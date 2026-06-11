@@ -44,8 +44,6 @@
   const time = $derived(formatTime(entry.ts));
   const actions = $derived(rowActions(entry));
   const siblings = $derived(siblingTargetsLabel(entry.targets, inspectedHash));
-  /** Select-from-note: any row with targets (redacted stubs carry none). */
-  const canSelect = $derived(entry.targets.length > 0);
 
   function onContextMenu(e: MouseEvent) {
     if (oncontextmenu === undefined) return;
@@ -137,9 +135,9 @@
     </span>
   {/if}
 
-  {#if !editing && (canSelect || actions.correct || actions.retract || actions.redact)}
+  {#if !editing && (actions.select || actions.correct || actions.retract || actions.redact)}
     <span class="actions">
-      {#if canSelect}
+      {#if actions.select}
         <button
           onclick={() =>
             onaction({ kind: "select-journal-targets", targets: entry.targets })}

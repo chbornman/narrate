@@ -164,12 +164,14 @@ describe("JournalEntry hover actions (UI §8.3)", () => {
     ]);
   });
 
-  it("a rating offers Retract only; a redacted stub offers nothing", () => {
+  it("a rating offers Select + Retract; a redacted stub offers nothing", () => {
     render(JournalEntry, {
       entry: entry("01A", { kind: "rating", text: null, rating: 3 }),
       onaction: () => {},
       oncorrect: () => {},
     });
+    // Select rides every kind except stubs (founder, June 2026).
+    expect(screen.getByRole("button", { name: "Select" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retract" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Correct" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Redact…" })).toBeNull();
