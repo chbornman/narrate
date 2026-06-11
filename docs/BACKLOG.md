@@ -8,6 +8,21 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
+- [ ] **Drag photos OUT of the app** — from the grid or from Look, click-
+  drag an image out of the window and drop it into Finder/another app as
+  the ORIGINAL file (a native OS file drag carrying absolute paths — the
+  D4 reveal/open-with class of OS integration, not an in-app file verb;
+  D3 stands: the library never moves or deletes its own files, the drop
+  target copies). Implementation pointers: Tauri needs a native start-
+  drag (HTML5 dragstart cannot carry real files out of a webview) —
+  tauri-plugin-drag (CrabNebula) or NSDraggingSession/NSFilePromise via
+  the window handle on macOS. Sub-questions to decide at build time:
+  a multi-select drag carries the whole selection; does a collapsed
+  RAW+JPEG pair drag both members or the display member (lean: both —
+  the pair is one image to the user, and a half-exported pair is the
+  kind of silent data loss the welcome card warns about); offline-volume
+  images can't drag (no readable path) — quiet refusal, no toast spam.
+  (Founder, dogfood round 3, June 2026.)
 - [x] **Pair targets vs "+N others"** — landed `wave2/polish` (B61:
   suppress, the stack badge already says it): `siblingTargetsLabel`
   gains the inspected image's pair-mate and never counts it — the mark
