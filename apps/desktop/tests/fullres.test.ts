@@ -11,7 +11,12 @@
  * tested in Rust (protocol.rs, library_acceptance.rs).
  */
 import { describe, expect, it } from "vitest";
-import { FIRST_SOURCE, needsOriginal, nextSource } from "../src/lib/logic/fullres";
+import {
+  FIRST_SOURCE,
+  loadProvesPixels,
+  needsOriginal,
+  nextSource,
+} from "../src/lib/logic/fullres";
 import { fitScale } from "../src/lib/logic/zoom";
 
 const PREVIEW = { w: 2560, h: 1707 }; // the display-preview class
@@ -70,5 +75,28 @@ describe("the source ladder — original, then embedded-native, then the preview
 
   it("a refused embedded exhausts the ladder (preview stands; decoded 1:1 is M1.5)", () => {
     expect(nextSource("embedded")).toBeNull();
+  });
+});
+
+describe("the swap gate — only a load that proved pixels supplants the preview", () => {
+  // THE founder bug (June 2026): WKWebView fires `load` with natural dims
+  // 0×0 — instead of `error` — when an <img>'s src was swapped inside its
+  // own onerror handler and the new URL 404s. That is exactly a RAW's
+  // ladder hop (/original refused → /embedded refused). Trusting the lying
+  // load replaced the painted preview with the webview's broken-image
+  // glyph and wedged the ladder. The gate makes a dimensionless load a
+  // refusal: same path as onerror — next rung, or the preview stands.
+  it("a RAW whose embedded rung 404s keeps the preview painted (0×0 load = refusal)", () => {
+    expect(loadProvesPixels({ w: 0, h: 0 })).toBe(false);
+  });
+
+  it("a genuinely decoded source proves pixels and may swap in", () => {
+    expect(loadProvesPixels({ w: 9504, h: 6336 })).toBe(true);
+    expect(loadProvesPixels({ w: 1, h: 1 })).toBe(true);
+  });
+
+  it("a degenerate axis never proves (raster routes always have both)", () => {
+    expect(loadProvesPixels({ w: 2560, h: 0 })).toBe(false);
+    expect(loadProvesPixels({ w: 0, h: 1707 })).toBe(false);
   });
 });

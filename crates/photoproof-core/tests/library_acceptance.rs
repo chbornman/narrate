@@ -1450,6 +1450,87 @@ fn embedded_native_refusals_fall_back_to_the_preview() {
     assert!(env.lib.embedded_native(&big).unwrap().is_none());
 }
 
+/// Founder bug (June 2026, Sony ILCE-7CR ARW): the library was ingested
+/// while the extractor could only see the legacy small root-IFD preview
+/// (1616×1080) — so the cached display artifact is SMALL and flagged for
+/// the full-decode backfill, and the /embedded route refused on the
+/// no-pixel-gain gate (the artifact IS the embedded preview). The rawler
+/// sweep fix (preview.rs `largest_chained_jpeg`) now finds the
+/// full-resolution chained-IFD "JpgFromRaw". This pins the UPGRADE path:
+/// against the STALE small artifact — no re-ingest, founder's library
+/// as-is — the native route must serve at full size, because the gain is
+/// real and the aspect agrees within tolerance (Sony's small preview is
+/// ~0.25% off the camera JPEG's 3:2 — well inside the 2% gate).
+#[test]
+fn embedded_native_serves_full_res_discovered_after_ingest() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    // Ingest-time extraction: the small preview only (the rawler root-IFD
+    // miss). Portrait shot: stored landscape + tag 8, founder geometry ÷1.
+    let small_display = display_pattern(1080, 1616);
+    env.extractor.script(
+        "sony.arw",
+        FakeSpec {
+            preview: store_for_orientation(&small_display, 8),
+            raw_dims: Some((9728, 6656)),
+            exif_orientation: 8,
+            preview_orientation: None,
+        },
+    );
+    env.write("photos/sony.arw", b"synthetic arw a7cr body");
+    env.scan(&root);
+    env.drain_queue();
+
+    let conn = env.conn();
+    let h: String = conn
+        .query_row(
+            "SELECT image_hash FROM paths WHERE rel_path = 'photos/sony.arw' AND state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let hash = ContentHash::from_hex(&h).unwrap();
+
+    // The stale state the founder's library is actually in: a small
+    // display artifact, flagged for backfill…
+    let a = env
+        .lib
+        .preview_artifact(&hash, ArtifactKind::Display)
+        .unwrap()
+        .unwrap();
+    assert_eq!((a.width, a.height), (1080, 1616));
+    assert!(a.needs_full_decode, "small preview missed the threshold");
+    // …and THE REFUSAL the founder hit: extraction still finds only the
+    // small preview → no pixel gain → uniform 404 at the protocol.
+    assert!(env.lib.embedded_native(&hash).unwrap().is_none());
+
+    // The sweep fix lands (extractor now sees the chained full-res JPEG,
+    // carrying the holding IFD's own Orientation tag). Camera-JPEG crop is
+    // 9504×6336 — aspect 1.5 vs the artifact's 1616/1080 ≈ 1.4963; the
+    // fixture halves the founder dims (same aspects, same gates) to keep
+    // the pattern generation out of the suite's critical path.
+    let full_display = display_pattern(3168, 4752);
+    env.extractor.script(
+        "sony.arw",
+        FakeSpec {
+            preview: store_for_orientation(&full_display, 8),
+            raw_dims: Some((9728, 6656)),
+            exif_orientation: 8,
+            preview_orientation: Some(8),
+        },
+    );
+    let native = env
+        .lib
+        .embedded_native(&hash)
+        .unwrap()
+        .expect("full-res embedded must serve against the stale artifact");
+    // Native size, display-oriented (portrait), upright — strokes drawn
+    // over the small preview keep their substrate geometry at deep zoom.
+    assert_eq!((native.width, native.height), (3168, 4752));
+    assert_upright_bytes(&native.jpeg, true, "sony.arw native after upgrade");
+}
+
 // ---------------------------------------------------------------------------
 // 11. Threshold routing (§9.3)
 // ---------------------------------------------------------------------------

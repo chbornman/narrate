@@ -413,6 +413,118 @@ pub trait EmbeddedPreviewExtractor: Send + Sync {
     fn extract(&self, path: &Path) -> Result<Option<ExtractedPreview>, PreviewError>;
 }
 
+/// A JPEG preview found by walking the RAW's TIFF IFD chain: where it
+/// lives in the file, its header-probed pixel dims, and the orientation
+/// tag of the IFD that holds it (None for the root IFD — see
+/// [`largest_chained_jpeg`] for why root orientation is never trusted as
+/// the preview's own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainedJpegCandidate {
+    pub offset: u64,
+    pub len: u64,
+    pub width: u32,
+    pub height: u32,
+    pub own_orientation: Option<u16>,
+}
+
+impl ChainedJpegCandidate {
+    fn edge(&self) -> u32 {
+        self.width.max(self.height)
+    }
+}
+
+/// Walk EVERY IFD of a TIFF-structured RAW — the chained next-IFD list
+/// plus each IFD's sub-IFDs — for JPEGInterchangeFormat/-Length pairs and
+/// return the largest embedded JPEG by pixel edge (header-probed; nothing
+/// is fully decoded here).
+///
+/// WHY THIS EXISTS (founder bug, dogfood round 2): rawler's per-format
+/// `full_image` implementations only consult the IFD their format
+/// historically used. Sony ARW (A7C/A7R V/A7CR class) parks the
+/// full-resolution camera JPEG in a CHAINED IFD — exiftool's IFD2
+/// "JpgFromRaw", tags 0x0201/0x0202 — while the root IFD's same tag pair
+/// points at the legacy 1616×1080 preview. rawler 0.7.2's ArwDecoder reads
+/// only the root pair, so both the ingest preview pass and the on-demand
+/// /embedded route saw a small preview, and the embedded-native pixel-gain
+/// gate then refused (correctly, but the full-res JPEG was sitting right
+/// there in the file). Verified against the founder's ILCE-7CR files.
+///
+/// Non-TIFF RAW containers (CR3/BMFF) fail the TIFF parse and yield None;
+/// candidates whose byte range or JPEG header does not check out are
+/// skipped — this is a best-effort sweep on top of rawler's ladder, never
+/// a replacement for it.
+pub fn largest_chained_jpeg(source: &rawler::rawsource::RawSource) -> Option<ChainedJpegCandidate> {
+    use rawler::formats::tiff::reader::TiffReader;
+    use rawler::formats::tiff::{GenericTiffReader, IFD};
+
+    let mut reader = source.reader();
+    let tiff = GenericTiffReader::new(&mut reader, 0, 0, None, &[]).ok()?;
+
+    fn consider(
+        source: &rawler::rawsource::RawSource,
+        ifd: &IFD,
+        is_root: bool,
+        best: &mut Option<ChainedJpegCandidate>,
+    ) {
+        use rawler::tags::ExifTag;
+        let (Some(off), Some(len)) = (
+            ifd.get_entry(ExifTag::JPEGInterchangeFormat),
+            ifd.get_entry(ExifTag::JPEGInterchangeFormatLength),
+        ) else {
+            return;
+        };
+        let (offset, len) = (off.force_u64(0), len.force_u64(0));
+        if len == 0 {
+            return;
+        }
+        // Out-of-range pointers (truncated/corrupt files) skip silently.
+        let Ok(bytes) = source.subview(offset, len) else {
+            return;
+        };
+        // Header-only probe: dimensions without decoding megapixels.
+        let Ok((width, height)) = image::ImageReader::with_format(
+            std::io::Cursor::new(bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .into_dimensions() else {
+            return;
+        };
+        // The preview's OWN orientation tag — only trusted off the root
+        // IFD: per TIFF/EP the root Orientation describes the main (raw)
+        // image, which rawler already surfaces as the EXIF orientation;
+        // claiming it as the preview's own would bypass the §9.3.1
+        // pre-rotation heuristic for exactly the files that need it.
+        let own_orientation = if is_root {
+            None
+        } else {
+            ifd.get_entry(ExifTag::Orientation)
+                .map(|e| e.force_u16(0))
+                .filter(|o| (1..=8).contains(o))
+        };
+        let candidate = ChainedJpegCandidate {
+            offset,
+            len,
+            width,
+            height,
+            own_orientation,
+        };
+        if best.is_none_or(|b| candidate.edge() > b.edge()) {
+            *best = Some(candidate);
+        }
+    }
+
+    let mut best: Option<ChainedJpegCandidate> = None;
+    for (idx, ifd) in tiff.chains().iter().enumerate() {
+        consider(source, ifd, idx == 0, &mut best);
+        for subs in ifd.sub_ifds().values() {
+            for sub in subs {
+                consider(source, sub, false, &mut best);
+            }
+        }
+    }
+    best
+}
+
 /// rawler-backed extraction (§9.3: metadata-only parse, no demosaic).
 #[derive(Debug, Default)]
 pub struct RawlerExtractor;
@@ -429,14 +541,39 @@ impl EmbeddedPreviewExtractor for RawlerExtractor {
             .and_then(|md| md.exif.orientation)
             .filter(|o| (1..=8).contains(o))
             .unwrap_or(1);
-        // Largest embedded preview first; fall back down the ladder.
-        let preview = decoder
+        // rawler's ladder first (format-specific knowledge lives there)…
+        let decoder_preview = decoder
             .full_image(&source, &params)
             .ok()
             .flatten()
             .or_else(|| decoder.preview_image(&source, &params).ok().flatten())
             .or_else(|| decoder.thumbnail_image(&source, &params).ok().flatten());
-        let Some(image) = preview else {
+        // …then the chained-IFD sweep, which wins only on a strictly
+        // larger pixel edge (header-probed before paying for the decode).
+        // Sony ARW: the ladder yields the 1616×1080 root preview while the
+        // full 9504×6336 camera JPEG sits in chained IFD2.
+        let chained = largest_chained_jpeg(&source).filter(|c| {
+            decoder_preview.as_ref().is_none_or(|d| {
+                use image::GenericImageView;
+                let (dw, dh) = d.dimensions();
+                c.edge() > dw.max(dh)
+            })
+        });
+        let (image, preview_orientation) = match chained {
+            Some(c) => {
+                let decoded = source.subview(c.offset, c.len).ok().and_then(|bytes| {
+                    image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).ok()
+                });
+                match decoded {
+                    // A header that probed fine but fails the full decode
+                    // (truncated stream) falls back to rawler's ladder.
+                    Some(img) => (Some(img), c.own_orientation),
+                    None => (decoder_preview, None),
+                }
+            }
+            None => (decoder_preview, None),
+        };
+        let Some(image) = image else {
             return Ok(None);
         };
         // Sensor dims via the dummy decode (no decompression).
@@ -452,7 +589,7 @@ impl EmbeddedPreviewExtractor for RawlerExtractor {
             raw_width,
             raw_height,
             exif_orientation,
-            preview_orientation: None,
+            preview_orientation,
         }))
     }
 }
@@ -636,6 +773,122 @@ mod tests {
         let img = DynamicImage::new_rgba8(100, 60);
         let resized = resize_to_edge(&img, 512);
         assert_eq!(resized.dimensions(), (100, 60));
+    }
+
+    // ---- the chained-IFD JPEG sweep (founder bug: Sony ARW JpgFromRaw) ----
+
+    /// Decodable JPEG bytes at the requested dimensions.
+    fn jpeg_blob(w: u32, h: u32) -> Vec<u8> {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            w,
+            h,
+            image::Rgb([90, 120, 60]),
+        ));
+        encode_jpeg_native(&img).unwrap()
+    }
+
+    /// Hand-rolled little-endian classic TIFF: one chained IFD per element,
+    /// each carrying a JPEGInterchangeFormat/-Length pair (and an
+    /// Orientation tag when given) — the exact shape Sony ARW uses for its
+    /// root preview + chained "JpgFromRaw" full-size JPEG.
+    fn synthetic_tiff(ifds: &[(Vec<u8>, Option<u16>)]) -> Vec<u8> {
+        fn entry(out: &mut Vec<u8>, tag: u16, typ: u16, count: u32, value: u32) {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&typ.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        // Layout: header, then every JPEG blob, then the IFD chain.
+        let mut blob_off = Vec::new();
+        let mut cursor = 8u32;
+        for (jpeg, _) in ifds {
+            blob_off.push(cursor);
+            cursor += jpeg.len() as u32;
+        }
+        let mut ifd_off = Vec::new();
+        for (_, own) in ifds {
+            ifd_off.push(cursor);
+            let n = if own.is_some() { 3u32 } else { 2u32 };
+            cursor += 2 + 12 * n + 4;
+        }
+        let mut out = Vec::with_capacity(cursor as usize);
+        out.extend_from_slice(b"II");
+        out.extend_from_slice(&42u16.to_le_bytes());
+        out.extend_from_slice(&ifd_off[0].to_le_bytes());
+        for (jpeg, _) in ifds {
+            out.extend_from_slice(jpeg);
+        }
+        for (i, (jpeg, own)) in ifds.iter().enumerate() {
+            let n: u16 = if own.is_some() { 3 } else { 2 };
+            out.extend_from_slice(&n.to_le_bytes());
+            // Entries in ascending tag order (TIFF requires it; rawler is
+            // lenient but the fixture should be honest).
+            if let Some(o) = own {
+                entry(&mut out, 0x0112, 3, 1, u32::from(*o)); // Orientation, SHORT
+            }
+            entry(&mut out, 0x0201, 4, 1, blob_off[i]); // JPEGInterchangeFormat
+            entry(&mut out, 0x0202, 4, 1, jpeg.len() as u32); // …Length
+            let next = ifd_off.get(i + 1).copied().unwrap_or(0);
+            out.extend_from_slice(&next.to_le_bytes());
+        }
+        out
+    }
+
+    /// THE founder bug shape (Sony ILCE-7CR ARW): root IFD points at the
+    /// legacy small preview, a chained IFD carries the full-resolution
+    /// camera JPEG with its own Orientation tag. The sweep must pick the
+    /// chained JPEG — rawler's root-only lookup is exactly what starved the
+    /// preview pass AND the /embedded route down to 1616×1080.
+    #[test]
+    fn chained_ifd_full_jpeg_wins_over_root_preview() {
+        let tiff = synthetic_tiff(&[
+            (jpeg_blob(160, 100), None),    // root: small preview
+            (jpeg_blob(320, 200), Some(8)), // chained: "JpgFromRaw"
+        ]);
+        let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
+        let c = largest_chained_jpeg(&source).expect("sweep found a JPEG");
+        assert_eq!((c.width, c.height), (320, 200));
+        assert_eq!(c.own_orientation, Some(8), "the holding IFD's own tag");
+        // And the candidate's byte range round-trips through a real decode.
+        let bytes = source.subview(c.offset, c.len).unwrap();
+        let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!(img.dimensions(), (320, 200));
+    }
+
+    /// Root-held previews never claim the root Orientation tag as their
+    /// own: per TIFF/EP it describes the main (raw) image — rawler already
+    /// surfaces it as the EXIF orientation, and treating it as the
+    /// preview's own tag would bypass the §9.3.1 pre-rotation heuristic.
+    #[test]
+    fn root_preview_keeps_no_own_orientation() {
+        let tiff = synthetic_tiff(&[(jpeg_blob(320, 200), Some(8))]);
+        let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
+        let c = largest_chained_jpeg(&source).expect("root JPEG found");
+        assert_eq!((c.width, c.height), (320, 200));
+        assert_eq!(c.own_orientation, None);
+        // A bigger root beats a smaller chained JPEG (the sweep is by pixel
+        // edge, not by chain position).
+        let tiff = synthetic_tiff(&[
+            (jpeg_blob(320, 200), None),
+            (jpeg_blob(160, 100), Some(8)),
+        ]);
+        let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
+        let c = largest_chained_jpeg(&source).expect("root JPEG found");
+        assert_eq!((c.width, c.height), (320, 200));
+        assert_eq!(c.own_orientation, None);
+    }
+
+    /// Best-effort discipline: non-TIFF containers (CR3/BMFF) and entries
+    /// whose bytes are not a JPEG refuse quietly — rawler's own ladder
+    /// remains the fallback, never an error.
+    #[test]
+    fn sweep_refuses_non_tiff_and_garbage_quietly() {
+        let source = rawler::rawsource::RawSource::new_from_slice(b"not a tiff at all");
+        assert!(largest_chained_jpeg(&source).is_none());
+        // A well-formed TIFF whose "JPEG" bytes do not parse: skipped.
+        let tiff = synthetic_tiff(&[(b"definitely not jpeg data".to_vec(), None)]);
+        let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
+        assert!(largest_chained_jpeg(&source).is_none());
     }
 
     #[test]
