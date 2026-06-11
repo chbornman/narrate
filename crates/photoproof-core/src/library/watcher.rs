@@ -226,6 +226,14 @@ pub struct WatchPipeline {
     volume_id: String,
     mount_point: PathBuf,
     root_dir: PathBuf,
+    /// Symlink-resolved twins of `mount_point`/`root_dir`. FSEvents
+    /// (macOS) reports RESOLVED event paths — a `/var/…` root's events
+    /// arrive as `/private/var/…` — while inotify reports the registered
+    /// form, so containment and rel-path math accept EITHER prefix
+    /// (founder-machine find, June 2026: every event on a symlinked root
+    /// was silently dropped).
+    mount_point_canonical: PathBuf,
+    root_dir_canonical: PathBuf,
     tolerance_ns: i64,
     cfg: DebounceConfig,
     core: DebounceCore,
@@ -241,11 +249,20 @@ impl WatchPipeline {
         let (_root, volume, dir) = lib.root_location(root_id)?;
         let mount_point = PathBuf::from(volume.mount_point.clone().expect("online volume"));
         let tolerance_ns = lib.mtime_tolerance_ns(volume.fs_type.as_deref());
+        // Resolution failure (e.g. the volume going offline mid-setup)
+        // falls back to the unresolved form: the twin checks degrade to
+        // the old single-prefix behavior instead of erroring the watcher.
+        let mount_point_canonical = mount_point
+            .canonicalize()
+            .unwrap_or_else(|_| mount_point.clone());
+        let root_dir_canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
         Ok(Self {
             volume_id: volume.volume_id.clone(),
             root_id: root_id.to_owned(),
             mount_point,
             root_dir: dir,
+            mount_point_canonical,
+            root_dir_canonical,
             tolerance_ns,
             cfg,
             core: DebounceCore::new(cfg),
@@ -264,8 +281,14 @@ impl WatchPipeline {
         self.core.len()
     }
 
+    /// Containment in BOTH spellings (see the `*_canonical` field note).
+    fn in_root(&self, p: &Path) -> bool {
+        p.starts_with(&self.root_dir) || p.starts_with(&self.root_dir_canonical)
+    }
+
     fn rel_of(&self, path: &Path) -> Option<String> {
         rel_path_str(&self.mount_point, path)
+            .or_else(|| rel_path_str(&self.mount_point_canonical, path))
     }
 
     pub fn push(
@@ -276,7 +299,7 @@ impl WatchPipeline {
         let now_ms = now.epoch_ms();
         match event {
             RawWatchEvent::Created(p) | RawWatchEvent::Modified(p) => {
-                if !p.starts_with(&self.root_dir) {
+                if !self.in_root(&p) {
                     return Ok(vec![]);
                 }
                 // A directory moved/created inside the root may arrive as a
@@ -290,7 +313,7 @@ impl WatchPipeline {
                 Ok(vec![])
             }
             RawWatchEvent::Removed(p) => {
-                if !p.starts_with(&self.root_dir) {
+                if !self.in_root(&p) {
                     return Ok(vec![]);
                 }
                 self.core.push_removed(p, now_ms);
@@ -336,10 +359,10 @@ impl WatchPipeline {
     ) -> Result<Vec<PipelineEffect>, LibraryError> {
         let now_ms = now.epoch_ms();
         let fallback = |this: &mut Self| {
-            if from.starts_with(&this.root_dir) {
+            if this.in_root(&from) {
                 this.core.push_removed(from.clone(), now_ms);
             }
-            if to.starts_with(&this.root_dir) {
+            if this.in_root(&to) {
                 this.core.push_changed(to.clone(), now_ms);
             }
         };
@@ -347,16 +370,16 @@ impl WatchPipeline {
             // Directory rename: every child path row needs a relink; the
             // remove side surfaces through the per-file correlation, so a
             // scan handles it wholesale.
-            if from.starts_with(&self.root_dir) || to.starts_with(&self.root_dir) {
+            if self.in_root(&from) || self.in_root(&to) {
                 return Ok(vec![PipelineEffect::ScanNeeded]);
             }
             return Ok(vec![]);
         }
         let (Some(from_rel), Some(to_rel)) = (
-            from.starts_with(&self.root_dir)
+            self.in_root(&from)
                 .then(|| self.rel_of(&from))
                 .flatten(),
-            to.starts_with(&self.root_dir)
+            self.in_root(&to)
                 .then(|| self.rel_of(&to))
                 .flatten(),
         ) else {
