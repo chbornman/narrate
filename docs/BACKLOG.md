@@ -46,6 +46,8 @@ managing = off-thesis).
   round 2.)
 - [ ] clicking esc closes the Journal / metadata inspector sidebar when returning to the grid. We dont want this behavior. When we return to the grid, an image will still be selected. We probably do need to think about if multiple images are selected, how do we show the sidebar content?
 
+- [ ] **Full metrics suite across every pipeline stage** — when the product is feature-complete, instrument each step (ingest passes, hash/preview throughput, search latency, fold cost, capture/binding latencies, overlay render, IPC round-trips) into one coherent metrics surface (debug panel growing into a perf dashboard); founder wants "blazing fast" to be measured, not vibes. (Founder, June 2026.)
+
 ## M1.5 (scheduled concept, not yet a packet)
 
 - [ ] Full RAW decode backfill pass (rawler/libheif worker; queue already
