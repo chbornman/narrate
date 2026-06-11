@@ -18,6 +18,7 @@
   import type { Dims, ZoomTransform } from "../../logic/zoom";
   import * as stroke from "../../logic/stroke";
   import {
+    classifyPenDown,
     livePoints,
     livePressures,
     penDown,
@@ -112,20 +113,19 @@
     liveSeq += 1;
   }
 
-  /** The stylus eraser end counts (UI §4.4): eraser button = bit 32 in
-   * `buttons` (button 5 on the down transition). */
-  function eraserIntent(e: PointerEvent): boolean {
-    return ui.look.eraserHeld || e.button === 5 || (e.buttons & 32) !== 0;
-  }
-
   function onPointerDown(e: PointerEvent) {
     if (!ui.look.pencilMode || t === null) return;
+    // The button gate comes FIRST (logic/pencil.ts classifyPenDown):
+    // right/middle-click always falls through — untouched, so the
+    // look-backdrop menu seat keeps its click even with E held. Button 0
+    // draws (or erases under hold-E); the stylus eraser end erases (B45).
+    const intent = classifyPenDown(e.button, e.buttons, ui.look.eraserHeld);
+    if (intent === "pass") return;
     e.stopPropagation(); // the stage must not also start a drag-pan
-    if (eraserIntent(e)) {
+    if (intent === "erase") {
       eraseAt(e);
       return;
     }
-    if (e.button !== 0) return; // right-click stays the backdrop menu seat
     canvasEl?.setPointerCapture(e.pointerId);
     pen = penDown(sampleOf(e), { t, image });
     ui.look.penDown = true;
@@ -195,30 +195,14 @@
     if (target !== null) void ui.eraseStroke(target);
   }
 
-  // ---- raw key facts: hold-E release, Space yields the pointer ----------------
-
-  let spaceHeld = $state(false);
-
-  function isTextInput(el: Element | null): boolean {
-    return (
-      el instanceof HTMLInputElement ||
-      el instanceof HTMLTextAreaElement ||
-      (el instanceof HTMLElement && el.isContentEditable)
-    );
-  }
-
-  function onWindowKeydown(e: KeyboardEvent) {
-    if (e.key === " " && !isTextInput(document.activeElement)) spaceHeld = true;
-  }
-
-  function onWindowKeyup(e: KeyboardEvent) {
-    if (e.key === " ") spaceHeld = false;
-    // (Hold-E release lives in LookStage's keyup — mounted for the whole
-    // Look visit, including before this canvas has image dims.)
-  }
+  // ---- raw key facts ------------------------------------------------------------
+  //
+  // Space and hold-E release are tracked ONCE, in LookStage (mounted for
+  // the whole Look visit), through its stageOwnsRawKeys ownership gate;
+  // this overlay only CONSUMES ui.look.spaceHeld/eraserHeld. Window loss
+  // is the overlay's own concern: the in-flight pen must discard.
 
   function onWindowBlur() {
-    spaceHeld = false;
     ui.look.eraserHeld = false;
     if (pen !== null) discardPen(); // window loss = pointer-cancel semantics
   }
@@ -261,7 +245,7 @@
 
   // ---- rendering ---------------------------------------------------------------
 
-  const active = $derived(ui.look.pencilMode && !spaceHeld);
+  const active = $derived(ui.look.pencilMode && !ui.look.spaceHeld);
 
   let pencilRed = $state(""); // resolved from the token below; empty until then
   $effect(() => {
@@ -345,11 +329,7 @@
   });
 </script>
 
-<svelte:window
-  onkeydown={onWindowKeydown}
-  onkeyup={onWindowKeyup}
-  onblur={onWindowBlur}
-/>
+<svelte:window onblur={onWindowBlur} />
 
 <canvas
   bind:this={canvasEl}

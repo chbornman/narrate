@@ -11,6 +11,7 @@ import {
   displayedHash,
   navigationSet,
   spaceDown,
+  spaceHeldNext,
   spacePanned,
   spaceUp,
   toEntry,
@@ -191,6 +192,38 @@ describe("Space across cycles", () => {
     expect(r.outcome).toBe("none");
     // Cycle 3: clean again → close.
     expect(spaceUp(spaceDown(r.state, fresh), pencilOff).outcome).toBe("close");
+  });
+});
+
+describe("spaceHeldNext — the shared Space-held slice fact (one tracker, ownership-gated)", () => {
+  // LookStage is the ONLY writer (through its stageOwnsRawKeys gate);
+  // PencilOverlay consumes ui.look.spaceHeld to yield the pointer. Both
+  // raw pipelines therefore share one gate and CANNOT desync.
+
+  it("engages only while the stage owns the raw keys — exactly like the pan machine", () => {
+    expect(spaceHeldNext(false, "down", true)).toBe(true);
+    // The pan machine engages under the same owned down — agreement is
+    // the point (the overlay used to track Space ungated).
+    expect(spaceDown(SPACE_IDLE, fresh).held).toBe(true);
+  });
+
+  it("a Space under the cheatsheet or an open menu never makes the overlay yield", () => {
+    // Stage does not own the keys (cheatsheet/menu/search/rail): the pan
+    // machine never sees the down, so the slice fact must stay false too.
+    expect(spaceHeldNext(false, "down", false)).toBe(false);
+  });
+
+  it("a menu opening MID-hold cannot wedge it: keyup/blur release unconditionally", () => {
+    expect(spaceHeldNext(true, "up", false)).toBe(false);
+    expect(spaceHeldNext(true, "blur", false)).toBe(false);
+    // …while an unowned auto-repeat does not release an engaged hold
+    // (release belongs to keyup, mirroring spaceDown's repeat rule).
+    expect(spaceHeldNext(true, "down", false)).toBe(true);
+  });
+
+  it("stray releases on idle stay idle", () => {
+    expect(spaceHeldNext(false, "up", true)).toBe(false);
+    expect(spaceHeldNext(false, "blur", false)).toBe(false);
   });
 });
 

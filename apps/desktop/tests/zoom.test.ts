@@ -298,3 +298,43 @@ describe("clampOffsets — centering + pan clamp (founder dogfood round 1)", () 
     expect(t.ty).toBeCloseTo((800 - 250) / 2);
   });
 });
+
+describe("bottom-edge resize — the filmstrip PUSHES the viewport (polish)", () => {
+  // Toggling the filmstrip shrinks the stage container by the strip's
+  // height (it is an edge panel now, never an overlay). The session is
+  // canonical and dimension-independent, so LookStage's derived transform
+  // re-runs THIS carryOver against the new container — fit refits, a live
+  // zoom keeps its magnification, and clampOffsets (U13) re-normalizes;
+  // PencilOverlay redraws because its draw effect keys on (t, container).
+  const SHRUNK = dims(C.w, C.h - 80);
+
+  it("fit recomputes against the shrunk container, and back on untoggle", () => {
+    expect(carryOver(null, SHRUNK, LANDSCAPE)).toEqual(fitTransform(SHRUNK, LANDSCAPE));
+    expect(fitScale(SHRUNK, LANDSCAPE)).toBeLessThan(fitScale(C, LANDSCAPE));
+    expect(carryOver(null, C, LANDSCAPE)).toEqual(fitTransform(C, LANDSCAPE));
+  });
+
+  it("an in-progress zoom session survives: same scale, centerFrac at the new center", () => {
+    const t = zoomAtPoint(fitTransform(C, LANDSCAPE), C, LANDSCAPE, { x: 700, y: 250 }, 2.3);
+    const s = toSession(t, C, LANDSCAPE, "free");
+    const resized = carryOver(s, SHRUNK, LANDSCAPE);
+    expect(resized.scale).toBeCloseTo(2.3, 12); // the resize never re-zooms
+    // The image fraction that sat at the OLD container center sits at the
+    // NEW one (interior point: no edge constraint binds here).
+    const p = screenPoint(resized, {
+      x: s.centerFrac.x * LANDSCAPE.w,
+      y: s.centerFrac.y * LANDSCAPE.h,
+    });
+    expect(p.x).toBeCloseTo(SHRUNK.w / 2, 9);
+    expect(p.y).toBeCloseTo(SHRUNK.h / 2, 9);
+  });
+
+  it("a session punched into the bottom edge re-clamps: no gap opens under the image", () => {
+    const s = { mode: "free" as const, scale: 1, centerFrac: { x: 0.5, y: 0.99 } };
+    const resized = carryOver(s, SHRUNK, LANDSCAPE);
+    // Unclamped ty would strand the bottom edge above the container's;
+    // clampOffsets pins it (the U13 overflow rule, same as panning).
+    expect(resized.ty).toBe(SHRUNK.h - LANDSCAPE.h * resized.scale);
+    expect(resized.tx).toBeCloseTo(SHRUNK.w / 2 - 0.5 * LANDSCAPE.w, 9);
+  });
+});

@@ -121,3 +121,23 @@ export function spaceUp(
     outcome: s.panned || e.pencilOn ? "none" : "close",
   };
 }
+
+/**
+ * The shared raw Space-held fact (P5.1 review fix): ONE tracker, in
+ * LookStage, writing the look slice (the eraserHeld precedent);
+ * PencilOverlay only CONSUMES the slice field to yield the pointer for
+ * Space-pan. Engagement is ownership-gated exactly like the pan machine
+ * (LookStage's stageOwnsRawKeys: a Space pressed under the cheatsheet, a
+ * context menu, search, or the rail must not make the overlay yield) —
+ * so the two pipelines cannot desync. Release is UNCONDITIONAL: the
+ * keyup (or window blur) may arrive after a menu opened mid-hold, and a
+ * hold must never wedge.
+ */
+export function spaceHeldNext(
+  held: boolean,
+  evt: "down" | "up" | "blur",
+  stageOwnsKeys: boolean,
+): boolean {
+  if (evt !== "down") return false;
+  return stageOwnsKeys ? true : held;
+}

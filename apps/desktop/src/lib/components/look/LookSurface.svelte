@@ -5,6 +5,13 @@
    * stroke-scrubber is an ALTERNATE CHILD of the same region (both obey
    * Tab). Right-click on the backdrop opens the look-backdrop seat
    * (Surround ▸ etc. — D6).
+   *
+   * The bottomEdge PUSHES the stage up; it never overlays it (founder,
+   * June 2026 — deliberately opposite the rail's overlay-not-push line:
+   * Look's canvas is the one surface where covered pixels matter). The
+   * stage's container dims shrink, so the live transform re-derives from
+   * the canonical zoom session (zoom.ts carryOver/clampOffsets — U13) and
+   * the pencil overlay redraws, all by construction.
    */
   import { ui } from "../../state/app.svelte";
   import { displayUrl } from "../../ipc/urls";
@@ -31,7 +38,9 @@
 </script>
 
 <div class="look-surface" oncontextmenu={onBackdropContextMenu} role="presentation">
-  <LookStage />
+  <div class="stage-region">
+    <LookStage />
+  </div>
   {#if ui.look.filmstrip && !ui.shell.chromeHidden}
     <Filmstrip />
   {/if}
@@ -42,6 +51,14 @@
     position: absolute;
     inset: 0;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
     background: var(--surround); /* D6: the Look backdrop is the surround */
+  }
+  /* The stage's viewport: shrinks when the filmstrip mounts below it. */
+  .stage-region {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
   }
 </style>

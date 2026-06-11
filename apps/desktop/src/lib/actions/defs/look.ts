@@ -150,9 +150,11 @@ export const LOOK_DEFS: ActionDef[] = [
     keys: [{ key: "z", ctrlOrMeta: true }],
     scope: "look",
     group: "capture",
+    seats: ["look-backdrop"], // pointer reachability (supersedes U14's named exemption)
     available: always,
     // Empty stack and no pen down → the pencil layer must NOT swallow the
-    // chord (CAPTURE §8.5: Ctrl+Z is a no-op in the pencil layer).
+    // chord (CAPTURE §8.5: Ctrl+Z is a no-op in the pencil layer); the
+    // same gate grays the menu row.
     enabled: (ctx) => !ctx.railFocused && ctx.pencilUndoable,
   },
   {

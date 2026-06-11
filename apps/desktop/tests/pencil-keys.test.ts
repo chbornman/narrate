@@ -8,7 +8,13 @@
  * holds for every row.
  */
 import { describe, expect, it } from "vitest";
-import { dispatch, type KeyContext, type KeyInput } from "../src/lib/logic/keymap";
+import {
+  dispatch,
+  withDefaults,
+  type KeyContext,
+  type KeyInput,
+} from "../src/lib/logic/keymap";
+import { menuModel } from "../src/lib/actions/menus";
 
 const look: KeyContext = {
   surface: "look",
@@ -105,6 +111,26 @@ describe("Space with the pencil on is the PAN key (UI §11), never look-close", 
     expect(dispatch(key(" "), { ...look, lookAtFit: true })).toEqual({
       kind: "look-close",
     });
+  });
+});
+
+describe("look-backdrop seating (featureset §6: menus mirror every verb)", () => {
+  // U14's keyboard-only exemption for pencil-undo is gone (polish round):
+  // the chord's verb holds a seat like every other row, grayed through
+  // the SAME enabled gate the keymap uses.
+  function undoRow(over: Partial<KeyContext> = {}) {
+    const rows = menuModel("look-backdrop", withDefaults({ ...look, ...over })).rows;
+    return rows.find((r) => r.verb === "Undo stroke");
+  }
+
+  it("carries an Undo stroke row, grayed until pencil work exists", () => {
+    const dimmed = undoRow();
+    expect(dimmed).toBeDefined();
+    expect(dimmed?.disabled).toBe(true);
+    const live = undoRow({ pencilUndoable: true });
+    expect(live?.disabled).toBe(false);
+    expect(live?.action).toEqual({ kind: "pencil-undo" });
+    expect(live?.keyHint).toEqual({ key: "z", ctrlOrMeta: true });
   });
 });
 
