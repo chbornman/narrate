@@ -1,9 +1,9 @@
 /**
  * Escape = strictly back-one-layer (featureset §0: Esc is sacred), the
- * full 14-layer order, exhaustively: redaction modal → drop-confirm →
- * context menu → inline journal correction → journal composer → note
- * input → cheatsheet → indicator popover → debug panel → search →
- * Look→Grid → inspector → clear selection → none. Never quits.
+ * full 15-layer order, exhaustively: welcome card → redaction modal →
+ * drop-confirm → context menu → inline journal correction → journal
+ * composer → note input → cheatsheet → indicator popover → debug panel →
+ * search → Look→Grid → inspector → clear selection → none. Never quits.
  *
  * AMENDED BY INTEGRATION: the drag-folder drop-confirm sheet (featureset
  * §6) joins as layer 2 — it is scrim-covered topmost chrome like the
@@ -16,11 +16,18 @@
  * inspector layer moved BELOW search and Look→Grid (every other layer's
  * relative order unchanged); the journal composer joined as a text-edit
  * layer beside the inline correction (§0: text inputs exit first).
+ *
+ * AMENDED BY THE WAVE-2 ROBUSTNESS CLUSTER (BACKLOG "First-run welcome
+ * card"): the storage-story modal joins as layer 1, ABOVE the redaction
+ * modal — it is shown before anything else can open, scrim-covered like
+ * the one destructive modal; every other layer's relative order is
+ * unchanged.
  */
 import { describe, expect, it } from "vitest";
 import { escapeAction, type EscapeContext } from "../src/lib/logic/escape";
 
 const none: EscapeContext = {
+  welcomeCardOpen: false,
   redactionModalOpen: false,
   dropConfirmOpen: false,
   contextMenuOpen: false,
@@ -38,6 +45,7 @@ const none: EscapeContext = {
 
 /** Every layer open at once — peeling must follow the exact order. */
 const everything: EscapeContext = {
+  welcomeCardOpen: true,
   redactionModalOpen: true,
   dropConfirmOpen: true,
   contextMenuOpen: true,
@@ -53,8 +61,9 @@ const everything: EscapeContext = {
   hasSelection: true,
 };
 
-// (flag to clear, expected action) in layer order, 1..13.
+// (flag to clear, expected action) in layer order, 1..14.
 const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
+  ["welcomeCardOpen", "close-welcome-card"],
   ["redactionModalOpen", "close-redaction-modal"],
   ["dropConfirmOpen", "close-drop-confirm"],
   ["contextMenuOpen", "close-context-menu"],
@@ -70,7 +79,7 @@ const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
   ["hasSelection", "clear-selection"],
 ];
 
-describe("the 14-layer order, exhaustively", () => {
+describe("the 15-layer order, exhaustively", () => {
   it("peels exactly one layer per press, in order, ending at none", () => {
     let ctx = { ...everything };
     for (const [flag, expected] of LAYERS) {
@@ -78,7 +87,7 @@ describe("the 14-layer order, exhaustively", () => {
       // Clear the layer the action would close and press Escape again.
       ctx = { ...ctx, [flag]: flag === "surface" ? "grid" : false };
     }
-    expect(escapeAction(ctx)).toBe("none"); // layer 14 — NEVER quits
+    expect(escapeAction(ctx)).toBe("none"); // layer 15 — NEVER quits
   });
 
   it("each layer wins over everything beneath it", () => {
@@ -108,8 +117,14 @@ describe("contract spot checks", () => {
     );
   });
 
-  it("the redaction modal (the app's one modal) always cancels first", () => {
-    expect(escapeAction(everything)).toBe("close-redaction-modal");
+  it("the welcome card peels before everything — it was there first", () => {
+    expect(escapeAction(everything)).toBe("close-welcome-card");
+  });
+
+  it("the redaction modal (the one destructive modal) cancels next", () => {
+    expect(escapeAction({ ...everything, welcomeCardOpen: false })).toBe(
+      "close-redaction-modal",
+    );
   });
 
   it("the drop-confirm sheet closes before menus, after the one modal", () => {

@@ -72,7 +72,17 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "toggle-cheatsheet",
     "open-settings",
   ],
-  "rail-folder": ["rail-folder-open", "rail-folder-reveal", "rescan-root", "—", "add-root"],
+  // Rebuild previews sits right after Rescan: kin verbs (both re-derive
+  // index state from files) with deliberately DIFFERENT semantics — the
+  // defs' doc comments hold the distinction (BACKLOG, dogfood round 3).
+  "rail-folder": [
+    "rail-folder-open",
+    "rail-folder-reveal",
+    "rescan-root",
+    "rebuild-previews",
+    "—",
+    "add-root",
+  ],
   // Journal entry rows (select-from-note): the seat arg is the entry's
   // ordered target list. The row verbs (Correct/Retract/Redact…) stay
   // hover affordances by design (defs/inspector.ts) — not menu rows.

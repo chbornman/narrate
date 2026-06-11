@@ -618,11 +618,12 @@ export class Ui {
   }
 
   // ---------------------------------------------------------------------------
-  // Escape — the 14-layer order (logic/escape.ts)
+  // Escape — the 15-layer order (logic/escape.ts)
   // ---------------------------------------------------------------------------
 
   escapeContext(): EscapeContext {
     return {
+      welcomeCardOpen: this.shell.welcomeOpen,
       redactionModalOpen: this.inspector.redactTargetId !== null,
       dropConfirmOpen: this.dropPaths !== null,
       contextMenuOpen: this.shell.contextMenu !== null,
@@ -641,6 +642,11 @@ export class Ui {
 
   async escape() {
     switch (escapeAction(this.escapeContext())) {
+      case "close-welcome-card":
+        // Honors the card's "don't show again" toggle — Esc is a real
+        // dismissal, never a trap that resurrects the card every launch.
+        this.shell.dismissWelcome();
+        break;
       case "close-redaction-modal":
         this.inspector.redactTargetId = null;
         break;
@@ -940,6 +946,16 @@ export class Ui {
       case "rescan-root":
         try {
           await ipc.rescanRoot(action.rootId);
+        } catch {
+          /* unreachable backend in tests */
+        }
+        break;
+      case "rebuild-previews":
+        // Fire-and-forget like Rescan: the pump regenerates in the
+        // background; thumbs heal off `previews-changed` (no progress UI —
+        // the ingest indicator already shows queue depth).
+        try {
+          await ipc.rebuildPreviews(action.rootId);
         } catch {
           /* unreachable backend in tests */
         }

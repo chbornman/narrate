@@ -2016,3 +2016,154 @@ fn l13_08_offline_volume_never_burns_attempts_and_poisoned_rows_heal() {
         .unwrap();
     assert_eq!(dead, 0, "at-cap volume-offline rows rescued on reopen");
 }
+
+/// BACKLOG "Rebuild previews…" (founder, dogfood round 3): the manual
+/// regeneration verb, SEPARATE from Rescan — it re-pends the preview pass
+/// for every image with an active path under the root (fresh budget,
+/// backfill priority), and the next drain overwrites artifacts in place
+/// (idempotent, §9.8).
+#[test]
+fn rebuild_previews_repends_the_whole_root_and_drain_regenerates() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    let elsewhere = env.register("other");
+    env.write("photos/a.jpg", &unique_jpeg(7301));
+    env.write("photos/b.jpg", &unique_jpeg(7302));
+    env.write("other/c.jpg", &unique_jpeg(7303));
+    env.scan(&root);
+    env.scan(&elsewhere);
+    env.drain_queue();
+
+    // Sanity: a vanished root is an error, not a quiet zero.
+    assert!(matches!(
+        env.lib.rebuild_previews("01NOSUCHROOT"),
+        Err(photoproof_core::library::LibraryError::NotFound(_))
+    ));
+
+    let n = env.lib.rebuild_previews(&root).unwrap();
+    assert_eq!(
+        n, 2,
+        "both images under the root re-pend; the sibling root's image does not"
+    );
+
+    // The re-pended rows carry the exact recovery shape: pending, fresh
+    // attempt budget, no backoff, no stale error, backfill priority.
+    let conn = env.conn();
+    let repended: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name = 'preview' AND state = 'pending'
+               AND attempts = 0 AND not_before IS NULL AND error IS NULL
+               AND priority = 2",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(repended, 2);
+    let untouched: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name = 'preview' AND state = 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(untouched, 1, "the other root's preview pass stays done");
+
+    // Drain: artifacts regenerate idempotently (write_artifacts overwrites
+    // atomically) — every artifact file exists and every pass is done again.
+    env.drain_queue();
+    for hash in env.lib.image_hashes().unwrap() {
+        for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+            assert!(
+                photoproof_core::library::artifact_path(&env.cache, &hash, kind).exists(),
+                "artifact regenerated for {kind:?}"
+            );
+        }
+    }
+    let pending_after: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name = 'preview' AND state != 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_after, 0);
+}
+
+/// BACKLOG "Library doctor / self-check pass", v1: a done preview row whose
+/// artifact file vanished re-pends (and the next drain heals it); orphaned
+/// stale path rows are COUNTED, never deleted; stranded preview temp files
+/// are swept. A second doctor pass over a healthy library reports zeros.
+#[test]
+fn doctor_heals_missing_artifacts_counts_orphans_and_sweeps_temps() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    env.write("photos/a.jpg", &unique_jpeg(7401));
+    env.write("photos/b.jpg", &unique_jpeg(7402));
+    env.scan(&root);
+    env.drain_queue();
+
+    // Mangle reality behind the index's back: one artifact file gone
+    // (cache cleaned outside the app), one stranded mid-write temp file.
+    // a.jpg specifically — its ORIGINAL survives, so the heal can run.
+    let hash_a: ContentHash = env
+        .conn()
+        .query_row(
+            "SELECT image_hash FROM paths WHERE rel_path LIKE '%a.jpg'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|h| ContentHash::from_hex(&h).unwrap())
+        .unwrap();
+    let thumb_a = photoproof_core::library::artifact_path(&env.cache, &hash_a, ArtifactKind::Thumb);
+
+    std::fs::remove_file(&thumb_a).unwrap();
+    let tmp = env
+        .cache
+        .join("previews")
+        .join(".pp-tmp-9999-stranded.webp");
+    std::fs::write(&tmp, b"torn").unwrap();
+    // And an orphaned stale path: b.jpg deleted on disk → reconciliation
+    // marks its only path row stale with no surviving active sibling.
+    std::fs::remove_file(env.mount.join("photos/b.jpg")).unwrap();
+    env.scan(&root);
+
+    let report = env.lib.doctor().unwrap();
+    assert_eq!(
+        report.repended, 1,
+        "the done row behind the missing thumb re-pends"
+    );
+    assert_eq!(
+        report.stale_orphans, 1,
+        "b.jpg's stale row counted, not deleted"
+    );
+    assert_eq!(report.temps_swept, 1, "the stranded temp file swept");
+    assert!(!tmp.exists());
+
+    // Conservative by charter: the stale row SURVIVES the doctor.
+    let stale_rows: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE state = 'stale'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale_rows, 1);
+
+    // Drain regenerates the missing artifact (idempotent, §9.8)…
+    env.drain_queue();
+    assert!(thumb_a.exists(), "doctor + drain healed the artifact");
+
+    // …and a healthy library doctors clean (b.jpg's orphaned stale row is
+    // still rightly reported — v1 counts it every pass, it never sweeps).
+    let again = env.lib.doctor().unwrap();
+    assert_eq!(again.repended, 0);
+    assert_eq!(again.temps_swept, 0);
+    assert_eq!(again.stale_orphans, 1);
+}

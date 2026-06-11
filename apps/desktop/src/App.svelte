@@ -33,6 +33,7 @@
   import NoteInput from "./lib/components/shell/NoteInput.svelte";
   import FirstRun from "./lib/components/shell/FirstRun.svelte";
   import ConsentCard from "./lib/components/shell/ConsentCard.svelte";
+  import WelcomeCard from "./lib/components/shell/WelcomeCard.svelte";
   import Cheatsheet from "./lib/components/shell/Cheatsheet.svelte";
   import ContextMenuHost from "./lib/components/shell/ContextMenuHost.svelte";
   import DropConfirm from "./lib/components/shell/DropConfirm.svelte";
@@ -226,6 +227,10 @@
   <ToastHost />
   <Cheatsheet />
   <DropConfirm />
+
+  <!-- first-run storage story (BACKLOG) — mounted LAST among the z-80
+       overlays so the DOM order matches its escape-layer-1 position -->
+  <WelcomeCard />
 
   {#if import.meta.env.PHOTOPROOF_DEBUG && ui.shell.debugOpen && DebugPanel !== null}
     <DebugPanel />

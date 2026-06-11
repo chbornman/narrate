@@ -153,6 +153,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::add_root,
         commands::library::remove_root,
         commands::library::rescan_root,
+        commands::library::rebuild_previews,
         commands::library::folder_tree,
         commands::library::list_folder,
         commands::library::ingest_status,
@@ -199,6 +200,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::add_root,
         commands::library::remove_root,
         commands::library::rescan_root,
+        commands::library::rebuild_previews,
         commands::library::folder_tree,
         commands::library::list_folder,
         commands::library::ingest_status,
@@ -233,5 +235,6 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         debug::debug_runtime,
         debug::debug_force_flush,
         debug::debug_force_rescan,
+        debug::debug_doctor,
     ]
 }

@@ -127,6 +127,20 @@ export function saveSurround(level: SurroundLevel) {
   safeSet("pp.surround", level);
 }
 
+// ---- first-run welcome card (BACKLOG: how your data is stored) ---------------
+
+/** The card shows on launch until a dismissal carries the "don't show
+ * again" toggle (default ON — the common path sees it exactly once). The
+ * pref is webview-local like every other UI pref: a fresh machine rightly
+ * gets the storage story again. */
+export function loadWelcomeSeen(): boolean {
+  return loadBool("pp.welcomeSeen", false);
+}
+
+export function saveWelcomeSeen(seen: boolean) {
+  saveBool("pp.welcomeSeen", seen);
+}
+
 // ---- session ----------------------------------------------------------------
 
 export function loadLastFolder(): { rootId: string; folder: string } | null {

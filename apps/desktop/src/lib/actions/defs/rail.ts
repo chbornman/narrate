@@ -86,6 +86,25 @@ export const RAIL_DEFS: ActionDef[] = [
       return a === null ? null : { kind: "rescan-root", rootId: a.rootId };
     },
   },
+  // "Rebuild previews…" (BACKLOG, founder dogfood round 3): the recovery/
+  // maintenance verb SEPARATE from Rescan — Rescan reconciles files↔index
+  // and enqueues MISSING passes; Rebuild re-pends the preview pass for
+  // EVERYTHING under the root (the generator_version machinery's manual
+  // trigger, LIBRARY §9.8). Regeneration overwrites artifacts in place, so
+  // the verb is safe to repeat — hence no confirmation step.
+  {
+    id: "rebuild-previews",
+    verb: "Rebuild previews…",
+    keys: [],
+    scope: "global",
+    group: "panels",
+    seats: ["rail-folder"],
+    available: always,
+    toAction: (_ctx, arg) => {
+      const a = railArg(arg);
+      return a === null ? null : { kind: "rebuild-previews", rootId: a.rootId };
+    },
+  },
   // The rail's own verb (footer button + this seat): the OS folder picker
   // → add_root, no Settings round-trip (founder, dogfood rounds 1+2).
   {

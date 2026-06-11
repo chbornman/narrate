@@ -49,6 +49,29 @@ describe("rail (push panel, D5)", () => {
   });
 });
 
+describe("first-run welcome card (BACKLOG: how your data is stored)", () => {
+  it("opens on a fresh profile; dismissal with the default-ON toggle persists", () => {
+    shell.loadPrefs();
+    expect(shell.welcomeOpen).toBe(true);
+    expect(shell.welcomeDontShowAgain).toBe(true); // common path: seen once
+    shell.dismissWelcome();
+    expect(shell.welcomeOpen).toBe(false);
+    const fresh = new ShellSlice();
+    fresh.loadPrefs();
+    expect(fresh.welcomeOpen).toBe(false); // next launch: stays away
+  });
+
+  it("toggle OFF keeps the card returning every launch (user's call)", () => {
+    shell.loadPrefs();
+    shell.welcomeDontShowAgain = false;
+    shell.dismissWelcome();
+    expect(shell.welcomeOpen).toBe(false); // dismissed for THIS session
+    const fresh = new ShellSlice();
+    fresh.loadPrefs();
+    expect(fresh.welcomeOpen).toBe(true);
+  });
+});
+
 describe("context-menu host state", () => {
   it("one menu at a time; seat + anchor + arg travel together", () => {
     shell.openContextMenu("thumb", { x: 10, y: 20 });
