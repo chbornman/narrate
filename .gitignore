@@ -21,3 +21,11 @@ Thumbs.db
 
 # Claude Code worktrees/session data
 .claude/
+
+# pp-bench results: machine-local numbers, diffed locally — never shared truth
+bench-results.jsonl
+
+# Standardized benchmark corpora: real RAWs, frozen after copy — too big
+# for git, documented by the committed README beside them
+test-corpora/*
+!test-corpora/README.md

@@ -8,6 +8,30 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
+- [ ] **Mid-ingest scroll stability** — every preview/exif tick that
+  re-lists the folder can yank the grid scroll back to the top while the
+  founder is already reviewing — exactly when staying put matters most.
+  Diagnosis pointers: capture-desc re-sorts as exif fills captureTs (the
+  image under the cursor MOVES — the keep-active-visible effect then
+  scrolls to its new position), and the scroll anchor is index-based
+  (logic/gridlayout captureAnchor), so an insert-above shifts what the
+  index points at. Fix direction: anchor by HASH across setItems (the
+  B64 identity rule applied to scroll), and suppress keep-active-visible
+  scrolling for re-lists the user didn't initiate. (Founder, dogfood
+  round 3, June 2026.)
+- [ ] **Import progressively: cards before hashes, previews in tiers** —
+  big-folder import should SHOW something immediately: (a) discovery
+  pass lists filenames and paints placeholder cards before hashing
+  completes (needs a pre-identity card state — today an image exists
+  only once hashed, K1; the card would carry the path until its hash
+  arrives and the card re-keys), (b) a quiet per-card indicator while
+  the preview builds (the previewReady placeholder is the seam — give it
+  a subtle building shimmer instead of dead gray), (c) consider a
+  low-res-first tier: a tiny embedded thumbnail (EXIF IFD1 ~160px) is
+  readable in milliseconds even over SMB — paint it blurred-up, replace
+  with the real 512px artifact when the preview pass lands. Performance
+  work should be DRIVEN by pp-bench numbers (scripts/bench.sh), not
+  vibes. (Founder, dogfood round 3, June 2026.)
 - [ ] **Drag photos OUT of the app** — from the grid or from Look, click-
   drag an image out of the window and drop it into Finder/another app as
   the ORIGINAL file (a native OS file drag carrying absolute paths — the
