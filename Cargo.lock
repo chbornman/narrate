@@ -3574,6 +3574,7 @@ dependencies = [
  "futures-core",
  "http",
  "image",
+ "libc",
  "photoproof-connectors",
  "photoproof-core",
  "pollster",

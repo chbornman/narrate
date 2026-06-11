@@ -106,34 +106,31 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
     after_comm.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// macOS: founder-machine verified (code-complete behind cfg). Uses
-/// sysctl KERN_PROC to read the kinfo_proc start time (seconds).
+/// macOS: proc_pidinfo(PROC_PIDTBSDINFO) → pbi_start_tvsec (seconds).
+/// The original sysctl KERN_PROC sketch used libc::kinfo_proc, which the
+/// libc crate only defines for FreeBSD/NetBSD — it never compiled on a
+/// Mac (caught at founder-machine verification, June 2026). A short read
+/// (rc != size) or any failure answers None: no identity proof, never
+/// kill.
 #[cfg(target_os = "macos")]
 pub fn process_start_time(pid: u32) -> Option<u64> {
     use std::mem::MaybeUninit;
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_PID,
-        pid as libc::c_int,
-    ];
-    let mut info = MaybeUninit::<libc::kinfo_proc>::uninit();
-    let mut size = std::mem::size_of::<libc::kinfo_proc>();
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            info.as_mut_ptr().cast(),
-            &mut size,
-            std::ptr::null_mut(),
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
             0,
+            info.as_mut_ptr().cast(),
+            size,
         )
     };
-    if rc != 0 || size == 0 {
+    if rc != size {
         return None;
     }
     let info = unsafe { info.assume_init() };
-    Some(info.kp_proc.p_starttime.tv_sec as u64)
+    Some(info.pbi_start_tvsec)
 }
 
 /// Windows: founder/CI verified (code-complete behind cfg) — the §8.4

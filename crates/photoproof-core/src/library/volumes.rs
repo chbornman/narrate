@@ -170,6 +170,7 @@ pub fn heuristic_fingerprint(
 #[derive(Debug, Default)]
 pub struct PlatformVolumeProbe;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const COARSE_MTIME_FS: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
 
 impl VolumeProbe for PlatformVolumeProbe {
