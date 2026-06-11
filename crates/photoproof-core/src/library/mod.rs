@@ -580,6 +580,34 @@ impl Library {
                     matched = pick.copied();
                 }
             }
+            // §4.1 level 3: a heuristic-identified volume (no marker, no
+            // platform id at creation) re-matches by fingerprint against
+            // mounts that ALSO lack both stronger identities. Ambiguity
+            // (two identical-looking mounts) leaves the volume offline —
+            // misbinding is worse than waiting for a marker.
+            if matched.is_none()
+                && platform_kind.as_deref() == Some("heuristic")
+                && let Some(pid) = &platform_id
+            {
+                let candidates: Vec<usize> = mounts
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, m)| {
+                        !claimed_mounts[*i]
+                            && mount_markers[*i].1.is_none()
+                            && m.platform_id.is_none()
+                            && volumes::heuristic_fingerprint(
+                                m.fs_type.as_deref(),
+                                m.label.as_deref(),
+                                m.capacity_bytes,
+                            ) == *pid
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if candidates.len() == 1 {
+                    matched = Some(candidates[0]);
+                }
+            }
             match matched {
                 Some(i) => {
                     claimed_mounts[i] = true;

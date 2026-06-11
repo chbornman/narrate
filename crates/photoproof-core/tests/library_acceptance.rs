@@ -1891,3 +1891,48 @@ fn s9_8_generator_version_bump_reenqueues_previews() {
         .generator_version;
     assert_eq!(v1, photoproof_core::library::GENERATOR_VERSION);
 }
+
+/// §4.1 level 3 (founder-machine regression, June 2026): a volume whose
+/// only identity is the heuristic fingerprint must RE-match on the next
+/// probe. The macOS stub probe minted exactly such volumes, and the
+/// matcher only implemented levels 1–2 — every probe tick flipped the
+/// volume offline, refusing reveal/open verbs 30 s after launch.
+#[test]
+fn l13_07_heuristic_volume_rematches_by_fingerprint() {
+    let env = Env::new();
+    let mut m = probed(&env.mount);
+    m.platform_id = None;
+    m.platform_kind = PlatformIdKind::Heuristic;
+    env.probe.set_mounts(vec![m]);
+    env.register("photos");
+    let volume_id = env.volume_id();
+    assert!(env.lib.volume(&volume_id).unwrap().unwrap().online);
+
+    // The marker (level 1) would mask the heuristic path: drop it, as a
+    // read-only or marker-stripped volume would.
+    let _ = std::fs::remove_file(env.mount.join(MARKER_FILENAME));
+
+    env.lib.probe_volumes().unwrap();
+    let vol = env.lib.volume(&volume_id).unwrap().unwrap();
+    assert!(
+        vol.online,
+        "fingerprint re-match keeps the heuristic volume online"
+    );
+
+    // Ambiguity refuses to guess: two identical-looking mounts → offline.
+    let twin = env._tmp.path().join("twin");
+    std::fs::create_dir_all(&twin).unwrap();
+    let mut a = probed(&env.mount);
+    a.platform_id = None;
+    a.platform_kind = PlatformIdKind::Heuristic;
+    let mut b = probed(&twin);
+    b.platform_id = None;
+    b.platform_kind = PlatformIdKind::Heuristic;
+    let _ = std::fs::remove_file(env.mount.join(MARKER_FILENAME));
+    env.probe.set_mounts(vec![a, b]);
+    env.lib.probe_volumes().unwrap();
+    assert!(
+        !env.lib.volume(&volume_id).unwrap().unwrap().online,
+        "two indistinguishable mounts: misbinding is worse than offline"
+    );
+}

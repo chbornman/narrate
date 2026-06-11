@@ -243,9 +243,55 @@ impl VolumeProbe for PlatformVolumeProbe {
         Ok(out)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     fn list_mounts(&self) -> io::Result<Vec<ProbedVolume>> {
-        // Founder-machine work: DADiskCopyDescription / GetVolumeInformationW.
+        // MNT_NOWAIT: the 30 s pump probe must never hang on a dead
+        // network mount; slightly stale statfs data is fine — identity
+        // fields (UUID, fs type) don't drift between syncs.
+        let mut raw: *mut libc::statfs = std::ptr::null_mut();
+        let n = unsafe { libc::getmntinfo(&mut raw, libc::MNT_NOWAIT) };
+        if n <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mounts = unsafe { std::slice::from_raw_parts(raw, n as usize) };
+        Ok(mounts.iter().filter_map(macos::probed_from_statfs).collect())
+    }
+
+    /// macOS override of the default longest-prefix lookup: statfs the
+    /// path itself. Firmlinks make the prefix heuristic WRONG here — a
+    /// path under /Users lives on the writable Data volume mounted at
+    /// /System/Volumes/Data, but textually starts with "/" (the sealed
+    /// system snapshot, whose UUID churns with every OS update).
+    #[cfg(target_os = "macos")]
+    fn probe_path(&self, path: &Path) -> io::Result<ProbedVolume> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+        let mut sfs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        if unsafe { libc::statfs(c.as_ptr(), sfs.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sfs = unsafe { sfs.assume_init() };
+        let mut probed = macos::probed_from_statfs(&sfs).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no probeable volume contains {}", path.display()),
+            )
+        })?;
+        // Firmlinked path (e.g. /Users/… on the Data volume mounted at
+        // /System/Volumes/Data): rel-path math needs a mount the path is
+        // actually UNDER. macOS firmlinks are root-level same-name links,
+        // so "/" reaches the same files; identity fields stay the Data
+        // volume's (stable UUID — unlike the sealed snapshot's).
+        if !path.starts_with(&probed.mount_point) {
+            probed.mount_point = PathBuf::from("/");
+        }
+        Ok(probed)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn list_mounts(&self) -> io::Result<Vec<ProbedVolume>> {
+        // Founder-machine work (Windows): GetVolumeInformationW.
         Ok(vec![ProbedVolume {
             mount_point: PathBuf::from("/"),
             platform_id: None,
@@ -257,6 +303,140 @@ impl VolumeProbe for PlatformVolumeProbe {
             is_system_root: true,
             coarse_mtime: false,
         }])
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+
+    /// Pseudo-filesystems that can never host a watched root.
+    const PSEUDO_FS: &[&str] = &["devfs", "autofs", "nullfs", "lifs", "synthfs"];
+
+    fn cstr(field: &[libc::c_char]) -> Option<String> {
+        let s = unsafe { std::ffi::CStr::from_ptr(field.as_ptr()) };
+        s.to_str().ok().map(str::to_owned)
+    }
+
+    pub(super) fn probed_from_statfs(sfs: &libc::statfs) -> Option<ProbedVolume> {
+        let fs_type = cstr(&sfs.f_fstypename)?;
+        if PSEUDO_FS.contains(&fs_type.as_str()) {
+            return None;
+        }
+        let mount_point = PathBuf::from(cstr(&sfs.f_mntonname)?);
+        // libc's apple module doesn't re-export MNT_RDONLY; the value is
+        // ABI-stable BSD (sys/mount.h).
+        const MNT_RDONLY: u32 = 0x0000_0001;
+        let uuid = volume_uuid(&mount_point);
+        Some(ProbedVolume {
+            // "/" is the sealed system snapshot; user data lives on the
+            // firmlinked Data volume — both are "the system", neither is
+            // a removable candidate.
+            is_system_root: mount_point == Path::new("/")
+                || mount_point == Path::new("/System/Volumes/Data"),
+            coarse_mtime: super::COARSE_MTIME_FS.contains(&fs_type.as_str()),
+            platform_kind: if uuid.is_some() {
+                PlatformIdKind::MacosUuid
+            } else {
+                PlatformIdKind::Heuristic
+            },
+            platform_id: uuid,
+            // External volumes mount under /Volumes/<name> — that name is
+            // the user-visible label; system mounts get none.
+            label: mount_point
+                .parent()
+                .filter(|p| *p == Path::new("/Volumes"))
+                .and_then(|_| mount_point.file_name())
+                .and_then(|n| n.to_str())
+                .map(str::to_owned),
+            fs_type: Some(fs_type),
+            capacity_bytes: Some((sfs.f_blocks as i64).saturating_mul(i64::from(sfs.f_bsize))),
+            read_only_flag: sfs.f_flags & MNT_RDONLY != 0,
+            mount_point,
+        })
+    }
+
+    /// §4.1 level 2 identity: the volume UUID via getattrlist
+    /// ATTR_VOL_UUID (no DiskArbitration dependency). None on
+    /// filesystems without one (some FAT/network mounts) — those fall to
+    /// the level-3 heuristic fingerprint.
+    fn volume_uuid(mount_point: &Path) -> Option<String> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(mount_point.as_os_str().as_bytes()).ok()?;
+        let mut attrs: libc::attrlist = unsafe { std::mem::zeroed() };
+        attrs.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+        attrs.volattr = libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID;
+        // getattrlist's reply: u32 total length, then the requested
+        // attributes in canonical order — here exactly one uuid_t.
+        #[repr(C)]
+        struct VolUuidBuf {
+            len: u32,
+            uuid: [u8; 16],
+        }
+        let mut buf = VolUuidBuf {
+            len: 0,
+            uuid: [0; 16],
+        };
+        let rc = unsafe {
+            libc::getattrlist(
+                c.as_ptr(),
+                (&raw mut attrs).cast(),
+                (&raw mut buf).cast(),
+                std::mem::size_of::<VolUuidBuf>(),
+                0,
+            )
+        };
+        if rc != 0 || (buf.len as usize) < std::mem::size_of::<VolUuidBuf>() {
+            return None;
+        }
+        if buf.uuid == [0u8; 16] {
+            return None;
+        }
+        let u = buf.uuid;
+        Some(format!(
+            "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
+        ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Real-syscall smoke: the mount list is non-empty, contains the
+        /// system root, and APFS volumes carry a UUID identity.
+        #[test]
+        fn list_mounts_reports_real_volumes() {
+            let mounts = PlatformVolumeProbe.list_mounts().expect("getmntinfo");
+            assert!(!mounts.is_empty());
+            assert!(mounts.iter().any(|m| m.mount_point == Path::new("/")));
+            let root = mounts
+                .iter()
+                .find(|m| m.mount_point == Path::new("/"))
+                .unwrap();
+            assert!(root.is_system_root);
+            assert_eq!(root.fs_type.as_deref(), Some("apfs"));
+            assert!(root.platform_id.is_some(), "APFS root carries a UUID");
+            assert_eq!(root.platform_kind, PlatformIdKind::MacosUuid);
+        }
+
+        /// probe_path binds a home path to the WRITABLE Data volume's
+        /// identity (the firmlink target), never the sealed read-only
+        /// snapshot's — while reporting a mount the path is actually
+        /// under, so rel-path math works.
+        #[test]
+        fn probe_path_resolves_through_firmlinks() {
+            let home = std::env::var("HOME").expect("HOME");
+            let v = PlatformVolumeProbe
+                .probe_path(Path::new(&home))
+                .expect("statfs");
+            assert!(
+                !v.read_only_flag,
+                "home must sit on a writable volume, got {v:?}"
+            );
+            assert!(v.platform_id.is_some());
+            assert!(Path::new(&home).starts_with(&v.mount_point));
+        }
     }
 }
 
