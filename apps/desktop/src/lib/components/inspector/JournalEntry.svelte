@@ -205,6 +205,10 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    /* Take the row's slack: without flex-grow the (space-reserving)
+     * right-side spans squeezed the quote to its 1ch overflow-wrap
+     * minimum — text rendered vertically (founder dogfood, June 2026). */
+    flex: 1 1 auto;
     min-width: 0;
   }
   .text {
@@ -258,13 +262,21 @@
     padding: 4px 6px;
     resize: vertical;
   }
-  /* Quiet hover actions (UI §8.3): present, invisible until pointed at. */
+  /* Quiet hover actions (UI §8.3): present, invisible until pointed at.
+   * An OVERLAY chip, not a flex sibling — visibility:hidden still
+   * reserves layout width, and four verbs + "+N others" in a 320px
+   * panel left the quote a 1ch sliver. Overlaying keeps both §8.3
+   * promises: zero width when quiet, zero reflow when revealed. */
   .actions {
-    margin-left: auto;
-    flex: 0 0 auto;
+    position: absolute;
+    right: 8px;
+    top: 2px;
     display: flex;
     gap: 6px;
     visibility: hidden;
+    background: var(--bg-raised);
+    border-radius: 3px;
+    padding: 2px 4px;
   }
   .row:hover .actions,
   .row:focus-within .actions {
