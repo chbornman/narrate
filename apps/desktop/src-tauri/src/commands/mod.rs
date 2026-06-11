@@ -20,15 +20,39 @@ pub mod search;
 
 use std::sync::Arc;
 
+use photoproof_core::ContentHash;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::dto::{DegradedFlags, IndicatorPulse, IndicatorState};
+use crate::dto::{DegradedFlags, IndicatorPulse, IndicatorState, JournalChanged};
+use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
 pub(crate) type S<'a> = State<'a, Arc<App>>;
 
 pub(crate) fn emit_pulse(handle: &AppHandle, event_kind: &'static str) {
     let _ = handle.emit("indicator-pulse", IndicatorPulse { event_kind });
+}
+
+/// `journal-changed` (BACKLOG): every committed journal mutation announces
+/// the affected image hashes so open surfaces (journal panel, grid badges,
+/// the Look overlay) refresh without frontend-triggered reloads — the seam
+/// M2b's voice events (which land without UI actions) will ride. Events
+/// with no image targets (session-level remarks) stay silent: no per-image
+/// surface changed. Same emission pattern as `settings-changed` (app.rs).
+pub(crate) fn emit_journal_changed(handle: &AppHandle, hashes: Vec<String>) {
+    if hashes.is_empty() {
+        return;
+    }
+    let _ = handle.emit("journal-changed", JournalChanged { hashes });
+}
+
+/// Shared hash plumbing (journal.rs + capture.rs commands).
+pub(crate) fn parse_hash(hash: &str) -> CmdResult<ContentHash> {
+    ContentHash::from_hex(hash).map_err(|e| CmdError::Invalid(format!("bad image hash: {e}")))
+}
+
+pub(crate) fn hashes(targets: &[ContentHash]) -> Vec<String> {
+    targets.iter().map(|h| h.as_str().to_owned()).collect()
 }
 
 pub(crate) fn indicator(app: &App) -> IndicatorState {

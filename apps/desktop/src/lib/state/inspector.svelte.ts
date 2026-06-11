@@ -31,8 +31,13 @@ export class InspectorSlice {
   /** Per-session "show retracted" toggle (UI §8.2). */
   showRetracted = $state(false);
 
-  /** Inline correction in progress (escape layer 3 closes it first). */
+  /** Inline correction in progress (escape layer 4 closes it first). */
   editingEventId = $state<string | null>(null);
+
+  /** The journal-panel composer input holds focus (escape layer 5 blurs
+   * it — text-input focus exits first, §0; the component's focus/blur
+   * handlers keep this true to the DOM). */
+  composerFocused = $state(false);
 
   /** Redaction modal target (escape layer 1 cancels it first). */
   redactTargetId = $state<string | null>(null);
@@ -48,6 +53,8 @@ export class InspectorSlice {
     this.open = false;
     this.editingEventId = null;
     this.redactTargetId = null;
+    // Unmounting the composer fires no blur — clear the flag here too.
+    this.composerFocused = false;
   }
 
   /** Fetch journal + metadata for `hash` via ipc (commands/journal.rs). */

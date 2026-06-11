@@ -8,7 +8,7 @@ use photoproof_core::{
 };
 use tauri::{AppHandle, Emitter};
 
-use super::{S, emit_pulse, indicator};
+use super::{S, emit_journal_changed, emit_pulse, hashes, indicator, parse_hash};
 use crate::dto::{IndicatorState, ScopeView, StrokeCommitDto, StrokePayloadDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
@@ -34,25 +34,20 @@ pub fn indicator_state(app: S<'_>) -> IndicatorState {
     indicator(&app)
 }
 
-/// Typed note (CAPTURE §4): binds to the current scope snapshot at submit
-/// time; verbatim text (one trailing newline trimmed); empty mints nothing.
+/// Append one typed remark over an explicit target list (CAPTURE §4 text
+/// rules: verbatim, one trailing newline trimmed; empty mints nothing).
 /// Returns whether an event was committed.
-#[tauri::command]
-pub fn add_note(app: S<'_>, handle: AppHandle, text: String) -> CmdResult<bool> {
-    app.touch()?;
-    let Some(text) = normalize_note(&text) else {
+pub(crate) fn mint_note(
+    store: &EventStore,
+    session: &SessionId,
+    text: &str,
+    targets: Vec<ContentHash>,
+) -> CmdResult<bool> {
+    let Some(text) = normalize_note(text) else {
         return Ok(false);
     };
-    let targets = app
-        .scope
-        .lock()
-        .expect("scope mutex")
-        .current()
-        .targets
-        .clone();
-    let session = app.session_id();
-    app.store.append(
-        &session,
+    store.append(
+        session,
         EventDraft::Remark {
             source: RemarkSource::Typed,
             text,
@@ -60,31 +55,88 @@ pub fn add_note(app: S<'_>, handle: AppHandle, text: String) -> CmdResult<bool> 
         },
         None,
     )?;
+    Ok(true)
+}
+
+/// Append one rating over an explicit target list (CAPTURE §10, C6: 0 =
+/// explicit clear). Zero targets = session scope: rating keys do nothing.
+pub(crate) fn mint_rating(
+    store: &EventStore,
+    session: &SessionId,
+    value: u8,
+    targets: Vec<ContentHash>,
+) -> CmdResult<bool> {
+    if value > 5 {
+        return Err(CmdError::Invalid(format!("rating out of range: {value}")));
+    }
+    if targets.is_empty() {
+        return Ok(false); // session scope: rating keys do nothing
+    }
+    store.append(session, EventDraft::Rating { value, targets }, None)?;
+    Ok(true)
+}
+
+/// The command's target list: the current scope snapshot (CAPTURE §3/§4 —
+/// the N transient and rating keys), or the explicit single image the
+/// journal-panel composer names (BACKLOG "compose entries from the journal
+/// panel") — the deliberate panel-context variant: panel-composed entries
+/// bind to the PANEL's image, never the grid write-scope.
+fn note_targets(app: &S<'_>, target: Option<&str>) -> CmdResult<Vec<ContentHash>> {
+    match target {
+        Some(hash) => Ok(vec![parse_hash(hash)?]),
+        None => Ok(app
+            .scope
+            .lock()
+            .expect("scope mutex")
+            .current()
+            .targets
+            .clone()),
+    }
+}
+
+/// Typed note (CAPTURE §4): binds to the current scope snapshot at submit
+/// time, or — `target` given — to that single image (the journal-panel
+/// composer's explicit binding; see `note_targets`). Verbatim text (one
+/// trailing newline trimmed); empty mints nothing. Returns whether an
+/// event was committed.
+#[tauri::command]
+pub fn add_note(
+    app: S<'_>,
+    handle: AppHandle,
+    text: String,
+    target: Option<String>,
+) -> CmdResult<bool> {
+    app.touch()?;
+    let targets = note_targets(&app, target.as_deref())?;
+    let session = app.session_id();
+    if !mint_note(&app.store, &session, &text, targets.clone())? {
+        return Ok(false);
+    }
     emit_pulse(&handle, "remark");
+    emit_journal_changed(&handle, hashes(&targets));
     Ok(true)
 }
 
 /// Rating keys 0–5 (CAPTURE §10, DECISIONS C6): bound to the current scope
 /// at keystroke time; multi-select mints ONE event targeting all N (selection
 /// order); 0 = explicit clear; session scope → rating keys do nothing.
+/// `target` is the journal-panel composer's explicit single-image binding
+/// (never session scope, so it always rates — see `note_targets`).
 #[tauri::command]
-pub fn set_rating(app: S<'_>, handle: AppHandle, value: u8) -> CmdResult<bool> {
+pub fn set_rating(
+    app: S<'_>,
+    handle: AppHandle,
+    value: u8,
+    target: Option<String>,
+) -> CmdResult<bool> {
     app.touch()?;
-    if value > 5 {
-        return Err(CmdError::Invalid(format!("rating out of range: {value}")));
-    }
-    let targets = {
-        let scope = app.scope.lock().expect("scope mutex");
-        let snap = scope.current();
-        if snap.targets.is_empty() {
-            return Ok(false); // session scope: rating keys do nothing
-        }
-        snap.targets.clone()
-    };
+    let targets = note_targets(&app, target.as_deref())?;
     let session = app.session_id();
-    app.store
-        .append(&session, EventDraft::Rating { value, targets }, None)?;
+    if !mint_rating(&app.store, &session, value, targets.clone())? {
+        return Ok(false);
+    }
     emit_pulse(&handle, "rating");
+    emit_journal_changed(&handle, hashes(&targets));
     Ok(true)
 }
 
@@ -173,8 +225,7 @@ pub(crate) fn mint_stroke(
     hash: &str,
     payload: StrokePayloadDto,
 ) -> CmdResult<EventId> {
-    let target = ContentHash::from_hex(hash)
-        .map_err(|e| CmdError::Invalid(format!("bad image hash: {e}")))?;
+    let target = parse_hash(hash)?;
     let payload = stroke_payload(payload)?;
     let event = store.append(
         session,
@@ -204,6 +255,7 @@ pub fn add_stroke(
     let session = app.session_id();
     let id = mint_stroke(&app.store, &session, &hash, payload)?;
     emit_pulse(&handle, "stroke");
+    emit_journal_changed(&handle, vec![hash]);
     Ok(StrokeCommitDto {
         id: id.as_str().to_owned(),
         session_id: session.as_str().to_owned(),
@@ -251,6 +303,44 @@ mod tests {
             [4330, 2204, 820, 9],
             [4391, 2188, 770, 17],
         ]
+    }
+
+    /// The journal-panel composer (BACKLOG "compose entries from the
+    /// journal panel"): a typed remark bound to ONE explicit target — the
+    /// panel's image, never the grid write-scope (the scope ring buffer is
+    /// not consulted on this path at all).
+    #[test]
+    fn mint_note_binds_to_the_explicit_panel_target() {
+        let (_tmp, store, session, hash) = store_fixture();
+        assert!(mint_note(&store, &session, "quiet keeper\n", vec![hash.clone()]).unwrap());
+        let rows = journal_entries(&store, &hash).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "remark");
+        assert_eq!(rows[0].source, "typed");
+        assert_eq!(
+            rows[0].text.as_deref(),
+            Some("quiet keeper"),
+            "verbatim, one trailing newline trimmed (CAPTURE §4)"
+        );
+        assert_eq!(rows[0].targets, vec![hash.as_str().to_owned()]);
+        // Empty/whitespace mints nothing (CAPTURE §4).
+        assert!(!mint_note(&store, &session, "   \n", vec![hash.clone()]).unwrap());
+        assert_eq!(journal_entries(&store, &hash).unwrap().len(), 1);
+    }
+
+    /// Composer rating: explicit single target commits (never session
+    /// scope), 0 clears through the same fold (C6), range still checked.
+    #[test]
+    fn mint_rating_commits_explicit_targets_and_declines_session_scope() {
+        let (_tmp, store, session, hash) = store_fixture();
+        assert!(mint_rating(&store, &session, 4, vec![hash.clone()]).unwrap());
+        assert_eq!(store.current_rating(&hash).unwrap(), Some(4));
+        assert!(mint_rating(&store, &session, 0, vec![hash.clone()]).unwrap());
+        let rows = journal_entries(&store, &hash).unwrap();
+        assert_eq!(rows.last().unwrap().rating, Some(0), "0 = explicit clear");
+        // Zero targets = session scope: rating keys do nothing (§10).
+        assert!(!mint_rating(&store, &session, 3, vec![]).unwrap());
+        assert!(mint_rating(&store, &session, 6, vec![hash]).is_err());
     }
 
     #[test]

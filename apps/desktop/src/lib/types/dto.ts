@@ -46,6 +46,13 @@ export interface IndicatorPulse {
   eventKind: string;
 }
 
+/** `journal-changed` payload: the images whose journal truth a committed
+ * mutation touched. Open surfaces (journal panel, grid badges, the Look
+ * overlay) refresh from this — the seam M2b voice events will ride. */
+export interface JournalChanged {
+  hashes: string[];
+}
+
 export interface IngestStatus {
   running: boolean;
   done: number;

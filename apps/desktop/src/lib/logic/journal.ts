@@ -79,8 +79,13 @@ export function retractedToggleLabel(count: number, shown: boolean): string {
 
 // ---- per-row states & actions ------------------------------------------------
 
-/** The three quiet hover actions (UI §8.3), gated by EVENTS target rules. */
+/** The quiet hover actions (UI §8.3), gated by EVENTS target rules. */
 export interface RowActions {
+  /** Select-from-note — the entry's full target set in the grid. Every
+   * entry kind with targets EXCEPT redacted stubs (founder, June 2026:
+   * redaction means the entry is gone; offering verbs on the stub reads
+   * wrong even when the DTO still carries the event's targets). */
+  select: boolean;
   /** Inline revision — remarks only (EVENTS §3.4: revisions target
    * remarks/revisions; other kinds are rejected at append). */
   correct: boolean;
@@ -93,10 +98,13 @@ export interface RowActions {
 }
 
 export function rowActions(e: JournalEntryDto): RowActions {
-  if (e.kind === "redacted") return { correct: false, retract: false, redact: false };
+  if (e.kind === "redacted")
+    return { select: false, correct: false, retract: false, redact: false };
+  const select = e.targets.length > 0;
   if (e.retracted)
-    return { correct: false, retract: false, redact: e.kind !== "rating" };
+    return { select, correct: false, retract: false, redact: e.kind !== "rating" };
   return {
+    select,
     correct: e.kind === "remark",
     retract: true,
     redact: e.kind !== "rating",
@@ -107,6 +115,23 @@ export function rowActions(e: JournalEntryDto): RowActions {
 export function ratingLine(value: number | null): string {
   if (value === null || value === 0) return "rating cleared";
   return `rating set to ${value}`;
+}
+
+/** "+N others" (BACKLOG: journal entries show sibling targets): a
+ * multi-target entry quietly counts the OTHER images the event targets
+ * beyond the inspected one. Null for single-target rows (nothing to say)
+ * and for stubs (redacted stubs carry no targets). */
+export function siblingTargetsLabel(
+  targets: string[],
+  inspectedHash: string | null,
+): string | null {
+  if (targets.length < 2) return null;
+  const others =
+    inspectedHash === null
+      ? targets.length
+      : targets.filter((t) => t !== inspectedHash).length;
+  if (others === 0) return null;
+  return `+${others} other${others === 1 ? "" : "s"}`;
 }
 
 // ---- timestamp formatting (local time — the journal reads as a diary) --------

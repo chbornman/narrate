@@ -26,8 +26,15 @@ export interface KeyChord {
   arg?: unknown;
 }
 
-/** The four context-menu seats + the reserved M2a toolbar seat. */
-export type MenuSeat = "thumb" | "gutter" | "rail-folder" | "look-backdrop" | "look-toolbar";
+/** The context-menu seats (journal-row joined with the select-from-note
+ * polish) + the reserved M2a toolbar seat. */
+export type MenuSeat =
+  | "thumb"
+  | "gutter"
+  | "rail-folder"
+  | "look-backdrop"
+  | "journal-row"
+  | "look-toolbar";
 
 export interface MenuOption {
   arg: unknown;

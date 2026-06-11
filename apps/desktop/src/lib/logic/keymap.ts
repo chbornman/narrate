@@ -85,6 +85,9 @@ export type Action =
   | { kind: "journal-retract"; eventId: string }
   | { kind: "journal-redact"; eventId: string }
   | { kind: "journal-toggle-retracted" }
+  // select-from-note (BACKLOG): jump home + select the event's FULL target
+  // set in the grid, selection order = event_targets.position
+  | { kind: "select-journal-targets"; targets: string[] }
   // stroke row click → flash that stroke on the Look overlay (UI §8.2)
   | { kind: "journal-flash-stroke"; eventId: string }
   // OS integration (D4 — no deletion verbs, D3)

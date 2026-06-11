@@ -424,6 +424,37 @@ export class Ui {
     }
   }
 
+  /** Journal-panel composer (BACKLOG "compose entries from the journal
+   * panel"): a typed remark bound to the PANEL's image as its single
+   * explicit target — a deliberate panel-context variant of CAPTURE §4's
+   * submit-time scope (the N transient keeps the scope rule; the composer
+   * never consults the grid write-scope). Resolves true iff committed
+   * (the component clears its draft on commit only). Never advances —
+   * composing in the panel is reading-side work, not the §4 heartbeat. */
+  async composeRemark(text: string): Promise<boolean> {
+    const hash = this.inspector.hash;
+    if (hash === null || text.trim() === "") return false;
+    try {
+      const committed = await ipc.addNote(text, hash);
+      if (committed) await this.refreshJournalFor(hash);
+      return committed;
+    } catch {
+      return false; // backend unavailable: the draft survives
+    }
+  }
+
+  /** Composer rating (0–5, 0 clears, same fold): bound to the panel's
+   * image like composeRemark — always rates (never session scope). */
+  async composeRating(value: number) {
+    const hash = this.inspector.hash;
+    if (hash === null) return;
+    try {
+      if (await ipc.setRating(value, hash)) await this.refreshJournalFor(hash);
+    } catch {
+      /* backend unavailable */
+    }
+  }
+
   /** The inspector is LIVE: any commit that targets the inspected image
    * re-folds its journal/metadata immediately (founder dogfood, round 1) —
    * never wait for an active-image change. */
@@ -536,8 +567,58 @@ export class Ui {
     await this.refreshItems();
   }
 
+  /** Backend `journal-changed` (BACKLOG): journal mutations announce their
+   * affected hashes from the Rust side, so open surfaces refresh without a
+   * frontend-triggered reload — the catch-all for writers WITHOUT a UI
+   * action (M2b voice) and for cross-window mutations. The M1 writers'
+   * direct refresh hooks above remain: they are awaited and deterministic
+   * (tests run without a Tauri event loop); the duplicate fetch this
+   * implies for same-window writes is absorbed by the inspector slice's
+   * stale-response guard. The Look overlay's strokesVersion bump MIGRATED
+   * here from the indicator-pulse heuristic — hash-aware now. */
+  async onJournalChanged(hashes: string[]) {
+    const affected = new Set(hashes);
+    if (this.look.currentHash !== null && affected.has(this.look.currentHash))
+      this.look.strokesVersion += 1; // overlay re-folds its strokes
+    const hash = this.inspector.hash;
+    if (this.inspector.open !== false && hash !== null && affected.has(hash))
+      await this.inspector.load(hash);
+    // Grid badges (has-journal dot, folded rating data) re-list only when
+    // an affected image is in the current folder.
+    if (this.grid.items.some((i) => affected.has(i.hash)))
+      await this.refreshItems();
+  }
+
+  /** Select-from-note (BACKLOG): jump home and select the entry's FULL
+   * target set in the grid — selection order = event_targets.position
+   * (CAPTURE §3). Stack-aware: a target that is a collapsed pair's hidden
+   * member selects the pair's cell (once, both members re-report through
+   * selectionTargets). Targets outside the current folder (multi-target
+   * notes minted over search selections can span folders) are skipped. */
+  async selectJournalTargets(targets: string[]) {
+    this.searchOpen = false;
+    if (this.surface === "look") {
+      this.surface = "grid";
+      this.look.close();
+    }
+    const order: string[] = [];
+    for (const t of targets) {
+      const unit = this.grid.units.find(
+        (u) => u.primary.hash === t || u.alt?.hash === t,
+      );
+      if (unit !== undefined && !order.includes(unit.primary.hash))
+        order.push(unit.primary.hash);
+    }
+    if (order.length === 0) {
+      await this.reportScope(); // home, selection untouched
+      return;
+    }
+    const focus = this.grid.unitHashes.indexOf(order[0]);
+    await this.applySelection({ order, focus, anchor: focus });
+  }
+
   // ---------------------------------------------------------------------------
-  // Escape — the 12-layer order (logic/escape.ts)
+  // Escape — the 14-layer order (logic/escape.ts)
   // ---------------------------------------------------------------------------
 
   escapeContext(): EscapeContext {
@@ -546,6 +627,7 @@ export class Ui {
       dropConfirmOpen: this.dropPaths !== null,
       contextMenuOpen: this.shell.contextMenu !== null,
       journalEditOpen: this.inspector.editingEventId !== null,
+      journalComposerFocused: this.inspector.composerFocused,
       noteInputOpen: this.shell.note.open,
       cheatsheetOpen: this.shell.cheatsheetOpen,
       indicatorPopoverOpen: this.shell.popoverOpen,
@@ -570,6 +652,12 @@ export class Ui {
         break;
       case "close-journal-edit":
         this.inspector.editingEventId = null;
+        break;
+      case "blur-journal-composer":
+        // Exit text-input focus first (§0); the input's blur handler keeps
+        // the flag honest, but a headless context (tests) has no element.
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        this.inspector.composerFocused = false;
         break;
       case "close-note-input":
         this.cancelNote();
@@ -885,6 +973,9 @@ export class Ui {
         break;
       case "journal-toggle-retracted":
         this.inspector.showRetracted = !this.inspector.showRetracted;
+        break;
+      case "select-journal-targets":
+        await this.selectJournalTargets(action.targets);
         break;
       // ---- OS integration (D4; bodies land with Stage A) ----------------------
       case "reveal-in-file-manager": {

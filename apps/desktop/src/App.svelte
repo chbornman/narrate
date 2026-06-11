@@ -23,6 +23,7 @@
     IndicatorPulse,
     IndicatorState,
     IngestStatus,
+    JournalChanged,
     RootDto,
     RuntimeStatus,
   } from "./lib/types/dto";
@@ -115,13 +116,15 @@
     ui.debugEnabled = Boolean(import.meta.env.PHOTOPROOF_DEBUG);
     void ui.init();
     const unlisteners: Promise<UnlistenFn>[] = [
-      listen<IndicatorPulse>("indicator-pulse", (e) => {
-        ui.shell.onPulse();
-        // Stroke-affecting commits (any source: pencil flows, journal
-        // panel, redaction) refresh the Look overlay's fold (P5.1).
-        if (["stroke", "retraction", "redaction"].includes(e.payload.eventKind))
-          ui.look.strokesVersion += 1;
-      }),
+      // The pulse is pure indicator feedback now — the Look overlay's
+      // refresh migrated onto the hash-aware `journal-changed` channel.
+      listen<IndicatorPulse>("indicator-pulse", () => ui.shell.onPulse()),
+      // Journal truth changed (any writer: typed/panel/pencil flows today;
+      // M2b voice events land without UI actions): affected open surfaces
+      // — journal panel, grid badges, Look overlay — refresh themselves.
+      listen<JournalChanged>("journal-changed", (e) =>
+        void ui.onJournalChanged(e.payload.hashes),
+      ),
       listen<IndicatorState>("indicator-state", (e) => {
         ui.shell.onIndicatorState(e.payload);
       }),

@@ -17,6 +17,7 @@ import {
   rowActions,
   sessionGroups,
   sessionTimeRange,
+  siblingTargetsLabel,
   visibleRows,
 } from "../src/lib/logic/journal";
 import type { JournalEntryDto } from "../src/lib/types/dto";
@@ -97,51 +98,87 @@ describe("retracted toggle (UI §8.2: hidden until toggled)", () => {
   });
 });
 
-describe("row actions (UI §8.3 gated by EVENTS §3.4–3.6)", () => {
-  it("live remark: all three", () => {
+describe("row actions (UI §8.3 gated by EVENTS §3.4–3.6; Select on every kind except redacted stubs — founder, June 2026)", () => {
+  it("live remark: select + all three", () => {
     expect(rowActions(entry({ id: "01A" }))).toEqual({
+      select: true,
       correct: true,
       retract: true,
       redact: true,
     });
   });
 
-  it("rating: retract only (nothing to scrub, nothing to revise)", () => {
+  it("rating: select + retract (nothing to scrub, nothing to revise)", () => {
     expect(rowActions(entry({ id: "01A", kind: "rating", rating: 4 }))).toEqual({
+      select: true,
       correct: false,
       retract: true,
       redact: false,
     });
   });
 
-  it("stroke: retract (erase) and redact, never correct", () => {
+  it("stroke: select, retract (erase) and redact, never correct", () => {
     expect(rowActions(entry({ id: "01A", kind: "stroke", text: null }))).toEqual({
+      select: true,
       correct: false,
       retract: true,
       redact: true,
     });
   });
 
-  it("retracted remark: ONLY redact (content persists in log + sidecars; retraction-of-retraction is forbidden, E4)", () => {
+  it("retracted remark: select + redact only (content persists in log + sidecars; retraction-of-retraction is forbidden, E4)", () => {
     expect(rowActions(entry({ id: "01A", retracted: true }))).toEqual({
+      select: true,
       correct: false,
       retract: false,
       redact: true,
     });
   });
 
-  it("retracted rating: nothing", () => {
+  it("retracted rating: select only (its targets are still real)", () => {
     expect(
       rowActions(entry({ id: "01A", kind: "rating", rating: 3, retracted: true })),
-    ).toEqual({ correct: false, retract: false, redact: false });
+    ).toEqual({ select: true, correct: false, retract: false, redact: false });
   });
 
-  it("redacted stub: nothing — content is already gone", () => {
-    expect(rowActions(entry({ id: "01A", kind: "redacted", text: null }))).toEqual({
+  it("redacted stub: nothing — content is already gone, and a stub offers no verbs even when the DTO still carries targets", () => {
+    expect(
+      rowActions(
+        entry({ id: "01A", kind: "redacted", text: null, targets: ["ab".repeat(32)] }),
+      ),
+    ).toEqual({
+      select: false,
       correct: false,
       retract: false,
       redact: false,
     });
+  });
+
+  it("a targetless row never offers Select (nothing to pick)", () => {
+    expect(rowActions(entry({ id: "01A", targets: [] })).select).toBe(false);
+  });
+});
+
+describe("sibling targets — '+N others' (BACKLOG: journal entries show sibling targets)", () => {
+  const [a, b, c] = ["ab".repeat(32), "cd".repeat(32), "ef".repeat(32)];
+
+  it("counts the OTHER targets beyond the inspected image", () => {
+    expect(siblingTargetsLabel([a, b], a)).toBe("+1 other");
+    expect(siblingTargetsLabel([a, b, c], a)).toBe("+2 others");
+    // The inspected image's position in the order does not matter.
+    expect(siblingTargetsLabel([b, a, c], a)).toBe("+2 others");
+  });
+
+  it("single-target rows and stubs say nothing", () => {
+    expect(siblingTargetsLabel([a], a)).toBeNull();
+    expect(siblingTargetsLabel([], a)).toBeNull(); // redacted stub
+  });
+
+  it("degrades honestly when the inspected hash is unknown or absent", () => {
+    // No inspected hash (should not happen with an open panel): full count.
+    expect(siblingTargetsLabel([a, b], null)).toBe("+2 others");
+    // Inspected image not among the targets: every target is an "other".
+    expect(siblingTargetsLabel([a, b], c)).toBe("+2 others");
   });
 });
 

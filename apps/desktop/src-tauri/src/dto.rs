@@ -91,6 +91,16 @@ pub struct IndicatorPulse {
     pub event_kind: &'static str,
 }
 
+/// `journal-changed` payload (BACKLOG): the images whose journal truth a
+/// committed mutation touched. Open surfaces refresh from this — required
+/// before M2b voice events land without UI actions. No text content ever
+/// rides this channel either.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalChanged {
+    pub hashes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStatus {

@@ -74,6 +74,16 @@ export function selectNone(s: SelState): SelState {
   return clear(s);
 }
 
+/** The inspector's quiet multi-select header (founder, June 2026): with
+ * several images selected, the panel shows the ANCHOR image's truth plus
+ * "N selected" so the narrowed view is never mistaken for the whole
+ * selection. Counted over the stack-EXPANDED write-scope targets — the
+ * same N a rating keystroke would mint against (CAPTURE §3) and the
+ * scope ring echoes. Null below 2: a single image needs no caveat. */
+export function multiSelectLabel(targetCount: number): string | null {
+  return targetCount > 1 ? `${targetCount} selected` : null;
+}
+
 export type FocusDir = "left" | "right" | "up" | "down";
 
 /**
