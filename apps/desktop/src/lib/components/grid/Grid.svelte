@@ -116,10 +116,18 @@
 
   // ---- thumb pointer wiring ---------------------------------------------------
 
-  function onThumbClick(idx: number, e: MouseEvent) {
+  // Pointer handlers carry the rendered unit's HASH, never a slot index:
+  // the virtualizer recycles slots and an ingest refresh can re-sort
+  // `units` between render and click (exif passes fill captureTs
+  // mid-session) — an index crossing that boundary acts on a different
+  // image (founder dogfood, June 2026). The index each selection verb
+  // needs is resolved against the CURRENT order at event time.
+  function onThumbClick(hash: string, e: MouseEvent) {
     if (ui.shell.note.open) ui.cancelNote(); // transient closes; draft discarded
     ui.shell.railFocused = false; // pointer interaction returns key focus
     const hashes = ui.grid.unitHashes;
+    const idx = hashes.indexOf(hash);
+    if (idx < 0) return;
     let next: sel.SelState;
     if (e.shiftKey) next = sel.rangeTo(ui.grid.sel, hashes, idx);
     else if (e.metaKey || e.ctrlKey) next = sel.toggle(ui.grid.sel, hashes, idx);
@@ -133,21 +141,28 @@
     void ui.perform({ kind: "open-look" });
   }
 
-  /** Chevron control: make the pair active, then the one stack verb. */
-  function onChevron(idx: number) {
+  /** Chevron control: make the pair active, then toggle THAT pair — the
+   * identity pinned by hash for the toggle too, because applySelection
+   * awaits the set_scope IPC round-trip and a re-sort landing in that
+   * gap retargets any focus-index path. */
+  function onChevron(hash: string) {
     if (ui.shell.note.open) ui.cancelNote();
     ui.shell.railFocused = false;
     void (async () => {
-      await ui.applySelection(sel.click(ui.grid.sel, ui.grid.unitHashes, idx));
-      await ui.perform({ kind: "stack-toggle-active" });
+      const hashes = ui.grid.unitHashes;
+      const idx = hashes.indexOf(hash);
+      if (idx < 0) return;
+      await ui.applySelection(sel.click(ui.grid.sel, hashes, idx));
+      ui.grid.togglePairByHash(hash);
     })();
   }
 
-  function onThumbContextMenu(idx: number, e: MouseEvent) {
+  function onThumbContextMenu(hash: string, e: MouseEvent) {
     e.preventDefault();
     const hashes = ui.grid.unitHashes;
-    if (!sel.isSelected(ui.grid.sel, hashes[idx]))
-      void ui.applySelection(sel.click(ui.grid.sel, hashes, idx));
+    if (hashes.indexOf(hash) < 0) return;
+    if (!sel.isSelected(ui.grid.sel, hash))
+      void ui.applySelection(sel.click(ui.grid.sel, hashes, hashes.indexOf(hash)));
     ui.shell.openContextMenu("thumb", { x: e.clientX, y: e.clientY });
   }
 
@@ -251,10 +266,10 @@
           selected={sel.isSelected(ui.grid.sel, unit.primary.hash)}
           active={ui.grid.sel.focus === s.idx}
           size={geom.cell}
-          onpointerselect={(e) => onThumbClick(s.idx, e)}
+          onpointerselect={(e) => onThumbClick(unit.primary.hash, e)}
           onopen={onThumbOpen}
-          onstacktoggle={() => onChevron(s.idx)}
-          oncontextmenu={(e) => onThumbContextMenu(s.idx, e)}
+          onstacktoggle={() => onChevron(unit.primary.hash)}
+          oncontextmenu={(e) => onThumbContextMenu(unit.primary.hash, e)}
         />
         {#if link.left || link.right}
           <!-- the shared pair underline: the left member spans the gap, so

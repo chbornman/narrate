@@ -215,3 +215,57 @@ describe("previews-changed ping (thumbs heal as artifacts land)", () => {
     expect(g.previewPing.hashes.size).toBe(0);
   });
 });
+
+describe("mid-ingest re-sort keeps IDENTITY, not indexes (founder dogfood, June 2026)", () => {
+  // The exif pass fills captureTs mid-session; capture-desc then flips
+  // from the undated filename fallback to dated order under the user.
+  const dated = (relPath: string, ts: string): GridItem => ({
+    ...item(relPath),
+    captureTs: ts,
+  });
+
+  it("focus follows the image across a sort flip, not its index", () => {
+    const g = new GridSlice();
+    g.setItems([item("a.jpg"), item("b.jpg"), item("c.jpg")]); // filename order
+    g.sel = { order: ["h:a.jpg"], focus: 0, anchor: 0 };
+    expect(g.activeHash).toBe("h:a.jpg");
+    // captureTs lands: a oldest → capture-desc puts it LAST.
+    g.setItems([
+      dated("a.jpg", "2026-06-01T00:00:00Z"),
+      dated("b.jpg", "2026-06-02T00:00:00Z"),
+      dated("c.jpg", "2026-06-03T00:00:00Z"),
+    ]);
+    expect(g.activeHash).toBe("h:a.jpg"); // the image, never index 0
+    expect(g.sel.focus).toBe(2);
+    expect(g.sel.order).toEqual(["h:a.jpg"]);
+  });
+
+  it("togglePairByHash toggles the pair HOSTING the hash at execute time", () => {
+    const g = new GridSlice();
+    g.setItems([item("a.jpg"), item("a.cr2"), item("b.jpg"), item("b.cr2")]);
+    expect(g.units.length).toBe(2); // two collapsed pairs
+    // Re-sort: b's capture time is newer → capture-desc puts b first.
+    g.setItems([
+      dated("a.jpg", "2026-06-01T00:00:00Z"),
+      dated("a.cr2", "2026-06-01T00:00:00Z"),
+      dated("b.jpg", "2026-06-05T00:00:00Z"),
+      dated("b.cr2", "2026-06-05T00:00:00Z"),
+    ]);
+    expect(g.unitHashes[0]).toBe("h:b.jpg");
+    g.togglePairByHash("h:a.jpg"); // a moved to index 1 — still a's pair
+    expect(g.unitStack(g.unitHashes.indexOf("h:a.jpg"))).toBe("expanded");
+    expect(g.unitStack(g.unitHashes.indexOf("h:b.jpg"))).toBe("collapsed");
+  });
+
+  it("a selected display member that pairs up mid-ingest follows its cell", () => {
+    const g = new GridSlice();
+    g.setItems([item("a.jpg")]);
+    g.sel = { order: ["h:a.jpg"], focus: 0, anchor: 0 };
+    // The RAW member lands later in the scan: the jpg stays the display
+    // member of the now-collapsed pair; selection sticks to the cell.
+    g.setItems([item("a.jpg"), item("a.cr2")]);
+    expect(g.units.length).toBe(1);
+    expect(g.activeHash).toBe("h:a.jpg");
+    expect(g.selectionTargets).toEqual(["h:a.jpg", "h:a.cr2"]);
+  });
+});

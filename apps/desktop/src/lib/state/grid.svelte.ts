@@ -122,10 +122,16 @@ export class GridSlice {
   }
 
   /** Replace the item list (folder open / ingest refresh), reconciling
-   * selection and focus. */
+   * selection and focus. Focus follows the IMAGE, not its index: an
+   * ingest refresh re-sorts whenever an exif pass fills captureTs
+   * mid-session, and a merely length-clamped focus index silently
+   * retargets every active-cell verb at a different image (founder
+   * dogfood, June 2026). fixupSelection owns the hash-mapping invariant
+   * (hidden alts follow their display member; vanished hashes drop). */
   setItems(items: GridItem[]) {
+    const prevActive = this.activeHash;
     this.rawItems = items;
-    this.sel = sel.reconcile(this.sel, this.unitHashes);
+    this.fixupSelection(prevActive);
   }
 
   setSelection(next: sel.SelState) {
@@ -171,6 +177,20 @@ export class GridSlice {
 
   toggleActiveStack() {
     this.togglePairAt(this.sel.focus);
+  }
+
+  /** The chevron's path: toggle the pair HOSTING `hash` (display member
+   * or hidden alt) resolved at execute time. Pointer identity must
+   * survive an items re-sort landing inside the click's own async
+   * selection round-trip — the focus-index route toggled a different
+   * image's pair when that happened (founder dogfood, June 2026). The
+   * keyboard/menu verb stays focus-based: its subject IS the focus at
+   * perform time. */
+  togglePairByHash(hash: string) {
+    const index = this.units.findIndex(
+      (u) => u.primary.hash === hash || u.alt?.hash === hash,
+    );
+    if (index >= 0) this.togglePairAt(index);
   }
 
   setAllStacks(collapsed: boolean) {
