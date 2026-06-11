@@ -32,6 +32,21 @@ managing = off-thesis).
   (APFS: a case-only rename isn't a rename; s02_2 fails on macOS today),
   import-time warnings on risky volumes. (Founder, dogfood round 3,
   June 2026.)
+- [ ] **Library doctor / self-check pass** — a maintenance verb (and an
+  M1.5 candidate for the 6-hour tick) that validates the index against
+  reality and repairs what it can: done preview passes whose artifacts
+  are missing on disk → re-enqueue; orphaned stale path rows → sweep;
+  half-ingested RAW+JPEG pairs (one member's passes dead) → re-enqueue
+  the laggard; marker/identity drift → report. Born from dogfood round
+  3's mangled-folder session: the offline-defer fix (`l13_08`) removes
+  the biggest poison source, but mangled states will keep happening and
+  the library should HEAL, not just avoid. (Founder, June 2026.)
+- [ ] **Grid: recycled `<img>` can flash the previous image's pixels** —
+  the virtualizer pool recycles `<img>` elements by slot; on fast scroll
+  a cell can paint the prior occupant for a frame before the new src
+  decodes. Cosmetic; fix is clearing/hiding the img when the bound hash
+  changes until first paint of the new one. (P5.1-polish review residual,
+  June 2026.)
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
 - [ ] **Search entry as overlay, results as canvas** — `/` opens a floating

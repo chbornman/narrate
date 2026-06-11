@@ -1936,3 +1936,83 @@ fn l13_07_heuristic_volume_rematches_by_fingerprint() {
         "two indistinguishable mounts: misbinding is worse than offline"
     );
 }
+
+/// §10.5 amendment (founder-machine, June 2026): an offline volume says
+/// nothing about the file — passes DEFER without burning attempts, and a
+/// database poisoned by the old behavior (rows dead at the lifetime cap
+/// with volume-offline errors) heals on reopen.
+#[test]
+fn l13_08_offline_volume_never_burns_attempts_and_poisoned_rows_heal() {
+    let mut env = Env::new();
+    let root = env.register("photos");
+    env.write("photos/a.jpg", &unique_jpeg(990));
+    env.scan(&root);
+
+    let direct = rusqlite::Connection::open(&env.db).unwrap();
+
+    // Flap the volume HARD: offline at drain time, with the backoff
+    // cleared between rounds the way online transitions used to — the
+    // old mark_failed path burned an attempt per round and hit the
+    // lifetime cap within ten.
+    env.probe.set_mounts(vec![]);
+    env.lib.probe_volumes().unwrap();
+    for _ in 0..15 {
+        direct
+            .execute("UPDATE ingest_passes SET not_before = NULL", [])
+            .unwrap();
+        env.lib
+            .process_queue(&QueueOptions::default())
+            .unwrap();
+    }
+    let (max_attempts, errors): (i64, i64) = direct
+        .query_row(
+            "SELECT COALESCE(MAX(attempts), 0),
+                    COALESCE(SUM(state = 'error'), 0) FROM ingest_passes",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(errors, 0, "offline never produces error rows");
+    assert!(
+        max_attempts <= 1,
+        "offline defers give the attempt back (max attempts {max_attempts})"
+    );
+
+    // Replug: the online transition clears the defer backoff too — the
+    // queue drains to done without waiting out not_before.
+    env.probe.set_mounts(vec![probed(&env.mount)]);
+    env.lib.probe_volumes().unwrap();
+    env.drain_queue();
+    let stuck: i64 = direct
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes WHERE state IN ('pending', 'error')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stuck, 0, "everything completes once the volume is back");
+
+    // Poisoned pre-fix rows (dead at the cap with volume-offline errors)
+    // heal on reopen: retry_errors rescues them with a fresh budget.
+    direct
+        .execute(
+            "UPDATE ingest_passes
+             SET state = 'error', attempts = 10,
+                 error = 'volume-offline: no online active path'
+             WHERE pass_name = 'preview'",
+            [],
+        )
+        .unwrap();
+    drop(direct);
+    env.reopen();
+    env.drain_queue();
+    let direct = rusqlite::Connection::open(&env.db).unwrap();
+    let dead: i64 = direct
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes WHERE state = 'error'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dead, 0, "at-cap volume-offline rows rescued on reopen");
+}

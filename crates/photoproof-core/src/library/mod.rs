@@ -620,12 +620,15 @@ impl Library {
                         to_scan.extend(self.active_roots_of(&volume_id)?);
                         // Re-queue errored ingest passes whose image sits on
                         // this volume — the error may have been caused by the
-                        // volume being offline or misbound.
+                        // volume being offline or misbound — and clear the
+                        // offline-defer backoff on pending ones: the volume
+                        // is BACK, waiting out a 10-minute not_before would
+                        // be punishing the user for replugging.
                         let conn = self.db.lock().expect("poisoned");
                         let _ = conn.execute(
                             "UPDATE ingest_passes
                              SET state = 'pending', not_before = NULL
-                             WHERE state = 'error'
+                             WHERE state IN ('error', 'pending')
                                AND image_hash IN (
                                  SELECT p.image_hash FROM paths p
                                  WHERE p.volume_id = ?1 AND p.state = 'active'
@@ -1472,14 +1475,12 @@ impl Library {
             }
         });
         let Some(abs) = abs else {
+            // Not a strike against the file: defer without burning an
+            // attempt (a flapping volume once killed two-thirds of a
+            // folder's passes at the lifetime cap — founder machine,
+            // June 2026).
             let conn = self.db.lock().expect("poisoned");
-            ingest::mark_failed(
-                &conn,
-                item,
-                "volume-offline: no online active path",
-                true,
-                self.now(),
-            )?;
+            ingest::defer_offline(&conn, item, self.now())?;
             report.transient_retries += 1;
             return Ok(());
         };

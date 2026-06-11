@@ -111,14 +111,44 @@ pub fn recover_running(conn: &Connection) -> rusqlite::Result<usize> {
 }
 
 /// Restart / 6-hour-tick retry (§10.5): `error` rows with fewer than 10
-/// lifetime attempts go back to `pending`.
+/// lifetime attempts go back to `pending`. Volume-offline rows are
+/// rescued REGARDLESS of attempts, with a fresh budget: the lifetime cap
+/// exists to stop reprocessing bad FILES, and databases from before the
+/// defer_offline fix hold rows that burned all 10 on a flapping volume
+/// (founder-machine find, June 2026).
 pub fn retry_errors(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE ingest_passes
-         SET state = 'pending', not_before = NULL
-         WHERE state = 'error' AND attempts < ?1",
+         SET state = 'pending', not_before = NULL,
+             attempts = CASE WHEN error LIKE 'volume-offline%' THEN 0 ELSE attempts END
+         WHERE state = 'error'
+           AND (attempts < ?1 OR error LIKE 'volume-offline%')",
         params![MAX_LIFETIME_ATTEMPTS],
     )
+}
+
+/// An offline volume says nothing about the FILE: re-pend with the long
+/// transient backoff and GIVE THE ATTEMPT BACK — neither the §10.5
+/// auto-retry cap nor the lifetime cap may burn down while a volume is
+/// merely unplugged. (The volume's online transition clears `not_before`
+/// and re-pends ahead of the backoff anyway.)
+pub fn defer_offline(conn: &Connection, item: &QueueItem, now: UtcMillis) -> rusqlite::Result<()> {
+    let backoff = TRANSIENT_BACKOFF_MS[TRANSIENT_BACKOFF_MS.len() - 1];
+    let not_before = UtcMillis::from_epoch_ms(now.epoch_ms() + backoff);
+    conn.execute(
+        "UPDATE ingest_passes
+         SET state = 'pending', error = ?4, not_before = ?5,
+             attempts = MAX(attempts - 1, 0)
+         WHERE image_hash = ?1 AND pass_name = ?2 AND pass_version = ?3",
+        params![
+            item.image_hash.as_str(),
+            item.pass.as_str(),
+            item.pass_version,
+            "volume-offline: no online active path",
+            not_before.to_rfc3339()
+        ],
+    )?;
+    Ok(())
 }
 
 /// Insert a pass row at enqueue (idempotent: the PK upsert keeps the
