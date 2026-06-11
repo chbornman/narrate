@@ -22,7 +22,10 @@
  *
  * Everything else is owned elsewhere: the protocol owns both allowlists
  * and refuses with uniform 404s; LookStage keeps the preview painted
- * until a full-res source has actually loaded, renders it into the
+ * until a full-res source has actually loaded — PROVABLY: a load event
+ * counts only when it carries nonzero natural dims (`loadProvesPixels`
+ * below; WKWebView can fire a lying 0×0 "load" for a refused source after
+ * an onerror-driven src swap) — renders it into the
  * preview's layout box, and derives both from the canonical zoom session —
  * the transform carries over exactly by construction. "Actual" (100%)
  * zoom stays PREVIEW-relative even when a full-res source renders (U12:
@@ -62,4 +65,29 @@ export const FIRST_SOURCE: FullresSource = "original";
  * ladder (`null` — the preview stands, never re-asked this session). */
 export function nextSource(source: FullresSource): FullresSource | null {
   return source === "original" ? "embedded" : null;
+}
+
+/** THE SWAP GATE: a full-res <img> `load` event proves a usable source
+ * only when the element reports nonzero natural dims.
+ *
+ * WHY (founder bug, June 2026, macOS): WKWebView fires a LOAD event — with
+ * naturalWidth/Height 0 — instead of `error` when an <img>'s src is
+ * swapped INSIDE its own onerror handler and the new URL then 404s. That
+ * is exactly the ladder's original→embedded hop on a RAW: /original
+ * refuses (allowlist), onerror advances the rung, and when /embedded also
+ * refuses the "load" lied. Trusting it supplanted the painted preview with
+ * the webview's broken-image glyph AND wedged the ladder (no error event ⇒
+ * no rung advance, no failed-set entry — the embedded rung looked served
+ * while serving nothing). Verified empirically against a wry-style custom
+ * scheme handler answering an empty-body 404 after an onerror-driven src
+ * swap; a fresh (non-swapped) 404 fires `error` as expected.
+ *
+ * The gate is exact, not heuristic: every route serves raster formats only
+ * (webp/jpeg/png), and a raster that decoded has nonzero dims — so zero
+ * dims is always a refusal in load's clothing and takes the SAME path as
+ * onerror (next rung, or the preview stands). This is what keeps the
+ * pinned contract honest: the preview stays painted until a full-res
+ * source has ACTUALLY loaded. */
+export function loadProvesPixels(natural: Dims): boolean {
+  return natural.w > 0 && natural.h > 0;
 }

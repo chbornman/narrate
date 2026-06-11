@@ -20,6 +20,7 @@
   import * as zoom from "../../logic/zoom";
   import {
     FIRST_SOURCE,
+    loadProvesPixels,
     needsOriginal,
     nextSource,
     type FullresSource,
@@ -74,7 +75,9 @@
   // a 404 that advances the rung, and an exhausted ladder leaves the
   // preview standing silently (TIFF/HEIC: the M1.5 backfill). The request
   // is STICKY per hash (zooming back out never re-fetches or flickers);
-  // the preview stays painted until a source has LOADED, then they swap in
+  // the preview stays painted until a source has PROVABLY loaded (nonzero
+  // natural dims — WKWebView fires a lying 0×0 "load" for a 404 after an
+  // onerror-driven src swap; see loadProvesPixels), then they swap in
   // place. The full-res image renders into the preview's layout box
   // (explicit natW×natH), so the live transform — derived from the
   // canonical zoom session — carries over exactly, by construction, and
@@ -121,6 +124,21 @@
     failed.add(fullresHash);
     fullresFailed = failed; // ladder exhausted: the preview stands (M1.5)
     fullresHash = null;
+  }
+
+  /** The swap happens HERE and only here — after a load that PROVED pixels
+   * (logic/fullres.ts loadProvesPixels). WKWebView fires a lying `load`
+   * (natural dims 0×0) instead of `error` when a src swapped inside its
+   * own onerror then 404s — the RAW ladder's exact shape — and trusting it
+   * replaced the painted preview with the broken-image glyph. A dimension-
+   * less "load" is a refusal and walks the same ladder as onerror. */
+  function onFullresLoad(e: Event) {
+    const img = e.currentTarget as HTMLImageElement;
+    if (loadProvesPixels({ w: img.naturalWidth, h: img.naturalHeight })) {
+      fullresLoadedHash = hash;
+    } else {
+      onFullresError();
+    }
   }
 
   // ---- session writes (the only zoom mutations) ------------------------------
@@ -349,9 +367,7 @@
         style:transform={t !== null
           ? `translate(${t.tx}px, ${t.ty}px) scale(${t.scale})`
           : "none"}
-        onload={() => {
-          fullresLoadedHash = hash;
-        }}
+        onload={onFullresLoad}
         onerror={onFullresError}
       />
     {/if}
