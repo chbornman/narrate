@@ -45,6 +45,7 @@ managing = off-thesis).
   (no RAW decode needed); true decoded 1:1 stays M1.5. (Founder, dogfood
   round 2.)
 - [ ] clicking esc closes the Journal / metadata inspector sidebar when returning to the grid. We dont want this behavior. When we return to the grid, an image will still be selected. We probably do need to think about if multiple images are selected, how do we show the sidebar content?
+- [ ] **Filmstrip pushes, doesn't overlay** — when shown in Look, the filmstrip should not be overlaid on top of the canvas viewport; it acts like a sidebar/edge panel, moving the viewport up to accommodate it. Note: deliberately opposite to the rail's overlay-not-push convention (I1) — Look's canvas is the one surface where covered pixels matter. (Founder, June 2026.)
 
 - [ ] **Full metrics suite across every pipeline stage** — when the product is feature-complete, instrument each step (ingest passes, hash/preview throughput, search latency, fold cost, capture/binding latencies, overlay render, IPC round-trips) into one coherent metrics surface (debug panel growing into a perf dashboard); founder wants "blazing fast" to be measured, not vibes. (Founder, June 2026.)
 
