@@ -6,6 +6,8 @@
    * strings (key hints render through KeyHint). Consumers: all four
    * context-menu seats, sort ▾, every submenu, M2a tool menus.
    */
+  // Lucide chevron for the submenu marker (BACKLOG "Adopt Lucide icons").
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import type { Action } from "../logic/keymap";
   import type { MenuModel, MenuRow } from "../actions/menus";
   import { navInit, navKey, rowsAt, type MenuNav } from "./menu";
@@ -94,7 +96,7 @@
         {#if row.keyHint !== undefined}
           <KeyHint chord={row.keyHint} />
         {/if}
-        {#if row.kind === "submenu"}<span class="sub">▸</span>{/if}
+        {#if row.kind === "submenu"}<span class="sub"><ChevronRight size={12} /></span>{/if}
       </button>
     {/if}
   {/each}
@@ -153,5 +155,7 @@
   }
   .sub {
     color: var(--text-faint);
+    display: inline-flex; /* svg baseline → flex centering */
+    align-items: center;
   }
 </style>

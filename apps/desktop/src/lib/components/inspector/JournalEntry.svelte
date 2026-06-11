@@ -11,6 +11,10 @@
    * row emits Actions — routing is the parent's (JournalTab). Verbatim
    * user words only, ever (R3).
    */
+  // Lucide chevrons for the "edited" fold (BACKLOG "Adopt Lucide icons");
+  // the accessible name stays the word "edited" — tests query by it.
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import type { Action } from "../../logic/keymap";
   import {
     formatTime,
@@ -126,7 +130,9 @@
           onclick={() => (showOriginal = !showOriginal)}
           aria-expanded={showOriginal}
         >
-          edited {showOriginal ? "▾" : "▸"}
+          edited {#if showOriginal}<ChevronDown size={11} />{:else}<ChevronRight
+              size={11}
+            />{/if}
         </button>
       {/if}
       {#if showOriginal && entry.originalText !== null}
@@ -252,6 +258,9 @@
     color: var(--text-faint);
     font-size: 11px;
     padding: 0;
+    display: inline-flex; /* keep the chevron svg on the text's midline */
+    align-items: center;
+    gap: 2px;
   }
   .original {
     color: var(--text-faint);

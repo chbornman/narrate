@@ -5,6 +5,8 @@
    * thumb-size slider synced with Ctrl+wheel and -/=. Tooltips resolve
    * from the registry (tooltip.ts).
    */
+  // Lucide chevron replaces the text ▾ (BACKLOG "Adopt Lucide icons").
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import { ui } from "../../state/app.svelte";
   import { THUMB_STEPS } from "../../logic/sort";
   import { tooltip } from "../../primitives/tooltip";
@@ -30,7 +32,7 @@
     onclick={openSort}
     {@attach tooltip({ actionId: "open-sort-menu", verb: "Sort" })}
   >
-    sort ▾
+    sort <ChevronDown size={12} />
   </button>
   <input
     class="thumb-slider"
@@ -63,6 +65,9 @@
     border: none;
     background: transparent;
     color: var(--text-faint);
+    display: inline-flex; /* keep the chevron svg on the text's midline */
+    align-items: center;
+    gap: 2px;
   }
   .quiet:hover {
     color: var(--text);

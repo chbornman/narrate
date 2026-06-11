@@ -2,12 +2,15 @@
   /**
    * The stack expand/collapse CONTROL (featureset §5 — a control, not a
    * badge): the one extra click zone a cell may carry (§8 guardrail keeps
-   * the rest of the cell a single zone). Collapsed pairs show ⌄ (expand);
-   * expanded members show ⌃ (re-collapse) — live, reversible, per pair —
-   * next to the member count (dogfood round 1: the control shows the pair
-   * count). The verb itself is the registry's stack-toggle-active row; the
-   * tooltip resolves from it (the fourth rendering of the one table).
+   * the rest of the cell a single zone). Collapsed pairs show a down
+   * chevron (expand); expanded members show an up chevron (re-collapse) —
+   * live, reversible, per pair — next to the member count (dogfood round
+   * 1: the control shows the pair count). The verb itself is the
+   * registry's stack-toggle-active row; the tooltip resolves from it (the
+   * fourth rendering of the one table).
    */
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronUp from "@lucide/svelte/icons/chevron-up";
   import { tooltip } from "../../primitives/tooltip";
 
   let {
@@ -32,7 +35,9 @@
   ondblclick={(e) => e.stopPropagation()}
   {@attach tooltip({ actionId: "stack-toggle-active" })}
 >
-  <span class="count">{count}</span>{collapsed ? "⌄" : "⌃"}
+  <span class="count">{count}</span>{#if collapsed}<ChevronDown
+      size={12}
+    />{:else}<ChevronUp size={12} />{/if}
 </button>
 
 <style>

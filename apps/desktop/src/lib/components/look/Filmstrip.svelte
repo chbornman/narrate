@@ -7,6 +7,8 @@
    * not an overlay: it sits in LookSurface's flex column and PUSHES the
    * stage viewport up (founder, June 2026).
    */
+  // Lucide Unplug = the offline-volume badge (same glyph as the Grid).
+  import Unplug from "@lucide/svelte/icons/unplug";
   import { ui } from "../../state/app.svelte";
   import { thumbUrl } from "../../ipc/urls";
   import { displayedHash } from "../../logic/looknav";
@@ -31,7 +33,7 @@
     >
       <img src={thumbUrl(shown)} alt="" draggable="false" />
       {#if item?.hasJournal}<span class="journal-dot"></span>{/if}
-      {#if item?.offline}<span class="offline-badge">⏏</span>{/if}
+      {#if item?.offline}<span class="offline-badge"><Unplug size={9} /></span>{/if}
     </button>
   {/each}
 </div>
@@ -81,6 +83,6 @@
     right: 3px;
     top: 1px;
     color: var(--text-dim);
-    font-size: 9px;
+    display: flex; /* size the badge box to the svg, no baseline gap */
   }
 </style>

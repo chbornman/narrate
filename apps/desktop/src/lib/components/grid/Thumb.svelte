@@ -12,6 +12,9 @@
    * The <img> elements are recycled by the virtualizer (keyed by pool
    * slot, not item) — this component only swaps `src`.
    */
+  // Lucide Unplug = the offline-volume badge (BACKLOG "Adopt Lucide
+  // icons"; Lucide ships no eject — "disconnected" is the meaning).
+  import Unplug from "@lucide/svelte/icons/unplug";
   import { srcHash, thumbUrl } from "../../ipc/urls";
   import { infoLine } from "../../logic/cellinfo";
   import type { CellInfoLevel } from "../../state/grid.svelte";
@@ -173,7 +176,7 @@
   {/if}
   <!-- badges paint over the info strip so the dot never disappears -->
   {#if hasJournal}<span class="journal-dot"></span>{/if}
-  {#if offline}<span class="offline-badge">⏏</span>{/if}
+  {#if offline}<span class="offline-badge"><Unplug size={11} /></span>{/if}
   {#if stack !== "solo"}
     <!-- the expand/collapse CONTROL, not a badge (featureset §5).
          count: D1 pairs strictly one JPEG with one RAW — always 2. -->
@@ -225,7 +228,7 @@
     right: 5px;
     top: 3px;
     color: var(--text-dim);
-    font-size: 11px;
+    display: flex; /* size the badge box to the svg, no baseline gap */
     pointer-events: none;
   }
   /* T cell-info strip (logic/cellinfo.ts) — dimmed, pointer-inert. */

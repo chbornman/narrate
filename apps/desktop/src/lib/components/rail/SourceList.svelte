@@ -4,6 +4,12 @@
    * saved searches arrive as sibling SourceSections with ZERO edits here
    * (the M3-proofing is the whole point of this component).
    */
+  // Lucide (BACKLOG "Adopt Lucide icons"): stroke chevrons for the folder
+  // twist; Unplug for the offline-volume badge (Lucide ships no eject —
+  // "disconnected" is the meaning the old ⏏ carried here anyway).
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Unplug from "@lucide/svelte/icons/unplug";
   import type { SourceRow, SourceSection } from "../../logic/sources";
 
   let {
@@ -39,10 +45,14 @@
         }}
       >
         {#if row.hasChildren}
-          <span class="twist">{row.expanded ? "▾" : "▸"}</span>
+          <span class="twist"
+            >{#if row.expanded}<ChevronDown size={12} />{:else}<ChevronRight
+                size={12}
+              />{/if}</span
+          >
         {/if}
         <span class="label">{row.label}</span>
-        {#if row.offline}<span class="badge">⏏</span>{/if}
+        {#if row.offline}<span class="badge" title="Volume offline"><Unplug size={11} /></span>{/if}
       </button>
     {/each}
   {/each}
@@ -82,8 +92,9 @@
   }
   .twist {
     color: var(--text-faint);
-    font-size: 10px;
     flex: 0 0 auto;
+    display: inline-flex; /* svg baseline → flex centering */
+    align-items: center;
   }
   .label {
     overflow: hidden;
@@ -92,6 +103,7 @@
   }
   .badge {
     color: var(--text-faint);
-    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
   }
 </style>
