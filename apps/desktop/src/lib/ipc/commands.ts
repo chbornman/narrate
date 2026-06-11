@@ -148,4 +148,11 @@ export const rescanRoot = (rootId: string) =>
 // -- window plumbing ----------------------------------------------------------
 
 export const openSettingsWindow = () => invoke<void>("open_settings_window");
+/** macOS Tab lights-out (featureset §0 "hides ALL chrome"): the traffic
+ * lights are NATIVE NSButtons (Overlay titlebar), outside the DOM region
+ * gates — left visible they float over (and click-block) the chrome-less
+ * grid. Hidden/shown in lockstep with chromeHidden; never persisted.
+ * No-op off macOS. */
+export const setTrafficLightsHidden = (hidden: boolean) =>
+  invoke<void>("set_traffic_lights_hidden", { hidden });
 export const quit = () => invoke<void>("quit");

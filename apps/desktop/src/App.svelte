@@ -5,7 +5,10 @@
    * {#if !ui.shell.chromeHidden} (Tab lights-out, featureset §0; future
    * chrome obeys by construction because App mounts chrome only through
    * gated regions). EXEMPT by ruling: the capture indicator (capture-state
-   * truth — modes must stay visible) and an open note input.
+   * truth — modes must stay visible) and an open note input. On macOS the
+   * NATIVE traffic lights (Overlay titlebar) sit outside these DOM gates;
+   * the perform sink (app.svelte.ts, toggle-lights-out) hides/shows them
+   * in lockstep via set_traffic_lights_hidden.
    *
    * The edge-dwell hotzone is DELETED — no auto-hide fly-outs (featureset
    * §3); the rail is a push panel on `\`. ContextMenuHost + ToastHost +

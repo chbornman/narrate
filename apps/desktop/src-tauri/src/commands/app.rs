@@ -204,6 +204,51 @@ pub fn open_settings_window(handle: AppHandle) -> CmdResult<()> {
     Ok(())
 }
 
+/// Tab lights-out, the native half (featureset §0: "hides ALL chrome").
+/// With macOS's Overlay titlebar the traffic lights are native NSButtons,
+/// not DOM — App.svelte's region gates cannot touch them, and left visible
+/// they float over (and click-block) the chrome-less grid's top-left
+/// corner. WHY standardWindowButton:setHidden: and not set_decorations:
+/// tao rebuilds the style mask from scratch on re-decorate, dropping
+/// FullSizeContentView and wrecking the Overlay layout — hiding the
+/// buttons is lossless and exactly reversible. Nothing persists: lib.rs
+/// strips DECORATIONS from the window-state flags, and this hidden bit
+/// lives only on the live NSWindow. No-op off macOS (the custom DOM
+/// controls there are gated in Svelte).
+#[tauri::command]
+pub fn set_traffic_lights_hidden(window: tauri::WebviewWindow, hidden: bool) -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // AppKit is main-thread-only; the command may arrive off it.
+        let win = window.clone();
+        window
+            .run_on_main_thread(move || {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let Ok(ns_window) = win.ns_window() else {
+                    return;
+                };
+                let ns_window = ns_window.cast::<AnyObject>();
+                // NSWindowButton: close = 0, miniaturize = 1, zoom = 2.
+                for kind in 0_usize..=2 {
+                    unsafe {
+                        let button: *mut AnyObject =
+                            msg_send![ns_window, standardWindowButton: kind];
+                        if !button.is_null() {
+                            let _: () = msg_send![button, setHidden: hidden];
+                        }
+                    }
+                }
+            })
+            .map_err(|e| CmdError::Invalid(format!("traffic lights: {e}")))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, hidden);
+    }
+    Ok(())
+}
+
 /// Cmd/Ctrl+Q. Cleanup (session close + sidecar flush) runs in the
 /// `ExitRequested` handler in lib.rs, so OS-initiated quits get it too.
 #[tauri::command]

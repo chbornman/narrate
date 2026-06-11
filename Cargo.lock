@@ -3594,6 +3594,7 @@ dependencies = [
  "http",
  "image",
  "libc",
+ "objc2",
  "photoproof-connectors",
  "photoproof-core",
  "pollster",
