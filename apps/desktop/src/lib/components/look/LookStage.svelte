@@ -218,6 +218,12 @@
   // an overlay/menu/the rail owns the keys, Space neither pans nor closes.
   function stageOwnsRawKeys(): boolean {
     return (
+      // The registry's look-close row runs FIRST in the same keydown
+      // dispatch (App's window listener registered at app mount) and this
+      // handler stays attached until Svelte unmounts the stage — without
+      // the surface check, a Space-at-fit close re-engages spaceHeld AFTER
+      // look.close() reset it, and no tracker survives to see the keyup.
+      ui.surface === "look" &&
       !ui.searchOpen &&
       !ui.shell.cheatsheetOpen &&
       ui.shell.contextMenu === null &&

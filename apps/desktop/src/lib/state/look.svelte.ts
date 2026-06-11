@@ -110,6 +110,9 @@ export class LookSlice {
     this.flips = new Set();
     this.atFit = true;
     this.zoomCmd = { seq: this.zoomCmd.seq + 1, op: "fit" };
+    // Belt over the LookStage surface gate: whatever a prior visit left
+    // behind, a fresh Look never starts with the pencil's pointer yielded.
+    this.spaceHeld = false;
   }
 
   close() {
