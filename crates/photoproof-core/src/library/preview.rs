@@ -453,6 +453,61 @@ impl EmbeddedPreviewExtractor for RawlerExtractor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Embedded-native full resolution (Look's progressive route — founder,
+// dogfood round 2): the embedded JPEG served at NATIVE size, on demand
+// ---------------------------------------------------------------------------
+
+/// JPEG quality for the on-demand native-size re-encode (decoded by the
+/// extractor, re-oriented per §9.3.1, encoded once per request — the
+/// protocol's immutable cache headers let the webview's HTTP cache hold it).
+pub const EMBEDDED_NATIVE_QUALITY: u8 = 90;
+
+/// Aspect agreement tolerance between the oriented native image and the
+/// cached display artifact. Resize rounding on a 2560-edge artifact moves
+/// the aspect by well under 1%; a 90° disagreement inverts it entirely.
+const EMBEDDED_NATIVE_ASPECT_TOLERANCE: f64 = 0.02;
+
+/// The serve decision for the embedded-native route, pure: serve only when
+/// the display-oriented embedded preview actually ADDS pixels over the
+/// cached display artifact, AND its aspect agrees with that artifact.
+/// Stated plainly (§9.3.1/§9.7): strokes live in display-oriented image
+/// space — a native image whose geometry disagrees with the stroke
+/// substrate would rotate/misplace every mark at deep zoom. Disagreement
+/// or no gain = refuse; the 2560 preview stands silently.
+pub fn embedded_native_acceptable(
+    oriented_w: u32,
+    oriented_h: u32,
+    display_w: u32,
+    display_h: u32,
+) -> bool {
+    if oriented_w == 0 || oriented_h == 0 || display_w == 0 || display_h == 0 {
+        return false;
+    }
+    // No pixel gain (small embedded previews, sources at or below the
+    // display edge): the cached artifact already carries every pixel.
+    if oriented_w.max(oriented_h) <= display_w.max(display_h) {
+        return false;
+    }
+    let oa = f64::from(oriented_w) / f64::from(oriented_h);
+    let da = f64::from(display_w) / f64::from(display_h);
+    ((oa - da) / da).abs() < EMBEDDED_NATIVE_ASPECT_TOLERANCE
+}
+
+/// Encode a display-oriented image as JPEG for the native-size route (JPEG
+/// carries no alpha; the embedded source never had any).
+pub fn encode_jpeg_native(img: &DynamicImage) -> Result<Vec<u8>, PreviewError> {
+    let rgb = img.to_rgb8();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(
+        &mut std::io::Cursor::new(&mut out),
+        EMBEDDED_NATIVE_QUALITY,
+    )
+    .encode_image(&rgb)
+    .map_err(|e| PreviewError::Decode(e.to_string()))?;
+    Ok(out)
+}
+
 /// Orient an extracted preview per the §9.3.1 policy. Returns the
 /// display-oriented image and the decision (for logging/tests).
 pub fn orient_embedded_preview(
@@ -538,6 +593,38 @@ mod tests {
         let (apply, reason) = embedded_orientation_decision(1616, 1080, None, None, 8, None);
         assert_eq!(apply, 8);
         assert_eq!(reason, EmbeddedOrientationReason::NoRawDims);
+    }
+
+    #[test]
+    fn native_route_serves_only_genuine_pixel_gain() {
+        // Full-res embedded over a 2560-class artifact: serve.
+        assert!(embedded_native_acceptable(6000, 4000, 2560, 1707));
+        // Small embedded preview (older-Sony-ARW class): the display
+        // artifact IS the embedded preview — no gain, preview stands.
+        assert!(!embedded_native_acceptable(1616, 1080, 1616, 1080));
+        // At or below the display edge, even when larger than the artifact
+        // on one axis only: max-edge rule.
+        assert!(!embedded_native_acceptable(2200, 1467, 2200, 1467));
+        // Degenerate dims never serve.
+        assert!(!embedded_native_acceptable(0, 0, 2560, 1707));
+        assert!(!embedded_native_acceptable(6000, 4000, 0, 0));
+    }
+
+    #[test]
+    fn native_route_refuses_geometry_disagreement() {
+        // A 90° disagreement inverts the aspect — refused (stroke safety).
+        assert!(!embedded_native_acceptable(4000, 6000, 2560, 1707));
+        // Resize rounding stays well inside the tolerance.
+        assert!(embedded_native_acceptable(6000, 4000, 2560, 1706));
+        assert!(embedded_native_acceptable(3600, 2400, 2560, 1707));
+    }
+
+    #[test]
+    fn native_encode_round_trips_dimensions() {
+        let img = DynamicImage::ImageRgba8(image::RgbaImage::new(120, 80));
+        let bytes = encode_jpeg_native(&img).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(decoded.dimensions(), (120, 80));
     }
 
     #[test]

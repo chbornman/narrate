@@ -357,6 +357,19 @@ fn assert_upright(file: &Path, expect_portrait: bool, context: &str) -> (u32, u3
     let img = image::open(file)
         .unwrap_or_else(|e| panic!("{context}: artifact decode failed: {e}"))
         .into_rgba8();
+    assert_upright_img(&img, expect_portrait, context)
+}
+
+/// In-memory twin of [`assert_upright`] for protocol-style byte responses
+/// (the embedded-native route returns encoded bytes, not a cache file).
+fn assert_upright_bytes(bytes: &[u8], expect_portrait: bool, context: &str) -> (u32, u32) {
+    let img = image::load_from_memory(bytes)
+        .unwrap_or_else(|e| panic!("{context}: bytes decode failed: {e}"))
+        .into_rgba8();
+    assert_upright_img(&img, expect_portrait, context)
+}
+
+fn assert_upright_img(img: &image::RgbaImage, expect_portrait: bool, context: &str) -> (u32, u32) {
     let (w, h) = (img.width(), img.height());
     assert_eq!(
         h > w,
@@ -1267,6 +1280,174 @@ fn l13_10_embedded_preview_orientation_fixtures() {
         .unwrap_or_default();
     assert_eq!(frd.skipped, 2);
     assert_eq!(frd.pending, 0);
+}
+
+/// Backlog (founder, dogfood round 2): RAW 1:1 via the embedded full-res
+/// JPEG. The native-size route must agree with the cached preview on
+/// orientation and aspect for BOTH §9.3.1 conventions — strokes live in
+/// display-oriented image space, so any disagreement would rotate or
+/// misplace every mark at deep zoom. Same fixtures as the orientation
+/// acceptance above, asserted against `Library::embedded_native`.
+#[test]
+fn embedded_native_agrees_with_preview_orientation() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    let display = display_pattern(2400, 3600); // portrait, ≥ threshold
+
+    // "Nikon-style": preview already display-oriented; tag still says 6.
+    env.extractor.script(
+        "nikon-pre-rotated.nef",
+        FakeSpec {
+            preview: display.clone(),
+            raw_dims: Some((6000, 4000)),
+            exif_orientation: 6,
+            preview_orientation: None,
+        },
+    );
+    // "Fuji-style": preview sensor-oriented; the tag must be applied.
+    env.extractor.script(
+        "fuji-tag-reliant.raf",
+        FakeSpec {
+            preview: store_for_orientation(&display, 6),
+            raw_dims: Some((6000, 4000)),
+            exif_orientation: 6,
+            preview_orientation: None,
+        },
+    );
+    env.write("photos/nikon-pre-rotated.nef", b"synthetic nef body 1");
+    env.write("photos/fuji-tag-reliant.raf", b"synthetic raf body 2");
+    env.scan(&root);
+    env.drain_queue();
+
+    let conn = env.conn();
+    for rel in [
+        "photos/nikon-pre-rotated.nef",
+        "photos/fuji-tag-reliant.raf",
+    ] {
+        let h: String = conn
+            .query_row(
+                "SELECT image_hash FROM paths WHERE rel_path = ?1 AND state = 'active'",
+                [rel],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let hash = ContentHash::from_hex(&h).unwrap();
+        let native = env
+            .lib
+            .embedded_native(&hash)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{rel}: native route refused"));
+        // Native size — not the 2560 display class — display-oriented.
+        assert_eq!((native.width, native.height), (2400, 3600), "{rel}");
+        // Upright pattern, no double rotation, across both conventions.
+        let dims = assert_upright_bytes(&native.jpeg, true, &format!("{rel} native"));
+        assert_eq!(dims, (2400, 3600), "{rel}");
+        // Aspect agreement with the cached display artifact — the stroke
+        // substrate the native image renders underneath.
+        let a = env
+            .lib
+            .preview_artifact(&hash, ArtifactKind::Display)
+            .unwrap()
+            .unwrap();
+        let na = f64::from(native.width) / f64::from(native.height);
+        let da = a.width as f64 / a.height as f64;
+        assert!(
+            ((na - da) / da).abs() < 0.02,
+            "{rel}: aspect drifted — native {na} vs display artifact {da}"
+        );
+        // And it genuinely adds pixels over the preview.
+        assert!(
+            i64::from(native.width.max(native.height)) > a.width.max(a.height),
+            "{rel}: no pixel gain"
+        );
+    }
+}
+
+/// The embedded-native refusal set: small embedded preview (no pixel gain),
+/// no embedded preview, non-RAW formats, cloud placeholders (§5.2: a
+/// dataless file is never read), and offline volumes — each a silent
+/// `None`, so Look keeps the 2560 preview (the route's uniform 404).
+#[test]
+fn embedded_native_refusals_fall_back_to_the_preview() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    // A genuine full-res case proves the positive path in this env…
+    env.extractor.script(
+        "big.nef",
+        FakeSpec {
+            preview: display_pattern(4000, 3000),
+            raw_dims: Some((4000, 3000)),
+            exif_orientation: 1,
+            preview_orientation: None,
+        },
+    );
+    // …and the older-Sony-ARW small-preview class: the display artifact IS
+    // the embedded preview (never upscaled) — no gain to serve.
+    env.extractor.script(
+        "small.arw",
+        FakeSpec {
+            preview: display_pattern(1616, 1080),
+            raw_dims: Some((6048, 4024)),
+            exif_orientation: 1,
+            preview_orientation: None,
+        },
+    );
+    let big_abs = env.write("photos/big.nef", b"synthetic nef big");
+    env.write("photos/small.arw", b"synthetic arw small");
+    env.write("photos/none.arw", b"synthetic arw none"); // extractor: None
+    env.write("photos/plain.jpg", &unique_jpeg(77));
+    env.scan(&root);
+    env.drain_queue();
+
+    let conn = env.conn();
+    let hash_of = |rel: &str| -> ContentHash {
+        let h: String = conn
+            .query_row(
+                "SELECT image_hash FROM paths WHERE rel_path = ?1 AND state = 'active'",
+                [rel],
+                |r| r.get(0),
+            )
+            .unwrap();
+        ContentHash::from_hex(&h).unwrap()
+    };
+    let big = hash_of("photos/big.nef");
+    assert!(env.lib.embedded_native(&big).unwrap().is_some());
+
+    // Small embedded: refused (the preview already carries every pixel).
+    assert!(
+        env.lib
+            .embedded_native(&hash_of("photos/small.arw"))
+            .unwrap()
+            .is_none()
+    );
+    // No embedded preview at all (placeholder thumb until the backfill).
+    assert!(
+        env.lib
+            .embedded_native(&hash_of("photos/none.arw"))
+            .unwrap()
+            .is_none()
+    );
+    // Non-RAW: the /original route owns webview-decodable formats.
+    assert!(
+        env.lib
+            .embedded_native(&hash_of("photos/plain.jpg"))
+            .unwrap()
+            .is_none()
+    );
+
+    // Cloud placeholder (§5.2): the file dematerialized after ingest — the
+    // stat-level attribute alone must refuse; extraction would hydrate.
+    env.placeholders.mark(&big_abs);
+    assert!(env.lib.embedded_native(&big).unwrap().is_none());
+    env.placeholders.hydrate(&big_abs);
+    assert!(env.lib.embedded_native(&big).unwrap().is_some());
+
+    // Offline volume: reads never touch originals (§8/§11).
+    env.probe.set_mounts(vec![]);
+    env.lib.probe_volumes().unwrap();
+    assert!(env.lib.embedded_native(&big).unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------

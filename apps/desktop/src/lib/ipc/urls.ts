@@ -16,7 +16,15 @@ export const displayUrl = (hash: string): string =>
 
 /** The ORIGINAL file — Look's progressive full-resolution route. Served
  * only for webview-decodable stored formats (protocol.rs allowlist:
- * jpeg/png/webp); RAW/TIFF/offline answer 404 and Look keeps the preview
- * silently. */
+ * jpeg/png/webp); RAW falls through to the embedded rung, TIFF/HEIC and
+ * offline answer 404 and Look keeps the preview silently. */
 export const originalUrl = (hash: string): string =>
   `photoproof://localhost/original/${hash}`;
+
+/** The RAW's embedded full-resolution JPEG at NATIVE size — the ladder
+ * rung between the display preview and (M1.5) decoded 1:1. Extraction is
+ * on-demand and applies the preview's exact §9.3.1 orientation policy, so
+ * strokes stay put at deep zoom; non-RAW/offline/small-preview sources
+ * answer 404 and Look falls back per logic/fullres.ts. */
+export const embeddedUrl = (hash: string): string =>
+  `photoproof://localhost/embedded/${hash}`;

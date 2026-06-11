@@ -1,6 +1,6 @@
 //! The `photoproof://` custom URI scheme: thumbnails and Look images served
 //! straight from the preview cache (spec/UI.md §3.3, DECISIONS P16), plus
-//! the progressive full-resolution route for Look (dogfood round 1):
+//! the progressive full-resolution routes for Look (dogfood rounds 1+2):
 //!
 //!   /thumb/<hash>     cached WebP thumbnail
 //!   /display/<hash>   cached WebP display preview (2560 px class)
@@ -9,8 +9,16 @@
 //!                     format column, never extension sniffing), resolved
 //!                     through the library's best ONLINE path; offline or
 //!                     missing files refuse with 404. RAW/TIFF/HEIC sources
-//!                     404 here by design — Look keeps the display preview
-//!                     silently (the full decode is the M1.5 backfill).
+//!                     404 here by design — RAW falls through to /embedded;
+//!                     TIFF/HEIC keep the display preview silently (the
+//!                     full decode is the M1.5 backfill).
+//!   /embedded/<hash>  the RAW's embedded full-resolution JPEG at NATIVE
+//!                     size (dogfood round 2) — extracted on demand, served
+//!                     display-oriented per the SAME §9.3.1 policy as the
+//!                     cached preview (strokes live in display-oriented
+//!                     space; the library refuses geometry disagreement).
+//!                     Non-RAW, offline, placeholder, and small/no-embedded
+//!                     sources refuse with the same uniform 404.
 //!
 //! Image bytes NEVER cross `invoke`/IPC and are never base64-encoded. URLs
 //! are content-addressed, so every route carries the same immutable cache
@@ -27,23 +35,26 @@ pub enum Route {
     Artifact(ArtifactKind),
     /// The original source file (allowlisted formats only).
     Original,
+    /// The RAW's embedded full-resolution JPEG at native size.
+    Embedded,
 }
 
 /// Parse `/thumb/<hash>` | `/display/<hash>` (a trailing `.webp` is
-/// tolerated) | `/original/<hash>`. Returns the route and the validated
-/// content hash — hash validation is the traversal guard.
+/// tolerated) | `/original/<hash>` | `/embedded/<hash>`. Returns the route
+/// and the validated content hash — hash validation is the traversal guard.
 pub fn parse_path(path: &str) -> Option<(Route, ContentHash)> {
     let mut parts = path.trim_start_matches('/').splitn(2, '/');
     let route = match parts.next()? {
         "thumb" => Route::Artifact(ArtifactKind::Thumb),
         "display" => Route::Artifact(ArtifactKind::Display),
         "original" => Route::Original,
+        "embedded" => Route::Embedded,
         _ => return None,
     };
     let rest = parts.next()?;
     let hash_str = match route {
         Route::Artifact(_) => rest.strip_suffix(".webp").unwrap_or(rest),
-        Route::Original => rest,
+        Route::Original | Route::Embedded => rest,
     };
     let hash = ContentHash::from_hex(hash_str).ok()?;
     Some((route, hash))
@@ -56,7 +67,8 @@ pub fn resolve(cache_dir: &Path, path: &str) -> Option<PathBuf> {
             let file = artifact_path(cache_dir, &hash, kind);
             file.exists().then_some(file)
         }
-        (Route::Original, _) => None, // originals resolve through the library
+        // Originals and embedded natives resolve through the library.
+        (Route::Original | Route::Embedded, _) => None,
     }
 }
 
@@ -107,6 +119,15 @@ pub fn serve(library: &Library, path: &str) -> http::Response<Vec<u8>> {
             })
             .map(|(bytes, content_type)| respond_ok(bytes, content_type))
             .unwrap_or_else(respond_not_found),
+        // The library owns the whole embedded-native policy (RAW-only,
+        // online-only, placeholder skip, §9.3.1 orientation, pixel-gain +
+        // geometry agreement); any refusal is the same uniform 404.
+        Some((Route::Embedded, hash)) => library
+            .embedded_native(&hash)
+            .ok()
+            .flatten()
+            .map(|native| respond_ok(native.jpeg, "image/jpeg"))
+            .unwrap_or_else(respond_not_found),
         None => respond_not_found(),
     }
 }
@@ -134,7 +155,8 @@ mod tests {
     use std::sync::Arc;
 
     use photoproof_core::library::{
-        FakeVolumeProbe, LibraryOptions, PlatformIdKind, ProbedVolume, ScanOptions,
+        EmbeddedPreviewExtractor, ExtractedPreview, FakeVolumeProbe, LibraryOptions,
+        PlatformIdKind, PreviewError, ProbedVolume, QueueOptions, ScanOptions,
     };
 
     use super::*;
@@ -162,6 +184,22 @@ mod tests {
         // No suffix tolerance on originals (content-addressed, no extension).
         assert!(parse_path(&format!("/original/{}.webp", h.as_str())).is_none());
         assert!(parse_path(&format!("/original/{}.jpg", h.as_str())).is_none());
+    }
+
+    #[test]
+    fn parses_the_embedded_route() {
+        let h = hash();
+        let (r, parsed) = parse_path(&format!("/embedded/{}", h.as_str())).unwrap();
+        assert_eq!(r, Route::Embedded);
+        assert_eq!(parsed, h);
+        // Same discipline as /original: no suffix tolerance, no traversal,
+        // never resolved as a cache artifact.
+        assert!(parse_path(&format!("/embedded/{}.jpg", h.as_str())).is_none());
+        assert!(parse_path("/embedded/not-a-hash").is_none());
+        assert!(parse_path("/embedded/../../etc/passwd").is_none());
+        assert!(parse_path("/embedded/").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve(dir.path(), &format!("/embedded/{}", h.as_str())).is_none());
     }
 
     #[test]
@@ -272,6 +310,103 @@ mod tests {
         // Online and present on disk — refused purely by stored format.
         let resp = serve(&lib, &format!("/original/{}", h.as_str()));
         assert_eq!(resp.status(), 404);
+    }
+
+    // ---- /embedded against a real temp library -----------------------------
+
+    /// Scripted extractor: one full-resolution preview for every RAW path
+    /// (the §9.3.1 orientation-policy depth is covered by core's
+    /// library_acceptance fixtures; here the wire contract is under test).
+    struct ScriptedExtractor;
+
+    impl EmbeddedPreviewExtractor for ScriptedExtractor {
+        fn extract(&self, _path: &Path) -> Result<Option<ExtractedPreview>, PreviewError> {
+            Ok(Some(ExtractedPreview {
+                image: image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    3000,
+                    2000,
+                    image::Rgb([40, 90, 160]),
+                )),
+                raw_width: Some(3000),
+                raw_height: Some(2000),
+                exif_orientation: 1,
+                preview_orientation: None,
+            }))
+        }
+    }
+
+    /// Temp library with one scanned root holding a JPEG and a RAW, previews
+    /// generated (the embedded route requires the cached display artifact).
+    fn raw_env() -> (tempfile::TempDir, Library, FakeVolumeProbe) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mount = tmp.path().join("mount");
+        let dir = mount.join("shoot");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("IMG_0001.jpg"), b"jpeg-original-bytes").unwrap();
+        std::fs::write(dir.join("IMG_0003.nef"), b"synthetic nef body").unwrap();
+        let probe = FakeVolumeProbe::new();
+        probe.set_mounts(vec![probed(&mount)]);
+        let lib = Library::open_with(
+            tmp.path().join("photoproof.db"),
+            tmp.path().join("previews"),
+            LibraryOptions {
+                probe: Arc::new(probe.clone()),
+                extractor: Arc::new(ScriptedExtractor),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let root_id = lib.register_root(&dir, Some("shoot")).unwrap();
+        lib.scan_root(&root_id, &ScanOptions::default()).unwrap();
+        lib.process_queue(&QueueOptions::default()).unwrap();
+        (tmp, lib, probe)
+    }
+
+    #[test]
+    fn serves_the_raw_embedded_native_jpeg() {
+        let (_tmp, lib, _probe) = raw_env();
+        let h = hash_with_format(&lib, ImageFormat::Raw);
+        // The original route still refuses RAW (U12 allowlist unchanged)…
+        assert_eq!(
+            serve(&lib, &format!("/original/{}", h.as_str())).status(),
+            404
+        );
+        // …and the embedded route serves the native-size JPEG instead.
+        let resp = serve(&lib, &format!("/embedded/{}", h.as_str()));
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["content-type"], "image/jpeg");
+        assert_eq!(
+            resp.headers()["cache-control"],
+            "public, max-age=31536000, immutable"
+        );
+        let decoded = image::load_from_memory(resp.body()).expect("decodable jpeg");
+        use image::GenericImageView;
+        // Native size — NOT the 2560-class display preview.
+        assert_eq!(decoded.dimensions(), (3000, 2000));
+    }
+
+    #[test]
+    fn embedded_refuses_non_raw_offline_and_unknown_with_404() {
+        let (_tmp, lib, probe) = raw_env();
+        // Non-RAW stored format: /original owns it; /embedded refuses.
+        let jpeg = hash_with_format(&lib, ImageFormat::Jpeg);
+        assert_eq!(
+            serve(&lib, &format!("/embedded/{}", jpeg.as_str())).status(),
+            404
+        );
+        // Unknown (never-ingested) hash.
+        assert_eq!(
+            serve(&lib, &format!("/embedded/{}", hash().as_str())).status(),
+            404
+        );
+        // Offline volume (disk pulled): uniform refusal.
+        let raw = hash_with_format(&lib, ImageFormat::Raw);
+        probe.set_mounts(vec![]);
+        lib.probe_volumes().unwrap();
+        assert_eq!(
+            serve(&lib, &format!("/embedded/{}", raw.as_str())).status(),
+            404
+        );
     }
 
     #[test]

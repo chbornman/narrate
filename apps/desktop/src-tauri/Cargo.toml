@@ -48,6 +48,9 @@ ash = "0.38"
 [dev-dependencies]
 tempfile = { workspace = true }
 futures-core = { workspace = true }
+# protocol.rs /embedded tests: scripted extractor previews in, decoded
+# response bytes out (resolves to photoproof-core's pinned version).
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [features]
 # The debug side panel (spec/UI.md §10, DECISIONS I6): its commands and event
