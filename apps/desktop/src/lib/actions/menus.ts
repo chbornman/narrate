@@ -72,7 +72,7 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "toggle-cheatsheet",
     "open-settings",
   ],
-  "rail-folder": ["rail-folder-open", "rail-folder-reveal", "rescan-root"],
+  "rail-folder": ["rail-folder-open", "rail-folder-reveal", "rescan-root", "—", "add-root"],
   "look-backdrop": [
     "zoom-toggle",
     "zoom-fit",

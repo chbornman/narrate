@@ -76,6 +76,8 @@ export type Action =
   | { kind: "rail-folder-open"; rootId: string; folder: string }
   | { kind: "rail-folder-reveal"; rootId: string; folder: string }
   | { kind: "rescan-root"; rootId: string }
+  // rail footer button + rail-folder seat: OS picker → register root
+  | { kind: "add-root" }
   | { kind: "open-inspector"; tab: "metadata" | "journal" }
   | { kind: "close-inspector" }
   // journal row verbs (pointer-seated; Stage C wires the flows)

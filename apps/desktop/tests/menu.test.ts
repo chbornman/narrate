@@ -126,6 +126,8 @@ describe("menus.ts — seat models over the registry", () => {
       "Open",
       "Show in file manager",
       "Rescan",
+      undefined, // separator before the rail's own verb
+      "Add folder…",
     ]);
     expect(model.rows[0].action).toEqual({
       kind: "rail-folder-open",
@@ -133,6 +135,7 @@ describe("menus.ts — seat models over the registry", () => {
       folder: "2026",
     });
     expect(model.rows[2].action).toEqual({ kind: "rescan-root", rootId: "r1" });
+    expect(model.rows[4].action).toEqual({ kind: "add-root" });
   });
 
   it("the sort ▾ pseudo-seat is the same machinery, flat", () => {

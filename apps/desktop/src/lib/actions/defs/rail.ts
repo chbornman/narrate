@@ -86,4 +86,16 @@ export const RAIL_DEFS: ActionDef[] = [
       return a === null ? null : { kind: "rescan-root", rootId: a.rootId };
     },
   },
+  // The rail's own verb (footer button + this seat): the OS folder picker
+  // → add_root, no Settings round-trip (founder, dogfood rounds 1+2).
+  {
+    id: "add-root",
+    verb: "Add folder…",
+    label: "Add a watched folder",
+    keys: [],
+    scope: "global",
+    group: "panels",
+    seats: ["rail-folder"],
+    available: always,
+  },
 ];

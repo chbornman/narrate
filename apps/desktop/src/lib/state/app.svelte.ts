@@ -182,14 +182,49 @@ export class Ui {
   // ---------------------------------------------------------------------------
 
   async refreshRoots() {
-    this.roots = await ipc.listRoots();
+    this.applyRootsSnapshot(await ipc.listRoots());
+  }
+
+  /** Apply a roots snapshot: a vanished current root resets the grid. */
+  private applyRootsSnapshot(roots: RootDto[]) {
+    this.roots = roots;
     if (
       this.grid.rootId !== null &&
-      !this.roots.some((r) => r.rootId === this.grid.rootId)
+      !roots.some((r) => r.rootId === this.grid.rootId)
     ) {
       this.grid.rootId = null;
       this.grid.rawItems = [];
     }
+  }
+
+  /** Roots edited in ANY window land here LIVE (add_root/remove_root emit
+   * `roots-changed` with the fresh snapshot — the P4.2b settings-changed
+   * pattern; founder dogfood, round 2): the rail updates instantly. With
+   * nothing open afterwards — the open root was removed, or a first root
+   * just arrived — the first remaining root opens (the init() rule), so
+   * the grid never sits on a dead folder. */
+  async onRootsChanged(roots: RootDto[]) {
+    this.applyRootsSnapshot(roots);
+    if (this.grid.rootId === null && roots.length > 0)
+      await this.openFolder(roots[0].rootId, "");
+  }
+
+  /** "Add folder…" (rail footer button + rail-folder seat): the OS
+   * directory picker straight from the rail — the FirstRun/Settings
+   * add-root flow, one click (founder, dogfood rounds 1+2). The new root
+   * opens; every other window's rail follows via `roots-changed`. */
+  async addRootFromPicker() {
+    let dir: unknown;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      dir = await open({ directory: true, multiple: false });
+    } catch {
+      return; // non-tauri dev/tests: no picker to show
+    }
+    if (typeof dir !== "string") return;
+    const root = await ipc.addRoot(dir);
+    await this.refreshRoots();
+    await this.openFolder(root.rootId, "");
   }
 
   async openFolder(rootId: string, folder: string) {
@@ -820,6 +855,9 @@ export class Ui {
         } catch {
           /* unreachable backend in tests */
         }
+        break;
+      case "add-root":
+        await this.addRootFromPicker();
         break;
       case "open-inspector":
         this.inspector.openTab(action.tab);
