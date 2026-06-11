@@ -11,6 +11,26 @@
 export const thumbUrl = (hash: string): string =>
   `photoproof://localhost/thumb/${hash}`;
 
+/**
+ * The hash a preview URL names — the last path segment, with any
+ * cache-busting query stripped ("" for non-URL strings, e.g. an empty
+ * `currentSrc`).
+ *
+ * Why it exists (BACKLOG: recycled <img> pixel flash): the grid
+ * virtualizer recycles <img> elements by pool slot, so a Thumb's `hash`
+ * prop changes under a LIVE element. Setting `src` only QUEUES the swap
+ * (the HTML "update the image data" microtask) — until it runs,
+ * `img.complete`/`img.naturalWidth` still describe the PREVIOUS
+ * occupant's bitmap, and a load event already in flight for the old src
+ * can fire after the prop changed. Every loaded-marking path must prove
+ * the element actually holds THIS hash's bitmap (via currentSrc) before
+ * unhiding it, or the old pixels flash for a frame on fast scroll.
+ */
+export const srcHash = (url: string): string => {
+  const path = url.split("?")[0];
+  return path.slice(path.lastIndexOf("/") + 1);
+};
+
 export const displayUrl = (hash: string): string =>
   `photoproof://localhost/display/${hash}`;
 

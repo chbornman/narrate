@@ -32,6 +32,15 @@
 
   const groups = $derived(sessionGroups(ui.inspector.entries));
 
+  /** The inspected image's own RAW/JPEG pair member (DECISIONS B61):
+   * threaded into every row so "+N others" never counts the mate — the
+   * stack badge already says it; "+1 other" must mean a genuinely
+   * DIFFERENT image. The grid slice resolves it through `units`
+   * (collapsed alt or expanded partner cell). */
+  const pairMateHash = $derived(
+    ui.inspector.hash === null ? null : ui.grid.pairMateOf(ui.inspector.hash),
+  );
+
   function route(action: Action) {
     void ui.perform(action);
   }
@@ -95,6 +104,7 @@
         <JournalEntry
           {entry}
           inspectedHash={ui.inspector.hash}
+          {pairMateHash}
           editing={ui.inspector.editingEventId === entry.id}
           onaction={route}
           oncorrect={(eventId, text) => void ui.inspector.commitCorrection(eventId, text)}

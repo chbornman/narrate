@@ -24,6 +24,7 @@
   let {
     entry,
     inspectedHash = null,
+    pairMateHash = null,
     editing = false,
     onaction,
     oncorrect,
@@ -32,6 +33,10 @@
     entry: JournalEntryDto;
     /** The panel's image — "+N others" counts beyond it. */
     inspectedHash?: string | null;
+    /** The inspected image's RAW/JPEG pair member (DECISIONS B61): the
+     * mate is the same picture, never an "other" — JournalTab resolves
+     * it from ui.grid so the row logic stays pure. */
+    pairMateHash?: string | null;
     /** ui.inspector.editingEventId === entry.id (escape layer 4 owns it). */
     editing?: boolean;
     onaction: (action: Action) => void;
@@ -43,7 +48,9 @@
 
   const time = $derived(formatTime(entry.ts));
   const actions = $derived(rowActions(entry));
-  const siblings = $derived(siblingTargetsLabel(entry.targets, inspectedHash));
+  const siblings = $derived(
+    siblingTargetsLabel(entry.targets, inspectedHash, pairMateHash),
+  );
 
   function onContextMenu(e: MouseEvent) {
     if (oncontextmenu === undefined) return;
