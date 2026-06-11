@@ -22,7 +22,22 @@ function memoryStorage(): Storage {
   };
 }
 
-if (typeof globalThis.localStorage === "undefined") {
+// Probe instead of typeof: Node 25's global localStorage EXISTS but is
+// inert without --localstorage-file (clear/setItem are undefined), which
+// the old undefined-check waved through.
+function storageUsable(): boolean {
+  try {
+    const s = globalThis.localStorage;
+    if (typeof s?.clear !== "function") return false;
+    s.setItem("__setup_probe__", "1");
+    s.removeItem("__setup_probe__");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (!storageUsable()) {
   Object.defineProperty(globalThis, "localStorage", {
     value: memoryStorage(),
     configurable: true,

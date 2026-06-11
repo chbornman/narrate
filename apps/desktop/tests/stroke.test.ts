@@ -14,7 +14,14 @@
 import { describe, expect, it } from "vitest";
 import type { Dims, Point, ZoomTransform } from "../src/lib/logic/zoom";
 import * as stroke from "../src/lib/logic/stroke";
-import { penDown, penMove, penUp, decimate, type PenState } from "../src/lib/logic/pencil";
+import {
+  classifyPenDown,
+  decimate,
+  penDown,
+  penMove,
+  penUp,
+  type PenState,
+} from "../src/lib/logic/pencil";
 import type { StrokePayloadWire } from "../src/lib/types/dto";
 
 // ---- deterministic PRNG (registry.test.ts pattern) ---------------------------
@@ -312,6 +319,61 @@ describe("§8.3 capture reduction — jitter dedupe and the 8192 bound", () => {
     expect(state.points.length).toBe(2); // down + the 1-px move
   });
 
+  it("recomputes the dedupe baseline when the transform changes mid-stroke", () => {
+    // Pen-down at screen (100,100) under 1:1 → image (100,100). A wheel
+    // zoom to ×2 mid-stroke moves that kept point to screen (200,200);
+    // the baseline must follow it (the P5.1 review bug compared against
+    // the stale pre-zoom screen point).
+    const t1: ZoomTransform = { scale: 1, tx: 0, ty: 0 };
+    const t2: ZoomTransform = { scale: 2, tx: 0, ty: 0 };
+    const state = penDown(
+      { x: 100, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 0 },
+      { t: t1, image: PREVIEW },
+    );
+    // 0.3 px from the RE-PROJECTED baseline: jitter, must drop (the stale
+    // baseline reads it as a ~141-px move and would keep it).
+    penMove(
+      state,
+      { x: 200.3, y: 200, pressure: 0.5, pointerType: "mouse", timeMs: 10 },
+      { t: t2, image: PREVIEW },
+    );
+    expect(state.points.length).toBe(1);
+    // 0.3 px from the STALE baseline but a real ~50-image-px move under
+    // ×2: must be kept (the stale baseline would drop it).
+    penMove(
+      state,
+      { x: 100.3, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 20 },
+      { t: t2, image: PREVIEW },
+    );
+    expect(state.points.length).toBe(2);
+    expect(state.points[1].n.x).toBeCloseTo(50.15 / PREVIEW.w, 9);
+    expect(state.points[1].n.y).toBeCloseTo(50 / PREVIEW.h, 9);
+  });
+
+  it("a mid-stroke PAN moves the baseline too (translation, not just scale)", () => {
+    const t1: ZoomTransform = { scale: 1, tx: 0, ty: 0 };
+    const panned: ZoomTransform = { scale: 1, tx: 5, ty: 0 }; // Space-pan mid-stroke
+    const state = penDown(
+      { x: 100, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 0 },
+      { t: t1, image: PREVIEW },
+    );
+    // The kept point now sits at screen (105,100): 0.2 px away is jitter.
+    penMove(
+      state,
+      { x: 105.2, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 10 },
+      { t: panned, image: PREVIEW },
+    );
+    expect(state.points.length).toBe(1);
+    // 0.2 px from the stale baseline is a real 4.8-px move now: kept.
+    penMove(
+      state,
+      { x: 100.2, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 20 },
+      { t: panned, image: PREVIEW },
+    );
+    expect(state.points.length).toBe(2);
+    expect(state.points[1].n.x).toBeCloseTo(95.2 / PREVIEW.w, 9);
+  });
+
   it("t offsets start at 0 and never decrease, even on misordered clocks", () => {
     const state = penDown(
       { x: 0, y: 0, pressure: 0.5, pointerType: "mouse", timeMs: 1000 },
@@ -359,6 +421,31 @@ describe("§8.3 capture reduction — jitter dedupe and the 8192 bound", () => {
     expect(out[0]).toBe(pts[0]);
     expect(out[out.length - 1]).toBe(pts[8]);
     expect(out.length).toBe(5);
+  });
+});
+
+describe("pointer-down intent — the button gate precedes eraser intent (P5.1 review)", () => {
+  it("button 0 draws bare and erases under hold-E", () => {
+    expect(classifyPenDown(0, 1, false)).toBe("draw");
+    expect(classifyPenDown(0, 1, true)).toBe("erase");
+  });
+
+  it("the stylus eraser end always erases (button 5 / buttons bit 32 — B45)", () => {
+    expect(classifyPenDown(5, 32, false)).toBe("erase");
+    expect(classifyPenDown(5, 32, true)).toBe("erase");
+    expect(classifyPenDown(0, 33, false)).toBe("erase"); // bit alongside contact
+  });
+
+  it("right/middle-click PASS to the backdrop menu seat — E held or not", () => {
+    // The review bug: eraser intent evaluated first made right/middle
+    // erase under hold-E, eating the look-backdrop menu's click.
+    expect(classifyPenDown(2, 2, true)).toBe("pass");
+    expect(classifyPenDown(2, 2, false)).toBe("pass");
+    expect(classifyPenDown(1, 4, true)).toBe("pass");
+    expect(classifyPenDown(1, 4, false)).toBe("pass");
+    // X1/X2 side buttons are not erase gestures either.
+    expect(classifyPenDown(3, 8, true)).toBe("pass");
+    expect(classifyPenDown(4, 16, true)).toBe("pass");
   });
 });
 

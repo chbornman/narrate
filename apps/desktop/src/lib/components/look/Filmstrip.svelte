@@ -3,7 +3,9 @@
    * The Look filmstrip (UI §4.1, `F`, default hidden) — STAGE B. Stack-
    * aware: each cell shows the entry's DISPLAYED member, so an R flip is
    * visible here too (featureset §5). Obeys Tab via LookSurface's gate;
-   * shows the same two badges as the Grid, nothing more.
+   * shows the same two badges as the Grid, nothing more. An edge panel,
+   * not an overlay: it sits in LookSurface's flex column and PUSHES the
+   * stage viewport up (founder, June 2026).
    */
   import { ui } from "../../state/app.svelte";
   import { thumbUrl } from "../../ipc/urls";
@@ -36,10 +38,7 @@
 
 <style>
   .filmstrip {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    flex: 0 0 auto; /* pushes the stage region, never covers it */
     height: 80px; /* ≤ 88 px (§4.1) */
     display: flex;
     gap: 4px;

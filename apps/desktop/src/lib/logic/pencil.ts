@@ -24,6 +24,8 @@ import {
   BASE_W_DEFAULT,
   JITTER_MIN_SCREEN_PX,
   MAX_POINTS,
+  denormalize,
+  imageToScreen,
   normalize,
   pathLengthLE,
   pressurePerMille,
@@ -64,8 +66,11 @@ interface PenPoint {
 export interface PenState {
   points: PenPoint[];
   image: Dims;
-  /** Last KEPT sample's screen point (jitter dedupe reference). */
+  /** Last KEPT sample's screen point (jitter dedupe reference), valid
+   * under `lastT` — recomputed when the transform changes mid-stroke. */
   lastScreen: Point;
+  /** The transform `lastScreen` was captured under. */
+  lastT: ZoomTransform;
   downAtMs: number;
 }
 
@@ -82,6 +87,7 @@ export function penDown(s: PenSample, f: PenFrame): PenState {
     points: [toPenPoint(s, f, 0)],
     image: f.image,
     lastScreen: { x: s.x, y: s.y },
+    lastT: f.t,
     downAtMs: s.timeMs,
   };
 }
@@ -96,6 +102,16 @@ export function decimate(points: PenPoint[]): PenPoint[] {
 }
 
 export function penMove(state: PenState, s: PenSample, f: PenFrame): void {
+  // A mid-stroke wheel zoom moved the transform under the pen: the stale
+  // lastScreen lives in the OLD screen space, so the 0.5-px comparison
+  // below would be against the wrong point. Re-project the last kept
+  // sample through the CURRENT transform first (sub-pixel keep/drop must
+  // be measured where the pixels are now).
+  if (f.t.scale !== state.lastT.scale || f.t.tx !== state.lastT.tx || f.t.ty !== state.lastT.ty) {
+    const last = state.points[state.points.length - 1].n;
+    state.lastScreen = imageToScreen(denormalize(last, state.image), f.t);
+    state.lastT = f.t;
+  }
   // Jitter dedupe: drop samples closer than 0.5 SCREEN px to the last
   // kept one (lossless at display resolution, §8.3).
   if (Math.hypot(s.x - state.lastScreen.x, s.y - state.lastScreen.y) < JITTER_MIN_SCREEN_PX)
@@ -156,6 +172,25 @@ export function livePoints(state: PenState, t: ZoomTransform): Point[] {
 
 export function livePressures(state: PenState): number[] {
   return state.points.map((pt) => pt.p);
+}
+
+// ---- pointer-down intent (B45 + the button-gate fix) -------------------------
+
+export type PenDownIntent = "draw" | "erase" | "pass";
+
+/** Classify a pencil-mode pointer-down (the button gate comes FIRST —
+ * P5.1 review fix): the primary button draws, or erases while hold-E is
+ * engaged; the stylus eraser end always erases (button 5 on the down
+ * transition / buttons bit 32 — B45); any other button (right/middle)
+ * PASSES untouched to the look-backdrop menu seat, hold-E or not. */
+export function classifyPenDown(
+  button: number,
+  buttons: number,
+  eraserHeld: boolean,
+): PenDownIntent {
+  if (button === 5 || (buttons & 32) !== 0) return "erase";
+  if (button !== 0) return "pass";
+  return eraserHeld ? "erase" : "draw";
 }
 
 // ---- undo stack (§8.5: depth 10, this-process, authored-here only) ----------

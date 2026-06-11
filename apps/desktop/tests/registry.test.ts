@@ -178,8 +178,8 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
     "remove-last-chip": "chip × buttons in the search overlay",
     "pencil-eraser":
       "pointer-native: the stylus eraser end (hold-E is the keyboard form; a menu item cannot hold)",
-    "pencil-undo":
-      "pointer path: the journal panel's stroke-row Retract (the same tombstone)",
+    // pencil-undo is SEATED (look-backdrop "Undo stroke") — its keyboard-
+    // only exemption was removed by the post-P5.1 polish round.
   };
 
   it("every non-reserved verb holds a seat or names its chrome/pointer affordance", () => {

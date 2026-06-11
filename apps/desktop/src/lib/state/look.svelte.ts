@@ -53,8 +53,12 @@ export class LookSlice {
   /** Tracing-paper overlay: per app-RUN session state, never persisted;
    * defaults ON (UI §4.4). Survives leaving Look. */
   overlayVisible = $state(true);
-  /** Hold-E engaged (release is a raw keyup fact in PencilOverlay). */
+  /** Hold-E engaged (release is a raw keyup fact in LookStage). */
   eraserHeld = $state(false);
+  /** Space held (raw key fact, tracked ONCE in LookStage through the
+   * stageOwnsRawKeys gate — looknav.ts spaceHeldNext; PencilOverlay
+   * consumes it to yield the pointer for Space-pan). */
+  spaceHeld = $state(false);
   /** A stroke is in flight (pointer captured by the overlay). */
   penDown = $state(false);
   /** Undo stack (§8.5): depth 10, in-memory, THIS process only, holding
@@ -106,6 +110,9 @@ export class LookSlice {
     this.flips = new Set();
     this.atFit = true;
     this.zoomCmd = { seq: this.zoomCmd.seq + 1, op: "fit" };
+    // Belt over the LookStage surface gate: whatever a prior visit left
+    // behind, a fresh Look never starts with the pencil's pointer yielded.
+    this.spaceHeld = false;
   }
 
   close() {
@@ -118,6 +125,7 @@ export class LookSlice {
     // via syncUndoSession, not on leaving Look).
     this.pencilMode = false;
     this.eraserHeld = false;
+    this.spaceHeld = false; // its tracker (LookStage) unmounts with Look
     this.penDown = false;
   }
 

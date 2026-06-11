@@ -78,8 +78,10 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "zoom-fit",
     "zoom-100",
     "—",
-    // The grease pencil (P5.1): mode + overlay toggles, pointer-seated.
+    // The grease pencil (P5.1): mode + overlay toggles plus undo (graying
+    // on pencilUndoable), pointer-seated.
     "pencil-pen",
+    "pencil-undo",
     "cycle-overlay",
     "—",
     // Dogfood round 1 reachability audit (Look-side pointer seats).
