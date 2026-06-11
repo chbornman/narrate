@@ -95,11 +95,14 @@
 
 <div class="overlay" data-stage={stage} role="dialog" aria-label="Search">
   {#if stage === "entry"}
-    <!-- The scrim IS the honest overlay: the invoking surface stays
-         visible (dimmed) behind it. Pointerdown leaves search exactly like
-         Esc's leave-search layer — the Sheet primitive's scrim contract,
-         reused here so click-out and Esc agree on where you land. -->
-    <div class="dim" role="presentation" onpointerdown={() => void ui.closeSearch()}></div>
+    <!-- The dim is purely visual: the invoking surface stays visible
+         (dimmed) behind it, but it is NOT a dismissal affordance — UI §5.1
+         enumerates Escape as the return path, and Sheet's scrim contract
+         (dismissing scrims are ENUMERATED; new ones are spec changes)
+         means click-out here would need a DECISIONS/spec ruling first. It
+         still swallows pointer events so the layer beneath stays inert
+         while search is up. -->
+    <div class="dim" role="presentation"></div>
   {/if}
 
   <!-- The panel (input + chips) is one persistent element across stages so

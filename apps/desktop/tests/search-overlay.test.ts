@@ -117,22 +117,51 @@ describe("entry overlay vs results canvas (backlog: search entry as overlay)", (
     expect(container.querySelector(".dim")).not.toBeNull();
   });
 
-  it("scrim pointerdown leaves search to the invoking surface (I1)", async () => {
+  it("the dim is visual only — pointerdown does NOT dismiss (Esc is the exit, §5.1)", async () => {
     await ui.openSearch();
     expect(ui.searchOpen).toBe(true);
     const { container } = render(SearchOverlay);
+    // UI §5.1 enumerates Escape as the return path; a dismissing scrim
+    // would be a new affordance needing a spec ruling (Sheet's contract:
+    // scrim instances are ENUMERATED). The dim only keeps the layer
+    // beneath inert.
     await fireEvent.pointerDown(container.querySelector(".dim") as HTMLElement);
-    // Same exit as Esc's leave-search layer: search closes; the surface
-    // was never changed, so we are back where search was invoked from.
-    expect(ui.searchOpen).toBe(false);
-    expect(ui.surface).toBe("grid");
+    expect(ui.searchOpen).toBe(true);
   });
 
-  it("clicks inside the floating panel do NOT dismiss (only scrim/Esc leave)", async () => {
+  it("clicks inside the floating panel do NOT dismiss either", async () => {
     await ui.openSearch();
     const { container } = render(SearchOverlay);
     await fireEvent.pointerDown(container.querySelector(".bar") as HTMLElement);
     expect(ui.searchOpen).toBe(true);
+  });
+
+  it("reopening `/` after Enter→Look starts at the entry overlay, never a stale canvas", async () => {
+    // First search: results arrived, the user pressed Enter on a result.
+    // openLook(hash, true) flips searchOpen off DIRECTLY — it never goes
+    // through closeSearch — so query/results survive the close.
+    await ui.openSearch();
+    ui.query = "fog";
+    ui.results = searchResults([result({ type: "visual_match" })]);
+    await ui.openLook("ab".repeat(32), true);
+    expect(ui.searchOpen).toBe(false);
+
+    // `/` again: a FRESH entry. Stale results would otherwise derive the
+    // canvas stage instantly — no floating input, no dimmed surface —
+    // making the entry overlay first-run-only.
+    await ui.openSearch();
+    expect(ui.query).toBe("");
+    expect(ui.results).toBeNull();
+    const { container } = render(SearchOverlay);
+    expect((container.querySelector(".overlay") as HTMLElement).dataset.stage).toBe(
+      "entry",
+    );
+    expect(container.querySelector(".dim")).not.toBeNull();
+    expect(container.querySelector("[role='listbox']")).toBeNull();
+
+    // Leave Look so later cases start from the grid surface again.
+    await ui.closeSearch();
+    await ui.leaveLook();
   });
 });
 
