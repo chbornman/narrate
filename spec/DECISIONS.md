@@ -538,6 +538,26 @@ Build-pass readings recorded by the P6.2 runtime-supervision packet
   now a single serialized queue). The per-model "pause" action is deferred:
   resume-from-part makes pause equivalent to stop.
 
+## Batch-1 polish decisions (June 2026)
+
+Founder rulings from the batch-1 polish round (journal/look/rail/raw
+clusters), recorded at merge.
+
+- **B59 (founder).** The journal rows' "Select in grid" affordance
+  (select-from-note) rides EVERY entry kind with targets except redacted
+  stubs: ratings and retracted rows keep Select — their targets are real
+  and useful to jump to — while a stub offers no verbs at all, even when
+  the DTO still carries the event's targets (redaction means the entry is
+  gone; affordances on the stub read wrong). Availability is pure row
+  logic (rowActions).
+- **B60 (founder).** Multi-select inspector display: the panel keeps
+  showing ONE image's truth — the anchor the inspector already follows —
+  plus a quiet "N selected" line (grid only; Look narrows scope by
+  construction). N counts the stack-expanded write-scope targets, the
+  same N a rating keystroke mints against and the scope ring echoes. No
+  aggregate/combined panel; revisit at the M3 sidebar design pass if
+  dogfood demands it.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

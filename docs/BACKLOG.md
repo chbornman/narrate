@@ -19,33 +19,37 @@ managing = off-thesis).
   (🔍 from the spec mockup, sort ▾, ⏏, ×, chevron, titlebar buttons) with
   a consistent stroke set, sized/toned via tokens. UI.md §5 mockup emoji is
   illustrative, not normative. (Founder, dogfood round 2.)
-- [ ] **Roots changes propagate live across windows** — adding/removing a
-  folder in Settings must appear in the main-window rail instantly:
-  `add_root`/`remove_root` emit a `roots-changed` event (same pattern as
-  P4.2b's `settings-changed`); App listens → `refreshRoots()`. Same class
-  as the journal-staleness fix (`ecf6e26`). (Founder, dogfood round 2.)
-- [ ] **Add watched folder from the rail, one button click** — a visible "Add folder…" button in the rail (footer row) + context-menu entry opening the folder picker directly; founder wants this working ahead of any deeper sidebar redesign. Currently only drag-onto-window / Settings / first-run. (Founder, dogfood rounds 1+2.)
+- [x] **Roots changes propagate live across windows** — landed `6dab0f6`
+  (batch-1 rail cluster): `add_root`/`remove_root` emit `roots-changed`
+  (the `settings-changed` pattern); App listens → `refreshRoots()`.
+  (Founder, dogfood round 2.)
+- [x] **Add watched folder from the rail, one button click** — landed `6dab0f6`: "Add folder…" footer button + rail-folder context-menu `add-root` row, both opening the picker directly. (Founder, dogfood rounds 1+2.)
 
-- [ ] **Compose entries from the journal panel** — the Journal tab gets an inline way to add a new entry directly (not just the N transient), and generally every entry kind a user can author (remark, rating, revision/correction) should be addable via UI from there; retract/redact already exist per-row. (Founder, dogfood round 2.)
-- [ ] **Journal entries show sibling targets** — a multi-target note's entry
-  carries a quiet "+N others" affordance (targets are already in the event;
-  the journal DTO needs them surfaced). (Founder, dogfood round 1.)
-- [ ] **Select images from note** — from a journal entry, select the event's
-  full target set in the grid (jump home + select). The vision statement as
-  a verb; also an M3 workflow entry point (select → file into project).
-- [ ] **Backend `journal-changed` event** carrying affected hashes, so open
-  surfaces refresh without frontend-triggered reloads — required before
-  M2b voice (events will land without UI actions); the M1 writers are
-  covered by direct refresh hooks (`ecf6e26`).
+- [x] **Compose entries from the journal panel** — landed `506d81a` (batch-1 journal cluster): inline composer in the Journal tab (quiet textarea + rating binding; its focus joins the Esc text-edit layers). (Founder, dogfood round 2.)
+- [x] **Journal entries show sibling targets** — landed `506d81a`: "+N
+  others" quiet mark (`siblingTargetsLabel`), targets surfaced on the
+  journal DTO. (Founder, dogfood round 1.)
+- [x] **Select images from note** — landed `506d81a`: `select-journal-targets`
+  row affordance + journal-row seat (jump home + select the entry's full
+  target set). Availability: every entry kind except redacted stubs (B59).
+- [x] **Backend `journal-changed` event** — landed `506d81a`: carries
+  affected hashes; journal panel, grid badges, and the Look overlay
+  refresh off it (the indicator pulse is pure feedback again).
 
-- [ ] **RAW 1:1 via the embedded full-res JPEG** — most cameras embed a
-  full-resolution JPEG in the RAW; ingest extracts it then downscales to
-  2560, discarding pixels we already had. Serve the embedded JPEG at native
-  size through the progressive route when zooming a RAW past the preview
-  (no RAW decode needed); true decoded 1:1 stays M1.5. (Founder, dogfood
-  round 2.)
-- [ ] clicking esc closes the Journal / metadata inspector sidebar when returning to the grid. We dont want this behavior. When we return to the grid, an image will still be selected. We probably do need to think about if multiple images are selected, how do we show the sidebar content?
-- [ ] **Filmstrip pushes, doesn't overlay** — when shown in Look, the filmstrip should not be overlaid on top of the canvas viewport; it acts like a sidebar/edge panel, moving the viewport up to accommodate it. Note: deliberately opposite to the rail's overlay-not-push convention (I1) — Look's canvas is the one surface where covered pixels matter. (Founder, June 2026.)
+- [x] **RAW 1:1 via the embedded full-res JPEG** — landed `1cbf7ad`
+  (batch-1 raw cluster): `/embedded` route serves the RAW's embedded JPEG
+  at native size with the preview's exact §9.3.1 orientation policy
+  (strokes stay put at deep zoom); ladder is /original → /embedded →
+  preview stands. True decoded 1:1 stays M1.5.
+- [x] **Esc keeps the inspector on Look→Grid** — landed `506d81a`: the
+  inspector layer peels AFTER Look→Grid (returning to the grid keeps the
+  panel on the still-active image). Multi-select display resolved by B60:
+  anchor image + quiet "N selected" (`64b220e`).
+- [x] **Filmstrip pushes, doesn't overlay** — landed `ca5c9a7` (batch-1
+  look cluster): the filmstrip moves the Look viewport up rather than
+  covering it (deliberately opposite the rail's I1 overlay convention —
+  Look's canvas is the one surface where covered pixels matter).
+  (Founder, June 2026.)
 
 - [ ] **Full metrics suite across every pipeline stage** — when the product is feature-complete, instrument each step (ingest passes, hash/preview throughput, search latency, fold cost, capture/binding latencies, overlay render, IPC round-trips) into one coherent metrics surface (debug panel growing into a perf dashboard); founder wants "blazing fast" to be measured, not vibes. (Founder, June 2026.)
 
@@ -60,10 +64,10 @@ managing = off-thesis).
 ## Milestone-attached extras (build with their milestone)
 
 - **M2a (pencil) — P5.1 SHIPPED** (`1e06f1e`): B/E/O keys, overlay, undo/eraser, journal stroke micro-previews. The toolbar idea is ruled out for good — zero-chrome wins (U14); the old P/E/V band is retired. Review-sourced polish below:
-- [ ] Pencil: jitter dedupe compares against a lastScreen captured under the pre-zoom transform when wheel-zooming mid-stroke — sub-pixel keep/drop only; recompute the baseline on transform change. (P5.1 review.)
-- [ ] Pencil: eraser intent is evaluated before the button-0 gate — middle/right-click with E held erases and pre-empts the look-backdrop menu for that click. (P5.1 review.)
-- [ ] Pencil: PencilOverlay tracks Space with its own raw listener, skipping LookStage's stageOwnsRawKeys ownership check — share the ui.look slice (eraserHeld precedent). (P5.1 review.)
-- [ ] Pencil: consider an "Undo stroke" row on the look-backdrop seat (enabled: pencilUndoable) instead of the named keyboard-only exemption. (P5.1 review.)
+- [x] Pencil: jitter-dedupe baseline recomputed on transform change (wheel-zoom mid-stroke) — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: button-0 gate evaluated before eraser intent — middle/right-click with E held no longer erases or pre-empts the look-backdrop menu — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: PencilOverlay consumes the shared ui.look spaceHeld slice (eraserHeld precedent); the one tracker lives in LookStage behind stageOwnsRawKeys (+ the Space-at-fit close fix, `ffbd515`) — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: "Undo stroke" row on the look-backdrop seat (enabled: pencilUndoable) replaces the keyboard-only exemption — landed `ca5c9a7`. (P5.1 review.)
 - [ ] Pencil: one-euro live-stroke filter (CAPTURE §8.3 MAY) — add only if real-pen dogfood shows live wobble. (P5.1, DOGFOOD-M2.)
 - [x] Pencil: terminal pen-up sample (dedupe-exempt) to make ts − t_last exact for held dots — founder-resolved, landed with P6.1 (B41). 
 - **M2b (voice) — P6.1 engine (`9a5eece`) + P6.2 runtime (`fd0adc8`) SHIPPED**: sessions/scope ring/VAD-onset binding/voice pipeline/corrections/linking, mock/stub-verified (supervisor, downloads incl. byte-zero license gate, tiers, scheduler, consent card, OpenAI-compatible + sherpa-WS clients); M-key mic row still reserved — un-reserving needs the real arm path (P6.3). All eight P6.1→P6.2 wiring obligations below closed by P6.2:
