@@ -10,14 +10,27 @@
    * from the same def (KeyHint copy can never drift). The whole bar
    * (accessories included) is a gated chrome region — it obeys Tab
    * lights-out via App.svelte's region gate.
+   *
+   * Platform split (UI §2.3): macOS keeps NATIVE decorations — rounded
+   * corners, shadow, traffic lights — via tauri.macos.conf.json
+   * (`titleBarStyle: Overlay` + `hiddenTitle`), so this strip becomes an
+   * overlay: the custom minimize/maximize/close buttons are dropped (the
+   * lights own those verbs) and a left inset reserves the lights'
+   * footprint so the rail toggle clears them. Windows/Linux stay
+   * undecorated (`decorations: false` in the base config) and render the
+   * custom controls, unchanged.
    */
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ui } from "../../state/app.svelte";
   import { resolveAction } from "../../actions/registry";
   import { tooltip } from "../../primitives/tooltip";
+  import { isMac } from "../../logic/platform";
   import type { Action } from "../../logic/keymap";
 
   let { title }: { title: string } = $props();
+
+  /** Sampled once per mount — the platform cannot change under a window. */
+  const mac = isMac();
 
   const win = getCurrentWindow();
   $effect(() => {
@@ -33,6 +46,12 @@
 </script>
 
 <div class="titlebar" data-tauri-drag-region>
+  {#if mac}
+    <!-- Native traffic lights (Overlay style) render over this corner;
+         the empty strip keeps them draggable and pushes the rail toggle
+         clear of them. -->
+    <div class="traffic-inset" data-tauri-drag-region aria-hidden="true"></div>
+  {/if}
   <div class="cluster">
     <button
       class="chrome"
@@ -69,11 +88,13 @@
       {@attach tooltip({ actionId: "open-inspector", verb: "Journal", arg: "journal" })}
       >≣</button
     >
-    <div class="controls">
-      <button aria-label="Minimize" onclick={() => void win.minimize()}>–</button>
-      <button aria-label="Maximize" onclick={() => void win.toggleMaximize()}>□</button>
-      <button aria-label="Close" onclick={() => void win.close()}>×</button>
-    </div>
+    {#if !mac}
+      <div class="controls">
+        <button aria-label="Minimize" onclick={() => void win.minimize()}>–</button>
+        <button aria-label="Maximize" onclick={() => void win.toggleMaximize()}>□</button>
+        <button aria-label="Close" onclick={() => void win.close()}>×</button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -100,6 +121,13 @@
     display: flex;
     align-items: center;
     gap: 2px;
+  }
+  /* macOS only: the three 12px lights sit at the default Overlay
+     position (x≈12, vertically centered in a 28px bar — exactly this
+     strip's height); 78px covers their span plus breathing room. */
+  .traffic-inset {
+    flex: 0 0 78px;
+    align-self: stretch;
   }
   .controls {
     display: flex;

@@ -5,11 +5,13 @@
    * elsewhere.
    */
   import type { KeyChord } from "../actions/types";
+  import { isMac } from "../logic/platform";
 
   let { chord }: { chord: KeyChord } = $props();
 
-  const isMac =
-    typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+  // The shared probe (logic/platform.ts) — same answer the window-chrome
+  // split uses, so glyphs and chrome can never disagree about the OS.
+  const mac = isMac();
 
   const KEY_NAMES: Record<string, string> = {
     " ": "Space",
@@ -23,7 +25,7 @@
 
   const text = $derived.by(() => {
     const parts: string[] = [];
-    if (chord.ctrlOrMeta === true) parts.push(isMac ? "⌘" : "Ctrl");
+    if (chord.ctrlOrMeta === true) parts.push(mac ? "⌘" : "Ctrl");
     if (chord.shift === true) parts.push("Shift");
     const k = KEY_NAMES[chord.key] ?? (chord.key.length === 1 ? chord.key.toUpperCase() : chord.key);
     parts.push(k);

@@ -12,7 +12,14 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open } from "@tauri-apps/plugin-dialog";
   import * as ipc from "../ipc/commands";
+  import { isMac } from "../logic/platform";
   import type { AppSettings, RootDto, RuntimeStatus } from "../types/dto";
+
+  /** Same chrome split as Titlebar.svelte (UI §2.3): on macOS this window
+   * is built with native decorations + Overlay traffic lights
+   * (open_settings_window in commands/app.rs), so the custom close button
+   * is dropped and the drag strip insets past the lights. */
+  const mac = isMac();
 
   let roots = $state<RootDto[]>([]);
   let runtime = $state<RuntimeStatus | null>(null);
@@ -109,9 +116,11 @@
 <svelte:window onkeydown={onKeydown} />
 
 <main>
-  <div class="drag" data-tauri-drag-region>
+  <div class="drag" class:mac data-tauri-drag-region>
     <span data-tauri-drag-region>Settings</span>
-    <button class="close" aria-label="Close" onclick={() => void win.close()}>×</button>
+    {#if !mac}
+      <button class="close" aria-label="Close" onclick={() => void win.close()}>×</button>
+    {/if}
   </div>
 
   <!-- 1. Watched folders -->
@@ -255,6 +264,11 @@
     padding: 0 6px 0 12px;
     color: var(--text-dim);
     font-size: 12px;
+  }
+  /* macOS: clear the native traffic lights (same 78px footprint the main
+     window's Titlebar reserves). */
+  .drag.mac {
+    padding-left: 78px;
   }
   .close {
     border: none;

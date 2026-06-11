@@ -180,12 +180,25 @@ pub fn open_settings_window(handle: AppHandle) -> CmdResult<()> {
         let _ = existing.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(&handle, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Settings")
-        .inner_size(620.0, 700.0)
-        .min_inner_size(480.0, 480.0)
-        .decorations(false)
-        .background_color(tauri::webview::Color(14, 14, 14, 255))
+    let builder =
+        WebviewWindowBuilder::new(&handle, "settings", WebviewUrl::App("settings.html".into()))
+            .title("Settings")
+            .inner_size(620.0, 700.0)
+            .min_inner_size(480.0, 480.0)
+            .background_color(tauri::webview::Color(14, 14, 14, 255));
+    // Platform chrome (UI §2.3), mirroring tauri.macos.conf.json for the
+    // main window: macOS keeps native decorations — rounded corners,
+    // shadow, traffic lights overlaying the drag strip (SettingsApp.svelte
+    // insets past them and drops its custom close button); Windows/Linux
+    // stay undecorated with the custom strip.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .hidden_title(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
+    builder
         .build()
         .map_err(|e| CmdError::Invalid(format!("settings window: {e}")))?;
     Ok(())
