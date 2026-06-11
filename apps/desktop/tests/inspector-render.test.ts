@@ -403,3 +403,44 @@ describe("multi-select header — anchor image + 'N selected' (grid only)", () =
     expect(screen.queryByText(/selected/)).toBeNull();
   });
 });
+
+describe("'+N others' vs the inspected image's pair-mate (DECISIONS B61)", () => {
+  // A collapsed RAW+JPEG pair in the grid: an entry minted against the
+  // pair targets BOTH members (DECISIONS 4), but the mate is the same
+  // picture — the stack badge already says "2", so the sibling mark must
+  // stay silent unless a genuinely DIFFERENT image is targeted.
+  const setup = () => {
+    ui.grid.setItems([gridItem("a/IMG_1.jpg"), gridItem("a/IMG_1.cr2"), gridItem("a/IMG_2.jpg")]);
+    ui.inspector.hash = "h:a/IMG_1.jpg";
+  };
+
+  it("suppresses the mark when the only extra target is the pair-mate", () => {
+    setup();
+    ui.inspector.entries = [
+      entry("01A", { targets: ["h:a/IMG_1.jpg", "h:a/IMG_1.cr2"] }),
+    ];
+    const { container } = render(JournalTab);
+    expect(container.querySelector(".siblings")).toBeNull();
+  });
+
+  it("counts only genuinely different images beyond the pair", () => {
+    setup();
+    ui.inspector.entries = [
+      entry("01A", {
+        targets: ["h:a/IMG_1.jpg", "h:a/IMG_1.cr2", "h:a/IMG_2.jpg"],
+      }),
+    ];
+    render(JournalTab);
+    expect(screen.getByText("+1 other")).toBeTruthy();
+  });
+
+  it("a non-pair sibling still reads '+1 other' (the original mark)", () => {
+    setup();
+    ui.inspector.hash = "h:a/IMG_2.jpg"; // solo image — no mate
+    ui.inspector.entries = [
+      entry("01A", { targets: ["h:a/IMG_2.jpg", "h:a/IMG_1.jpg"] }),
+    ];
+    render(JournalTab);
+    expect(screen.getByText("+1 other")).toBeTruthy();
+  });
+});

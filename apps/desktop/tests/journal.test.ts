@@ -180,6 +180,25 @@ describe("sibling targets — '+N others' (BACKLOG: journal entries show sibling
     // Inspected image not among the targets: every target is an "other".
     expect(siblingTargetsLabel([a, b], c)).toBe("+2 others");
   });
+
+  it("never counts the inspected image's own pair-mate (B61: the stack badge already says it)", () => {
+    // An entry minted against a collapsed pair targets BOTH members
+    // (DECISIONS 4) — but the mate is the same picture, so the mark is
+    // suppressed entirely…
+    expect(siblingTargetsLabel([a, b], a, b)).toBeNull();
+    // …and a genuinely different third image counts WITHOUT the mate.
+    expect(siblingTargetsLabel([a, b, c], a, b)).toBe("+1 other");
+    // Order of the pair in the target list does not matter.
+    expect(siblingTargetsLabel([b, a], a, b)).toBeNull();
+  });
+
+  it("the pair-mate is ignored when the inspected hash is unknown (a mate of nothing)", () => {
+    expect(siblingTargetsLabel([a, b], null, b)).toBe("+2 others");
+  });
+
+  it("solo inspected images (mate null) keep the original count", () => {
+    expect(siblingTargetsLabel([a, b], a, null)).toBe("+1 other");
+  });
 });
 
 describe("rating copy (C6: 0 is an explicit clear)", () => {

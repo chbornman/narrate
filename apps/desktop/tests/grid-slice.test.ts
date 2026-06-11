@@ -82,6 +82,24 @@ describe("units = stack pairing over the sorted items (D1)", () => {
   });
 });
 
+describe("pairMateOf — the journal's B61 seam (the mate is never an 'other')", () => {
+  it("resolves both directions through a collapsed pair (display member or hidden alt)", () => {
+    expect(grid.pairMateOf("h:a/IMG_1.jpg")).toBe("h:a/IMG_1.cr2");
+    expect(grid.pairMateOf("h:a/IMG_1.cr2")).toBe("h:a/IMG_1.jpg");
+  });
+
+  it("resolves across the two cells of an EXPANDED pair (collapse state must not change what counts as a different image)", () => {
+    grid.setAllStacks(false);
+    expect(grid.pairMateOf("h:a/IMG_1.jpg")).toBe("h:a/IMG_1.cr2");
+    expect(grid.pairMateOf("h:a/IMG_1.cr2")).toBe("h:a/IMG_1.jpg");
+  });
+
+  it("answers null for solo images and hashes not on the surface", () => {
+    expect(grid.pairMateOf("h:a/IMG_2.jpg")).toBeNull();
+    expect(grid.pairMateOf("h:nowhere.jpg")).toBeNull();
+  });
+});
+
 describe("selectionTargets is stack-expanded (the ● 2 truth upstream)", () => {
   it("one selected collapsed CELL = two ordered targets, JPEG then RAW", () => {
     grid.setSelection(sel.click(sel.EMPTY, grid.unitHashes, 0));

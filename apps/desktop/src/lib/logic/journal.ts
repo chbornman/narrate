@@ -120,16 +120,25 @@ export function ratingLine(value: number | null): string {
 /** "+N others" (BACKLOG: journal entries show sibling targets): a
  * multi-target entry quietly counts the OTHER images the event targets
  * beyond the inspected one. Null for single-target rows (nothing to say)
- * and for stubs (redacted stubs carry no targets). */
+ * and for stubs (redacted stubs carry no targets).
+ *
+ * `pairMateHash` is the inspected image's own RAW/JPEG pair member
+ * (DECISIONS B61): an entry minted against a collapsed pair targets BOTH
+ * members (DECISIONS 4), but the pair-mate is the same picture — the
+ * stack badge already says "2", and "+1 other" must mean a genuinely
+ * DIFFERENT image. The mate is excluded from the count, suppressing the
+ * mark entirely when every extra target is the mate. Ignored when the
+ * inspected hash is unknown (a mate of nothing is meaningless). */
 export function siblingTargetsLabel(
   targets: string[],
   inspectedHash: string | null,
+  pairMateHash: string | null = null,
 ): string | null {
   if (targets.length < 2) return null;
   const others =
     inspectedHash === null
       ? targets.length
-      : targets.filter((t) => t !== inspectedHash).length;
+      : targets.filter((t) => t !== inspectedHash && t !== pairMateHash).length;
   if (others === 0) return null;
   return `+${others} other${others === 1 ? "" : "s"}`;
 }

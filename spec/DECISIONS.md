@@ -558,6 +558,23 @@ clusters), recorded at merge.
   aggregate/combined panel; revisit at the M3 sidebar design pass if
   dogfood demands it.
 
+## Wave 2 polish decisions (June 2026)
+
+Founder rulings from the wave-2 polish round, recorded at merge.
+
+- **B61 (founder).** The journal row's "+N others" sibling mark never
+  counts the inspected image's own RAW/JPEG pair member: an entry minted
+  against a collapsed pair targets BOTH members (DECISIONS 4), but the
+  mate is the same picture — the stack badge already says "2", and
+  "+1 other" must mean a genuinely DIFFERENT image. The mark is
+  suppressed entirely when every extra target is the inspected image's
+  pair-mate. The pure row logic keeps the ruling testable
+  (`siblingTargetsLabel(targets, inspectedHash, pairMateHash)`); the
+  grid slice resolves the mate through the unit hosting the inspected
+  hash (collapsed alt or expanded partner cell — collapse state must not
+  change what counts as a different image) and JournalTab threads it
+  down. (Founder, dogfood round 3, June 2026.)
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

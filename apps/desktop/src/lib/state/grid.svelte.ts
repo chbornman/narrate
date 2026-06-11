@@ -179,6 +179,27 @@ export class GridSlice {
     this.togglePairAt(this.sel.focus);
   }
 
+  /** The RAW/JPEG pair-mate of `hash`, or null for solo images and hashes
+   * not on the surface. Consumed by the journal's "+N others" mark
+   * (DECISIONS B61: the mate is the same picture — never an "other").
+   * Resolved through the unit HOSTING the hash: a collapsed pair carries
+   * the mate as its hidden alt; an expanded pair hosts the mate in its
+   * own unit under the same pair key (collapse state must not change what
+   * counts as a different image). */
+  pairMateOf(hash: string): string | null {
+    const i = this.units.findIndex(
+      (u) => u.primary.hash === hash || u.alt?.hash === hash,
+    );
+    if (i < 0) return null;
+    const unit = this.units[i];
+    if (unit.alt !== null)
+      return unit.primary.hash === hash ? unit.alt.hash : unit.primary.hash;
+    const key = this.stackModel.pairs[i];
+    if (key === null) return null;
+    const j = this.stackModel.pairs.findIndex((k, idx) => k === key && idx !== i);
+    return j >= 0 ? this.units[j].primary.hash : null;
+  }
+
   /** The chevron's path: toggle the pair HOSTING `hash` (display member
    * or hidden alt) resolved at execute time. Pointer identity must
    * survive an items re-sort landing inside the click's own async

@@ -12,7 +12,7 @@
    * The <img> elements are recycled by the virtualizer (keyed by pool
    * slot, not item) — this component only swaps `src`.
    */
-  import { thumbUrl } from "../../ipc/urls";
+  import { srcHash, thumbUrl } from "../../ipc/urls";
   import { infoLine } from "../../logic/cellinfo";
   import type { CellInfoLevel } from "../../state/grid.svelte";
   import StackChevron from "./StackChevron.svelte";
@@ -65,6 +65,15 @@
   // complete before the first effect runs, so an effect-driven reset races
   // onload and permanently hides the img. The complete-check below covers
   // loads that finish before handlers observe them.
+  //
+  // RECYCLED-IMG GUARD (BACKLOG: pixel flash): the virtualizer recycles
+  // this <img> by pool slot, so `hash` changes under a live element whose
+  // bitmap (and possibly an in-flight load event) still belongs to the
+  // PREVIOUS occupant — setting `src` only queues the swap. The hash
+  // keying drops `loaded` (opacity 0) on recycle, but BOTH marking paths
+  // must also prove via currentSrc that the element holds THIS hash's
+  // bitmap, or they re-mark against stale pixels and the old image
+  // flashes for a frame on fast scroll (srcHash doc in ipc/urls.ts).
   const MAX_RETRIES = 30;
   let el: HTMLImageElement | undefined = $state();
   let loadedHash = $state<string | null>(null);
@@ -88,7 +97,10 @@
   $effect(() => {
     void hash;
     const img = el;
-    if (img && img.complete && img.naturalWidth > 0) {
+    // complete + naturalWidth alone are NOT enough: on a recycled slot
+    // they still describe the previous occupant until the src swap's
+    // microtask runs — only a matching currentSrc proves the bitmap is ours.
+    if (img && img.complete && img.naturalWidth > 0 && srcHash(img.currentSrc) === hash) {
       loadedHash = hash;
     }
     return () => clearTimeout(retryTimer);
@@ -146,7 +158,10 @@
     decoding="async"
     class:loaded
     onload={() => {
-      loadedHash = hash;
+      // A load event can arrive for the PREVIOUS occupant's src after the
+      // slot was recycled — mark loaded only when the element's bitmap is
+      // this hash's (recycled-img guard above).
+      if (el !== undefined && srcHash(el.currentSrc) === hash) loadedHash = hash;
     }}
     onerror={handleError}
   />

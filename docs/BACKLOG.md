@@ -8,13 +8,12 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
-- [ ] **Pair targets vs "+N others"** — a journal entry on a collapsed
-  RAW+JPEG pair targets both members (DECISIONS 4), so the sibling mark
-  reads "+1 other" even though no OTHER image is involved — misleading.
-  Decide the right indication: suppress the mark when every extra target
-  is the inspected image's own pair member ("● 2" already says it), or a
-  distinct quiet register for pair-mate targets. (Founder, dogfood
-  round 3, June 2026.)
+- [x] **Pair targets vs "+N others"** — landed `wave2/polish` (B61:
+  suppress, the stack badge already says it): `siblingTargetsLabel`
+  gains the inspected image's pair-mate and never counts it — the mark
+  shows only for genuinely DIFFERENT images; `GridSlice.pairMateOf`
+  resolves the mate (collapsed alt or expanded partner cell), JournalTab
+  threads it down. (Founder, dogfood round 3, June 2026.)
 - [ ] **"Rebuild previews…" on the rail folder menu** — a recovery/
   maintenance verb SEPARATE from Rescan (different semantics: Rescan
   reconciles files↔index and enqueues missing passes; Rebuild re-enqueues
@@ -41,12 +40,14 @@ managing = off-thesis).
   3's mangled-folder session: the offline-defer fix (`l13_08`) removes
   the biggest poison source, but mangled states will keep happening and
   the library should HEAL, not just avoid. (Founder, June 2026.)
-- [ ] **Grid: recycled `<img>` can flash the previous image's pixels** —
-  the virtualizer pool recycles `<img>` elements by slot; on fast scroll
-  a cell can paint the prior occupant for a frame before the new src
-  decodes. Cosmetic; fix is clearing/hiding the img when the bound hash
-  changes until first paint of the new one. (P5.1-polish review residual,
-  June 2026.)
+- [x] **Grid: recycled `<img>` can flash the previous image's pixels** —
+  landed `wave2/polish`: both loaded-marking paths in Thumb (the
+  complete-check effect and onload) now prove via `currentSrc` that the
+  element holds THIS hash's bitmap (`srcHash` in ipc/urls.ts) — a
+  recycled img stays at the opacity-0 placeholder until the new hash's
+  first load; stale complete/naturalWidth and in-flight load events for
+  the previous occupant can no longer re-mark it. (P5.1-polish review
+  residual, June 2026.)
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
 - [ ] **Search entry as overlay, results as canvas** — `/` opens a floating
