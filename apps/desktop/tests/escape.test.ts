@@ -1,14 +1,21 @@
 /**
  * Escape = strictly back-one-layer (featureset §0: Esc is sacred), the
- * full P4.2 13-layer order, exhaustively: redaction modal → drop-confirm →
- * context menu → inline journal correction → note input → cheatsheet →
- * indicator popover → debug panel → inspector → search → Look→Grid →
- * clear selection → none. Never quits.
+ * full 14-layer order, exhaustively: redaction modal → drop-confirm →
+ * context menu → inline journal correction → journal composer → note
+ * input → cheatsheet → indicator popover → debug panel → search →
+ * Look→Grid → inspector → clear selection → none. Never quits.
  *
  * AMENDED BY INTEGRATION: the drag-folder drop-confirm sheet (featureset
  * §6) joins as layer 2 — it is scrim-covered topmost chrome like the
  * modal, and the Sheet contract promises Esc dismisses while Esc routes
  * only through this order (recorded in DECISIONS, UI build U-entries).
+ *
+ * AMENDED BY THE JOURNAL POLISH ROUND (founder, June 2026): Esc from Look
+ * back to Grid must NOT close the inspector — "when we return to the
+ * grid, an image will still be selected", its panel content with it. The
+ * inspector layer moved BELOW search and Look→Grid (every other layer's
+ * relative order unchanged); the journal composer joined as a text-edit
+ * layer beside the inline correction (§0: text inputs exit first).
  */
 import { describe, expect, it } from "vitest";
 import { escapeAction, type EscapeContext } from "../src/lib/logic/escape";
@@ -18,6 +25,7 @@ const none: EscapeContext = {
   dropConfirmOpen: false,
   contextMenuOpen: false,
   journalEditOpen: false,
+  journalComposerFocused: false,
   noteInputOpen: false,
   cheatsheetOpen: false,
   indicatorPopoverOpen: false,
@@ -34,6 +42,7 @@ const everything: EscapeContext = {
   dropConfirmOpen: true,
   contextMenuOpen: true,
   journalEditOpen: true,
+  journalComposerFocused: true,
   noteInputOpen: true,
   cheatsheetOpen: true,
   indicatorPopoverOpen: true,
@@ -44,23 +53,24 @@ const everything: EscapeContext = {
   hasSelection: true,
 };
 
-// (flag to clear, expected action) in layer order, 1..12.
+// (flag to clear, expected action) in layer order, 1..13.
 const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
   ["redactionModalOpen", "close-redaction-modal"],
   ["dropConfirmOpen", "close-drop-confirm"],
   ["contextMenuOpen", "close-context-menu"],
   ["journalEditOpen", "close-journal-edit"],
+  ["journalComposerFocused", "blur-journal-composer"],
   ["noteInputOpen", "close-note-input"],
   ["cheatsheetOpen", "close-cheatsheet"],
   ["indicatorPopoverOpen", "close-indicator-popover"],
   ["debugPanelOpen", "close-debug-panel"],
-  ["inspectorOpen", "close-inspector"],
   ["searchOpen", "leave-search"],
   ["surface", "leave-look"],
+  ["inspectorOpen", "close-inspector"],
   ["hasSelection", "clear-selection"],
 ];
 
-describe("the 13-layer order, exhaustively", () => {
+describe("the 14-layer order, exhaustively", () => {
   it("peels exactly one layer per press, in order, ending at none", () => {
     let ctx = { ...everything };
     for (const [flag, expected] of LAYERS) {
@@ -68,7 +78,7 @@ describe("the 13-layer order, exhaustively", () => {
       // Clear the layer the action would close and press Escape again.
       ctx = { ...ctx, [flag]: flag === "surface" ? "grid" : false };
     }
-    expect(escapeAction(ctx)).toBe("none"); // layer 13 — NEVER quits
+    expect(escapeAction(ctx)).toBe("none"); // layer 14 — NEVER quits
   });
 
   it("each layer wins over everything beneath it", () => {
@@ -86,10 +96,13 @@ describe("the 13-layer order, exhaustively", () => {
 
 describe("contract spot checks", () => {
   it("text-edit layers exit before chrome (§0: exits text inputs first)", () => {
-    // An inline journal correction beats the note input beats everything.
+    // An inline journal correction beats the composer beats the note input.
     expect(
       escapeAction({ ...none, journalEditOpen: true, noteInputOpen: true }),
     ).toBe("close-journal-edit");
+    expect(
+      escapeAction({ ...none, journalComposerFocused: true, noteInputOpen: true }),
+    ).toBe("blur-journal-composer");
     expect(escapeAction({ ...none, noteInputOpen: true, inspectorOpen: true })).toBe(
       "close-note-input",
     );
@@ -108,19 +121,25 @@ describe("contract spot checks", () => {
     ).toBe("close-redaction-modal");
   });
 
-  it("the context menu (incl. sort ▾) closes before any panel", () => {
+  it("the context menu (incl. sort ▾ and journal rows) closes before any panel", () => {
     expect(
       escapeAction({ ...none, contextMenuOpen: true, inspectorOpen: true }),
     ).toBe("close-context-menu");
   });
 
-  it("inspector closes before search; search before Look", () => {
-    expect(escapeAction({ ...none, inspectorOpen: true, searchOpen: true })).toBe(
-      "close-inspector",
-    );
+  it("search closes before Look; Look→Grid KEEPS the inspector (founder, June 2026)", () => {
     expect(escapeAction({ ...none, searchOpen: true, surface: "look" })).toBe(
       "leave-search",
     );
+    // The founder ask verbatim: Esc back to the grid must not close the
+    // Journal/metadata sidebar — the still-active image's content stays.
+    expect(
+      escapeAction({ ...none, surface: "look", inspectorOpen: true }),
+    ).toBe("leave-look");
+    // In Grid the inspector then closes first, before the selection.
+    expect(
+      escapeAction({ ...none, inspectorOpen: true, hasSelection: true }),
+    ).toBe("close-inspector");
   });
 
   it("leaves Look back to Grid, then clears the selection", () => {

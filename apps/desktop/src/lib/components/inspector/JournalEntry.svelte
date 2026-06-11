@@ -2,33 +2,56 @@
   /**
    * One journal row — STAGE C OWNS THIS FILE. Row states (verbatim remark ·
    * rating · stroke micro-preview (P5.1) · "[redacted]" stub ·
-   * retracted struck-through) + the three quiet hover actions (UI §8.3):
+   * retracted struck-through) + the quiet hover actions (UI §8.3):
+   * Select (select-from-note — the entry's full target set in the grid) ·
    * Correct (inline revision) · Retract (toast + Undo = RE-STATE, E4) ·
-   * Redact… (the one modal). Availability is pure row logic
-   * (logic/journal.ts rowActions); the row emits Actions — routing is the
-   * parent's (JournalTab). Verbatim user words only, ever (R3).
+   * Redact… (the one modal). Multi-target entries carry a quiet "+N
+   * others" affordance (sibling targets — BACKLOG polish). Availability is
+   * pure row logic (logic/journal.ts rowActions/siblingTargetsLabel); the
+   * row emits Actions — routing is the parent's (JournalTab). Verbatim
+   * user words only, ever (R3).
    */
   import type { Action } from "../../logic/keymap";
-  import { formatTime, ratingLine, rowActions } from "../../logic/journal";
+  import {
+    formatTime,
+    ratingLine,
+    rowActions,
+    siblingTargetsLabel,
+  } from "../../logic/journal";
   import type { JournalEntryDto } from "../../types/dto";
   import StrokePreview from "./StrokePreview.svelte";
 
   let {
     entry,
+    inspectedHash = null,
     editing = false,
     onaction,
     oncorrect,
+    oncontextmenu,
   }: {
     entry: JournalEntryDto;
-    /** ui.inspector.editingEventId === entry.id (escape layer 3 owns it). */
+    /** The panel's image — "+N others" counts beyond it. */
+    inspectedHash?: string | null;
+    /** ui.inspector.editingEventId === entry.id (escape layer 4 owns it). */
     editing?: boolean;
     onaction: (action: Action) => void;
     /** Commit of the inline correction (empty text just closes). */
     oncorrect: (eventId: string, text: string) => void;
+    /** Right-click → the journal-row context-menu seat (parent routes). */
+    oncontextmenu?: (entry: JournalEntryDto, x: number, y: number) => void;
   } = $props();
 
   const time = $derived(formatTime(entry.ts));
   const actions = $derived(rowActions(entry));
+  const siblings = $derived(siblingTargetsLabel(entry.targets, inspectedHash));
+  /** Select-from-note: any row with targets (redacted stubs carry none). */
+  const canSelect = $derived(entry.targets.length > 0);
+
+  function onContextMenu(e: MouseEvent) {
+    if (oncontextmenu === undefined) return;
+    e.preventDefault();
+    oncontextmenu(entry, e.clientX, e.clientY);
+  }
 
   /** "edited" affordance: expand shows the original, dimmed (UI §8.2). */
   let showOriginal = $state(false);
@@ -40,7 +63,7 @@
   });
 
   function onEditKeydown(e: KeyboardEvent) {
-    // Enter commits; Shift+Enter newlines; Esc reaches escape layer 3
+    // Enter commits; Shift+Enter newlines; Esc reaches escape layer 4
     // through the global handler (text inputs exit first, §0).
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -49,7 +72,7 @@
   }
 </script>
 
-<div class="row" class:retracted={entry.retracted}>
+<div class="row" class:retracted={entry.retracted} oncontextmenu={onContextMenu} role="presentation">
   <span class="time" title={entry.source}>{time}</span>
 
   {#if entry.kind === "redacted"}
@@ -107,8 +130,23 @@
     </span>
   {/if}
 
-  {#if !editing && (actions.correct || actions.retract || actions.redact)}
+  {#if siblings !== null}
+    <!-- sibling targets (BACKLOG): the event also wrote on other images -->
+    <span class="siblings" title="This entry targets other images too — Select picks them all">
+      {siblings}
+    </span>
+  {/if}
+
+  {#if !editing && (canSelect || actions.correct || actions.retract || actions.redact)}
     <span class="actions">
+      {#if canSelect}
+        <button
+          onclick={() =>
+            onaction({ kind: "select-journal-targets", targets: entry.targets })}
+        >
+          Select
+        </button>
+      {/if}
       {#if actions.correct}
         <button onclick={() => onaction({ kind: "journal-correct", eventId: entry.id })}>
           Correct
@@ -190,6 +228,13 @@
     font-size: 11px;
     white-space: nowrap;
     margin-left: 6px;
+  }
+  /* Sibling targets ("+N others") — same quiet register as the link mark. */
+  .siblings {
+    color: var(--text-faint);
+    font-size: 11px;
+    white-space: nowrap;
+    flex: 0 0 auto;
   }
   .edited {
     align-self: flex-start;

@@ -31,7 +31,7 @@ use photoproof_core::{
 };
 use tauri::AppHandle;
 
-use super::{S, emit_pulse};
+use super::{S, emit_journal_changed, emit_pulse, hashes, parse_hash};
 use crate::dto::{ImageMetadataDto, JournalEntryDto, RedactReportDto, StrokeDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
@@ -43,12 +43,14 @@ use crate::note::normalize_note;
 // re-derived here with the same chain rules (EVENTS §6.1).
 // ---------------------------------------------------------------------------
 
-fn parse_hash(hash: &str) -> CmdResult<ContentHash> {
-    ContentHash::from_hex(hash).map_err(|e| CmdError::Invalid(format!("bad image hash: {e}")))
-}
-
-fn hashes(targets: &[ContentHash]) -> Vec<String> {
-    targets.iter().map(|h| h.as_str().to_owned()).collect()
+/// The images whose journal truth a mutation of `id` touches — the event's
+/// direct targets (the `journal-changed` payload). Session-level events
+/// have none; an unknown id yields an empty (silent) list.
+pub(crate) fn affected_hashes(store: &EventStore, id: &EventId) -> CmdResult<Vec<String>> {
+    Ok(store
+        .raw_event(id)?
+        .map(|e| hashes(&e.targets))
+        .unwrap_or_default())
 }
 
 /// Stroke geometry → wire form (EVENTS §3.3 `[x, y, p, t]` tuples) for the
@@ -561,9 +563,16 @@ pub fn revise_event(
     };
     let target = EventId::from_str_strict(&event_id)?;
     let session = app.session_id();
-    app.store
-        .append(&session, EventDraft::Revision { target, text }, None)?;
+    app.store.append(
+        &session,
+        EventDraft::Revision {
+            target: target.clone(),
+            text,
+        },
+        None,
+    )?;
     emit_pulse(&handle, "revision");
+    emit_journal_changed(&handle, affected_hashes(&app.store, &target)?);
     Ok(true)
 }
 
@@ -577,12 +586,13 @@ pub fn retract_event(app: S<'_>, handle: AppHandle, event_id: String) -> CmdResu
     app.store.append(
         &session,
         EventDraft::Retraction {
-            target,
+            target: target.clone(),
             source: RetractionSource::System,
         },
         None,
     )?;
     emit_pulse(&handle, "retraction");
+    emit_journal_changed(&handle, affected_hashes(&app.store, &target)?);
     Ok(true)
 }
 
@@ -596,6 +606,8 @@ pub fn unretract_event(app: S<'_>, handle: AppHandle, event_id: String) -> CmdRe
     match restate(&app.store, &session, &id)? {
         Some(kind) => {
             emit_pulse(&handle, kind);
+            // The re-stated event carries the SAME targets as the root.
+            emit_journal_changed(&handle, affected_hashes(&app.store, &id)?);
             Ok(true)
         }
         None => Ok(false),
@@ -610,14 +622,19 @@ pub async fn redact_event(
     event_id: String,
 ) -> CmdResult<RedactReportDto> {
     let app = app.inner().clone();
-    let report = tauri::async_runtime::spawn_blocking(move || {
+    let (report, affected) = tauri::async_runtime::spawn_blocking(move || {
         app.touch()?;
         let id = EventId::from_str_strict(&event_id)?;
-        redact_report(&app.store, &app.library, &app.engine, &id, UtcMillis::now())
+        // Targets read BEFORE the scrub (they survive it, but the receipt
+        // is about the pre-redaction truth).
+        let affected = affected_hashes(&app.store, &id)?;
+        let report = redact_report(&app.store, &app.library, &app.engine, &id, UtcMillis::now())?;
+        Ok::<_, CmdError>((report, affected))
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))??;
     emit_pulse(&handle, "redaction");
+    emit_journal_changed(&handle, affected);
     Ok(report)
 }
 
@@ -686,6 +703,36 @@ mod tests {
                 None,
             )
             .expect("append retraction");
+    }
+
+    /// The `journal-changed` payload (BACKLOG): a mutation's affected
+    /// images = the event's direct targets; session-level and unknown
+    /// events stay silent (empty list).
+    #[test]
+    fn affected_hashes_are_the_events_direct_targets() {
+        let (_tmp, store, session, hash) = store_fixture();
+        let other = ContentHash::from_hex(&"cd".repeat(32)).expect("hash");
+        let id = remark(
+            &store,
+            &session,
+            "both of these",
+            vec![hash.clone(), other.clone()],
+        );
+        assert_eq!(
+            affected_hashes(&store, &id).unwrap(),
+            vec![hash.as_str().to_owned(), other.as_str().to_owned()],
+            "event_targets order is preserved"
+        );
+        let session_note = remark(&store, &session, "a day thought", vec![]);
+        assert_eq!(
+            affected_hashes(&store, &session_note).unwrap(),
+            Vec::<String>::new()
+        );
+        let unknown = EventId::from_str_strict("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert_eq!(
+            affected_hashes(&store, &unknown).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

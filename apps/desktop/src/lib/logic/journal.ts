@@ -109,6 +109,23 @@ export function ratingLine(value: number | null): string {
   return `rating set to ${value}`;
 }
 
+/** "+N others" (BACKLOG: journal entries show sibling targets): a
+ * multi-target entry quietly counts the OTHER images the event targets
+ * beyond the inspected one. Null for single-target rows (nothing to say)
+ * and for stubs (redacted stubs carry no targets). */
+export function siblingTargetsLabel(
+  targets: string[],
+  inspectedHash: string | null,
+): string | null {
+  if (targets.length < 2) return null;
+  const others =
+    inspectedHash === null
+      ? targets.length
+      : targets.filter((t) => t !== inspectedHash).length;
+  if (others === 0) return null;
+  return `+${others} other${others === 1 ? "" : "s"}`;
+}
+
 // ---- timestamp formatting (local time — the journal reads as a diary) --------
 
 const MONTHS = [

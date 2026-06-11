@@ -34,12 +34,16 @@ export const setScope = (targets: string[]) =>
 
 export const indicatorState = () => invoke<IndicatorState>("indicator_state");
 
-/** Typed note bound to the current scope. Resolves true iff committed. */
-export const addNote = (text: string) => invoke<boolean>("add_note", { text });
+/** Typed note bound to the current scope — or, `target` given, to that
+ * single image (the journal-panel composer's explicit binding: the panel's
+ * image, never the grid write-scope). Resolves true iff committed. */
+export const addNote = (text: string, target?: string) =>
+  invoke<boolean>("add_note", target === undefined ? { text } : { text, target });
 
-/** Rating key 0–5. Session scope = no-op (resolves false). */
-export const setRating = (value: number) =>
-  invoke<boolean>("set_rating", { value });
+/** Rating key 0–5. Session scope = no-op (resolves false). `target` is the
+ * journal-panel composer's explicit single-image binding (always rates). */
+export const setRating = (value: number, target?: string) =>
+  invoke<boolean>("set_rating", target === undefined ? { value } : { value, target });
 
 /** Activity touch (CAPTURE §2.1). Resolves to the CURRENT (post-touch)
  * session id: session closure is lazy (§2.2), so this echo is how the

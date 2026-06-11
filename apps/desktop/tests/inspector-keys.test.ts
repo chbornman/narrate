@@ -99,3 +99,29 @@ describe("thumb-menu seating (featureset §6: menus mirror every verb)", () => {
     expect(inspector?.children?.map((c) => c.checked === true)).toEqual([false, true]);
   });
 });
+
+describe("select-from-note (BACKLOG: journal-row seat + pointer affordance)", () => {
+  const targets = ["ab".repeat(32), "cd".repeat(32)];
+
+  it("the journal-row menu carries Select in grid with the entry's FULL target set", () => {
+    const ctx = withDefaults({ ...base, inspectorOpen: "journal" });
+    const model = menuModel("journal-row", ctx, targets);
+    expect(model.rows.map((r) => r.verb)).toEqual(["Select in grid"]);
+    expect(model.rows[0].action).toEqual({
+      kind: "select-journal-targets",
+      targets, // selection order = event_targets.position
+    });
+  });
+
+  it("a row without targets (redacted stub) renders no menu", () => {
+    const ctx = withDefaults({ ...base, inspectorOpen: "journal" });
+    expect(menuModel("journal-row", ctx, []).rows).toEqual([]);
+  });
+
+  it("pointer-only: no chord ever dispatches it", () => {
+    // keys: [] — the registry shape test admits it via its seat; nothing
+    // to dispatch here, asserted structurally in registry.test.ts.
+    const ctx = withDefaults({ ...base, inspectorOpen: "metadata" });
+    expect(menuModel("journal-row", ctx, targets).rows).toEqual([]); // journal tab only
+  });
+});

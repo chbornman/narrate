@@ -73,6 +73,10 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "open-settings",
   ],
   "rail-folder": ["rail-folder-open", "rail-folder-reveal", "rescan-root"],
+  // Journal entry rows (select-from-note): the seat arg is the entry's
+  // ordered target list. The row verbs (Correct/Retract/Redact…) stay
+  // hover affordances by design (defs/inspector.ts) — not menu rows.
+  "journal-row": ["select-journal-targets"],
   "look-backdrop": [
     "zoom-toggle",
     "zoom-fit",

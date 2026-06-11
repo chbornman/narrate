@@ -5,7 +5,8 @@
    * (I = Metadata, J = Journal; M5 adds Partner as one more tab — the
    * right edge is RESERVED for per-image truth). No Tabs primitive: one
    * consumer. Push, resizable, width persists; openness does not
-   * (DECISIONS 3). Esc closes first via escape layer 8.
+   * (DECISIONS 3). Esc closes it from Grid (escape layer 12); leaving
+   * Look keeps it open on the still-active image (founder, June 2026).
    *
    * Stage C: tabs filled (MetadataTab/JournalTab), journal flows wired,
    * key hints on the tab strip (KeyHint — the one component that may

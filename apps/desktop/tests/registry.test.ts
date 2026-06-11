@@ -227,4 +227,29 @@ describe("seat coverage (menus can render every seated verb)", () => {
       }
     }
   });
+
+  it("the journal-row seat renders its verb (its arg is the entry's target list)", () => {
+    const ctx = withDefaults({
+      surface: "grid",
+      searchOpen: false,
+      inputFocused: false,
+      searchInputFocused: false,
+      hasSelection: false,
+      railOpen: false,
+      debugEnabled: false,
+      asrReady: false,
+      inspectorOpen: "journal",
+    });
+    const model = menuModel("journal-row", ctx, ["ab".repeat(32)]);
+    const seated = REGISTRY.filter(
+      (d) => d.reserved !== true && d.seats?.includes("journal-row"),
+    );
+    expect(seated.length).toBeGreaterThan(0);
+    for (const def of seated) {
+      expect(
+        model.rows.some((r) => r.verb === def.verb),
+        `${def.id} missing from journal-row menu`,
+      ).toBe(true);
+    }
+  });
 });

@@ -1,6 +1,6 @@
 /**
  * The §0 contract, end to end over the FINAL registry and the real shell
- * (INTEGRATION): Esc peels the full 13-layer order one press at a time on
+ * (INTEGRATION): Esc peels the full 14-layer order one press at a time on
  * a live Ui; G reaches Grid from everywhere; Tab lights-out hides every
  * chrome REGION in the rendered App while the indicator and an open note
  * input survive (coordinator ruling); and the structural residue —
@@ -100,12 +100,15 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Esc — the 13-layer order on a live Ui (logic order is unit-tested in
-// escape.test.ts; this drives the real flags and slice closers).
+// Esc — the 14-layer order on a live Ui (logic order is unit-tested in
+// escape.test.ts; this drives the real flags and slice closers). AMENDED
+// by the journal polish round (founder, June 2026): the inspector peels
+// AFTER Look→Grid — returning to the grid keeps the panel on the still-
+// active image — and the journal composer joined the text-edit layers.
 // ---------------------------------------------------------------------------
 
 describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
-  it("walks all 13 layers in order, then does nothing", async () => {
+  it("walks all 14 layers in order, then does nothing", async () => {
     ui.grid.rawItems = []; // state from other suites
     ui.grid.rawItems = ["a", "b"].map((h) => ({
       hash: h,
@@ -127,6 +130,7 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
     ui.shell.cheatsheetOpen = true;
     ui.summonNote();
     ui.inspector.editingEventId = "01A";
+    ui.inspector.composerFocused = true;
     ui.shell.openContextMenu("thumb", null);
     ui.offerDrop(["/x"]);
     ui.inspector.redactTargetId = "01A";
@@ -136,13 +140,15 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
       [() => ui.dropPaths === null, "drop confirm"],
       [() => ui.shell.contextMenu === null, "context menu"],
       [() => ui.inspector.editingEventId === null, "journal edit"],
+      [() => !ui.inspector.composerFocused, "journal composer"],
       [() => !ui.shell.note.open, "note input"],
       [() => !ui.shell.cheatsheetOpen, "cheatsheet"],
       [() => !ui.shell.popoverOpen, "indicator popover"],
       [() => !ui.shell.debugOpen, "debug panel"],
-      [() => ui.inspector.open === false, "inspector"],
       [() => !ui.searchOpen, "search"],
+      // Founder, June 2026: Look→Grid keeps the inspector open.
       [() => ui.surface === "grid", "Look → Grid"],
+      [() => ui.inspector.open === false, "inspector"],
       [() => ui.grid.sel.order.length === 0, "selection"],
     ];
     for (let i = 0; i < peels.length; i++) {
@@ -153,7 +159,7 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
       for (let j = i + 1; j < peels.length; j++)
         expect(peels[j][0](), `${peels[j][1]} peeled early`).toBe(false);
     }
-    await ui.escape(); // layer 13: none — never quits
+    await ui.escape(); // layer 14: none — never quits
     expect(ui.surface).toBe("grid");
   });
 });

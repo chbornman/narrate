@@ -17,6 +17,7 @@ import {
   rowActions,
   sessionGroups,
   sessionTimeRange,
+  siblingTargetsLabel,
   visibleRows,
 } from "../src/lib/logic/journal";
 import type { JournalEntryDto } from "../src/lib/types/dto";
@@ -142,6 +143,29 @@ describe("row actions (UI §8.3 gated by EVENTS §3.4–3.6)", () => {
       retract: false,
       redact: false,
     });
+  });
+});
+
+describe("sibling targets — '+N others' (BACKLOG: journal entries show sibling targets)", () => {
+  const [a, b, c] = ["ab".repeat(32), "cd".repeat(32), "ef".repeat(32)];
+
+  it("counts the OTHER targets beyond the inspected image", () => {
+    expect(siblingTargetsLabel([a, b], a)).toBe("+1 other");
+    expect(siblingTargetsLabel([a, b, c], a)).toBe("+2 others");
+    // The inspected image's position in the order does not matter.
+    expect(siblingTargetsLabel([b, a, c], a)).toBe("+2 others");
+  });
+
+  it("single-target rows and stubs say nothing", () => {
+    expect(siblingTargetsLabel([a], a)).toBeNull();
+    expect(siblingTargetsLabel([], a)).toBeNull(); // redacted stub
+  });
+
+  it("degrades honestly when the inspected hash is unknown or absent", () => {
+    // No inspected hash (should not happen with an open panel): full count.
+    expect(siblingTargetsLabel([a, b], null)).toBe("+2 others");
+    // Inspected image not among the targets: every target is an "other".
+    expect(siblingTargetsLabel([a, b], c)).toBe("+2 others");
   });
 });
 
