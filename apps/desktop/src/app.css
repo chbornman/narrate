@@ -16,6 +16,9 @@ body {
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
+  /* Native widgetry (select popups, scrollbars) follows the dark chrome —
+   * CSS can't reach the popup list itself, only the scheme can. */
+  color-scheme: dark;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -51,6 +54,13 @@ select {
   outline: none;
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* Where the engine honors styled popup rows at all (color-scheme covers
+ * the rest of the native list). */
+option {
+  background: var(--bg-raised);
+  color: var(--text);
 }
 
 /* Accessibility baseline (§12): visible focus ring on all focusables. */
