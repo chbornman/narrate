@@ -162,3 +162,15 @@ describe("marquee merge (featureset §1: gutter drag; Ctrl = additive)", () => {
     expect(sel.marqueeMerge(s0, items, [], true).order).toEqual(items);
   });
 });
+
+describe("multi-select inspector label (founder, June 2026)", () => {
+  it("reads 'N selected' from two targets up — the anchor view's honesty caveat", () => {
+    expect(sel.multiSelectLabel(2)).toBe("2 selected");
+    expect(sel.multiSelectLabel(5)).toBe("5 selected");
+  });
+
+  it("is silent for a single image or none (no caveat needed)", () => {
+    expect(sel.multiSelectLabel(1)).toBeNull();
+    expect(sel.multiSelectLabel(0)).toBeNull();
+  });
+});

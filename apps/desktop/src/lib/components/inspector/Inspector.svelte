@@ -11,14 +11,26 @@
    * Stage C: tabs filled (MetadataTab/JournalTab), journal flows wired,
    * key hints on the tab strip (KeyHint — the one component that may
    * render key names).
+   *
+   * Multi-select (founder, June 2026): the panel shows the ANCHOR image's
+   * truth with a quiet "N selected" line — one image's content, never an
+   * aggregate; the count keeps the narrowed view honest. Grid only: Look
+   * narrows scope to the viewed image by construction.
    */
   import { ui } from "../../state/app.svelte";
+  import { multiSelectLabel } from "../../logic/selection";
   import { INSPECTOR_WIDTH_KEY } from "../../state/prefs";
   import Panel from "../../primitives/Panel.svelte";
   import KeyHint from "../../primitives/KeyHint.svelte";
   import MetadataTab from "./MetadataTab.svelte";
   import JournalTab from "./JournalTab.svelte";
   import RedactionModal from "./RedactionModal.svelte";
+
+  const multiNote = $derived(
+    ui.surface === "grid"
+      ? multiSelectLabel(ui.grid.selectionTargets.length)
+      : null,
+  );
 </script>
 
 <Panel
@@ -49,6 +61,11 @@
     </button>
     <!-- M5: Partner joins this strip -->
   </div>
+  {#if multiNote !== null}
+    <div class="multi-note" title="The panel shows the active image; writes target the whole selection">
+      {multiNote}
+    </div>
+  {/if}
   {#if ui.inspector.open === "metadata"}
     <MetadataTab />
   {:else if ui.inspector.open === "journal"}
@@ -75,5 +92,11 @@
   .tabs button.active {
     color: var(--text);
     background: var(--bg-raised);
+  }
+  /* The quiet register: same tone as the "+N others" sibling mark. */
+  .multi-note {
+    padding: 4px 12px 0;
+    font-size: 11px;
+    color: var(--text-faint);
   }
 </style>

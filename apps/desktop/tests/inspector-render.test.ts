@@ -351,3 +351,55 @@ describe("MetadataTab (K16: read-only)", () => {
     expect(container.querySelector("input, textarea, select")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multi-select header (founder, June 2026): the panel shows the ANCHOR
+// image's truth with a quiet "N selected" line — grid only, ≥2 targets.
+// ---------------------------------------------------------------------------
+import Inspector from "../src/lib/components/inspector/Inspector.svelte";
+import type { GridItem } from "../src/lib/types/dto";
+
+// jsdom has no ResizeObserver; the Panel primitive's sizing needs one.
+class ResizeObserverShim {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+globalThis.ResizeObserver ??= ResizeObserverShim as typeof ResizeObserver;
+
+const gridItem = (relPath: string): GridItem => ({
+  hash: `h:${relPath}`,
+  fileName: relPath.split("/").pop() as string,
+  relPath,
+  captureTs: null,
+  addedTs: "2026-06-01T00:00:00Z",
+  hasJournal: false,
+  rating: null,
+  offline: false,
+});
+
+describe("multi-select header — anchor image + 'N selected' (grid only)", () => {
+  it("renders the quiet count with several images selected", () => {
+    ui.surface = "grid";
+    ui.inspector.open = "journal";
+    ui.grid.rawItems = [gridItem("a.jpg"), gridItem("b.jpg"), gridItem("c.jpg")];
+    ui.grid.sel = { order: ["h:a.jpg", "h:b.jpg", "h:c.jpg"], focus: 0, anchor: 0 };
+    render(Inspector);
+    expect(screen.getByText("3 selected")).toBeTruthy();
+  });
+
+  it("stays silent for a single selection and outside the grid", () => {
+    ui.surface = "grid";
+    ui.inspector.open = "journal";
+    ui.grid.rawItems = [gridItem("a.jpg"), gridItem("b.jpg")];
+    ui.grid.sel = { order: ["h:a.jpg"], focus: 0, anchor: 0 };
+    render(Inspector);
+    expect(screen.queryByText(/selected/)).toBeNull();
+
+    document.body.innerHTML = "";
+    ui.surface = "look";
+    ui.grid.sel = { order: ["h:a.jpg", "h:b.jpg"], focus: 0, anchor: 0 };
+    render(Inspector);
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+});
