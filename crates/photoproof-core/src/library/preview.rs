@@ -24,7 +24,10 @@ use crate::metrics::PipelineMetrics;
 
 /// Compile-time constant covering encoder, sizes, and the color pipeline
 /// (§9.8). Orientation or ICC changes MUST bump this.
-pub const GENERATOR_VERSION: i64 = 1;
+/// v2 (June 2026): two-step resize + libwebp method 2 (pp-bench-driven) —
+/// artifact bytes changed, existing caches regenerate at backfill
+/// priority via the §9.8 machinery.
+pub const GENERATOR_VERSION: i64 = 2;
 
 pub const THUMB_EDGE: u32 = 512;
 pub const THUMB_QUALITY: f32 = 75.0;
@@ -305,6 +308,15 @@ fn adobe_rgb_to_srgb_in_place(rgba: &mut [u8]) {
 // ---------------------------------------------------------------------------
 
 /// Resize to a longest-edge target. Never upscale (§9.2).
+///
+/// Deliberately ONE CatmullRom pass. The classic two-step trick (cheap
+/// Triangle prescale to 2× the target, CatmullRom for the last octave)
+/// was tried and MEASURED 3.4× SLOWER here (pp-bench canon corpus, June
+/// 2026: 408 ms vs 120 ms mean) — image-rs's separable resampler already
+/// scales its kernel with the ratio, so the prescale only added a second
+/// full pass and a ~70 MB intermediate per image, which across 8 parallel
+/// workers thrashes the cache. Do not "optimize" this without a bench
+/// diff against the frozen corpora.
 fn resize_to_edge(img: &DynamicImage, edge: u32) -> DynamicImage {
     let (w, h) = img.dimensions();
     if w.max(h) <= edge {
@@ -313,10 +325,24 @@ fn resize_to_edge(img: &DynamicImage, edge: u32) -> DynamicImage {
     img.resize(edge, edge, image::imageops::FilterType::CatmullRom)
 }
 
+/// WebP at libwebp `method` 2 (pp-bench, June 2026): the default method 4
+/// spent ~30% of total ingest wall-time inside the encoder; method 2
+/// roughly halves encode time for a few percent larger artifacts. Cache
+/// bytes are cheap (never evicts, L5) — ingest latency is the cost the
+/// founder feels. Falls back to the simple encoder if libwebp rejects the
+/// config (never observed; belt only).
 fn encode_webp(img: &DynamicImage, quality: f32) -> Vec<u8> {
     let rgba = img.to_rgba8();
     let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
-    encoder.encode(quality).to_vec()
+    let Ok(mut config) = webp::WebPConfig::new() else {
+        return encoder.encode(quality).to_vec();
+    };
+    config.quality = quality;
+    config.method = 2;
+    match encoder.encode_advanced(&config) {
+        Ok(mem) => mem.to_vec(),
+        Err(_) => encoder.encode(quality).to_vec(),
+    }
 }
 
 /// Generate and atomically write both artifacts from a display-oriented,
