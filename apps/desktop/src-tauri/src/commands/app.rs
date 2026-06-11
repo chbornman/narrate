@@ -180,14 +180,72 @@ pub fn open_settings_window(handle: AppHandle) -> CmdResult<()> {
         let _ = existing.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(&handle, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Settings")
-        .inner_size(620.0, 700.0)
-        .min_inner_size(480.0, 480.0)
-        .decorations(false)
-        .background_color(tauri::webview::Color(14, 14, 14, 255))
+    let builder =
+        WebviewWindowBuilder::new(&handle, "settings", WebviewUrl::App("settings.html".into()))
+            .title("Settings")
+            .inner_size(620.0, 700.0)
+            .min_inner_size(480.0, 480.0)
+            .background_color(tauri::webview::Color(14, 14, 14, 255));
+    // Platform chrome (UI §2.3), mirroring tauri.macos.conf.json for the
+    // main window: macOS keeps native decorations — rounded corners,
+    // shadow, traffic lights overlaying the drag strip (SettingsApp.svelte
+    // insets past them and drops its custom close button); Windows/Linux
+    // stay undecorated with the custom strip.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .hidden_title(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
+    builder
         .build()
         .map_err(|e| CmdError::Invalid(format!("settings window: {e}")))?;
+    Ok(())
+}
+
+/// Tab lights-out, the native half (featureset §0: "hides ALL chrome").
+/// With macOS's Overlay titlebar the traffic lights are native NSButtons,
+/// not DOM — App.svelte's region gates cannot touch them, and left visible
+/// they float over (and click-block) the chrome-less grid's top-left
+/// corner. WHY standardWindowButton:setHidden: and not set_decorations:
+/// tao rebuilds the style mask from scratch on re-decorate, dropping
+/// FullSizeContentView and wrecking the Overlay layout — hiding the
+/// buttons is lossless and exactly reversible. Nothing persists: lib.rs
+/// strips DECORATIONS from the window-state flags, and this hidden bit
+/// lives only on the live NSWindow. No-op off macOS (the custom DOM
+/// controls there are gated in Svelte).
+#[tauri::command]
+pub fn set_traffic_lights_hidden(window: tauri::WebviewWindow, hidden: bool) -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // AppKit is main-thread-only; the command may arrive off it.
+        let win = window.clone();
+        window
+            .run_on_main_thread(move || {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let Ok(ns_window) = win.ns_window() else {
+                    return;
+                };
+                let ns_window = ns_window.cast::<AnyObject>();
+                // NSWindowButton: close = 0, miniaturize = 1, zoom = 2.
+                for kind in 0_usize..=2 {
+                    unsafe {
+                        let button: *mut AnyObject =
+                            msg_send![ns_window, standardWindowButton: kind];
+                        if !button.is_null() {
+                            let _: () = msg_send![button, setHidden: hidden];
+                        }
+                    }
+                }
+            })
+            .map_err(|e| CmdError::Invalid(format!("traffic lights: {e}")))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, hidden);
+    }
     Ok(())
 }
 

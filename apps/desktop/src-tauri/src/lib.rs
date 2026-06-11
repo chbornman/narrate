@@ -29,6 +29,7 @@ mod state;
 use std::sync::Arc;
 
 use tauri::{Manager, RunEvent};
+use tauri_plugin_window_state::StateFlags;
 
 use state::App;
 
@@ -66,8 +67,24 @@ pub fn run() {
         // on some Wayland compositors — named in DOGFOOD §visual; the
         // fallback, if it misbehaves, is manual save/restore in
         // commands/app.rs keyed off the same RunEvent hooks.
+        //
+        // GEOMETRY ONLY — two flags are deliberately stripped from the
+        // default StateFlags::all():
+        // - DECORATIONS: decoration state is owned per-platform by
+        //   config/code (macOS keeps native Overlay chrome, Windows/Linux
+        //   run undecorated) and is toggled live by Tab lights-out. Any
+        //   macOS machine that ran the pre-Overlay builds has
+        //   decorated:false persisted for "main"; restoring it would strip
+        //   the traffic lights — leaving ZERO window controls — and the
+        //   exit-time save would make that sticky forever.
+        // - FULLSCREEN: shell.svelte.ts owns fullscreen as frontend state
+        //   (starts false); a disk-restored fullscreen window would desync
+        //   the F toggle on first press.
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    StateFlags::all() & !(StateFlags::DECORATIONS | StateFlags::FULLSCREEN),
+                )
                 .with_denylist(&["settings"])
                 .build(),
         )
@@ -169,6 +186,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::export_journal,
         commands::app::rebuild_index,
         commands::app::open_settings_window,
+        commands::app::set_traffic_lights_hidden,
         commands::app::quit,
         commands::journal::image_journal,
         commands::journal::image_metadata,
@@ -216,6 +234,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::export_journal,
         commands::app::rebuild_index,
         commands::app::open_settings_window,
+        commands::app::set_traffic_lights_hidden,
         commands::app::quit,
         commands::journal::image_journal,
         commands::journal::image_metadata,

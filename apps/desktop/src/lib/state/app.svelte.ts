@@ -13,6 +13,7 @@
 import * as ipc from "../ipc/commands";
 import * as sel from "../logic/selection";
 import * as note from "../logic/note";
+import { isMac } from "../logic/platform";
 import { escapeAction, type EscapeContext } from "../logic/escape";
 import { navigationSet } from "../logic/looknav";
 import { scopeTargets } from "../logic/scope";
@@ -766,6 +767,19 @@ export class Ui {
         break;
       case "toggle-lights-out":
         this.shell.toggleLightsOut();
+        // macOS: the traffic lights are NATIVE NSButtons (Overlay
+        // titlebar) — the {#if !chromeHidden} region gates can't reach
+        // them, and left visible they'd float over (and click-block) the
+        // chrome-less grid. Hide/show them in lockstep. Nothing persists:
+        // lib.rs strips DECORATIONS from the window-state flags, so a
+        // quit during lights-out still relaunches with full chrome.
+        if (isMac()) {
+          try {
+            await ipc.setTrafficLightsHidden(this.shell.chromeHidden);
+          } catch {
+            /* tests / non-tauri dev */
+          }
+        }
         break;
       case "toggle-rail":
         this.shell.toggleRail();

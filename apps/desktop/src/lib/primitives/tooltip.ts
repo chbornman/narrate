@@ -9,12 +9,12 @@
 import type { Attachment } from "svelte/attachments";
 import type { Action } from "../logic/keymap";
 import { defById } from "../actions/registry";
+import { isMac } from "../logic/platform";
 import type { KeyChord } from "../actions/types";
 
 const HOVER_DELAY_MS = 550;
 
 function chordText(chord: KeyChord): string {
-  const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
   const names: Record<string, string> = {
     " ": "Space",
     Escape: "Esc",
@@ -24,7 +24,7 @@ function chordText(chord: KeyChord): string {
     ArrowRight: "→",
   };
   const parts: string[] = [];
-  if (chord.ctrlOrMeta === true) parts.push(isMac ? "⌘" : "Ctrl");
+  if (chord.ctrlOrMeta === true) parts.push(isMac() ? "⌘" : "Ctrl");
   if (chord.shift === true) parts.push("Shift");
   parts.push(names[chord.key] ?? (chord.key.length === 1 ? chord.key.toUpperCase() : chord.key));
   return parts.join("+");

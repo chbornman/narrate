@@ -8,7 +8,7 @@
  * (featureset §6, escape layer 2), the cross-window roots-changed handler,
  * and the rail's add-root picker flow (founder dogfood, rounds 1+2).
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GridItem, RootDto, ScopeView } from "../src/lib/types/dto";
 
 const ipcLog = vi.hoisted(() => ({
@@ -268,6 +268,49 @@ describe("roots-changed live propagation (founder dogfood, round 2)", () => {
     expect(ui.roots).toEqual([]);
     expect(ui.grid.rootId).toBeNull();
     expect(ui.grid.rawItems).toEqual([]);
+  });
+});
+
+describe("Tab lights-out hides the NATIVE chrome too (featureset §0, macOS)", () => {
+  // The traffic lights are NSButtons (Overlay titlebar) — outside the DOM
+  // region gates. The perform sink must hide/show them in lockstep with
+  // chromeHidden, and only on macOS (Windows/Linux chrome is all-DOM).
+  const stubNavigator = (platform: string, userAgent: string) => {
+    Object.defineProperty(window.navigator, "platform", {
+      value: platform,
+      configurable: true,
+    });
+    Object.defineProperty(window.navigator, "userAgent", {
+      value: userAgent,
+      configurable: true,
+    });
+  };
+  afterEach(() => {
+    delete (window.navigator as { platform?: string }).platform;
+    delete (window.navigator as { userAgent?: string }).userAgent;
+  });
+
+  it("macOS: toggling sends set_traffic_lights_hidden true, then false", async () => {
+    stubNavigator(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+    );
+    await ui.perform({ kind: "toggle-lights-out" });
+    expect(ui.shell.chromeHidden).toBe(true);
+    expect(lastCall("set_traffic_lights_hidden")?.args).toEqual({ hidden: true });
+    await ui.perform({ kind: "toggle-lights-out" });
+    expect(ui.shell.chromeHidden).toBe(false);
+    expect(lastCall("set_traffic_lights_hidden")?.args).toEqual({ hidden: false });
+  });
+
+  it("Linux: no native call — the custom controls are DOM-gated already", async () => {
+    stubNavigator(
+      "Linux x86_64",
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    );
+    await ui.perform({ kind: "toggle-lights-out" });
+    expect(ui.shell.chromeHidden).toBe(true);
+    expect(lastCall("set_traffic_lights_hidden")).toBeUndefined();
   });
 });
 
