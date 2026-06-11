@@ -266,3 +266,30 @@ pub async fn debug_force_rescan(app: S<'_>, root_id: String) -> CmdResult<usize>
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugDoctorReport {
+    pub repended: usize,
+    pub stale_orphans: usize,
+    pub temps_swept: usize,
+}
+
+/// [dev] Run the library doctor NOW (BACKLOG "Library doctor"; the
+/// maintenance tick runs the same pass on its own schedule). A repair
+/// action, but a CONSERVATIVE one — doctor v1 re-pends and counts, it
+/// never deletes — so it sits beside flush/rescan in the dev row.
+#[tauri::command]
+pub async fn debug_doctor(app: S<'_>) -> CmdResult<DebugDoctorReport> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let r = app.library.doctor()?;
+        Ok(DebugDoctorReport {
+            repended: r.repended,
+            stale_orphans: r.stale_orphans,
+            temps_swept: r.temps_swept,
+        })
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}

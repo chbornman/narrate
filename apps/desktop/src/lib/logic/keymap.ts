@@ -76,6 +76,10 @@ export type Action =
   | { kind: "rail-folder-open"; rootId: string; folder: string }
   | { kind: "rail-folder-reveal"; rootId: string; folder: string }
   | { kind: "rescan-root"; rootId: string }
+  // recovery verb SEPARATE from Rescan (BACKLOG, dogfood round 3): re-pend
+  // the preview pass for everything under the root; regeneration overwrites
+  // artifacts idempotently (LIBRARY §9.8)
+  | { kind: "rebuild-previews"; rootId: string }
   // rail footer button + rail-folder seat: OS picker → register root
   | { kind: "add-root" }
   | { kind: "open-inspector"; tab: "metadata" | "journal" }

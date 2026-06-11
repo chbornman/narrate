@@ -164,6 +164,23 @@ pub async fn rescan_root(app: S<'_>, root_id: String) -> CmdResult<()> {
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// "Rebuild previews…" on the rail-folder menu (BACKLOG, founder dogfood
+/// round 3) — the recovery verb SEPARATE from Rescan: it re-pends the
+/// preview pass for every image under the root at backfill priority
+/// (LIBRARY §9.8/§10.3 — the generator_version machinery's manual
+/// trigger); the pump regenerates artifacts idempotently and thumbs heal
+/// off `previews-changed`. Returns the number of passes re-pended.
+#[tauri::command]
+pub async fn rebuild_previews(app: S<'_>, root_id: String) -> CmdResult<usize> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        Ok(app.library.rebuild_previews(&root_id)?)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 fn folder_node(n: photoproof_core::library::FolderTreeNode) -> FolderNode {
     FolderNode {
         name: n.name,

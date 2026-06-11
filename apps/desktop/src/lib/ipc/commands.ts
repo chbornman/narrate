@@ -145,6 +145,14 @@ export const openWithDefault = (hash: string) =>
 export const rescanRoot = (rootId: string) =>
   invoke<void>("rescan_root", { rootId });
 
+/** Rail-folder menu: "Rebuild previews…" — re-pend the preview pass for
+ * every image under the root (the recovery verb SEPARATE from Rescan;
+ * BACKLOG, founder dogfood round 3). Resolves to the re-pend count; the
+ * pump regenerates in the background and thumbs heal off
+ * `previews-changed`. */
+export const rebuildPreviews = (rootId: string) =>
+  invoke<number>("rebuild_previews", { rootId });
+
 // -- window plumbing ----------------------------------------------------------
 
 export const openSettingsWindow = () => invoke<void>("open_settings_window");

@@ -947,14 +947,146 @@ impl Library {
         self.reconcile_all(&ScanOptions::default())
     }
 
-    /// The 6-hour tick (§7.3, §10.5): error-row retry + full reconciliation.
+    /// The 6-hour tick (§7.3, §10.5): error-row retry + the doctor's
+    /// validate-and-heal sweep + full reconciliation. The doctor joined the
+    /// tick per BACKLOG "Library doctor / self-check pass" (founder, dogfood
+    /// round 3): mangled states keep happening; the library should HEAL on
+    /// its own schedule, not just avoid poisoning.
     pub fn maintenance_tick(&self) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
         {
             let conn = self.db.lock().expect("poisoned");
             ingest::retry_errors(&conn)?;
         }
+        self.doctor()?;
         self.probe_volumes()?;
         self.reconcile_all(&ScanOptions::default())
+    }
+
+    /// "Rebuild previews…" (BACKLOG, founder dogfood round 3): the
+    /// `generator_version` machinery's MANUAL trigger — semantics
+    /// deliberately different from Rescan (which reconciles files↔index and
+    /// enqueues only MISSING passes, §7.3). This re-pends the preview pass
+    /// for every image with an active path under the root, with a fresh
+    /// retry budget, at backfill priority (§10.3 — recovery work never
+    /// starves live-watcher discoveries). Regeneration is idempotent by
+    /// construction: `write_artifacts` overwrites atomically (§9.8).
+    ///
+    /// `running` rows are left alone: that image is regenerating RIGHT NOW,
+    /// and flipping the row back to pending mid-flight would let a second
+    /// worker claim it concurrently. Returns the number of rows re-pended.
+    pub fn rebuild_previews(&self, root_id: &str) -> Result<usize, LibraryError> {
+        // A vanished root is caller error, not a quiet zero.
+        self.root(root_id)?
+            .ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+        let conn = self.db.lock().expect("poisoned");
+        // Recycled rows (done/error/skipped) re-enter the queue AT backfill
+        // priority — the same shape as the §9.8 generator_version bump.
+        // Rows already pending keep their place if it is BETTER: the §10.3
+        // promotion rule never demotes, so a P0 watcher discovery or a P1
+        // scan enqueue is not pushed behind backfill work it already beats.
+        let n = conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'pending', attempts = 0, not_before = NULL,
+                 error = NULL,
+                 priority = CASE WHEN state = 'pending'
+                                 THEN MIN(priority, ?2) ELSE ?2 END
+             WHERE pass_name = 'preview' AND state != 'running'
+               AND image_hash IN (SELECT image_hash FROM paths
+                                  WHERE root_id = ?1 AND state = 'active')",
+            params![root_id, ingest::PRIORITY_BACKFILL],
+        )?;
+        if n > 0 {
+            self.log(format!("rebuild previews: {n} passes re-pended"));
+        }
+        Ok(n)
+    }
+
+    /// Library doctor v1 (BACKLOG "Library doctor / self-check pass"):
+    /// validate the index against reality and repair what it can,
+    /// CONSERVATIVELY — v1 re-pends and counts, it never deletes rows:
+    ///
+    /// - `done` preview passes whose thumb OR display artifact file is
+    ///   missing on disk (a cache directory mangled outside the app) →
+    ///   re-pend at backfill priority with a fresh budget; the next drain
+    ///   regenerates (idempotent, §9.8).
+    /// - stale path rows whose image has NO surviving active path →
+    ///   COUNTED only (the §7.2 move-correlation window may still claim
+    ///   them, and rows are cheap; sweeping is a later, bolder doctor).
+    /// - stranded preview temp files → swept (`sweep_temp_files`, §9.8
+    ///   crash hygiene — the same sweep `open_with` runs at startup). A
+    ///   sweep racing a mid-write pass at worst fails that one rename;
+    ///   the pass retries as transient and finals are never torn.
+    pub fn doctor(&self) -> Result<DoctorReport, LibraryError> {
+        // Snapshot the done rows, then probe the filesystem OUTSIDE the DB
+        // lock: artifact existence checks on a big library are thousands of
+        // stats, and the writer connection must not stall behind them.
+        let done: Vec<String> = {
+            let conn = self.db.lock().expect("poisoned");
+            let mut stmt = conn.prepare(
+                "SELECT image_hash FROM ingest_passes
+                 WHERE pass_name = 'preview' AND state = 'done'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut missing: Vec<String> = Vec::new();
+        for h in done {
+            let Ok(hash) = ContentHash::from_hex(&h) else {
+                continue; // sentinel/garbage hashes are not preview rows
+            };
+            let intact = [ArtifactKind::Thumb, ArtifactKind::Display]
+                .iter()
+                .all(|&k| preview::artifact_path(&self.cache_dir, &hash, k).exists());
+            if !intact {
+                missing.push(h);
+            }
+        }
+        let mut repended = 0usize;
+        if !missing.is_empty() {
+            let conn = self.db.lock().expect("poisoned");
+            for h in &missing {
+                // `state = 'done'` re-checked: a drain may have raced us.
+                repended += conn.execute(
+                    "UPDATE ingest_passes
+                     SET state = 'pending', attempts = 0, not_before = NULL,
+                         error = NULL, priority = ?2
+                     WHERE image_hash = ?1 AND pass_name = 'preview'
+                       AND state = 'done'",
+                    params![h, ingest::PRIORITY_BACKFILL],
+                )?;
+            }
+        }
+        let stale_orphans: usize = {
+            let conn = self.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT COUNT(*) FROM paths s
+                 WHERE s.state = 'stale'
+                   AND NOT EXISTS (SELECT 1 FROM paths a
+                                   WHERE a.image_hash = s.image_hash
+                                     AND a.state = 'active')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? as usize
+        };
+        let temps_swept = preview::sweep_temp_files(&self.cache_dir)?;
+        let report = DoctorReport {
+            repended,
+            stale_orphans,
+            temps_swept,
+        };
+        if report.repended > 0 || report.stale_orphans > 0 || report.temps_swept > 0 {
+            tracing::info!(
+                repended = report.repended,
+                stale_orphans = report.stale_orphans,
+                temps_swept = report.temps_swept,
+                "library doctor"
+            );
+            self.log(format!(
+                "doctor: {} previews re-pended, {} orphaned stale paths, {} temp files swept",
+                report.repended, report.stale_orphans, report.temps_swept
+            ));
+        }
+        Ok(report)
     }
 
     /// §7.2 for one observed (stable) file. `move_window_start` bounds the
@@ -2280,6 +2412,19 @@ pub enum Observed {
 pub struct QueueOptions {
     pub cancel: Option<CancelFlag>,
     pub max_items: Option<usize>,
+}
+
+/// What `Library::doctor` found and did (BACKLOG "Library doctor"): the
+/// debug panel renders it, the 6-hour tick `info!`s it when nonzero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DoctorReport {
+    /// `done` preview passes re-pended because an artifact file vanished.
+    pub repended: usize,
+    /// Stale path rows whose image has no surviving active path — COUNTED,
+    /// never deleted (doctor v1 is conservative by charter).
+    pub stale_orphans: usize,
+    /// Stranded `.pp-tmp-*` preview temp files removed.
+    pub temps_swept: usize,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

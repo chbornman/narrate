@@ -100,15 +100,17 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Esc — the 14-layer order on a live Ui (logic order is unit-tested in
+// Esc — the 15-layer order on a live Ui (logic order is unit-tested in
 // escape.test.ts; this drives the real flags and slice closers). AMENDED
 // by the journal polish round (founder, June 2026): the inspector peels
 // AFTER Look→Grid — returning to the grid keeps the panel on the still-
 // active image — and the journal composer joined the text-edit layers.
+// AMENDED by the wave-2 robustness cluster: the first-run welcome card
+// joined as layer 1 (BACKLOG "First-run welcome card").
 // ---------------------------------------------------------------------------
 
 describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
-  it("walks all 14 layers in order, then does nothing", async () => {
+  it("walks all 15 layers in order, then does nothing", async () => {
     ui.grid.rawItems = []; // state from other suites
     ui.grid.rawItems = ["a", "b"].map((h) => ({
       hash: h,
@@ -134,8 +136,10 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
     ui.shell.openContextMenu("thumb", null);
     ui.offerDrop(["/x"]);
     ui.inspector.redactTargetId = "01A";
+    ui.shell.welcomeOpen = true;
 
     const peels: [() => boolean, string][] = [
+      [() => !ui.shell.welcomeOpen, "welcome card"],
       [() => ui.inspector.redactTargetId === null, "redaction modal"],
       [() => ui.dropPaths === null, "drop confirm"],
       [() => ui.shell.contextMenu === null, "context menu"],
@@ -159,7 +163,7 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
       for (let j = i + 1; j < peels.length; j++)
         expect(peels[j][0](), `${peels[j][1]} peeled early`).toBe(false);
     }
-    await ui.escape(); // layer 14: none — never quits
+    await ui.escape(); // layer 15: none — never quits
     expect(ui.surface).toBe("grid");
   });
 });

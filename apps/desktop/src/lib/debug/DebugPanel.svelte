@@ -61,6 +61,12 @@
     await invoke("debug_force_rescan", { rootId: ui.grid.rootId });
     await refresh();
   }
+
+  /** The library doctor (BACKLOG), on demand: validate-and-heal, then show
+   * its report — the same pass the maintenance tick runs on a schedule. */
+  async function doctor() {
+    payload = await invoke("debug_doctor");
+  }
 </script>
 
 <aside class="debug-panel" aria-label="Debug panel">
@@ -71,6 +77,7 @@
     <span class="spacer"></span>
     <button class="dev" onclick={() => void forceFlush()}>[dev] flush</button>
     <button class="dev" onclick={() => void forceRescan()}>[dev] rescan</button>
+    <button class="dev" onclick={() => void doctor()}>[dev] doctor</button>
     <button class="dev" onclick={() => void refresh()} disabled={busy}>↻</button>
   </header>
   <pre>{JSON.stringify(payload, null, 2)}</pre>

@@ -77,9 +77,29 @@ export class ShellSlice {
 
   debugOpen = $state(false);
 
+  // -- first-run welcome card (BACKLOG: how your data is stored) --------------
+  /** Open until dismissed; whether it returns next launch is the toggle's
+   * call. NOT flipped in the constructor: tests build Ui instances with no
+   * App mounted, and the card belongs to the booted shell (loadPrefs runs
+   * from ui.init, the same seam every other pref uses). */
+  welcomeOpen = $state(false);
+  /** The card's "don't show this again" toggle, default ON: the common
+   * path reads the storage story exactly once. Lives on the slice (not the
+   * component) so the Esc path through app.svelte.ts honors it too. */
+  welcomeDontShowAgain = $state(true);
+
   loadPrefs() {
     this.surround = prefs.loadSurround();
     this.railOpen = prefs.loadRailOpen();
+    this.welcomeOpen = !prefs.loadWelcomeSeen();
+  }
+
+  /** Every dismissal path (the card's button AND Esc) lands here and
+   * honors the toggle — Esc must never be a trap that brings the card
+   * back forever (§0: Esc is sacred, not second-class). */
+  dismissWelcome() {
+    this.welcomeOpen = false;
+    prefs.saveWelcomeSeen(this.welcomeDontShowAgain);
   }
 
   toggleLightsOut() {
