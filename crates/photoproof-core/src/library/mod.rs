@@ -1577,6 +1577,7 @@ impl Library {
                     Ok(())
                 })?;
                 report.done += 1;
+                report.completed_previews.push(item.image_hash.clone());
                 Ok(())
             }
             Err(e) => self.fail_preview(item, e, report),
@@ -1683,6 +1684,7 @@ impl Library {
                 ingest::mark_done(&conn, item, now)?;
                 self.metrics.db_record.record(db_started.elapsed());
                 report.done += 1;
+                report.completed_previews.push(item.image_hash.clone());
                 Ok(())
             }
         }
@@ -2259,6 +2261,10 @@ pub struct QueueReport {
     pub skipped: usize,
     pub transient_retries: usize,
     pub cancelled: bool,
+    /// Images whose preview artifacts landed this drain — the
+    /// `previews-changed` payload (thumbs that exhausted their 404 retry
+    /// budget heal off it; the journal-changed seam, applied to previews).
+    pub completed_previews: Vec<ContentHash>,
 }
 
 impl QueueReport {
@@ -2270,6 +2276,8 @@ impl QueueReport {
         self.errors += other.errors;
         self.skipped += other.skipped;
         self.transient_retries += other.transient_retries;
+        self.completed_previews
+            .extend(other.completed_previews.iter().cloned());
     }
 }
 

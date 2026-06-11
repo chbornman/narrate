@@ -53,6 +53,13 @@ export interface JournalChanged {
   hashes: string[];
 }
 
+/** `previews-changed` payload: the images whose preview artifacts landed
+ * in an ingest drain. Thumbs that exhausted their 404 retry budget heal
+ * off this instead of staying blank until restart. */
+export interface PreviewsChanged {
+  hashes: string[];
+}
+
 export interface IngestStatus {
   running: boolean;
   done: number;

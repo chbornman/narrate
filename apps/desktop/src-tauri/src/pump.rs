@@ -66,14 +66,30 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     last_maintenance = Instant::now();
                     let _ = app.library.maintenance_tick();
                 }
-                let processed = app
+                let report = app
                     .library
                     .process_queue(&QueueOptions {
                         cancel: None,
                         max_items: Some(QUEUE_BATCH),
                     })
-                    .map(|r| r.processed)
-                    .unwrap_or(0);
+                    .unwrap_or_default();
+                let processed = report.processed;
+                // Hash-aware preview completions (the journal-changed
+                // pattern): thumbs whose retry budget ran out heal off
+                // this. One event per drain batch — same low-rate wire
+                // discipline as ingest-progress (≤ QUEUE_BATCH hashes).
+                if !report.completed_previews.is_empty() {
+                    let _ = handle.emit(
+                        "previews-changed",
+                        crate::dto::PreviewsChanged {
+                            hashes: report
+                                .completed_previews
+                                .iter()
+                                .map(|h| h.as_str().to_owned())
+                                .collect(),
+                        },
+                    );
+                }
 
                 let status = ingest_status(&app);
                 let due = match &last_emit {

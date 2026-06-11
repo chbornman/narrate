@@ -241,6 +241,7 @@
       <div class="cell" style:transform="translate({pos.x + dx}px, {pos.y}px)">
         <Thumb
           hash={unit.primary.hash}
+          previewPing={ui.grid.previewPing}
           hasJournal={unit.primary.hasJournal}
           offline={unit.primary.offline}
           stack={ui.grid.unitStack(s.idx)}

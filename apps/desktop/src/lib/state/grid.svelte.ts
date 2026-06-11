@@ -55,6 +55,20 @@ export class GridSlice {
   // -- scroll anchor (preserved across Look round-trips and folder revisits) ------
   scrollAnchor = $state<{ index: number; offset: number } | null>(null);
 
+  /** `previews-changed` ping (hash-aware, the journal-changed seam):
+   * thumbs matching `hashes` retry their preview load NOW with a fresh
+   * budget — without it, any ingest outlasting the Thumb retry cap left
+   * permanent blanks (founder dogfood, June 2026). `seq` makes each
+   * event observable even when consecutive payloads carry equal sets. */
+  previewPing = $state<{ seq: number; hashes: ReadonlySet<string> }>({
+    seq: 0,
+    hashes: new Set(),
+  });
+
+  onPreviewsChanged(hashes: string[]) {
+    this.previewPing = { seq: this.previewPing.seq + 1, hashes: new Set(hashes) };
+  }
+
   /** Viewport geometry, reported by Grid.svelte (page/edge move math). */
   gridCols = 1;
   gridRowsPerPage = 1;

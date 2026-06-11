@@ -194,3 +194,24 @@ describe("the indicator reads ● 2 for one selected collapsed cell (Ui loop)", 
     expect(ui.shell.scope.count).toBe(1);
   });
 });
+
+describe("previews-changed ping (thumbs heal as artifacts land)", () => {
+  it("each event bumps seq and replaces the hash set", () => {
+    const g = new GridSlice();
+    expect(g.previewPing.seq).toBe(0);
+    g.onPreviewsChanged(["aa", "bb"]);
+    expect(g.previewPing.seq).toBe(1);
+    expect(g.previewPing.hashes.has("aa")).toBe(true);
+    g.onPreviewsChanged(["cc"]);
+    expect(g.previewPing.seq).toBe(2);
+    expect(g.previewPing.hashes.has("aa")).toBe(false);
+    expect(g.previewPing.hashes.has("cc")).toBe(true);
+  });
+
+  it("an empty payload still bumps seq (harmless, observable)", () => {
+    const g = new GridSlice();
+    g.onPreviewsChanged([]);
+    expect(g.previewPing.seq).toBe(1);
+    expect(g.previewPing.hashes.size).toBe(0);
+  });
+});

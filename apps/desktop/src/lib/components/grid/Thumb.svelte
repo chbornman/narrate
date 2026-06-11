@@ -19,6 +19,7 @@
 
   let {
     hash,
+    previewPing,
     hasJournal,
     offline,
     stack,
@@ -34,6 +35,9 @@
     oncontextmenu,
   }: {
     hash: string;
+    /** `previews-changed` ping (grid slice): when `hashes` carries this
+     * cell's image, its artifact just landed — reload now. */
+    previewPing: { seq: number; hashes: ReadonlySet<string> };
     hasJournal: boolean;
     offline: boolean;
     stack: "solo" | "collapsed" | "expanded";
@@ -66,9 +70,20 @@
   let loadedHash = $state<string | null>(null);
   let retry = $state({ hash: "", n: 0 });
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Last applied previews-changed ping — its seq joins the cache-buster
+   * so the reload URL is NOVEL (never a previously-404'd one). */
+  let applied = $state({ hash: "", seq: 0 });
 
   const attempt = $derived(retry.hash === hash ? retry.n : 0);
+  const pingSeq = $derived(applied.hash === hash ? applied.seq : 0);
   const loaded = $derived(loadedHash === hash);
+
+  const src = $derived.by(() => {
+    const parts = [];
+    if (attempt > 0) parts.push(`r=${attempt}`);
+    if (pingSeq > 0) parts.push(`p=${pingSeq}`);
+    return parts.length === 0 ? thumbUrl(hash) : `${thumbUrl(hash)}?${parts.join("&")}`;
+  });
 
   $effect(() => {
     void hash;
@@ -77,6 +92,18 @@
       loadedHash = hash;
     }
     return () => clearTimeout(retryTimer);
+  });
+
+  // previews-changed: this image's artifact just landed (the backend
+  // writes it BEFORE emitting). Reload immediately with a fresh retry
+  // budget — a capped 404 loop otherwise blanked the cell until restart
+  // (founder dogfood, June 2026).
+  $effect(() => {
+    const ping = previewPing;
+    if (ping.seq === 0 || loaded || !ping.hashes.has(hash)) return;
+    clearTimeout(retryTimer);
+    retry = { hash, n: 0 };
+    applied = { hash, seq: ping.seq };
   });
 
   function handleError() {
@@ -112,7 +139,7 @@
 >
   <img
     bind:this={el}
-    src={attempt > 0 ? `${thumbUrl(hash)}?r=${attempt}` : thumbUrl(hash)}
+    {src}
     alt=""
     draggable="false"
     loading="eager"

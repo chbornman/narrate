@@ -101,6 +101,16 @@ pub struct JournalChanged {
     pub hashes: Vec<String>,
 }
 
+/// `previews-changed` payload: the images whose preview artifacts landed
+/// in an ingest drain. Thumbs that exhausted their 404 retry budget heal
+/// off this (the journal-changed seam, applied to previews) — without it,
+/// any ingest outlasting the retry cap left permanent blanks.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewsChanged {
+    pub hashes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStatus {

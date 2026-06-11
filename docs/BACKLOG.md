@@ -21,6 +21,17 @@ managing = off-thesis).
   the preview pass for everything under the root, the generator_version
   machinery's manual trigger). Becomes more load-bearing with M1.5
   preview-policy knobs. (Founder, dogfood round 3, June 2026.)
+- [ ] **First-run welcome card: how your data is stored** — a plain-words
+  disclaimer on first launch ("don't show again" toggle, persisted like
+  other prefs): sidecars are FILENAME-SPECIFIC (`.pp.json` beside the
+  image — rename outside the app while it isn't watching and the link
+  depends on the §7 relink heuristics), the index is rebuildable but the
+  journal sidecars ARE the data, what lives where. Beyond the card, think
+  about making the storage story itself stronger — e.g. hash-keyed
+  sidecar recovery sweep, case-insensitive-filesystem rename semantics
+  (APFS: a case-only rename isn't a rename; s02_2 fails on macOS today),
+  import-time warnings on risky volumes. (Founder, dogfood round 3,
+  June 2026.)
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
 - [ ] **Search entry as overlay, results as canvas** — `/` opens a floating

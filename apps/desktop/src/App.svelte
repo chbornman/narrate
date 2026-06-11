@@ -24,6 +24,7 @@
     IndicatorState,
     IngestStatus,
     JournalChanged,
+    PreviewsChanged,
     RootDto,
     RuntimeStatus,
   } from "./lib/types/dto";
@@ -124,6 +125,11 @@
       // — journal panel, grid badges, Look overlay — refresh themselves.
       listen<JournalChanged>("journal-changed", (e) =>
         void ui.onJournalChanged(e.payload.hashes),
+      ),
+      // Preview artifacts landed (ingest drain): thumbs that gave up
+      // retrying a 404 heal off the hash-aware ping — no restart needed.
+      listen<PreviewsChanged>("previews-changed", (e) =>
+        ui.grid.onPreviewsChanged(e.payload.hashes),
       ),
       listen<IndicatorState>("indicator-state", (e) => {
         ui.shell.onIndicatorState(e.payload);
