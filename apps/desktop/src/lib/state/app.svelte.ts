@@ -323,6 +323,15 @@ export class Ui {
     if (this.searchOpen) return;
     this.searchReturn = this.surface;
     this.searchOpen = true;
+    // `/` ALWAYS starts at the entry overlay (backlog ruling: a floating
+    // input over the dimmed surface). The overlay's stage is derived from
+    // result state, so stale query/results from the previous search would
+    // reopen straight into the canvas — and Enter→Look (openLook with
+    // fromSearch) closes search without passing through closeSearch, so
+    // the reset has to live HERE, on open, to cover every close path.
+    this.query = "";
+    this.chips = [];
+    this.results = null;
     this.searchFocus = -1;
     this.searchSel = sel.EMPTY;
     await this.reportScope();
