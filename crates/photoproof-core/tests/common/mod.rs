@@ -68,7 +68,7 @@ pub fn d_remark(text: &str, targets: Vec<ContentHash>) -> EventDraft {
 pub fn d_voice(text: &str, targets: Vec<ContentHash>, linked: Option<EventId>) -> EventDraft {
     EventDraft::Remark {
         source: RemarkSource::Voice {
-            conf_pm: 912,
+            conf_pm: Some(912),
             dur_ms: 4210,
             linked_event: linked,
         },
@@ -171,7 +171,7 @@ impl Gen {
         e.targets = targets;
         e.text = Some(text.into());
         e.payload = Some(Payload::Voice {
-            conf_pm: 900,
+            conf_pm: Some(900),
             dur_ms: 1500,
         });
         e

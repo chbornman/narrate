@@ -93,9 +93,15 @@ pub(crate) fn payload_canonical_json(p: &Payload) -> String {
 fn write_payload(out: &mut Vec<u8>, p: &Payload) {
     match p {
         Payload::Voice { conf_pm, dur_ms } => {
-            out.extend_from_slice(b"{\"conf_pm\":");
-            out.extend_from_slice(conf_pm.to_string().as_bytes());
-            out.extend_from_slice(b",\"dur_ms\":");
+            // conf_pm is optional (CAPTURE §6.5): omitted entirely when the
+            // model exposes no token log-probs (§4.1 rule 6 — never null).
+            out.push(b'{');
+            if let Some(conf_pm) = conf_pm {
+                out.extend_from_slice(b"\"conf_pm\":");
+                out.extend_from_slice(conf_pm.to_string().as_bytes());
+                out.push(b',');
+            }
+            out.extend_from_slice(b"\"dur_ms\":");
             out.extend_from_slice(dur_ms.to_string().as_bytes());
             out.push(b'}');
         }
@@ -271,11 +277,20 @@ pub(crate) fn parse_payload_value(kind: Kind, source: Source, v: &Value) -> PRes
     match (kind, source) {
         (Kind::Remark, Source::Voice) => {
             expect_keys(obj, &["conf_pm", "dur_ms"])?;
-            let conf_pm = req_int(obj, "conf_pm")?;
+            // conf_pm optional (CAPTURE §6.5); dur_ms required.
+            let conf_pm = match obj.get("conf_pm") {
+                None => None,
+                Some(v) => {
+                    let n = int_of(v, "conf_pm")?;
+                    Some(
+                        u16::try_from(n)
+                            .map_err(|_| CanonicalParseError::Invalid("conf_pm", n.to_string()))?,
+                    )
+                }
+            };
             let dur_ms = req_int(obj, "dur_ms")?;
             Ok(Payload::Voice {
-                conf_pm: u16::try_from(conf_pm)
-                    .map_err(|_| CanonicalParseError::Invalid("conf_pm", conf_pm.to_string()))?,
+                conf_pm,
                 dur_ms: u32::try_from(dur_ms)
                     .map_err(|_| CanonicalParseError::Invalid("dur_ms", dur_ms.to_string()))?,
             })

@@ -145,7 +145,9 @@ pub enum EventDraft {
 #[derive(Debug, Clone)]
 pub enum RemarkSource {
     Voice {
-        conf_pm: u16,
+        /// Optional per CAPTURE §6.5: omitted when the model exposes no
+        /// token log-probs.
+        conf_pm: Option<u16>,
         dur_ms: u32,
         /// Backward link to an earlier stroke (X2).
         linked_event: Option<EventId>,
@@ -308,6 +310,14 @@ impl EventStore {
     /// Monotonic ULID + UTC ts, for pre-allocation at capture onset (§1.2).
     pub fn mint(&self) -> Minted {
         self.minter.mint()
+    }
+
+    /// [`EventStore::mint`] against a caller-supplied wall clock — CAPTURE's
+    /// Clock seam mints utterance ids at VAD onset through THE SAME minter,
+    /// so process-wide ULID monotonicity (I14) holds across capture-minted
+    /// and store-minted ids.
+    pub fn mint_at(&self, now: UtcMillis) -> Minted {
+        self.minter.mint_at(now)
     }
 
     fn with_reader<T>(
@@ -826,6 +836,75 @@ impl EventStore {
                 out.push(get_session(conn, &sid)?.expect("row just selected"));
             }
             Ok(out)
+        })
+    }
+
+    // -- capture session bookkeeping (CAPTURE §2.3–2.5) ------------------------
+    //
+    // `(closed_clean, close_processing_done)` live in `capture_session_state`,
+    // a capture-owned, index-only bookkeeping table (never in sidecars; the
+    // EVENTS §5.2 `sessions` table stays exactly the spec's shape, so merge
+    // semantics are untouched).
+
+    /// Record a session's close bookkeeping (CAPTURE §2.3): `closed_clean`,
+    /// with close processing pending. Idempotent: re-recording keeps the
+    /// first `closed_clean` verdict and never resets a completed
+    /// close-processing run (recovery may race a clean close).
+    pub fn record_session_close(
+        &self,
+        id: &SessionId,
+        closed_clean: bool,
+    ) -> Result<(), StoreError> {
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        w.prepare_cached(
+            "INSERT INTO capture_session_state (session_id, closed_clean, close_processing_done) \
+             VALUES (?1, ?2, 0) ON CONFLICT(session_id) DO NOTHING",
+        )?
+        .execute(params![id.as_str(), closed_clean as i64])?;
+        Ok(())
+    }
+
+    /// Mark a closed session's close processing complete (§2.5 step 3
+    /// bookkeeping; processors are idempotent and resumable).
+    pub fn mark_close_processing_done(&self, id: &SessionId) -> Result<(), StoreError> {
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        w.prepare_cached(
+            "UPDATE capture_session_state SET close_processing_done = 1 WHERE session_id = ?1",
+        )?
+        .execute([id.as_str()])?;
+        Ok(())
+    }
+
+    /// Closed sessions whose close processing has not completed, ascending
+    /// id — re-enqueued on next launch (§2.5: `close_processing_done =
+    /// false` survives a quit-before-done).
+    pub fn close_processing_pending(&self) -> Result<Vec<SessionId>, StoreError> {
+        self.with_reader(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT session_id FROM capture_session_state \
+                 WHERE close_processing_done = 0 ORDER BY session_id",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(SessionId::from_str_strict(&row?).map_err(corrupt)?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// `(closed_clean, close_processing_done)` for one session, if recorded.
+    pub fn session_close_state(&self, id: &SessionId) -> Result<Option<(bool, bool)>, StoreError> {
+        self.with_reader(|conn| {
+            Ok(conn
+                .prepare_cached(
+                    "SELECT closed_clean, close_processing_done \
+                     FROM capture_session_state WHERE session_id = ?1",
+                )?
+                .query_row([id.as_str()], |r| {
+                    Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0))
+                })
+                .optional()?)
         })
     }
 

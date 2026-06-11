@@ -34,6 +34,9 @@
         ui.surface === "look" && ui.look.order.length > 0
           ? { index: ui.look.index, total: ui.look.order.length }
           : null,
+      // §5.4: a still-streaming utterance bound to an earlier scope
+      // tethers the scope segment until finalization.
+      streaming: ui.shell.streamingSegment(),
       ctx: ui.actionContext(),
     }),
   );
@@ -113,10 +116,16 @@
     {/if}
     <button class="zone note-btn" onclick={() => ui.summonNote()} aria-label="Write a note">
       {#each restSegs as seg (seg.id)}
-        <span class="segment" title={seg.title}>{seg.text}</span>
+        <!-- mic glyph (CAPTURE §6.4/§11 via modes.ts): dim = off/degraded,
+             live = the quiet breathing affordance while speech is detected;
+             the title is the §7.3 one-line hover copy -->
+        <span
+          class="segment"
+          class:dim={seg.tone === "dim"}
+          class:live={seg.tone === "live"}
+          title={seg.title}>{seg.text}</span
+        >
       {/each}
-      <!-- mic glyph absent until ASR is ready (P4.2: never) — its seat is
-           reserved by segments.ts ordering -->
     </button>
   </div>
 </div>
@@ -174,6 +183,23 @@
   .segment.scope.pulsing {
     color: var(--text);
     text-shadow: 0 0 6px var(--text-dim);
+  }
+  .segment.dim {
+    color: var(--text-faint);
+  }
+  /* The §7.3 "faint slow breathing" while VAD detects speech — opacity
+   * only, token colors untouched, nothing moves. */
+  .segment.live {
+    animation: mic-breathe 2.4s ease-in-out infinite;
+  }
+  @keyframes mic-breathe {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
   }
   .hairline {
     position: absolute;

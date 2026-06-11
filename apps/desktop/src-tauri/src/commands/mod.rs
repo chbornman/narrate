@@ -33,9 +33,12 @@ pub(crate) fn emit_pulse(handle: &AppHandle, event_kind: &'static str) {
 
 pub(crate) fn indicator(app: &App) -> IndicatorState {
     IndicatorState {
-        current_scope: app.scope.lock().expect("scope mutex").current().view(),
-        // M1: no ASR, no voice pipeline. The mic glyph is absent until ASR is
-        // ready (UI §7.3); these fields are the P6.x seam.
+        current_scope: app.scope.lock().expect("scope mutex").current_view(),
+        // No live voice pipeline in the shell yet: the core capture engine
+        // (P6.1, mock-verified) reports these through its §11
+        // `IndicatorState`; the shell maps them once P6.2's supervised ASR
+        // client is wired. Until then: mic disarmed, ASR unavailable —
+        // the mic glyph stays absent (UI §7.3).
         mic: "disarmed",
         streaming_utterance: None,
         degraded: DegradedFlags {

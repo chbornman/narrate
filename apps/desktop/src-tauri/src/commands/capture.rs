@@ -4,7 +4,7 @@
 
 use photoproof_core::{
     ContentHash, EventDraft, EventId, EventStore, RemarkSource, SessionId, StrokePayload,
-    StrokePoint, Tool, UtcMillis,
+    StrokePoint, Tool,
 };
 use tauri::{AppHandle, Emitter};
 
@@ -23,7 +23,7 @@ pub fn set_scope(app: S<'_>, handle: AppHandle, targets: Vec<String>) -> CmdResu
     let hashes = hashes.map_err(|e| CmdError::Invalid(format!("bad target hash: {e}")))?;
     let view = {
         let mut scope = app.scope.lock().expect("scope mutex");
-        scope.set(hashes, UtcMillis::now()).view()
+        scope.set(hashes)
     };
     let _ = handle.emit("indicator-state", indicator(&app));
     Ok(view)

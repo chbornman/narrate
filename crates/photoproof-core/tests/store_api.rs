@@ -299,7 +299,7 @@ fn linked_event_resolves_in_both_directions() {
             &ts.session,
             EventDraft::Remark {
                 source: RemarkSource::Voice {
-                    conf_pm: 950,
+                    conf_pm: Some(950),
                     dur_ms: 900,
                     linked_event: Some(s2.id.clone()),
                 },
@@ -369,7 +369,7 @@ fn append_and_redact_rejections() {
             &ts.session,
             EventDraft::Remark {
                 source: RemarkSource::Voice {
-                    conf_pm: 1001,
+                    conf_pm: Some(1001),
                     dur_ms: 10,
                     linked_event: None
                 },

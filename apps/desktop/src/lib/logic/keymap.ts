@@ -144,6 +144,8 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   overlayVisible: true, // tracing paper defaults ON (UI §4.4)
   pencilUndoable: false,
   micArmed: false,
+  micState: "disarmed",
+  asrUnavailable: true, // no ASR until P6.2 reports readiness
 };
 
 export function withDefaults(ctx: KeyContext): ActionContext {

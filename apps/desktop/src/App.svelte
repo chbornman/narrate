@@ -120,7 +120,7 @@
           ui.look.strokesVersion += 1;
       }),
       listen<IndicatorState>("indicator-state", (e) => {
-        ui.shell.onScopeEcho(e.payload.currentScope);
+        ui.shell.onIndicatorState(e.payload);
       }),
       listen<IngestStatus>("ingest-progress", (e) => {
         ui.shell.ingest = e.payload;

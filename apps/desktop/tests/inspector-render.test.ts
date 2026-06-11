@@ -183,6 +183,40 @@ describe("JournalEntry hover actions (UI §8.3)", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
+  it("linked rows carry the subtle link mark on both partners (P6.1, UI §8.2)", () => {
+    // The voice remark carries the stored backward pointer …
+    render(JournalEntry, {
+      entry: entry("01B", { linkedEvent: "01A" }),
+      onaction: () => {},
+      oncorrect: () => {},
+    });
+    expect(screen.getByTitle("Linked — drawn and spoken together")).toBeTruthy();
+
+    // … and the earlier stroke shows the resolved incoming link too
+    // (the backend traverses the one-way pointer in both directions).
+    document.body.innerHTML = "";
+    render(JournalEntry, {
+      entry: entry("01A", {
+        kind: "stroke",
+        text: null,
+        linkedEvent: "01B",
+        stroke: { baseW: 40, orientation: 1, points: [[100, 100, 1000, 0]] },
+      }),
+      onaction: () => {},
+      oncorrect: () => {},
+    });
+    expect(screen.getByTitle("Linked — drawn and spoken together")).toBeTruthy();
+
+    // Unlinked rows show no mark — silence while marking is common.
+    document.body.innerHTML = "";
+    render(JournalEntry, {
+      entry: entry("01C"),
+      onaction: () => {},
+      oncorrect: () => {},
+    });
+    expect(screen.queryByTitle("Linked — drawn and spoken together")).toBeNull();
+  });
+
   it("editing renders a textarea seeded with the folded text; Enter commits", async () => {
     const corrected: [string, string][] = [];
     render(JournalEntry, {

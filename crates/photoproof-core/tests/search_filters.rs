@@ -79,7 +79,7 @@ impl Fixture {
                 &self.session,
                 EventDraft::Remark {
                     source: RemarkSource::Voice {
-                        conf_pm: 900,
+                        conf_pm: Some(900),
                         dur_ms: 800,
                         linked_event: None,
                     },

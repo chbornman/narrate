@@ -55,12 +55,12 @@ impl App {
 
         // CAPTURE §2.4 crash recovery, before opening the launch session:
         // any session left open by a dead process closes at its last event's
-        // ts (else its start), `closed_clean = false` semantics are the
-        // store's. Recovery mints no events.
-        for rec in store.open_sessions()? {
-            let ended = store.last_event_ts(&rec.id)?.unwrap_or(rec.started_ts);
-            store.close_session(&rec.id, ended)?;
-        }
+        // ts (else its start) with `closed_clean = false`, and close
+        // processing is enqueued ONCE. Recovery mints no events. The empty
+        // P6.1 processor registry then drains the pending queue (idempotent;
+        // M3 registers the real processors).
+        photoproof_core::capture::recover_crashed_sessions(&store)?;
+        photoproof_core::capture::CloseProcessing::new().run_pending(&store)?;
 
         let ctx = SessionContext {
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -88,10 +88,11 @@ impl App {
     }
 
     /// Activity touch (CAPTURE §2.1/§2.2): refreshes the idle timer, rotating
-    /// the session across a 30-minute boundary.
+    /// the session across a 30-minute boundary (idle measured on the
+    /// monotonic capture clock; `ended_at` = the last activity's wall time).
     pub fn touch(&self) -> Result<(), CmdError> {
         let mut session = self.session.lock().expect("session mutex");
-        session.touch(&self.store, UtcMillis::now())?;
+        session.touch(&self.store, &mut EngineFlush { app: self })?;
         Ok(())
     }
 
@@ -99,9 +100,11 @@ impl App {
         self.session.lock().expect("session mutex").id().clone()
     }
 
-    /// Shutdown (CAPTURE §2.5 steps for M1): close the session, then flush
-    /// every pending sidecar immediately (SIDECARS S3: immediate flush on
-    /// shutdown), including the closing session's journal.
+    /// Shutdown (CAPTURE §2.5): close the session through the core engine
+    /// (capture drain — none attached until P6.2 — then sidecar flush, then
+    /// bookkeeping + the empty close-processor registry), and re-flush the
+    /// session journal afterwards so the sidecar carries `ended_ts`
+    /// (SIDECARS S3: immediate flush on shutdown).
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -112,16 +115,30 @@ impl App {
             .session
             .lock()
             .expect("session mutex")
-            .close(&self.store)
+            .close(&self.store, &mut EngineFlush { app: self })
         {
             eprintln!("photoproof: session close failed at shutdown: {e}");
         }
-        let now = UtcMillis::now();
-        if let Err(e) = self.engine.flush_all(now) {
-            eprintln!("photoproof: sidecar flush failed at shutdown: {e}");
-        }
         if let Err(e) = self.engine.flush_session(&session_id) {
             eprintln!("photoproof: session journal flush failed at shutdown: {e}");
+        }
+    }
+}
+
+/// The §2.5 step-2 hook: flush pending sidecars (and the closing session's
+/// journal) when a session closes — rotation and shutdown alike.
+struct EngineFlush<'a> {
+    app: &'a App,
+}
+
+impl photoproof_core::capture::SidecarFlush for EngineFlush<'_> {
+    fn flush_for_close(&mut self, closing: &SessionId) {
+        let now = UtcMillis::now();
+        if let Err(e) = self.app.engine.flush_all(now) {
+            eprintln!("photoproof: sidecar flush at session close failed: {e}");
+        }
+        if let Err(e) = self.app.engine.flush_session(closing) {
+            eprintln!("photoproof: session journal flush at session close failed: {e}");
         }
     }
 }

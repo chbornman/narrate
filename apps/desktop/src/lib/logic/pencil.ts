@@ -109,30 +109,40 @@ export function penMove(state: PenState, s: PenSample, f: PenFrame): void {
 }
 
 /**
- * Pen-up: apply the §8.4 threshold, quantize, and produce the wire
- * payload — or null for a discarded accident. Duration is pen-down →
- * pen-UP (a deliberate press-and-hold DOT commits even with one sample);
- * the event's ts is minted at append (pen-up) time by the backend, so
+ * Pen-up: record the pointer-up sample as the stroke's FINAL stored
+ * sample — EXEMPT from jitter dedupe (B41, founder-resolved): `ts −
+ * t_last` is then exactly pen-down → pen-up, the §9.1 span math's input.
+ * Then apply the §8.4 threshold, quantize, and produce the wire payload —
+ * or null for a discarded accident. Duration is pen-down → pen-UP (a
+ * deliberate press-and-hold DOT commits even with one sample); the
+ * event's ts is minted at append (pen-up) time by the backend, so
  * pen-down = ts − t_last (X1).
+ *
+ * `state` is not mutated: the terminal sample lands on a copy (Ctrl+Z
+ * racing pen-up keeps a truthful in-flight buffer).
  */
 export function penUp(
   state: PenState,
   orientation: number,
-  upTimeMs: number,
+  up: PenSample,
+  f: PenFrame,
 ): StrokePayloadWire | null {
-  const norms = state.points.map((pt) => pt.n);
-  const durationMs = Math.max(
-    state.points[state.points.length - 1].t,
-    Math.round(upTimeMs - state.downAtMs),
-  );
+  const prevT = state.points[state.points.length - 1].t;
+  const tUp = Math.max(prevT, Math.round(up.timeMs - state.downAtMs));
+  let points = [...state.points, toPenPoint(up, f, tUp)];
+  // The terminal sample counts against the 8192 bound (B40's overflow
+  // policy applies unchanged: decimate, never truncate the tail).
+  if (points.length > MAX_POINTS) points = decimate(points);
+  const norms = points.map((pt) => pt.n);
+  const durationMs = tUp;
   if (!shouldCommit(pathLengthLE(norms, state.image), durationMs)) return null;
-  const points: StrokeWirePoint[] = state.points.map((pt) => [
+  const wire: StrokeWirePoint[] = points.map((pt) => [
     quantizeCoord(pt.n.x),
     quantizeCoord(pt.n.y),
     pt.p,
     pt.t,
   ]);
-  return { baseW: BASE_W_DEFAULT, orientation, points, tool: "pencil" };
+  return { baseW: BASE_W_DEFAULT, orientation, points: wire, tool: "pencil" };
 }
 
 /** Live screen-space preview of the in-flight stroke under the CURRENT

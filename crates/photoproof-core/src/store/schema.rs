@@ -363,6 +363,24 @@ CREATE INDEX idx_events_linked ON annotation_events(linked_event)
   WHERE linked_event IS NOT NULL;
 "#;
 
+/// Migration slot pre-allocated to packet P6.1 (spec/CAPTURE.md §2.3
+/// session bookkeeping). Only P6.1 edits this constant.
+const CAPTURE_SCHEMA_SQL: &str = r#"
+-- CAPTURE §2.3: the rebuildable session bookkeeping pair (closed_clean,
+-- close_processing_done). A separate capture-owned table — NOT columns on
+-- `sessions` — so the EVENTS §5.2 truth shape and §8 merge semantics stay
+-- untouched. Index-only, never in sidecars; absence of a row simply means
+-- "no close recorded by this process" (pre-P6.1 closes, foreign rows).
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test) and the table is version-independent state.
+CREATE TABLE IF NOT EXISTS capture_session_state (
+  session_id             TEXT PRIMARY KEY CHECK (length(session_id) = 26),
+  closed_clean           INTEGER NOT NULL CHECK (closed_clean IN (0, 1)),
+  close_processing_done  INTEGER NOT NULL DEFAULT 0
+                           CHECK (close_processing_done IN (0, 1))
+) STRICT, WITHOUT ROWID;
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -403,6 +421,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
             )?;
         }
         run_pragma(conn, "PRAGMA user_version = 5")?;
+    }
+    if version < 6 {
+        conn.execute_batch(CAPTURE_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 6")?;
     }
     Ok(version)
 }

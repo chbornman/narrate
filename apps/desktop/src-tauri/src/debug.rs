@@ -86,7 +86,9 @@ pub struct DebugScopeSnapshot {
 }
 
 /// Capture tab (M1 slice): the write-scope snapshot ring (CAPTURE §3.1).
-/// VAD/binding entries arrive with P6.1.
+/// VAD/binding/link entries exist on the core capture engine's debug-note
+/// feed (P6.1, `CaptureEngine::debug_notes`); they render here once P6.2
+/// wires a live engine into the shell.
 #[tauri::command]
 pub fn debug_capture(app: S<'_>) -> Vec<DebugScopeSnapshot> {
     let scope = app.scope.lock().expect("scope mutex");

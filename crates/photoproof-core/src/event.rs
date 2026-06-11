@@ -134,8 +134,11 @@ pub struct StrokePayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payload {
     /// Voice remark: per-segment ASR confidence (per-mille) + duration.
+    /// `conf_pm` is OPTIONAL — omitted entirely when the model exposes no
+    /// token log-probs (CAPTURE §6.5/§7; EVENTS §4.1 rule 6: absent
+    /// optional fields are omitted, never null).
     Voice {
-        conf_pm: u16,
+        conf_pm: Option<u16>,
         dur_ms: u32,
     },
     /// Rating value 0..=5 (`0` = explicit zero, distinct from never-rated).
@@ -271,12 +274,12 @@ impl Event {
                 }
                 match (self.source, &self.payload) {
                     (Source::Voice, Some(Payload::Voice { conf_pm, .. })) => {
-                        if *conf_pm > 1000 {
+                        if conf_pm.is_some_and(|c| c > 1000) {
                             return fail("conf_pm must be 0..=1000");
                         }
                     }
                     (Source::Voice, _) => {
-                        return fail("voice remark requires {conf_pm, dur_ms} payload");
+                        return fail("voice remark requires {conf_pm?, dur_ms} payload");
                     }
                     (Source::Typed, None) => {}
                     (Source::Typed, Some(_)) => return fail("typed remark carries no payload"),

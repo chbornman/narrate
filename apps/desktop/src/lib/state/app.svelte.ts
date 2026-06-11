@@ -601,7 +601,9 @@ export class Ui {
       pencilMode: this.look.pencilMode,
       overlayVisible: this.look.overlayVisible,
       pencilUndoable: this.look.penDown || this.look.undoStack.length > 0,
-      micArmed: false, // reserved (M2b)
+      micArmed: this.shell.mic === "armedIdle" || this.shell.mic === "armedSpeaking",
+      micState: this.shell.mic,
+      asrUnavailable: this.shell.asrUnavailable,
     };
   }
 

@@ -72,7 +72,7 @@ fn vector_b_remark_event() -> Event {
     e.targets = vec![h(IMAGE_A)];
     e.text = Some("keep this one it has that muddy light I keep chasing".into());
     e.payload = Some(Payload::Voice {
-        conf_pm: 912,
+        conf_pm: Some(912),
         dur_ms: 4210,
     });
     e
@@ -165,6 +165,23 @@ fn spec_4_3_vector_a_typed_remark_two_targets() {
 #[test]
 fn spec_4_3_vector_b_voice_remark() {
     assert_vector(vector_b_remark_event(), VECTOR_B_REMARK);
+}
+
+/// CAPTURE §6.5: `conf_pm` is optional — omitted entirely (never null)
+/// when the model exposes no token log-probs. The omitted form is itself
+/// canonical and round-trips byte-exactly.
+#[test]
+fn voice_remark_without_confidence_omits_conf_pm_entirely() {
+    let mut e = vector_b_remark_event();
+    e.payload = Some(Payload::Voice {
+        conf_pm: None,
+        dur_ms: 4210,
+    });
+    let literal = VECTOR_B_REMARK.replace("{\"conf_pm\":912,\"dur_ms\":4210}", "{\"dur_ms\":4210}");
+    assert_vector(e, &literal);
+    // A null conf_pm is rejected (rule 6: absent fields are omitted).
+    let null_conf = VECTOR_B_REMARK.replace("\"conf_pm\":912", "\"conf_pm\":null");
+    assert!(parse_canonical(null_conf.as_bytes()).is_err());
 }
 
 #[test]

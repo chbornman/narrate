@@ -146,7 +146,13 @@
 
   function onPointerUp(e: PointerEvent) {
     if (pen === null) return;
-    const payload = penUp(pen, displayOrientation, e.timeStamp);
+    if (t === null) {
+      discardPen(); // transform lost mid-stroke: nothing truthful to commit
+      return;
+    }
+    // B41: the pointer-up position/time is the stroke's final stored
+    // sample (dedupe-exempt) — ts − t_last becomes the exact pen span.
+    const payload = penUp(pen, displayOrientation, sampleOf(e), { t, image });
     discardPen();
     if (payload !== null) void ui.commitStroke(payload); // pulse rides the backend
   }

@@ -527,7 +527,7 @@ fn quote_resolves_linked_stroke_in_both_directions() {
             &fx.session,
             EventDraft::Remark {
                 source: RemarkSource::Voice {
-                    conf_pm: 950,
+                    conf_pm: Some(950),
                     dur_ms: 1200,
                     linked_event: Some(stroke1.id.clone()),
                 },

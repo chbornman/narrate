@@ -77,9 +77,22 @@ export interface ActionContext {
   /** Ctrl+Z has pencil work: a pen-down to cancel or a stacked stroke to
    * retract — otherwise the pencil layer must not swallow the chord. */
   pencilUndoable: boolean;
-  // reserved (always falsy until M2b)
+  // mic (CAPTURE §6.4/§11 — P6.1 renders the contract; live values arrive
+  // with P6.2's supervised runtime, "disarmed"/unavailable until then)
   micArmed: boolean;
+  /** The §6.4 mic state machine, exactly the indicator contract's enum. */
+  micState: MicState;
+  /** §11 degraded flag: ASR down/absent — the muted-mic glyph, quietly. */
+  asrUnavailable: boolean;
 }
+
+/** CAPTURE §6.4 mic states, as the wire spells them (types/dto.ts twin). */
+export type MicState =
+  | "disarmed"
+  | "arming"
+  | "armedIdle"
+  | "armedSpeaking"
+  | "disarmedError";
 
 export interface ActionDef {
   /** Ties the registry to the Action union. UNIQUE per (id, scope). */
@@ -114,9 +127,13 @@ export interface ActionDef {
 }
 
 /** "Modes are visible" (featureset §0) — by construction: every sticky
- * state is a ModeDef whose segment renders in the indicator. */
+ * state is a ModeDef whose segment renders in the indicator. `tone` is
+ * the quiet rendering hint (UI §7.3): dimmed glyphs for off/degraded
+ * states, the breathing affordance while speech is detected. */
 export interface ModeDef {
   id: "auto-advance" | "pencil" | "mic"; // M2a/M2b ids reserved now
   isOn(ctx: ActionContext): boolean;
-  segment(ctx: ActionContext): { text: string; title: string } | null;
+  segment(ctx: ActionContext): { text: string; title: string; tone?: SegmentTone } | null;
 }
+
+export type SegmentTone = "dim" | "live";

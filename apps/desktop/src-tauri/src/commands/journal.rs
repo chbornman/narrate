@@ -19,7 +19,7 @@
 //!   adjacent rewrite, EVENTS §7 / SIDECARS §11) → RedactReportDto with the
 //!   offline-pending volume labels for the §8.4 toast copy.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -70,6 +70,24 @@ fn stroke_dto(p: &StrokePayload) -> StrokeDto {
             })
             .collect(),
     }
+}
+
+/// Stroke↔utterance link partners in BOTH directions (EVENTS §3.3, X2:
+/// the stored pointer is one-way on the later-committed event; "linked"
+/// is symmetric and the journal rows must show the mark on both partners).
+/// Multiple incoming links keep the first (lowest-id) partner, matching
+/// the store fold's reverse resolution.
+fn link_partners(events: &BTreeMap<EventId, Event>) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for e in events.values() {
+        if let Some(l) = &e.linked_event {
+            out.entry(e.id.as_str().to_owned())
+                .or_insert_with(|| l.as_str().to_owned());
+            out.entry(l.as_str().to_owned())
+                .or_insert_with(|| e.id.as_str().to_owned());
+        }
+    }
+    out
 }
 
 /// `retracted(id)` := ∃ retraction targeting id (retractions are never
@@ -295,6 +313,15 @@ pub(crate) fn journal_entries(
     for e in by_id.values() {
         if e.kind.is_content() && retracted.contains(&e.id) && e.targets.contains(image) {
             rows.push(retracted_row(&by_id, &retracted, e));
+        }
+    }
+    // Links traverse both directions onto the rows (subtle link mark, UI
+    // §8.2): a voice remark's own backward pointer AND the reverse hop a
+    // later partner stored. Scrubbed stubs never carry the mark.
+    let links = link_partners(&by_id);
+    for row in &mut rows {
+        if matches!(row.kind, "remark" | "stroke") && row.linked_event.is_none() {
+            row.linked_event = links.get(&row.id).cloned();
         }
     }
     rows.sort_by(|a, b| a.id.cmp(&b.id));
@@ -861,6 +888,68 @@ mod tests {
         let stub = rows.iter().find(|r| r.id == live.as_str()).unwrap();
         assert_eq!(stub.kind, "redacted");
         assert!(stub.stroke.is_none());
+    }
+
+    /// CAPTURE §9.2 / EVENTS §3.3: the link lives on the LATER-committed
+    /// event (here a voice remark pointing back at a stroke), and journal
+    /// rows surface the mark on BOTH partners.
+    #[test]
+    fn linked_rows_carry_the_mark_in_both_directions() {
+        use photoproof_core::{StrokePayload, StrokePoint, Tool};
+        let (_tmp, store, session, hash) = store_fixture();
+        let stroke = store
+            .append(
+                &session,
+                EventDraft::Stroke {
+                    payload: StrokePayload {
+                        base_w: 40,
+                        orientation: 1,
+                        points: vec![StrokePoint {
+                            x: 10,
+                            y: 10,
+                            p: 1000,
+                            t: 0,
+                        }],
+                        tool: Tool::Pencil,
+                    },
+                    target: hash.clone(),
+                    linked_event: None,
+                },
+                None,
+            )
+            .unwrap()
+            .id;
+        let voice = store
+            .append(
+                &session,
+                EventDraft::Remark {
+                    source: RemarkSource::Voice {
+                        conf_pm: None, // optional per CAPTURE §6.5
+                        dur_ms: 1200,
+                        linked_event: Some(stroke.clone()),
+                    },
+                    text: "circle that hand".into(),
+                    targets: vec![hash.clone()],
+                },
+                None,
+            )
+            .unwrap()
+            .id;
+        let rows = journal_entries(&store, &hash).unwrap();
+        assert_eq!(rows.len(), 2);
+        let stroke_row = rows.iter().find(|r| r.id == stroke.as_str()).unwrap();
+        let voice_row = rows.iter().find(|r| r.id == voice.as_str()).unwrap();
+        assert_eq!(
+            voice_row.linked_event.as_deref(),
+            Some(stroke.as_str()),
+            "the later-committed remark carries its stored pointer"
+        );
+        assert_eq!(
+            stroke_row.linked_event.as_deref(),
+            Some(voice.as_str()),
+            "the earlier stroke resolves the incoming link (both directions)"
+        );
+        assert_eq!(voice_row.source, "voice");
     }
 
     #[test]

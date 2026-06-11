@@ -26,6 +26,9 @@ rawler = "0.7.2"
 qcms = "0.3.0"
 fastrand = "2.4.1"
 libc = "0.2.186"
+# --- capture deps (owned by packet P6.1; append below this line only) ---
+photoproof-connectors = { path = "../photoproof-connectors" }
+futures-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

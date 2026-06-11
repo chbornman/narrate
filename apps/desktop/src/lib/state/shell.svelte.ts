@@ -7,7 +7,7 @@
  */
 import * as note from "../logic/note";
 import type { MenuSurface } from "../actions/menus";
-import type { IngestStatus, ScopeView } from "../types/dto";
+import type { IndicatorState, IngestStatus, ScopeView } from "../types/dto";
 import type { SurroundLevel } from "../theme/surround";
 import * as prefs from "./prefs";
 
@@ -51,6 +51,12 @@ export class ShellSlice {
   // -- capture echo ------------------------------------------------------------
   note = $state<note.NoteState>(note.CLOSED);
   scope = $state<ScopeView>(SESSION_SCOPE);
+  /** CAPTURE §11 mic state (rendered by the mic mode segment); the shell
+   * reports "disarmed"/unavailable until P6.2 wires the live engine. */
+  mic = $state<IndicatorState["mic"]>("disarmed");
+  /** §5.4: a still-streaming utterance's bound scope (tether rendering). */
+  streamingUtterance = $state<IndicatorState["streamingUtterance"]>(null);
+  asrUnavailable = $state(true);
   /** Monotonic pulse counter; the indicator animates on change (UI §7.4). */
   pulseCount = $state(0);
   lastPulseAt = 0;
@@ -104,6 +110,29 @@ export class ShellSlice {
   onScopeEcho(view: ScopeView) {
     this.scope = view;
     this.note = note.onScopeChanged(this.note, view);
+  }
+
+  /** The full CAPTURE §11 contract: scope + mic + streaming + degraded.
+   * No text content ever rides this channel. */
+  onIndicatorState(state: IndicatorState) {
+    this.onScopeEcho(state.currentScope);
+    this.mic = state.mic;
+    this.streamingUtterance = state.streamingUtterance;
+    this.asrUnavailable = state.degraded.asrUnavailable;
+  }
+
+  /** §5.4 tether input for logic/segments.ts: the bound scope, flagged
+   * when it differs from the live selection (full preview-list compare —
+   * two different single images must still tether). */
+  streamingSegment(): { kind: string; count: number; differs: boolean } | null {
+    const s = this.streamingUtterance;
+    if (s === null) return null;
+    const bound = s.boundScope;
+    const differs =
+      bound.kind !== this.scope.kind ||
+      bound.count !== this.scope.count ||
+      bound.previewHashes.join(",") !== this.scope.previewHashes.join(",");
+    return { kind: bound.kind, count: bound.count, differs };
   }
 
   /** Pulse coalescing: rapid events render distinct pulses, coalesced

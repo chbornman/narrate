@@ -70,6 +70,11 @@
     {:else}
       <span class="text dim">[stroke]</span>
     {/if}
+    {#if entry.linkedEvent !== null}
+      <!-- the subtle link mark (UI §8.2): drawn while speaking — the
+           backend resolves the one-way pointer in BOTH directions -->
+      <span class="linked" title="Linked — drawn and spoken together">⇠ linked</span>
+    {/if}
   {:else if editing}
     <!-- svelte-ignore a11y_autofocus — the edit is user-summoned -->
     <textarea
@@ -82,7 +87,11 @@
     ></textarea>
   {:else}
     <span class="body">
-      <span class="text">“{entry.text}”</span>
+      <span class="text"
+        >“{entry.text}”{#if entry.linkedEvent !== null}
+          <span class="linked" title="Linked — drawn and spoken together">⇠ linked</span
+          >{/if}</span
+      >
       {#if entry.corrected}
         <button
           class="edited"
@@ -174,6 +183,13 @@
   .redacted {
     color: var(--text-faint);
     font-style: italic;
+  }
+  /* The subtle link mark (UI §8.2) — quiet, achromatic. */
+  .linked {
+    color: var(--text-faint);
+    font-size: 11px;
+    white-space: nowrap;
+    margin-left: 6px;
   }
   .edited {
     align-self: flex-start;

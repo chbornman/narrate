@@ -11,7 +11,7 @@
  * Tab lights-out (coordinator ruling: the indicator is capture-state
  * truth; future mic evidence lives there — it never hides).
  */
-import type { ActionContext, ModeDef } from "../actions/types";
+import type { ActionContext, ModeDef, SegmentTone } from "../actions/types";
 import { MODES } from "../actions/modes";
 import { scopeLabel } from "./scope";
 
@@ -20,6 +20,11 @@ export interface SegmentInput {
   scope: { kind: string; count: number };
   /** 0-based position within the Look navigation set; null outside Look. */
   lookPosition: { index: number; total: number } | null;
+  /** CAPTURE §5.4/§11: an in-flight utterance's BOUND scope. `differs` =
+   * bound ≠ current selection (the caller compares full target lists);
+   * only then does the tether render — "selection is now B, but what
+   * you're saying lands on A". Optional: absent before M2b wiring. */
+  streaming?: { kind: string; count: number; differs: boolean } | null;
   ctx: ActionContext;
 }
 
@@ -36,6 +41,8 @@ export interface Segment {
   pulse?: boolean;
   /** Ingest hairline fill, 0..1. */
   fraction?: number;
+  /** Quiet rendering hint (UI §7.3): dimmed / breathing. */
+  tone?: SegmentTone;
 }
 
 export function segments(
@@ -58,16 +65,29 @@ export function segments(
   }
 
   // Scope: always present; `● 0` never renders — no selection is session
-  // scope (UI §7.2).
-  out.push({
-    id: "scope",
-    text: `● ${scopeLabel(input.scope.kind, input.scope.count)}`,
-    title:
-      input.scope.kind === "session"
-        ? "Words land on this session"
-        : `Speaking about ${input.scope.count}`,
-    pulse: true,
-  });
+  // scope (UI §7.2). While an utterance bound to a DIFFERENT scope is
+  // still streaming, the segment shows that bound scope with the tether
+  // (UI §7.3 `● 1 ⇠ 🎙`) and reverts at finalization; the indicator never
+  // re-binds anything itself (§5.4 — the distinction is mandatory).
+  const streaming = input.streaming ?? null;
+  if (streaming !== null && streaming.differs) {
+    out.push({
+      id: "scope",
+      text: `● ${scopeLabel(streaming.kind, streaming.count)} ⇠`,
+      title: `Words in flight land on the earlier selection — the live selection is ● ${scopeLabel(input.scope.kind, input.scope.count)}`,
+      pulse: true,
+    });
+  } else {
+    out.push({
+      id: "scope",
+      text: `● ${scopeLabel(input.scope.kind, input.scope.count)}`,
+      title:
+        input.scope.kind === "session"
+          ? "Words land on this session"
+          : `Speaking about ${input.scope.count}`,
+      pulse: true,
+    });
+  }
 
   if (input.lookPosition !== null && input.lookPosition.total > 0) {
     out.push({

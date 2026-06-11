@@ -82,7 +82,23 @@ function draw(
     if (state === null) state = penDown(sample, { t, image: preview });
     else penMove(state, sample, { t, image: preview });
   }
-  const payload = penUp(state!, orientation, 1000 + path[path.length - 1].t);
+  // B41: pen-up at the last sample's position/time — the terminal sample
+  // duplicates it (dedupe-exempt; one near-duplicate point per stroke).
+  const last = path[path.length - 1];
+  const img = { x: last.frac.x * preview.w, y: last.frac.y * preview.h };
+  const screen = stroke.imageToScreen(img, t);
+  const payload = penUp(
+    state!,
+    orientation,
+    {
+      x: screen.x,
+      y: screen.y,
+      pressure: last.pressure,
+      pointerType,
+      timeMs: 1000 + last.t,
+    },
+    { t, image: preview },
+  );
   expect(payload).not.toBeNull();
   return payload!;
 }
@@ -174,13 +190,16 @@ describe("CAPTURE §13.3 — stroke round-trip fidelity", () => {
     const state = penDown(samples[0], opts);
     penMove(state, samples[1], opts);
     penMove(state, samples[2], opts);
-    const payload = penUp(state, 1, 1100);
+    // B41: the pointer-up sample is stored as the terminal point, exempt
+    // from jitter dedupe — here a byte-for-byte duplicate of the last move.
+    const payload = penUp(state, 1, samples[2], opts);
     expect(payload).toEqual({
       baseW: stroke.BASE_W_DEFAULT,
       orientation: 1,
       points: [
         [2502, 2003, 500, 0],
         [5000, 4250, 500, 10],
+        [-2500, 8253, 500, 100],
         [-2500, 8253, 500, 100],
       ],
       tool: "pencil",
@@ -191,10 +210,12 @@ describe("CAPTURE §13.3 — stroke round-trip fidelity", () => {
     const t: ZoomTransform = { scale: 1, tx: 0, ty: 0 };
     const payload = draw(t, PREVIEW, "pen");
     const path = originalPath();
-    expect(payload.points.length).toBe(path.length); // samples >0.5px apart
+    // Samples >0.5px apart all survive, plus B41's terminal pen-up sample.
+    expect(payload.points.length).toBe(path.length + 1);
     for (const [i, [, , p, tMs]] of payload.points.entries()) {
-      expect(p).toBe(Math.round(path[i].pressure * 1000));
-      expect(tMs).toBe(path[i].t);
+      const j = Math.min(i, path.length - 1); // terminal duplicates the last
+      expect(p).toBe(Math.round(path[j].pressure * 1000));
+      expect(tMs).toBe(path[j].t);
     }
   });
 
@@ -209,21 +230,23 @@ describe("CAPTURE §13.3 — stroke round-trip fidelity", () => {
     // subject, §8.1) — quantization clamps, validation accepts.
     const t: ZoomTransform = { scale: 1, tx: 0, ty: 0 };
     let state: PenState | null = null;
+    let lastSample = { x: 0, y: 0, pressure: 0.5, pointerType: "mouse", timeMs: 0 };
     for (const [i, fx] of [-0.4, -0.1, 0.5, 1.1, 1.4].entries()) {
-      const sample = {
+      lastSample = {
         x: fx * PREVIEW.w,
         y: -0.3 * PREVIEW.h + i,
         pressure: 0.5,
         pointerType: "mouse",
         timeMs: 1000 + i * 20,
       };
-      if (state === null) state = penDown(sample, { t, image: PREVIEW });
-      else penMove(state, sample, { t, image: PREVIEW });
+      if (state === null) state = penDown(lastSample, { t, image: PREVIEW });
+      else penMove(state, lastSample, { t, image: PREVIEW });
     }
-    const payload = penUp(state!, 1, 1100)!;
+    const payload = penUp(state!, 1, { ...lastSample, timeMs: 1100 }, { t, image: PREVIEW })!;
     expect(stroke.validatePayload(payload)).toEqual([]);
     expect(payload.points[0][0]).toBe(-2500);
     expect(payload.points[4][0]).toBe(12500);
+    expect(payload.points[5][0]).toBe(12500); // B41 terminal sample, clamped too
     expect(payload.points.every((pt) => pt[1] === -2500)).toBe(true);
   });
 });
@@ -236,18 +259,15 @@ describe("CAPTURE §8.4 — commit threshold truth table", () => {
       { x: 100, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 1000 },
       { t, image: PREVIEW },
     );
-    penMove(
-      state,
-      {
-        x: 100 + spanPx,
-        y: 100,
-        pressure: 0.5,
-        pointerType: "mouse",
-        timeMs: 1000 + durationMs,
-      },
-      { t, image: PREVIEW },
-    );
-    return penUp(state, 1, 1000 + durationMs);
+    const end = {
+      x: 100 + spanPx,
+      y: 100,
+      pressure: 0.5,
+      pointerType: "mouse",
+      timeMs: 1000 + durationMs,
+    };
+    penMove(state, end, { t, image: PREVIEW });
+    return penUp(state, 1, end, { t, image: PREVIEW });
   }
 
   it("tiny AND brief → discarded (a fleeting accidental tap)", () => {
@@ -260,12 +280,16 @@ describe("CAPTURE §8.4 — commit threshold truth table", () => {
   });
 
   it("a held dot with NO movement at all commits (duration = pen-up time)", () => {
-    const state = penDown(
-      { x: 100, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 1000 },
-      { t, image: PREVIEW },
-    );
-    expect(penUp(state, 1, 1250)).not.toBeNull(); // held 250 ms
-    expect(penUp(state, 1, 1040)).toBeNull(); // fleeting 40 ms
+    const down = { x: 100, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 1000 };
+    const state = penDown(down, { t, image: PREVIEW });
+    const held = penUp(state, 1, { ...down, timeMs: 1250 }, { t, image: PREVIEW });
+    expect(held).not.toBeNull(); // held 250 ms
+    // B41: the dot's dwell is now IN the payload — ts − t_last is exact.
+    expect(held!.points).toEqual([
+      [333, 500, 1000, 0],
+      [333, 500, 1000, 250],
+    ]);
+    expect(penUp(state, 1, { ...down, timeMs: 1040 }, { t, image: PREVIEW })).toBeNull(); // fleeting 40 ms
   });
 
   it("long but brief → commits (a fast flick is a real mark)", () => {
@@ -315,8 +339,14 @@ describe("§8.3 capture reduction — jitter dedupe and the 8192 bound", () => {
     expect(state.points[state.points.length - 1].t).toBe(9499); // the tail survives
     for (let i = 1; i < state.points.length; i++)
       expect(state.points[i].t).toBeGreaterThanOrEqual(state.points[i - 1].t);
-    const payload = penUp(state, 1, 9500)!;
+    const payload = penUp(
+      state,
+      1,
+      { x: 9499, y: (9499 * 7) % 1000, pressure: 0.5, pointerType: "mouse", timeMs: 9500 },
+      { t, image: PREVIEW },
+    )!;
     expect(stroke.validatePayload(payload)).toEqual([]);
+    expect(payload.points.length).toBeLessThanOrEqual(8192); // bound holds with the terminal sample
   });
 
   it("decimate keeps endpoints exactly", () => {
@@ -357,8 +387,9 @@ describe("long-edge-unit conversion (the per-axis trap, non-square both ways)", 
         { x: 50, y: 50, pressure: 0.5, pointerType: "mouse", timeMs: 0 },
         { t, image: preview },
       );
-      penMove(state, { x: 50, y: 60, pressure: 0.5, pointerType: "mouse", timeMs: 30 }, { t, image: preview });
-      expect(penUp(state, 1, 30), `preview ${preview.w}×${preview.h}`).not.toBeNull();
+      const end = { x: 50, y: 60, pressure: 0.5, pointerType: "mouse", timeMs: 30 };
+      penMove(state, end, { t, image: preview });
+      expect(penUp(state, 1, end, { t, image: preview }), `preview ${preview.w}×${preview.h}`).not.toBeNull();
     }
   });
 });
