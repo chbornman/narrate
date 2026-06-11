@@ -423,6 +423,11 @@ Build-pass readings (continuing the B series) and one UI amendment
   `ts − t_last` reconstructs the span only to the last move sample —
   P6.1's §9.1 span math must reckon with under-spanned dots (recorded fix
   if linking needs it: a terminal pen-up sample, dedupe-exempt).
+  **RESOLVED (founder, June 2026): the terminal pen-up sample lands with
+  P6.1** — the pointer-up position/time is recorded as the stroke's final
+  sample, dedupe-exempt (more faithful to the hand, not less; one
+  near-duplicate point per stroke), making `ts − t_last` exact before the
+  §9.1 resolver is built on it.
 - **B42 (P5.1).** `add_stroke` bounds `base_w` to 1..10000 (core leaves it
   unbounded; a stroke wider than the entire long edge is rejected as
   hostile input). The spec default 40 is unaffected.
