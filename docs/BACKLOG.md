@@ -15,32 +15,37 @@ managing = off-thesis).
   is the inspected image's own pair member ("● 2" already says it), or a
   distinct quiet register for pair-mate targets. (Founder, dogfood
   round 3, June 2026.)
-- [ ] **"Rebuild previews…" on the rail folder menu** — a recovery/
-  maintenance verb SEPARATE from Rescan (different semantics: Rescan
-  reconciles files↔index and enqueues missing passes; Rebuild re-enqueues
-  the preview pass for everything under the root, the generator_version
-  machinery's manual trigger). Becomes more load-bearing with M1.5
+- [x] **"Rebuild previews…" on the rail folder menu** — landed `8755af1`:
+  `Library::rebuild_previews(root_id)` re-pends the preview pass for every
+  image with an active path under the root, fresh budget, backfill
+  priority (the generator_version machinery's manual trigger; regeneration
+  overwrites idempotently, §9.8); rail-folder seat
+  row right after Rescan. Becomes more load-bearing with M1.5
   preview-policy knobs. (Founder, dogfood round 3, June 2026.)
-- [ ] **First-run welcome card: how your data is stored** — a plain-words
-  disclaimer on first launch ("don't show again" toggle, persisted like
-  other prefs): sidecars are FILENAME-SPECIFIC (`.pp.json` beside the
-  image — rename outside the app while it isn't watching and the link
-  depends on the §7 relink heuristics), the index is rebuildable but the
-  journal sidecars ARE the data, what lives where. Beyond the card, think
-  about making the storage story itself stronger — e.g. hash-keyed
-  sidecar recovery sweep, case-insensitive-filesystem rename semantics
-  (APFS: a case-only rename isn't a rename; s02_2 fails on macOS today),
-  import-time warnings on risky volumes. (Founder, dogfood round 3,
-  June 2026.)
-- [ ] **Library doctor / self-check pass** — a maintenance verb (and an
-  M1.5 candidate for the 6-hour tick) that validates the index against
-  reality and repairs what it can: done preview passes whose artifacts
-  are missing on disk → re-enqueue; orphaned stale path rows → sweep;
+- [x] **First-run welcome card: how your data is stored** — landed
+  `8755af1`: WelcomeCard modal on launch — sidecars
+  (`.photoproof.json`, SIDECARS §2.1) live beside images, ARE the data,
+  and are filename-specific (outside-the-app renames lean on the §7
+  relink heuristics); the index is rebuildable. "Don't show again"
+  toggle (default ON) via prefs.ts; escape layer 1; redaction-modal
+  frame/focus pattern. (Founder, dogfood round 3, June 2026.)
+- [ ] **Stronger storage story beyond the welcome card** — the residue of
+  the welcome-card item: hash-keyed sidecar recovery sweep,
+  case-insensitive-filesystem rename semantics (APFS: a case-only rename
+  isn't a rename; s02_2 fails on macOS today), import-time warnings on
+  risky volumes. (Founder, dogfood round 3, June 2026.)
+- [x] **Library doctor / self-check pass** — v1 landed `8755af1`:
+  `Library::doctor()` re-pends done preview passes whose
+  artifacts are missing on disk, COUNTS orphaned stale path rows (no
+  deletion — conservative by charter), sweeps stranded preview temp
+  files; runs on the maintenance tick and as the debug panel's [dev]
+  doctor; `info!`s the report when nonzero. v2 candidates remain:
   half-ingested RAW+JPEG pairs (one member's passes dead) → re-enqueue
-  the laggard; marker/identity drift → report. Born from dogfood round
-  3's mangled-folder session: the offline-defer fix (`l13_08`) removes
-  the biggest poison source, but mangled states will keep happening and
-  the library should HEAL, not just avoid. (Founder, June 2026.)
+  the laggard; marker/identity drift → report; stale-orphan sweep. Born
+  from dogfood round 3's mangled-folder session: the offline-defer fix
+  (`l13_08`) removes the biggest poison source, but mangled states will
+  keep happening and the library should HEAL, not just avoid. (Founder,
+  June 2026.)
 - [ ] **Grid: recycled `<img>` can flash the previous image's pixels** —
   the virtualizer pool recycles `<img>` elements by slot; on fast scroll
   a cell can paint the prior occupant for a frame before the new src
