@@ -9,6 +9,10 @@
    * parser will ADD chips from natural language — the rendering is already
    * here.
    */
+  // Lucide (BACKLOG "Adopt Lucide icons"): the §5 mockup's 🔍 is
+  // illustrative, not normative — the bar uses the stroke set.
+  import Search from "@lucide/svelte/icons/search";
+  import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
   import { ZERO_RESULTS_LINE } from "../../search/render";
   import type { Filter } from "../../types/search";
@@ -70,7 +74,7 @@
 
 <div class="overlay" role="dialog" aria-label="Search">
   <div class="bar">
-    <span class="glyph" aria-hidden="true">🔍</span>
+    <span class="glyph" aria-hidden="true"><Search size={16} /></span>
     <input
       bind:this={inputEl}
       bind:value={ui.query}
@@ -87,7 +91,9 @@
       {#each ui.chips as chip, i (i)}
         <span class="chip">
           {chipLabel(chip)}
-          <button aria-label="Remove filter" onclick={() => void ui.removeChip(i)}>×</button>
+          <button aria-label="Remove filter" onclick={() => void ui.removeChip(i)}
+            ><X size={12} /></button
+          >
         </span>
       {/each}
     </div>
@@ -137,7 +143,7 @@
   }
   .glyph {
     color: var(--text-faint);
-    font-size: 14px;
+    display: inline-flex; /* svg baseline → flex centering */
   }
   .bar input {
     flex: 1;
@@ -170,6 +176,8 @@
     background: transparent;
     color: var(--text-faint);
     padding: 0 4px;
+    display: inline-flex; /* center the Lucide X in the chip row */
+    align-items: center;
   }
   .chip button:hover {
     color: var(--text);

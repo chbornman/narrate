@@ -8,6 +8,10 @@
    * M1 renders the degraded RUNTIME contract: Microphone stays hidden until
    * ASR is installed; Models shows the explainer.
    */
+  // Lucide (BACKLOG "Adopt Lucide icons"): X for the window close; Unplug
+  // for the offline-volume mark (Lucide ships no eject).
+  import Unplug from "@lucide/svelte/icons/unplug";
+  import X from "@lucide/svelte/icons/x";
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -111,7 +115,9 @@
 <main>
   <div class="drag" data-tauri-drag-region>
     <span data-tauri-drag-region>Settings</span>
-    <button class="close" aria-label="Close" onclick={() => void win.close()}>×</button>
+    <button class="close" aria-label="Close" onclick={() => void win.close()}
+      ><X size={14} /></button
+    >
   </div>
 
   <!-- 1. Watched folders -->
@@ -120,7 +126,9 @@
     {#each roots as root (root.rootId)}
       <div class="row">
         <span class="name">{root.displayName}</span>
-        <span class="state">{root.online ? "online" : "offline ⏏"}</span>
+        <span class="state"
+          >{#if root.online}online{:else}offline <Unplug size={11} />{/if}</span
+        >
         <button class="quiet" onclick={() => (removeWarnFor = root.rootId)}>Remove</button>
       </div>
       {#if removeWarnFor === root.rootId}
@@ -260,6 +268,15 @@
     border: none;
     background: transparent;
     color: var(--text-faint);
+    display: inline-flex; /* center the Lucide X svg */
+    align-items: center;
+    padding: 2px 6px;
+  }
+  /* The offline mark rides the text line — flex keeps it on the midline. */
+  .state {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   section {
     margin-top: 18px;

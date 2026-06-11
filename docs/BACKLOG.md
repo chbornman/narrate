@@ -54,10 +54,12 @@ managing = off-thesis).
   "overlay" per I1); results expand to the full canvas as they arrive
   (results stay a contact sheet — selection/write-scope/Look behavior
   unchanged, UI §5 stands). (Founder, dogfood round 2.)
-- [ ] **Adopt Lucide icons** (`@lucide/svelte`) — replace ad-hoc glyphs
-  (🔍 from the spec mockup, sort ▾, ⏏, ×, chevron, titlebar buttons) with
-  a consistent stroke set, sized/toned via tokens. UI.md §5 mockup emoji is
-  illustrative, not normative. (Founder, dogfood round 2.)
+- [x] **Adopt Lucide icons** (`@lucide/svelte`) — landed (wave2/lucide):
+  ad-hoc glyphs (🔍 from the spec mockup, sort ▾, ⏏, ×, chevrons, titlebar
+  buttons) replaced with the Lucide stroke set, sized per-site (12–16 px)
+  and toned via the existing tokens (icons inherit currentColor). Lucide
+  ships no eject, so the offline-volume ⏏ became Unplug. UI.md §5 mockup
+  emoji is illustrative, not normative. (Founder, dogfood round 2.)
 - [x] **Roots changes propagate live across windows** — landed `6dab0f6`
   (batch-1 rail cluster): `add_root`/`remove_root` emit `roots-changed`
   (the `settings-changed` pattern); App listens → `refreshRoots()`.

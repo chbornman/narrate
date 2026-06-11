@@ -12,6 +12,16 @@
    * lights-out via App.svelte's region gate.
    */
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  // Lucide replaces the ad-hoc text glyphs (BACKLOG "Adopt Lucide icons"):
+  // one stroke set, sized per-site, color inherited from the button's
+  // token (currentColor) so hover/on states keep working unchanged.
+  import PanelLeft from "@lucide/svelte/icons/panel-left";
+  import Search from "@lucide/svelte/icons/search";
+  import Info from "@lucide/svelte/icons/info";
+  import List from "@lucide/svelte/icons/list";
+  import Minus from "@lucide/svelte/icons/minus";
+  import Square from "@lucide/svelte/icons/square";
+  import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
   import { resolveAction } from "../../actions/registry";
   import { tooltip } from "../../primitives/tooltip";
@@ -40,7 +50,7 @@
       aria-pressed={ui.shell.railOpen}
       class:on={ui.shell.railOpen}
       onclick={() => perform("toggle-rail")}
-      {@attach tooltip({ actionId: "toggle-rail" })}>◧</button
+      {@attach tooltip({ actionId: "toggle-rail" })}><PanelLeft size={14} /></button
     >
   </div>
   <span class="title" data-tauri-drag-region>{title}</span>
@@ -49,7 +59,7 @@
       class="chrome"
       aria-label="Search"
       onclick={() => perform("open-search")}
-      {@attach tooltip({ actionId: "open-search" })}>⌕</button
+      {@attach tooltip({ actionId: "open-search" })}><Search size={14} /></button
     >
     <button
       class="chrome"
@@ -58,7 +68,7 @@
       class:on={ui.inspector.open === "metadata"}
       onclick={() => perform("open-inspector", "metadata")}
       {@attach tooltip({ actionId: "open-inspector", verb: "Metadata", arg: "metadata" })}
-      >ⓘ</button
+      ><Info size={14} /></button
     >
     <button
       class="chrome"
@@ -67,12 +77,12 @@
       class:on={ui.inspector.open === "journal"}
       onclick={() => perform("open-inspector", "journal")}
       {@attach tooltip({ actionId: "open-inspector", verb: "Journal", arg: "journal" })}
-      >≣</button
+      ><List size={14} /></button
     >
     <div class="controls">
-      <button aria-label="Minimize" onclick={() => void win.minimize()}>–</button>
-      <button aria-label="Maximize" onclick={() => void win.toggleMaximize()}>□</button>
-      <button aria-label="Close" onclick={() => void win.close()}>×</button>
+      <button aria-label="Minimize" onclick={() => void win.minimize()}><Minus size={14} /></button>
+      <button aria-label="Maximize" onclick={() => void win.toggleMaximize()}><Square size={12} /></button>
+      <button aria-label="Close" onclick={() => void win.close()}><X size={14} /></button>
     </div>
   </div>
 </div>
@@ -118,6 +128,11 @@
     border-radius: 3px;
     font-size: 13px;
     line-height: 1;
+    /* Lucide renders an <svg>: flex-center it (a text glyph centered via
+     * line-height; an inline svg would sit on the baseline). */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   .chrome:hover,
   .controls button:hover {

@@ -1,11 +1,13 @@
 <script lang="ts">
   /**
-   * Quiet dismissable centered sheet (primitive): scrim or [×] dismisses;
-   * Esc routes through the escape layer (host state). NO focus trap — the
-   * sheet is informational, not modal (R5: the redaction confirm is the
-   * app's only modal and owns its own frame). Instances are ENUMERATED:
-   * Cheatsheet, DropConfirm — new instances are spec changes (guardrail).
+   * Quiet dismissable centered sheet (primitive): scrim or the close
+   * button dismisses; Esc routes through the escape layer (host state).
+   * NO focus trap — the sheet is informational, not modal (R5: the
+   * redaction confirm is the app's only modal and owns its own frame).
+   * Instances are ENUMERATED: Cheatsheet, DropConfirm — new instances are
+   * spec changes (guardrail).
    */
+  import X from "@lucide/svelte/icons/x";
   import type { Snippet } from "svelte";
 
   let {
@@ -30,7 +32,7 @@
       tabindex="-1"
       onpointerdown={(e) => e.stopPropagation()}
     >
-      <button class="close" aria-label="Close" onclick={onclose}>×</button>
+      <button class="close" aria-label="Close" onclick={onclose}><X size={14} /></button>
       {@render children()}
     </div>
   </div>
@@ -63,8 +65,9 @@
     border: none;
     background: transparent;
     color: var(--text-faint);
-    font-size: 14px;
     padding: 2px 8px;
+    display: inline-flex; /* center the Lucide X svg */
+    align-items: center;
   }
   .close:hover {
     color: var(--text);
