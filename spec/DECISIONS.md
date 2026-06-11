@@ -444,6 +444,55 @@ Build-pass readings (continuing the B series) and one UI amendment
   as press — snappier, with no drag semantics to wait out); the stylus
   eraser end is detected via PointerEvent button 5 / buttons bit 32.
 
+## P6.1 capture decisions (June 2026)
+
+Build-pass readings recorded by the P6.1 capture-engine packet
+(mock-verified by design, per BUILD-LOOP's honest-scope table).
+
+- **B46 (P6.1).** CAPTURE §6.5's asr capture payload realized in EVENTS'
+  closed integer field set: `speech_started_at` ≡ the event's `ts`
+  (utterance id + ts are minted at VAD onset), `speech_ended_at` ≡
+  `ts + dur_ms`, `confidence` → `conf_pm`. `model_id` is NOT representable
+  in the v1 field set (storing it would break §4.1 rule-8 byte-exact
+  round-trips) and stays debug-panel territory. **EVENTS §3.1 erratum:
+  `conf_pm` is OPTIONAL** — omitted entirely when the model exposes no
+  token log-probs (CAPTURE §6.5 governs; never null), per §4.1 rule 6.
+- **B47 (P6.1).** `dur_ms` = the **VAD span** (onset → VAD speech end; the
+  segment's reported end as fallback) — EVENTS §3.1's "(VAD onset →
+  finalization)" parenthetical loses to CAPTURE §9.1's linking span:
+  finalization-based spans over-span by ASR emission latency and would
+  corrupt overlap linking, and §3.1 itself says `dur_ms` feeds linking.
+- **B48 (P6.1).** Session bookkeeping (`closed_clean`,
+  `close_processing_done` — CAPTURE §2.3) lives in a capture-owned,
+  index-only `capture_session_state` table (schema v6): the EVENTS §5.2
+  sessions table stays byte-identical and §9's "ended_ts is the single
+  permitted UPDATE" letter holds. The bookkeeping is intentionally
+  non-rebuildable.
+- **B49 (P6.1).** Token-time cross-check inputs: P1.2's TranscriptSegment
+  carries one onset (the VAD-onset echo) and no separate ASR token
+  t_start; capture-side VAD SpeechStarts associate to ASR utterance ids
+  FIFO in stream order, and the segment's own onset serves as the §5.1
+  cross-check — >250 ms disagreement across a scope change logs to the
+  debug panel, never rebinds. A genuine independent token-time input waits
+  on the Transcriber trait growing one (the P6.3 spike informs whether the
+  Nemotron export can supply it).
+- **B50 (P6.1).** §9.2's in-flight suppression over "span-so-far
+  (onset..now)" reduces to: ANY utterance in flight at pen-up suppresses
+  (a span ending at now always touches a stroke committing at now) —
+  implemented as derived, derivation in a comment, and the
+  wrong-fallback-partner case is pinned by test.
+- **B51 (P6.1).** §5.4 with multiple simultaneously in-flight utterances
+  (spec silent on plurality): the indicator's `streaming_utterance` shows
+  the MOST-RECENT onset's bound scope — the one being spoken.
+- **B52 (P6.1).** §2.5's "steps 1–2 block quit (capped)" splits across
+  layers: the core engine never sleeps — disarm sets the 5 s drain
+  deadline on the capture clock and pump() enforces it, force-abandoning
+  stragglers so trailing finals can never mint into a LATER session; the
+  real bounded blocking wait at quit belongs to the shell/P6.2 pump
+  thread. Also recorded: engine-minted ids share the store's single Minter
+  (new `EventStore::mint_at`) so I14 process-wide id monotonicity holds
+  across capture-minted and store-minted events.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

@@ -1,4 +1,4 @@
-# DOGFOOD-M2 — the founder-machine checklist (M2a pencil; M2b voice will extend this)
+# DOGFOOD-M2 — the founder-machine checklist (M2a pencil + M2b voice)
 
 P5.1 shipped the grease pencil with geometry and persistence property-tested
 (CAPTURE §13.3/§13.4 traced in the suite). Everything below is the
@@ -67,3 +67,35 @@ DOGFOOD-M1: a checklist, not archaeology.
   hardware).
 - [ ] Cursor visibility: the red dot over bright/red-heavy images; the
   eraser ring legibility.
+
+## 6. Voice capture (P6.1 engine — feel verifiable once P6.2 supervision and P6.3 real models land)
+
+The engine is mock-verified end-to-end (CAPTURE §13.1/2/5/6/7/8 traced);
+everything below needs a real mic, the real ASR child, or your eyes.
+
+- [ ] **Binding feel (the B1 rule, real mic)**: arm, speak while arrowing
+  through images mid-sentence — each remark must land on the image you
+  were LOOKING AT when you started the words. The debug panel's Capture
+  feed logs "token-time cross-check" entries only when ASR-vs-VAD onset
+  disagreement exceeds 250 ms across a scope change: frequent entries =
+  silero detection latency eating the §1 budget on this machine (the
+  spike's ONSET_ERROR_BUDGET_MS is the constant to tune against).
+- [ ] **Indicator legibility at 24 px**: five mic states (absent / dim
+  disarmed / solid armed / breathing while speaking / struck-muted
+  degraded) plus the streaming tether — verify the tether reads as "words
+  land on the earlier selection" without explanation, the 2.4 s
+  opacity-only breathing feels quiet, and the degraded glyph's one-line
+  hover shows. The mic glyph stays absent until P6.2 reports ASR ready.
+- [ ] **Disarm honesty (macOS especially)**: speak, disarm immediately —
+  the trailing sentence still lands within ~5 s, then the OS mic indicator
+  (orange dot) dies with the stream (closed, never paused).
+- [ ] **ASR kill drill (§13.7, once P6.2 lands)**: kill the ASR child
+  mid-sentence — only the mic glyph changes (muted), nothing minted from
+  the partial, and a typed note lands instantly.
+- [ ] **B41 stroke ends**: the terminal pen-up sample adds one
+  near-duplicate end point per stroke — confirm no visible hook/blob at
+  stroke ends at 400 % zoom; press-and-hold dots still commit, accidental
+  taps still vanish.
+- [ ] **Journal link marks**: circle a detail while talking about it —
+  both the stroke row and the remark row show the quiet linked mark;
+  clicking the stroke row still flashes the overlay stroke.
