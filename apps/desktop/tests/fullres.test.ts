@@ -3,12 +3,15 @@
  * dogfood round 1): Look opens on the display preview and swaps to the
  * original once the zoom demands more pixels than the preview supplies,
  * i.e. rendered device pixels (zoom scale × preview dims × DPR) exceed the
- * preview's own pixel dims. The swap mechanics (request stickiness, no
- * flash until loaded, 404 → preview stands) are LookStage facts; the
- * protocol's stored-format allowlist is tested in Rust (protocol.rs).
+ * preview's own pixel dims. Dogfood round 2 adds the SOURCE LADDER below
+ * the same predicate: /original, then the RAW's /embedded native JPEG.
+ * The swap mechanics (request stickiness, no flash until loaded, 404 →
+ * next rung → preview stands) are LookStage facts; the protocol's
+ * allowlists and the embedded route's orientation/geometry agreement are
+ * tested in Rust (protocol.rs, library_acceptance.rs).
  */
 import { describe, expect, it } from "vitest";
-import { needsOriginal } from "../src/lib/logic/fullres";
+import { FIRST_SOURCE, needsOriginal, nextSource } from "../src/lib/logic/fullres";
 import { fitScale } from "../src/lib/logic/zoom";
 
 const PREVIEW = { w: 2560, h: 1707 }; // the display-preview class
@@ -53,5 +56,19 @@ describe("needsOriginal — the swap-threshold predicate", () => {
   it("degenerate preview dims never request (nothing loaded yet)", () => {
     expect(needsOriginal({ scale: 8, preview: { w: 0, h: 0 } })).toBe(false);
     expect(needsOriginal({ scale: 8, preview: { w: 2560, h: 0 } })).toBe(false);
+  });
+});
+
+describe("the source ladder — original, then embedded-native, then the preview stands", () => {
+  it("a fresh request starts at the original", () => {
+    expect(FIRST_SOURCE).toBe("original");
+  });
+
+  it("a refused original advances to the embedded-native rung (the RAW path)", () => {
+    expect(nextSource("original")).toBe("embedded");
+  });
+
+  it("a refused embedded exhausts the ladder (preview stands; decoded 1:1 is M1.5)", () => {
+    expect(nextSource("embedded")).toBeNull();
   });
 });

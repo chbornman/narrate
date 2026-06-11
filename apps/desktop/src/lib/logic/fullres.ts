@@ -11,12 +11,23 @@
  * upsampled on screen. In zoom.ts terms (`scale` = screen px per preview
  * px) that reduces to `scale × devicePixelRatio > 1`.
  *
- * Everything else is owned elsewhere: the protocol serves /original only
- * for webview-decodable STORED formats (RAW/TIFF 404 → Look keeps the
- * preview silently, M1.5 backfill); LookStage keeps the preview painted
- * until the original has actually loaded, renders the original into the
+ * THE SOURCE LADDER (dogfood round 2 adds the embedded-native rung):
+ * past the threshold, sources are tried in order — /original (the file
+ * itself, webview-decodable stored formats only), then /embedded (the
+ * full-resolution JPEG most cameras pack into a RAW container, served at
+ * NATIVE size with the cached preview's exact display orientation — the
+ * backend applies the same §9.3.1 policy, so strokes stay put). When the
+ * ladder is exhausted (TIFF/HEIC, small/no embedded preview, offline),
+ * the 2560 preview stands silently; true decoded 1:1 stays M1.5.
+ *
+ * Everything else is owned elsewhere: the protocol owns both allowlists
+ * and refuses with uniform 404s; LookStage keeps the preview painted
+ * until a full-res source has actually loaded, renders it into the
  * preview's layout box, and derives both from the canonical zoom session —
- * the transform carries over exactly by construction.
+ * the transform carries over exactly by construction. "Actual" (100%)
+ * zoom stays PREVIEW-relative even when a full-res source renders (U12:
+ * the session carries exactly); native-pixel 1:1 semantics are the M1.5
+ * decoded-loupe question.
  */
 import type { Dims } from "./zoom";
 
@@ -38,4 +49,17 @@ export function needsOriginal(input: FullresInput): boolean {
   const dpr = input.devicePixelRatio ?? 1;
   // rendered device px = scale·preview.w·dpr; exceeds preview.w ⇔ scale·dpr > 1
   return input.scale * dpr > 1 + FULLRES_EPSILON;
+}
+
+/** A rung of the progressive source ladder past the display preview. */
+export type FullresSource = "original" | "embedded";
+
+/** First rung for a freshly requested image. */
+export const FIRST_SOURCE: FullresSource = "original";
+
+/** Next rung after `source` refused (a protocol 404): /original → the
+ * embedded-native JPEG (the RAW path); a refused /embedded exhausts the
+ * ladder (`null` — the preview stands, never re-asked this session). */
+export function nextSource(source: FullresSource): FullresSource | null {
+  return source === "original" ? "embedded" : null;
 }

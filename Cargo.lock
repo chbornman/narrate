@@ -3573,6 +3573,7 @@ dependencies = [
  "blake3",
  "futures-core",
  "http",
+ "image",
  "photoproof-connectors",
  "photoproof-core",
  "pollster",

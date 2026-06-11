@@ -1819,6 +1819,100 @@ impl Library {
     }
 
     // -----------------------------------------------------------------------
+    // Embedded-native full resolution (the /embedded protocol route —
+    // founder backlog, dogfood round 2)
+    // -----------------------------------------------------------------------
+
+    /// The RAW's embedded full-resolution JPEG at NATIVE size, display-
+    /// oriented per the same §9.3.1 policy the preview pass applied —
+    /// strokes are recorded in display-oriented image space (§9.7), so the
+    /// native image MUST agree with the cached preview's orientation and
+    /// aspect exactly, or every mark rotates/misplaces at deep zoom.
+    ///
+    /// On-demand extraction, no new cache tier: the file is local (rawler's
+    /// metadata-only parse), and the protocol's immutable cache headers let
+    /// the webview's HTTP cache hold the encoded result. Every refusal is a
+    /// uniform `Ok(None)` (the route answers 404; Look keeps the 2560
+    /// preview silently): non-RAW formats (the /original route owns
+    /// webview-decodable originals; TIFF/HEIC stay on the preview until the
+    /// M1.5 backfill), offline/missing paths, placeholder files (§5.2: a
+    /// dataless file is never read — extraction would force hydration), no
+    /// usable embedded JPEG, no pixel gain over the cached display artifact
+    /// (small-preview RAWs), or geometry disagreement with that artifact.
+    pub fn embedded_native(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<Option<EmbeddedNative>, LibraryError> {
+        use image::GenericImageView;
+        let Some(record) = self.image(hash)? else {
+            return Ok(None);
+        };
+        if record.format != ImageFormat::Raw {
+            return Ok(None);
+        }
+        // The cached display artifact is the stroke substrate the native
+        // image must agree with; without one there is nothing on screen to
+        // zoom past either.
+        let Some(display) = self.preview_artifact(hash, ArtifactKind::Display)? else {
+            return Ok(None);
+        };
+        let Some(best) = self.best_path(hash)? else {
+            return Ok(None);
+        };
+        if !best.online {
+            return Ok(None);
+        }
+        let Some(mount) = best.mount_point.as_deref() else {
+            return Ok(None);
+        };
+        let abs = join_rel(Path::new(mount), &best.row.rel_path);
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            return Ok(None);
+        };
+        if self.placeholders.is_placeholder(&abs, &meta) {
+            return Ok(None);
+        }
+        let extracted = match self.extractor.extract(&abs) {
+            Ok(Some(x)) => x,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                self.log(format!("embedded-native extraction failed on {hash}: {e}"));
+                return Ok(None);
+            }
+        };
+        let (oriented, _applied, _reason) = preview::orient_embedded_preview(extracted);
+        let (w, h) = oriented.dimensions();
+        let (dw, dh) = (
+            u32::try_from(display.width).unwrap_or(0),
+            u32::try_from(display.height).unwrap_or(0),
+        );
+        if !preview::embedded_native_acceptable(w, h, dw, dh) {
+            if w.max(h) > dw.max(dh) {
+                // Pixel gain but geometry disagreement — the load-bearing
+                // refusal, worth a debug-panel line (silent refusals for
+                // no-gain previews are the expected small-preview case).
+                self.log(format!(
+                    "embedded-native geometry disagreement on {hash}: native {w}x{h} vs \
+                     display artifact {dw}x{dh}; refused (stroke-substrate safety)"
+                ));
+            }
+            return Ok(None);
+        }
+        let jpeg = match preview::encode_jpeg_native(&oriented) {
+            Ok(b) => b,
+            Err(e) => {
+                self.log(format!("embedded-native encode failed on {hash}: {e}"));
+                return Ok(None);
+            }
+        };
+        Ok(Some(EmbeddedNative {
+            jpeg,
+            width: w,
+            height: h,
+        }))
+    }
+
+    // -----------------------------------------------------------------------
     // Batched grid listing (P4.1 A2 — the shell's one folder read)
     // -----------------------------------------------------------------------
 
@@ -2119,6 +2213,16 @@ fn image_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         gps_lon: r.get(17)?,
         first_ingested_at: r.get(18)?,
     })
+}
+
+/// One native-size, display-oriented JPEG for Look's progressive
+/// full-resolution route ([`Library::embedded_native`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedNative {
+    pub jpeg: Vec<u8>,
+    /// Display-oriented dimensions (agree with the cached preview's aspect).
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

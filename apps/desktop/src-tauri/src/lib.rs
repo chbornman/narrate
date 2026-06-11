@@ -58,11 +58,12 @@ pub fn run() {
                 .build(),
         )
         // Thumbnails + Look images: photoproof://localhost/{thumb|display}/{hash}
-        // straight from the preview cache, plus /original/{hash} — the
-        // progressive full-resolution route Look swaps to past 1:1 (served
-        // only for webview-decodable stored formats; protocol.rs owns the
-        // allowlist). Bytes never cross IPC, never base64 (UI §3.3,
-        // DECISIONS P16).
+        // straight from the preview cache, plus the progressive full-
+        // resolution ladder Look climbs past 1:1 — /original/{hash}
+        // (webview-decodable stored formats) and /embedded/{hash} (the
+        // RAW's native-size embedded JPEG, extracted on demand); protocol.rs
+        // owns the allowlists. Bytes never cross IPC, never base64 (UI
+        // §3.3, DECISIONS P16).
         .register_asynchronous_uri_scheme_protocol("photoproof", |ctx, request, responder| {
             let path = request.uri().path().to_owned();
             let library = ctx

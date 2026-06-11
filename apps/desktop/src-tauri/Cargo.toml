@@ -51,6 +51,9 @@ futures-core = { workspace = true }
 # MockRuntime for command-level event-emission tests (roots-changed):
 # dev-only feature; release binaries are unaffected.
 tauri = { version = "2", features = ["test"] }
+# protocol.rs /embedded tests: scripted extractor previews in, decoded
+# response bytes out (resolves to photoproof-core's pinned version).
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [features]
 # The debug side panel (spec/UI.md §10, DECISIONS I6): its commands and event
