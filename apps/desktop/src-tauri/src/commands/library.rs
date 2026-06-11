@@ -3,6 +3,7 @@
 //! rail-folder menu (featureset §6).
 
 use photoproof_core::library::ScanOptions;
+use tauri::{AppHandle, Emitter, Runtime};
 
 use super::S;
 use crate::dto::{FolderNode, GridItem, IngestStatus, RootDto};
@@ -43,27 +44,45 @@ pub(crate) fn root_dto(
     })
 }
 
+/// Active-roots snapshot: `list_roots` and the `roots-changed` payload
+/// share it.
+fn active_roots(app: &App) -> CmdResult<Vec<RootDto>> {
+    let mut out = Vec::new();
+    for r in app.library.roots()? {
+        if r.state == "active" {
+            out.push(root_dto(app, &r)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Root edits land in EVERY window instantly (a folder added/removed in
+/// Settings appears in the main-window rail live — the P4.2b
+/// `settings-changed` pattern): emit the fresh snapshot to all windows.
+fn emit_roots_changed<R: Runtime>(app: &App, handle: &AppHandle<R>) {
+    if let Ok(roots) = active_roots(app) {
+        let _ = handle.emit("roots-changed", roots);
+    }
+}
+
 #[tauri::command]
 pub async fn list_roots(app: S<'_>) -> CmdResult<Vec<RootDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut out = Vec::new();
-        for r in app.library.roots()? {
-            if r.state == "active" {
-                out.push(root_dto(&app, &r)?);
-            }
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+    tauri::async_runtime::spawn_blocking(move || active_roots(&app))
+        .await
+        .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Register a watched root, kick the initial scan (background), start the
 /// live watcher. Ingest runs through the pump; the grid populates
-/// incrementally (UI §9.1).
+/// incrementally (UI §9.1). Emits `roots-changed` so every window's rail
+/// updates live.
 #[tauri::command]
-pub async fn add_root(app: S<'_>, path: String) -> CmdResult<RootDto> {
+pub async fn add_root<R: Runtime>(
+    app: S<'_>,
+    handle: AppHandle<R>,
+    path: String,
+) -> CmdResult<RootDto> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app.touch()?;
@@ -99,16 +118,22 @@ pub async fn add_root(app: S<'_>, path: String) -> CmdResult<RootDto> {
             .library
             .root(&root_id)?
             .ok_or_else(|| CmdError::Invalid("root vanished after register".into()))?;
-        root_dto(&app, &record)
+        let dto = root_dto(&app, &record)?;
+        emit_roots_changed(&app, &handle);
+        Ok(dto)
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Remove a watched root (UI §2.4: journals and sidecars untouched; the
-/// images leave the index).
+/// images leave the index). Emits `roots-changed` — same as `add_root`.
 #[tauri::command]
-pub async fn remove_root(app: S<'_>, root_id: String) -> CmdResult<()> {
+pub async fn remove_root<R: Runtime>(
+    app: S<'_>,
+    handle: AppHandle<R>,
+    root_id: String,
+) -> CmdResult<()> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app.touch()?;
@@ -117,6 +142,7 @@ pub async fn remove_root(app: S<'_>, root_id: String) -> CmdResult<()> {
             .expect("watchers mutex")
             .remove(&root_id);
         app.library.remove_root(&root_id)?;
+        emit_roots_changed(&app, &handle);
         Ok(())
     })
     .await
@@ -187,4 +213,73 @@ pub async fn list_folder(app: S<'_>, root_id: String, folder: String) -> CmdResu
 #[tauri::command]
 pub fn ingest_status(app: S<'_>) -> IngestStatus {
     pump::ingest_status(&app)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the `roots-changed` emission over a mock Tauri app (the commands
+// are generic over Runtime so the MockRuntime drives the REAL command path).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
+    use tauri::{Listener, Manager};
+
+    use super::*;
+
+    fn mock_app() -> (tempfile::TempDir, tauri::App<MockRuntime>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tauri_app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let state = Arc::new(App::init(tmp.path().join("appdata")).expect("app init"));
+        tauri_app.manage(state);
+        (tmp, tauri_app)
+    }
+
+    /// Adding/removing a folder in the Settings window must appear in the
+    /// main-window rail INSTANTLY (founder dogfood, round 2): both commands
+    /// emit `roots-changed` carrying the fresh active-roots snapshot — the
+    /// P4.2b `settings-changed` pattern.
+    #[test]
+    fn add_and_remove_root_emit_roots_changed_snapshots() {
+        let (tmp, tauri_app) = mock_app();
+        let payloads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = payloads.clone();
+        tauri_app.listen_any("roots-changed", move |e| {
+            sink.lock()
+                .expect("payload mutex")
+                .push(e.payload().to_owned());
+        });
+        let photos = tmp.path().join("photos");
+        std::fs::create_dir_all(&photos).expect("photos dir");
+
+        let handle = tauri_app.handle().clone();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let dto = tauri::async_runtime::block_on(add_root(
+            state.clone(),
+            handle.clone(),
+            photos.display().to_string(),
+        ))
+        .expect("add_root");
+        {
+            let got = payloads.lock().expect("payload mutex");
+            assert_eq!(got.len(), 1, "add_root emits exactly once");
+            assert!(
+                got[0].contains(&dto.root_id),
+                "payload is the fresh snapshot (carries the new root)"
+            );
+        }
+
+        tauri::async_runtime::block_on(remove_root(state, handle, dto.root_id.clone()))
+            .expect("remove_root");
+        let got = payloads.lock().expect("payload mutex");
+        assert_eq!(got.len(), 2, "remove_root emits exactly once");
+        assert!(
+            !got[1].contains(&dto.root_id),
+            "the removed root has left the snapshot"
+        );
+    }
 }

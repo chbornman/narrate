@@ -23,6 +23,7 @@
     IndicatorPulse,
     IndicatorState,
     IngestStatus,
+    RootDto,
     RuntimeStatus,
   } from "./lib/types/dto";
   import Titlebar from "./lib/components/shell/Titlebar.svelte";
@@ -130,6 +131,9 @@
       // The Settings window's edits land live (set_stack_display emits to
       // every window; the grid re-pairs stacks on the spot).
       listen<AppSettings>("settings-changed", (e) => ui.applySettings(e.payload)),
+      // Root edits from any window (Settings add/remove — the same
+      // pattern): the rail updates instantly off the fresh snapshot.
+      listen<RootDto[]>("roots-changed", (e) => void ui.onRootsChanged(e.payload)),
       // RUNTIME §8.3: readiness/download snapshots — features light up
       // individually and silently (mic glyph appears, nothing else moves).
       listen<RuntimeStatus>("runtime-status", (e) => ui.shell.onRuntimeStatus(e.payload)),

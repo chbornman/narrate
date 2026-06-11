@@ -4,15 +4,23 @@
  * (featureset §2 via looknav.navigationSet), flip-aware Look→Grid focus
  * restore, the collapsed-pair "● 2" truth END TO END through openLook and
  * R (coordinator ruling), the inspector following the active image
- * (featureset §3), and the drag-folder → register-root confirmation flow
- * (featureset §6, escape layer 2).
+ * (featureset §3), the drag-folder → register-root confirmation flow
+ * (featureset §6, escape layer 2), the cross-window roots-changed handler,
+ * and the rail's add-root picker flow (founder dogfood, rounds 1+2).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { GridItem, ScopeView } from "../src/lib/types/dto";
+import type { GridItem, RootDto, ScopeView } from "../src/lib/types/dto";
 
 const ipcLog = vi.hoisted(() => ({
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   failAddRoot: false,
+}));
+
+/** The OS folder picker (rail "Add folder…"): null = user cancelled. */
+const dialog = vi.hoisted(() => ({ nextDir: null as string | null }));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(async () => dialog.nextDir),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -77,6 +85,7 @@ let ui: Ui;
 beforeEach(() => {
   ipcLog.calls.length = 0;
   ipcLog.failAddRoot = false;
+  dialog.nextDir = null;
   localStorage.clear();
   ui = new Ui();
   // a..d solo JPEGs in filename order (capture-desc falls back to name).
@@ -213,5 +222,66 @@ describe("drag-folder → register-root confirmation (featureset §6)", () => {
   it("an empty drop never opens the sheet", () => {
     ui.offerDrop([]);
     expect(ui.dropPaths).toBeNull();
+  });
+});
+
+describe("roots-changed live propagation (founder dogfood, round 2)", () => {
+  // add_root/remove_root emit `roots-changed` with the fresh active-roots
+  // snapshot (the settings-changed pattern); App.svelte routes the payload
+  // here. The Settings window's edits land in the rail INSTANTLY.
+  const root = (id: string): RootDto => ({
+    rootId: id,
+    displayName: id,
+    relPath: "",
+    volumeId: "v1",
+    online: true,
+    absPath: `/${id}`,
+  });
+
+  it("a first root added in Settings appears AND opens (nothing was open)", async () => {
+    expect(ui.grid.rootId).toBeNull();
+    await ui.onRootsChanged([root("r1")]);
+    expect(ui.roots.map((r) => r.rootId)).toEqual(["r1"]);
+    expect(ui.grid.rootId).toBe("r1"); // the init() rule: first root opens
+    expect(lastCall("list_folder")?.args).toMatchObject({ rootId: "r1", folder: "" });
+  });
+
+  it("an unrelated add updates the rail without navigating away", async () => {
+    ui.grid.rootId = "r1";
+    ui.grid.folder = "2026";
+    await ui.onRootsChanged([root("r1"), root("r2")]);
+    expect(ui.roots).toHaveLength(2);
+    expect(ui.grid.rootId).toBe("r1");
+    expect(ui.grid.folder).toBe("2026");
+    expect(lastCall("list_folder")).toBeUndefined(); // no reload, no jump
+  });
+
+  it("removing the open root resets the grid and falls back to the first remaining", async () => {
+    ui.grid.rootId = "r2";
+    await ui.onRootsChanged([root("r1")]);
+    expect(ui.grid.rootId).toBe("r1");
+  });
+
+  it("removing the last root returns to first-run (never a dead grid)", async () => {
+    ui.grid.rootId = "r1";
+    await ui.onRootsChanged([]);
+    expect(ui.roots).toEqual([]);
+    expect(ui.grid.rootId).toBeNull();
+    expect(ui.grid.rawItems).toEqual([]);
+  });
+});
+
+describe("add-root from the rail (founder dogfood, rounds 1+2)", () => {
+  it("the picked directory registers through add_root and opens", async () => {
+    dialog.nextDir = "/shoots/keflavik";
+    await ui.perform({ kind: "add-root" });
+    expect(lastCall("add_root")?.args).toEqual({ path: "/shoots/keflavik" });
+    expect(ui.grid.rootId).toBe("root:/shoots/keflavik");
+  });
+
+  it("cancelling the picker registers nothing", async () => {
+    dialog.nextDir = null;
+    await ui.perform({ kind: "add-root" });
+    expect(lastCall("add_root")).toBeUndefined();
   });
 });

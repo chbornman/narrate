@@ -6,6 +6,8 @@
    * ever). Rows render through SourceList over logic/sources.ts sections —
    * projects/saved-searches join as sibling sections in M3 with zero
    * edits here. Right-click on a folder row opens the rail-folder seat.
+   * The footer carries the rail's one standing affordance: "Add folder…"
+   * (founder, dogfood rounds 1+2 — no Settings round-trip).
    */
   import { ui } from "../../state/app.svelte";
   import { RAIL_WIDTH_KEY } from "../../state/prefs";
@@ -37,13 +39,46 @@
   persistKey={RAIL_WIDTH_KEY}
   label="Sources"
 >
-  <SourceList
-    sections={secs}
-    focusKey={ui.shell.railFocusKey}
-    currentKey={ui.grid.rootId === null
-      ? null
-      : `folders:${ui.grid.rootId}:${ui.grid.folder}`}
-    onopen={onOpen}
-    oncontextmenu={onContextMenu}
-  />
+  <div class="rail-body">
+    <div class="rows">
+      <SourceList
+        sections={secs}
+        focusKey={ui.shell.railFocusKey}
+        currentKey={ui.grid.rootId === null
+          ? null
+          : `folders:${ui.grid.rootId}:${ui.grid.folder}`}
+        onopen={onOpen}
+        oncontextmenu={onContextMenu}
+      />
+    </div>
+    <!-- emphasized (a full bordered button against the quiet rows) but
+         token-only; also seated on the rail-folder context menu -->
+    <button class="add-folder" onclick={() => void ui.perform({ kind: "add-root" })}>
+      Add folder…
+    </button>
+  </div>
 </Panel>
+
+<style>
+  .rail-body {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .rows {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .add-folder {
+    flex: 0 0 auto;
+    margin: 8px;
+    padding: 6px 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .add-folder:hover {
+    background: var(--bg-overlay);
+  }
+</style>

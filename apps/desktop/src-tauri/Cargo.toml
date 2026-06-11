@@ -48,6 +48,9 @@ ash = "0.38"
 [dev-dependencies]
 tempfile = { workspace = true }
 futures-core = { workspace = true }
+# MockRuntime for command-level event-emission tests (roots-changed):
+# dev-only feature; release binaries are unaffected.
+tauri = { version = "2", features = ["test"] }
 
 [features]
 # The debug side panel (spec/UI.md §10, DECISIONS I6): its commands and event
