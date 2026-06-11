@@ -493,6 +493,51 @@ Build-pass readings recorded by the P6.1 capture-engine packet
   (new `EventStore::mint_at`) so I14 process-wide id monotonicity holds
   across capture-minted and store-minted events.
 
+## P6.2 runtime decisions (June 2026)
+
+Build-pass readings recorded by the P6.2 runtime-supervision packet
+(stub-verified by design; real binaries, pins, and TLS arrive with P6.3).
+
+- **B53 (P6.2).** RUNTIME §8.1's Restarting(n) backoff exponent resets to 1
+  after each Ready (a consecutive-failure exponent), while the 5-attempt
+  budget stays a pure rolling 10-minute window ACROSS Ready periods — the
+  reading most consistent with flap protection (a flapping child exhausts
+  its budget even though each crash follows a Ready; a one-off crash after
+  a long healthy run restarts at 1 s). Both halves pinned by tests, the
+  exponent-reset by a mutant the review killed.
+- **B54 (P6.2).** §9's "interactive queue depth 1" on overflow: a newer
+  interactive submission displaces a still-QUEUED one, which completes as
+  Cancelled (search-as-you-type supersedes itself); a RUNNING interactive
+  call is never cancelled.
+- **B55 (P6.2).** The manifest schema gains an explicit per-file
+  `revision` field (§5.1's example embeds the revision in prose; the
+  schema needs it as data). All SHA-256/revision pins ship as explicit
+  `UNPINNED-P6.3` placeholders and verification FAILS CLOSED until the
+  spike pins real artifacts. Likewise the download transport: `hf:` URLs
+  resolve to https and the localhost-grade client refuses them
+  (TlsUnsupported) — choosing the TLS client (ureq/rustls vs reqwest) is a
+  P6.3 decision; the manager is fully verified over plain HTTP against the
+  stub server.
+- **B56 (P6.2).** The supervisor's Downloading/DownloadFailed states are
+  fed by a WeightsGate from the download manager (a separate component per
+  §5) rather than being supervisor-internal; the §8.1 diagram's states are
+  preserved verbatim in the machine. License-not-yet-accepted is NOT a
+  failure row — the gate simply hasn't opened, and settings shows the
+  acceptance affordance instead of an error.
+- **B57 (P6.2, amends B52).** CAPTURE §2.5 step 3 hardened from "never
+  blocks" to "never runs inline": session close only ENQUEUES
+  (close_processing_done = 0) and the sidecar pump tick drains the queue.
+  And the drain-deadline boundary semantics changed deliberately (the
+  backlog item's requested reading): a trailing final that becomes ready
+  only AFTER the 5 s cap is abandoned — previously it could still mint if
+  the poll happened to return Ready past the deadline.
+- **B58 (P6.2).** §5.2's "background priority" downloads are realized as a
+  dedicated worker thread plus the pacer throttle seam (no OS
+  thread-priority call), and one-file-at-a-time is enforced ACROSS models
+  (the review caught the consent path fanning out one thread per model —
+  now a single serialized queue). The per-model "pause" action is deferred:
+  resume-from-part makes pause equivalent to stop.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

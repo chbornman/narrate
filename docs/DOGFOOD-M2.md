@@ -99,3 +99,33 @@ everything below needs a real mic, the real ASR child, or your eyes.
 - [ ] **Journal link marks**: circle a detail while talking about it —
   both the stroke row and the remark row show the quiet linked mark;
   clicking the stroke row still flashes the overlay stroke.
+
+## 7. Runtime (P6.2 — surfaces verifiable NOW on this machine; real children with P6.3)
+
+- [ ] **Consent card**: launch with a fresh app-data dir and one watched
+  root — the quiet card appears (bottom-right, above the indicator) with
+  the live byte sum, per-model license links, and Accept-license buttons
+  gating Download; "Later" re-offers only from settings; "Never" is
+  remembered. Skipping changes nothing about journaling.
+- [ ] **Settings → Models** (this machine detects Tier 1 — see the
+  checklist's tier-gate item): offered rows with not-downloaded states,
+  license links, Restart runtime + Re-detect hardware actions. Pressing
+  Download against the unpinned manifest surfaces the TLS-deferred error
+  in the row (expected until P6.3 pins artifacts and picks the TLS
+  client) — quiet, no dialog.
+- [ ] **Single instance**: launch a second app instance — it focuses the
+  first and exits; the second's debug Runtime tab (if reached) reports
+  instance_lock_held = false.
+- [ ] **Debug panel → Runtime tab**: plan/tier/lock/orphan-sweep/download
+  lines + the full status snapshot render; supervisor state histories and
+  scheduler decisions join it when real children exist (P6.3).
+- [ ] **macOS shutdown mechanics** (when you target a Mac): normal quit
+  leaves no children; Activity Monitor force-quit relies on the
+  children.json net at next launch; kinfo_proc start-time matching.
+- [ ] **Windows** (first Windows build): Job Object KILL_ON_JOB_CLOSE and
+  the DXGI DedicatedVideoMemory probe are code-complete behind cfg but
+  have NEVER compiled — compile-check and run them before trusting them.
+- [ ] **sherpa wire contract** (P6.3): the WS client assumes result JSON
+  carries segment/start_time/is_final and optional ys_probs — confirm the
+  pinned sherpa-onnx build's exact field shapes, and whether token
+  timestamps exist (RUNTIME §3.2 open item; B49's cross-check wants them).

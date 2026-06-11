@@ -40,6 +40,13 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   panel's Retract row is the pointer path). Veto any of it and it's a
   registry remap.
 
+- [ ] **Tier-gate calibration (P6.2 finding, decide at P6.3)**: your
+  RTX 5080 reports 17,094,934,528 bytes as its largest Vulkan DEVICE_LOCAL
+  heap — 15.92 GiB, ~85 MiB UNDER the §6.2 "≥ 16 GB" Tier-2 gate, so it
+  detects as **Tier 1**. Decide: gate tolerance/headroom (e.g. ≥ 15.5 GiB),
+  a marketing-GiB conversion, or leave it and rely on the always-wins
+  override. The spike's measured VRAM numbers should settle it.
+
 ## 2. Founder-machine verification — **docs/DOGFOOD-M1.md is the script**
 
 Platform note: the NVIDIA+Wayland WebKit crash is handled in-app now
