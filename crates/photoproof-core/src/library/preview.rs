@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use image::{DynamicImage, GenericImageView, ImageDecoder};
 
 use crate::id::ContentHash;
+use crate::metrics::PipelineMetrics;
 
 /// Compile-time constant covering encoder, sizes, and the color pipeline
 /// (§9.8). Orientation or ICC changes MUST bump this.
@@ -319,24 +320,27 @@ fn encode_webp(img: &DynamicImage, quality: f32) -> Vec<u8> {
 }
 
 /// Generate and atomically write both artifacts from a display-oriented,
-/// sRGB image. Idempotent (overwrites, §10.4).
+/// sRGB image. Idempotent (overwrites, §10.4). `metrics` splits the
+/// fan-out into its resize/encode/write costs — the three knobs a perf
+/// pass would actually turn (filter choice, WebP quality/effort, IO).
 pub fn write_artifacts(
     cache_dir: &Path,
     hash: &ContentHash,
     display_oriented: &DynamicImage,
+    metrics: &PipelineMetrics,
 ) -> io::Result<Vec<GeneratedArtifact>> {
     let mut out = Vec::with_capacity(2);
     // Derive the thumb from the display-size render: one large resize, one
     // small one — and bitwise stability between the two artifacts' geometry.
-    let display = resize_to_edge(display_oriented, DISPLAY_EDGE);
-    let thumb = resize_to_edge(&display, THUMB_EDGE);
+    let display = metrics.resize.time(|| resize_to_edge(display_oriented, DISPLAY_EDGE));
+    let thumb = metrics.resize.time(|| resize_to_edge(&display, THUMB_EDGE));
     for (kind, img, quality) in [
         (ArtifactKind::Display, &display, DISPLAY_QUALITY),
         (ArtifactKind::Thumb, &thumb, THUMB_QUALITY),
     ] {
-        let encoded = encode_webp(img, quality);
+        let encoded = metrics.encode.time(|| encode_webp(img, quality));
         let dest = artifact_path(cache_dir, hash, kind);
-        atomic_write(&dest, &encoded)?;
+        metrics.write.time(|| atomic_write(&dest, &encoded))?;
         let (w, h) = img.dimensions();
         out.push(GeneratedArtifact {
             kind,

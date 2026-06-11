@@ -41,6 +41,9 @@ rusqlite = { workspace = true }
 blake3 = { workspace = true }
 ulid = { workspace = true }
 http = "1"
+tracing.workspace = true
+# The one subscriber install (lib.rs run()); core stays facade-only.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = "0.38"

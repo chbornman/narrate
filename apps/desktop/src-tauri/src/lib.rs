@@ -33,6 +33,20 @@ use tauri::{Manager, RunEvent};
 use state::App;
 
 pub fn run() {
+    // Structured logging (BACKLOG metrics, first slice): core/connectors
+    // emit `tracing` spans and events; the shell is the ONE place a
+    // subscriber installs. RUST_LOG overrides; the default keeps release
+    // consoles quiet (info) while photoproof's own drains/passes show at
+    // debug under `cargo tauri dev` — set RUST_LOG=trace for the firehose.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "info,photoproof_core=debug,photoproof_desktop=debug".into()
+            }),
+        )
+        .compact()
+        .init();
+
     let builder = tauri::Builder::default()
         // §8.5 single-instance discipline: a second launch never reaches
         // the supervisor — it forwards focus to the first instance and

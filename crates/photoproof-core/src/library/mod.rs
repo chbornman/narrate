@@ -55,6 +55,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
 use crate::id::{ContentHash, UtcMillis};
+use crate::metrics::{PipelineMetrics, StageSnapshot};
 use crate::store::StoreError;
 
 pub type VolumeId = String;
@@ -135,6 +136,8 @@ pub struct Library {
     extractor: Arc<dyn EmbeddedPreviewExtractor>,
     clock: MonotonicMillis,
     debug_log: Mutex<Vec<String>>,
+    /// Ingest-stage timings (BACKLOG "measured, not vibes" — first slice).
+    metrics: PipelineMetrics,
 }
 
 impl Library {
@@ -187,6 +190,7 @@ impl Library {
             extractor: options.extractor,
             clock: MonotonicMillis::new(),
             debug_log: Mutex::new(Vec::new()),
+            metrics: PipelineMetrics::default(),
         };
         if recovered > 0 {
             lib.log(format!(
@@ -234,6 +238,11 @@ impl Library {
     /// Drain the debug log (tests assert "warning logged" through this).
     pub fn take_debug_log(&self) -> Vec<String> {
         std::mem::take(&mut *self.debug_log.lock().expect("poisoned"))
+    }
+
+    /// Cumulative ingest-stage timings (debug panel; BACKLOG metrics).
+    pub fn metrics_snapshot(&self) -> Vec<StageSnapshot> {
+        self.metrics.snapshot()
     }
 
     // -----------------------------------------------------------------------
@@ -1325,30 +1334,85 @@ impl Library {
     /// Drain runnable pending passes (exif + preview — the M1 workers).
     /// `full-raw-decode` and the model passes stay queued by design: the
     /// queue knows their pass kinds; their workers are later milestones.
+    ///
+    /// Items drain in WAVES on the worker pool (one wave = one claim batch
+    /// = pool width): decode/resize/encode run truly parallel while every
+    /// DB touch stays serialized on the connection mutex exactly as
+    /// before. Claim order still follows queue priority — a wave claims
+    /// contiguously under one lock — and cancellation/max_items are
+    /// checked between waves, so cancel latency is bounded by one wave.
     pub fn process_queue(&self, opts: &QueueOptions) -> Result<QueueReport, LibraryError> {
+        use rayon::prelude::*;
+        let drain_started = std::time::Instant::now();
         let mut report = QueueReport::default();
         loop {
             if let Some(cancel) = &opts.cancel
                 && cancel.load(std::sync::atomic::Ordering::Relaxed)
             {
                 report.cancelled = true;
-                return Ok(report);
+                break;
             }
-            if let Some(max) = opts.max_items
-                && report.processed >= max
-            {
-                return Ok(report);
+            let width = worker_pool().current_num_threads().max(1);
+            let wave_cap = match opts.max_items {
+                Some(max) => width.min(max.saturating_sub(report.processed)),
+                None => width,
+            };
+            if wave_cap == 0 {
+                break;
             }
-            let item = {
-                let conn = self.db.lock().expect("poisoned");
-                ingest::claim_next(&conn, self.now())?
-            };
-            let Some(item) = item else {
-                return Ok(report);
-            };
-            report.processed += 1;
-            self.run_pass(&item, &mut report)?;
+            let items: Vec<ingest::QueueItem> = self.metrics.queue_claim.time(
+                || -> Result<_, LibraryError> {
+                    let conn = self.db.lock().expect("poisoned");
+                    let mut claimed = Vec::with_capacity(wave_cap);
+                    while claimed.len() < wave_cap {
+                        match ingest::claim_next(&conn, self.now())? {
+                            Some(item) => claimed.push(item),
+                            None => break,
+                        }
+                    }
+                    Ok(claimed)
+                },
+            )?;
+            if items.is_empty() {
+                break;
+            }
+            report.processed += items.len();
+            // Per-item reports merge after the wave; the first hard error
+            // (DB/IO plumbing — per-item pass failures are RECORDED, not
+            // returned) propagates after the wave's successes are counted,
+            // mirroring the sequential loop's abort semantics.
+            let results: Vec<Result<QueueReport, LibraryError>> = worker_pool().install(|| {
+                items
+                    .par_iter()
+                    .map(|item| {
+                        let mut local = QueueReport::default();
+                        self.run_pass(item, &mut local).map(|()| local)
+                    })
+                    .collect()
+            });
+            let mut first_err = None;
+            for r in results {
+                match r {
+                    Ok(local) => report.absorb(&local),
+                    Err(e) => first_err = first_err.or(Some(e)),
+                }
+            }
+            if let Some(e) = first_err {
+                return Err(e);
+            }
         }
+        if report.processed > 0 {
+            tracing::debug!(
+                processed = report.processed,
+                done = report.done,
+                errors = report.errors,
+                skipped = report.skipped,
+                transient = report.transient_retries,
+                elapsed_ms = drain_started.elapsed().as_millis() as u64,
+                "ingest queue drain"
+            );
+        }
+        Ok(report)
     }
 
     fn run_pass(
@@ -1392,8 +1456,14 @@ impl Library {
             return Ok(());
         };
         match item.pass {
-            PassName::Exif => self.run_exif_pass(item, &image, &abs, report),
-            PassName::Preview => self.run_preview_pass(item, &image, &abs, report),
+            PassName::Exif => self
+                .metrics
+                .exif_pass
+                .time(|| self.run_exif_pass(item, &image, &abs, report)),
+            PassName::Preview => self
+                .metrics
+                .preview_pass
+                .time(|| self.run_preview_pass(item, &image, &abs, report)),
             _ => {
                 // No M1 worker; claim_next never returns these.
                 let conn = self.db.lock().expect("poisoned");
@@ -1482,18 +1552,30 @@ impl Library {
         abs: &Path,
         report: &mut QueueReport,
     ) -> Result<(), LibraryError> {
-        match preview::decode_original_display_oriented(abs, image.exif_orientation) {
+        let decoded = self
+            .metrics
+            .decode
+            .time(|| preview::decode_original_display_oriented(abs, image.exif_orientation));
+        match decoded {
             Ok((img, _orientation)) => {
-                let artifacts = preview::write_artifacts(&self.cache_dir, &item.image_hash, &img)?;
-                let conn = self.db.lock().expect("poisoned");
-                self.record_artifacts_locked(
-                    &conn,
+                let artifacts = preview::write_artifacts(
+                    &self.cache_dir,
                     &item.image_hash,
-                    &artifacts,
-                    PreviewSource::Original,
-                    false,
+                    &img,
+                    &self.metrics,
                 )?;
-                ingest::mark_done(&conn, item, self.now())?;
+                self.metrics.db_record.time(|| -> Result<_, LibraryError> {
+                    let conn = self.db.lock().expect("poisoned");
+                    self.record_artifacts_locked(
+                        &conn,
+                        &item.image_hash,
+                        &artifacts,
+                        PreviewSource::Original,
+                        false,
+                    )?;
+                    ingest::mark_done(&conn, item, self.now())?;
+                    Ok(())
+                })?;
                 report.done += 1;
                 Ok(())
             }
@@ -1507,7 +1589,7 @@ impl Library {
         abs: &Path,
         report: &mut QueueReport,
     ) -> Result<(), LibraryError> {
-        let extracted = match self.extractor.extract(abs) {
+        let extracted = match self.metrics.raw_extract.time(|| self.extractor.extract(abs)) {
             Ok(x) => x,
             Err(e) => return self.fail_preview(item, e, report),
         };
@@ -1543,8 +1625,13 @@ impl Library {
                 use image::GenericImageView;
                 let (pw, ph) = oriented.dimensions();
                 let meets_threshold = pw.max(ph) >= EMBEDDED_ACCEPT_EDGE;
-                let artifacts =
-                    preview::write_artifacts(&self.cache_dir, &item.image_hash, &oriented)?;
+                let artifacts = preview::write_artifacts(
+                    &self.cache_dir,
+                    &item.image_hash,
+                    &oriented,
+                    &self.metrics,
+                )?;
+                let db_started = std::time::Instant::now();
                 let conn = self.db.lock().expect("poisoned");
                 self.record_artifacts_locked(
                     &conn,
@@ -1594,6 +1681,7 @@ impl Library {
                     ingest::promote(&conn, &item.image_hash, PassName::FullRawDecode, priority)?;
                 }
                 ingest::mark_done(&conn, item, now)?;
+                self.metrics.db_record.record(db_started.elapsed());
                 report.done += 1;
                 Ok(())
             }
@@ -1607,6 +1695,12 @@ impl Library {
         report: &mut QueueReport,
     ) -> Result<(), LibraryError> {
         let transient = matches!(e, PreviewError::Io(_));
+        tracing::warn!(
+            hash = %item.image_hash,
+            transient,
+            error = %e,
+            "preview pass failed"
+        );
         let conn = self.db.lock().expect("poisoned");
         ingest::mark_failed(&conn, item, &e.to_string(), transient, self.now())?;
         if transient {
@@ -2165,6 +2259,35 @@ pub struct QueueReport {
     pub skipped: usize,
     pub transient_retries: usize,
     pub cancelled: bool,
+}
+
+impl QueueReport {
+    /// Fold a wave worker's per-item tally into the drain total.
+    /// `processed` is counted at claim time and `cancelled` is drain-level
+    /// state — neither merges from workers.
+    fn absorb(&mut self, other: &QueueReport) {
+        self.done += other.done;
+        self.errors += other.errors;
+        self.skipped += other.skipped;
+        self.transient_retries += other.transient_retries;
+    }
+}
+
+/// The §10 queue worker pool: decode + resize + encode are the CPU cost
+/// of ingest, so size like the hashing pool (`min(cores, 8)` — §1.2's
+/// reasoning applies unchanged) but keep it SEPARATE: sharing one pool
+/// would let a scan's hash burst starve previews and vice versa. The cap
+/// also bounds transient decode memory (a wave holds up to 8 full-size
+/// decoded frames).
+fn worker_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(hashing::hash_pool_size())
+            .thread_name(|i| format!("pp-ingest-{i}"))
+            .build()
+            .expect("ingest worker pool")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]

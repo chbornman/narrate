@@ -106,8 +106,21 @@ pub fn debug_capture(app: S<'_>) -> Vec<DebugScopeSnapshot> {
 #[serde(rename_all = "camelCase")]
 pub struct DebugIngest {
     pub counters: Vec<DebugPassCounter>,
+    /// Cumulative per-stage wall-clock (BACKLOG metrics, first slice).
+    /// Process-lifetime counters: refresh twice and diff for rates.
+    pub stages: Vec<DebugStageStat>,
     pub recent_errors: Vec<(String, String, String)>,
     pub log: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStageStat {
+    pub stage: &'static str,
+    pub count: u64,
+    pub total_ms: f64,
+    pub mean_ms: f64,
+    pub max_ms: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,8 +166,21 @@ pub fn debug_ingest(app: S<'_>) -> CmdResult<DebugIngest> {
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let stages = app
+        .library
+        .metrics_snapshot()
+        .into_iter()
+        .map(|s| DebugStageStat {
+            stage: s.stage,
+            count: s.count,
+            total_ms: s.total_ms,
+            mean_ms: s.mean_ms,
+            max_ms: s.max_ms,
+        })
+        .collect();
     Ok(DebugIngest {
         counters,
+        stages,
         recent_errors,
         log: app.library.take_debug_log(),
     })

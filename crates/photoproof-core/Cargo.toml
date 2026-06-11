@@ -13,6 +13,7 @@ rusqlite = { workspace = true, features = ["trace"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 # --- sidecar deps (owned by packet P2.1; append below this line only) ---
 # --- library deps (owned by packet P2.2; append below this line only) ---
 # --- search deps (owned by packet P3.1; append below this line only) ---

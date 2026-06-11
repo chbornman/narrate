@@ -16,6 +16,7 @@ pub mod capture;
 pub mod event;
 pub mod id;
 pub mod library;
+pub mod metrics;
 pub mod runtime;
 pub mod search;
 pub mod sidecar;
