@@ -79,6 +79,22 @@ export const settingsGet = () => invoke<AppSettings>("settings_get");
 export const setStackDisplay = (display: "jpeg" | "raw") =>
   invoke<AppSettings>("set_stack_display", { display });
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
+/** §10.2–10.3: the ONE consent decision — Download now / Later / Never.
+ * No download starts without it; Never is remembered; skipping changes
+ * nothing about journaling. */
+export const runtimeConsent = (decision: "download" | "later" | "never") =>
+  invoke<RuntimeStatus>("runtime_consent", { decision });
+/** §5.3: record a per-model license acceptance (id + url + timestamp). */
+export const runtimeAcceptLicense = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_accept_license", { modelId });
+export const runtimeDownloadModel = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_download_model", { modelId });
+export const runtimeRemoveModel = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_remove_model", { modelId });
+/** Settings → "restart runtime" (§8.1: fresh attempt budget). */
+export const runtimeRestart = () => invoke<RuntimeStatus>("runtime_restart");
+/** Settings → re-detect hardware (§6.1.4). */
+export const runtimeRedetect = () => invoke<RuntimeStatus>("runtime_redetect");
 export const exportJournal = (dest: string) =>
   invoke<ExportReportDto>("export_journal", { dest });
 export const rebuildIndex = () => invoke<RebuildReportDto>("rebuild_index");

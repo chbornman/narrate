@@ -107,17 +107,44 @@ pub struct IngestStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
+    /// §8.3 readiness gates: false until the supervised child reports
+    /// Ready (never true in P6.2 — real binaries are the P6.3 spike).
     pub asr_ready: bool,
-    pub hardware_tier: Option<String>,
+    pub llm_ready: bool,
+    pub tier_detected: u8,
+    /// After the `[runtime] tier` override — it always wins (§6.2).
+    pub tier_effective: u8,
+    /// Overriding ABOVE detected shows the one-time plain warning.
+    pub tier_overridden_above: bool,
+    /// "undecided" | "later" | "never" | "download" (§10.3: no download
+    /// without explicit consent; Never is remembered; Later re-offers
+    /// from settings only).
+    pub consent: String,
+    /// The live manifest byte sum at the effective tier (§5.4: the
+    /// consent card always shows the live sum).
+    pub consent_offer_bytes: u64,
     pub models: Vec<ModelRow>,
+    pub instance_lock_held: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRow {
-    pub name: String,
-    pub size_bytes: u64,
+    pub id: String,
+    pub role: String,
+    /// "not-offered" | "not-downloaded" | "downloading" | "installed" |
+    /// "failed" (§2.4 settings states).
     pub state: String,
+    pub total_bytes: u64,
+    pub downloaded_bytes: u64,
+    /// §5.3: license display + acceptance state; texts/links viewable in
+    /// settings.
+    pub license_name: String,
+    pub license_url: String,
+    pub acceptance_required: bool,
+    pub accepted: bool,
+    /// Download failure detail surfaced in settings/debug (§5.2).
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

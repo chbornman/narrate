@@ -37,15 +37,66 @@ pub fn set_stack_display(
     Ok(next)
 }
 
-/// RUNTIME contract seam (P6.2). M1: degraded mode — no models, no ASR; the
-/// Microphone section stays hidden and Models renders the explainer.
+/// The RUNTIME contract (P6.2): tier, consent, per-model rows with
+/// license + progress, readiness gates. Settings renders the Models
+/// section from this; the one-time consent card reads the same snapshot.
 #[tauri::command]
-pub fn runtime_status() -> RuntimeStatus {
-    RuntimeStatus {
-        asr_ready: false,
-        hardware_tier: None,
-        models: Vec::new(),
-    }
+pub fn runtime_status(app: S<'_>) -> RuntimeStatus {
+    app.runtime.status()
+}
+
+/// §10.2–10.3: the one consent decision — "download" | "later" | "never".
+/// No download starts without this; Never is remembered; Later re-offers
+/// from settings only. Skipping changes nothing about journaling.
+#[tauri::command]
+pub fn runtime_consent(app: S<'_>, handle: AppHandle, decision: String) -> RuntimeStatus {
+    app.runtime.set_consent(&decision);
+    let status = app.runtime.status();
+    let _ = handle.emit("runtime-status", status.clone());
+    status
+}
+
+/// §5.3: record one model's license acceptance (model id, license url,
+/// timestamp — persisted in app data; texts stay viewable in settings).
+#[tauri::command]
+pub fn runtime_accept_license(app: S<'_>, model_id: String) -> CmdResult<RuntimeStatus> {
+    app.runtime
+        .accept_license(&model_id)
+        .map_err(CmdError::Invalid)?;
+    Ok(app.runtime.status())
+}
+
+/// Settings → download one model now (consent + license gates apply in
+/// the manager — zero bytes move for an unaccepted gated model, §13.7).
+#[tauri::command]
+pub fn runtime_download_model(app: S<'_>, model_id: String) -> CmdResult<RuntimeStatus> {
+    app.runtime
+        .download_model(&model_id)
+        .map_err(CmdError::Invalid)?;
+    Ok(app.runtime.status())
+}
+
+/// Settings → remove a model's weights.
+#[tauri::command]
+pub fn runtime_remove_model(app: S<'_>, model_id: String) -> CmdResult<RuntimeStatus> {
+    app.runtime
+        .remove_model(&model_id)
+        .map_err(CmdError::Invalid)?;
+    Ok(app.runtime.status())
+}
+
+/// Settings → "restart runtime" (§8.1: Failed re-enters Spawning with a
+/// fresh budget; surfaced download failures clear for retry).
+#[tauri::command]
+pub fn runtime_restart(app: S<'_>) -> RuntimeStatus {
+    app.runtime.restart_runtime();
+    app.runtime.status()
+}
+
+/// Settings → re-detect hardware (§6.1.4: cached + re-detect on demand).
+#[tauri::command]
+pub fn runtime_redetect(app: S<'_>) -> RuntimeStatus {
+    app.runtime.redetect_tier()
 }
 
 /// Settings → Export: sidecar set + manifest (SIDECARS §12).

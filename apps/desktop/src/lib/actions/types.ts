@@ -62,7 +62,9 @@ export interface ActionContext {
   lookAtFit: boolean;
   /** Compile-time debug builds only. */
   debugEnabled: boolean;
-  /** ASR ready (never true in P4.2). */
+  /** ASR ready — LIVE off the runtime-status channel since P6.2
+   * (RUNTIME §8.3): the EXISTENCE gate for mic surfaces (glyph, M row).
+   * Never true before P6.3 vendors real binaries. */
   asrReady: boolean;
   // radio state for menus
   sort: SortMode;
@@ -77,8 +79,10 @@ export interface ActionContext {
   /** Ctrl+Z has pencil work: a pen-down to cancel or a stacked stroke to
    * retract — otherwise the pencil layer must not swallow the chord. */
   pencilUndoable: boolean;
-  // mic (CAPTURE §6.4/§11 — P6.1 renders the contract; live values arrive
-  // with P6.2's supervised runtime, "disarmed"/unavailable until then)
+  // mic (CAPTURE §6.4/§11). ONE coherent readiness story since P6.2:
+  // `asrReady` above answers "does ASR exist?" (RUNTIME §8.3 readiness —
+  // surfaces appear); `asrUnavailable` answers "did it degrade under the
+  // user?" (CAPTURE §11 indicator flag — the muted-mic glyph, quietly).
   micArmed: boolean;
   /** The §6.4 mic state machine, exactly the indicator contract's enum. */
   micState: MicState;

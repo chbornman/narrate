@@ -53,10 +53,38 @@ export interface IngestStatus {
   errors: number;
 }
 
+/** RUNTIME (P6.2): tier + consent + per-model license/progress rows.
+ * `asrReady`/`llmReady` are the §8.3 readiness gates — false until a
+ * supervised child reports Ready (never true before P6.3 vendors real
+ * binaries); features light up individually and silently as they flip. */
 export interface RuntimeStatus {
   asrReady: boolean;
-  hardwareTier: string | null;
-  models: { name: string; sizeBytes: number; state: string }[];
+  llmReady: boolean;
+  tierDetected: number;
+  /** After the always-winning user override (§6.2). */
+  tierEffective: number;
+  /** Overriding ABOVE detected hardware: the one-time plain warning. */
+  tierOverriddenAbove: boolean;
+  /** "undecided" | "later" | "never" | "download" (§10.3). */
+  consent: string;
+  /** Live manifest byte sum at the effective tier (§5.4). */
+  consentOfferBytes: number;
+  models: ModelRowDto[];
+  instanceLockHeld: boolean;
+}
+
+export interface ModelRowDto {
+  id: string;
+  role: string;
+  /** "not-offered" | "not-downloaded" | "downloading" | "installed" | "failed". */
+  state: string;
+  totalBytes: number;
+  downloadedBytes: number;
+  licenseName: string;
+  licenseUrl: string;
+  acceptanceRequired: boolean;
+  accepted: boolean;
+  error: string | null;
 }
 
 export interface AppSettings {

@@ -9,12 +9,14 @@
 //! - `canonical`: canonical JSON serialization, byte-exact round-trip (EVENTS §4)
 //! - `store`: SQLite schema + EventStore (append/fold/redact/merge) (EVENTS §5–10)
 //! - `capture`: sessions, write scope, the voice pipeline (CAPTURE, P6.1)
+//! - `runtime`: supervision, weights, tiers, scheduling (RUNTIME, P6.2)
 
 pub mod canonical;
 pub mod capture;
 pub mod event;
 pub mod id;
 pub mod library;
+pub mod runtime;
 pub mod search;
 pub mod sidecar;
 pub mod store;

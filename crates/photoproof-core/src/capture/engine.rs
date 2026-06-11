@@ -12,7 +12,7 @@
 use std::task::{Context, Poll, Waker};
 
 use futures_core::stream::BoxStream;
-use photoproof_connectors::mock::AudioFeed;
+use photoproof_connectors::feed::AudioFeed;
 use photoproof_connectors::transcriber::{
     AudioFrame, SegmentKind, StreamMs, Transcriber, TranscriptSegment,
 };
@@ -379,9 +379,24 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
 
     /// Drain everything the Transcriber has ready (non-blocking; mocks are
     /// poll-deterministic). Returns events committed by this pump.
+    ///
+    /// The §2.5/§6.4 drain deadline gates EVERY iteration, not just
+    /// `Poll::Pending` (P6.2 hardening): a final that is merely *ready*
+    /// after the 5 s cap does not mint, and a stream that never returns
+    /// Pending (the real wire can keep a queue warm) cannot defeat the
+    /// cap — the clock re-read per iteration bounds the loop.
     pub fn pump(&mut self, store: &EventStore) -> Vec<Event> {
         let mut committed = Vec::new();
         while self.pipeline.is_some() {
+            let deadline_passed = self
+                .pipeline
+                .as_ref()
+                .and_then(|p| p.drain_deadline)
+                .is_some_and(|d| self.clock.mono_ms() >= d);
+            if deadline_passed {
+                self.finish_drain("5 s drain window elapsed");
+                break;
+            }
             let polled = {
                 let p = self.pipeline.as_mut().expect("checked in loop condition");
                 Self::poll_stream(&mut p.stream)
@@ -412,17 +427,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
                     }
                     break;
                 }
-                Poll::Pending => {
-                    let deadline_passed = self
-                        .pipeline
-                        .as_ref()
-                        .and_then(|p| p.drain_deadline)
-                        .is_some_and(|d| self.clock.mono_ms() >= d);
-                    if deadline_passed {
-                        self.finish_drain("5 s drain window elapsed");
-                    }
-                    break;
-                }
+                Poll::Pending => break,
             }
         }
         committed
@@ -435,10 +440,19 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             self.touch_activity(); // §2.1: Partial while armed is activity
         }
         // Partials are NEVER persisted and never displayed in the
-        // indicator; the dev-build debug panel MAY show them (§6.5).
+        // indicator; the DEV-BUILD debug panel MAY show them (§6.5) —
+        // release builds keep the ring (timing diagnostics) but the TEXT
+        // is cfg-gated out (P6.2 obligation: partials are dev-build
+        // debug territory, in every memory the app holds).
+        #[cfg(debug_assertions)]
         self.note(format!(
             "partial[{}] @{}ms: {:?}",
             seg.utterance_id, seg.onset, seg.text
+        ));
+        #[cfg(not(debug_assertions))]
+        self.note(format!(
+            "partial[{}] @{}ms: <text elided in release>",
+            seg.utterance_id, seg.onset
         ));
     }
 

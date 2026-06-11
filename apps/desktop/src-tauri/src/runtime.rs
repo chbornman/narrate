@@ -1,0 +1,774 @@
+//! The shell's runtime host (spec/RUNTIME.md, packet P6.2): owns the
+//! instance lock, the startup orphan sweep, config + tier resolution, the
+//! compiled manifest, consent + license records, and the download worker.
+//!
+//! HONEST SCOPE: no vendored llama-server/sherpa binaries exist until the
+//! P6.3 spike, so no supervisor is ever instantiated here yet — the
+//! supervision machinery is core code verified against the stub child
+//! (tests/runtime_process.rs); this host computes plans, serves status,
+//! and wires consent/downloads. Features light up individually as
+//! readiness events arrive (§8.3/§10.5); in this packet they simply never
+//! do, which renders exactly the degraded mode that is the whole M1
+//! product (§7).
+
+use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+use photoproof_connectors::config::{Config, from_toml_str};
+use photoproof_core::UtcMillis;
+use photoproof_core::runtime::{
+    Acceptances, ChildRegistry, DownloadError, DownloadManager, InstanceLock, Manifest,
+    ProcessPlan, RuntimeBus, RuntimePlan, SleepPacer, TierDecision, compiled_manifest, plan,
+    resolve_tier,
+};
+
+use crate::dto::{ModelRow, RuntimeStatus};
+use crate::hardware::LiveProbe;
+
+/// §10.3: "Later" re-offers from settings only; "Never" is remembered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consent {
+    Undecided,
+    Later,
+    Never,
+    Download,
+}
+
+impl Consent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Consent::Undecided => "undecided",
+            Consent::Later => "later",
+            Consent::Never => "never",
+            Consent::Download => "download",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "later" => Consent::Later,
+            "never" => Consent::Never,
+            "download" => Consent::Download,
+            _ => Consent::Undecided,
+        }
+    }
+}
+
+struct HostState {
+    config: Config,
+    /// Read by the debug panel (feature-gated); kept in every build.
+    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    config_warnings: Vec<String>,
+    tier: TierDecision,
+    consent: Consent,
+    acceptances: Acceptances,
+    /// model id → live download progress (downloaded, total). An entry
+    /// exists from enqueue to completion — queued models show as
+    /// "downloading" at 0 bytes.
+    downloads: BTreeMap<String, (u64, u64)>,
+    /// model id → surfaced failure (§5.2: settings + debug panel).
+    download_errors: BTreeMap<String, String>,
+    /// §5.2 "one file at a time" is a rule of the download MANAGER, not
+    /// of one model: pending model ids drain through ONE worker thread.
+    download_queue: VecDeque<String>,
+    download_worker_live: bool,
+    /// Startup orphan sweep result (killed, skipped) for the debug panel.
+    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    orphan_sweep: (Vec<String>, Vec<String>),
+}
+
+pub struct RuntimeHost {
+    pub bus: RuntimeBus,
+    app_data: PathBuf,
+    manifest: Manifest,
+    lock: Option<Arc<InstanceLock>>,
+    /// §5.2 throttle-while-capture-live seam: P6.3's arm/disarm wiring
+    /// flips this; the pacer consults it per chunk.
+    pub capture_live: Arc<AtomicBool>,
+    state: Mutex<HostState>,
+    /// Pins the §5.2 cross-model serialization: which thread ran each
+    /// model's download, in order.
+    #[cfg(test)]
+    download_thread_log: Mutex<Vec<(String, std::thread::ThreadId)>>,
+}
+
+impl RuntimeHost {
+    pub fn init(app_data: PathBuf) -> Self {
+        let runtime_dir = app_data.join("runtime");
+        let bus = RuntimeBus::new();
+        // §8.5: the exclusive lock; supervisors refuse to spawn without
+        // it. (The Tauri single-instance plugin already kept a second
+        // launch from reaching this point; belt and braces.)
+        let lock = InstanceLock::acquire(&runtime_dir)
+            .ok()
+            .flatten()
+            .map(Arc::new);
+        // §8.4 crash net, before any spawn could ever happen — but ONLY
+        // while holding the §8.5 lock. Without it another instance is
+        // live, and its healthy supervised children are exactly what the
+        // sweep looks for (alive PID + matching start-time): a lockless
+        // sweep would SIGKILL the live instance's children and erase its
+        // crash-net records. No lock ⇒ children.json is not touched.
+        let orphan_sweep = if lock.is_some() {
+            ChildRegistry::new(&runtime_dir)
+                .and_then(|reg| reg.kill_orphans())
+                .unwrap_or_default()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        // §4.4 config: unknown keys warn, missing sections default; a
+        // parse error falls back to defaults LOUDLY in the log (the
+        // journal must never block on config).
+        let config_path = app_data.join("config.toml");
+        let (config, config_warnings) = match std::fs::read_to_string(&config_path) {
+            Ok(text) => match from_toml_str(&text) {
+                Ok(loaded) => (
+                    loaded.config,
+                    loaded
+                        .unknown_keys
+                        .iter()
+                        .map(|k| format!("config.toml: unknown key `{k}`"))
+                        .collect(),
+                ),
+                Err(e) => (
+                    Config::default(),
+                    vec![format!("config.toml rejected ({e}); using defaults")],
+                ),
+            },
+            Err(_) => (Config::default(), Vec::new()),
+        };
+
+        // §6: detect (cached) + the override that always wins.
+        let tier = resolve_tier(
+            &mut LiveProbe,
+            config.runtime.tier,
+            &runtime_dir.join("tier.json"),
+            false,
+        );
+
+        // §5.1: the compiled manifest, also written for the debug panel.
+        let manifest = compiled_manifest();
+        let _ = manifest.write_to(&Self::models_dir_for(&app_data, &config));
+
+        let acceptances = Acceptances::load(&runtime_dir.join("acceptances.json"));
+        let consent = std::fs::read_to_string(runtime_dir.join("consent"))
+            .map(|s| Consent::parse(s.trim()))
+            .unwrap_or(Consent::Undecided);
+
+        Self {
+            bus,
+            app_data,
+            manifest,
+            lock,
+            capture_live: Arc::new(AtomicBool::new(false)),
+            state: Mutex::new(HostState {
+                config,
+                config_warnings,
+                tier,
+                consent,
+                acceptances,
+                downloads: BTreeMap::new(),
+                download_errors: BTreeMap::new(),
+                download_queue: VecDeque::new(),
+                download_worker_live: false,
+                orphan_sweep,
+            }),
+            #[cfg(test)]
+            download_thread_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn models_dir_for(app_data: &std::path::Path, config: &Config) -> PathBuf {
+        if config.runtime.models_dir.is_empty() {
+            app_data.join("models")
+        } else {
+            PathBuf::from(&config.runtime.models_dir)
+        }
+    }
+
+    fn manager(&self) -> DownloadManager {
+        let state = self.state.lock().expect("runtime state");
+        DownloadManager::new(
+            Self::models_dir_for(&self.app_data, &state.config),
+            self.bus.clone(),
+        )
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))] // P6.3 maps plans onto supervisors
+    pub fn plan(&self) -> RuntimePlan {
+        let state = self.state.lock().expect("runtime state");
+        let installed = self.manager_installed(&state);
+        plan(
+            &state.config,
+            state.tier.effective_tier,
+            &self.manifest,
+            &installed,
+        )
+    }
+
+    fn manager_installed(
+        &self,
+        state: &HostState,
+    ) -> BTreeMap<String, photoproof_core::runtime::InstalledRecord> {
+        DownloadManager::new(
+            Self::models_dir_for(&self.app_data, &state.config),
+            self.bus.clone(),
+        )
+        .installed()
+    }
+
+    // ------------------------------------------------------------ status ----
+
+    pub fn status(&self) -> RuntimeStatus {
+        let state = self.state.lock().expect("runtime state");
+        let installed = self.manager_installed(&state);
+        let tier = state.tier.effective_tier;
+        let offered = self.manifest.offered_at(tier);
+        let models = self
+            .manifest
+            .models
+            .iter()
+            .map(|m| {
+                let offered_here = offered.iter().any(|o| o.id == m.id);
+                let is_installed = installed.contains_key(&m.id);
+                let downloading = state.downloads.get(&m.id);
+                let error = state.download_errors.get(&m.id).cloned();
+                let state_name = if is_installed {
+                    "installed"
+                } else if error.is_some() {
+                    "failed"
+                } else if downloading.is_some() {
+                    "downloading"
+                } else if offered_here {
+                    "not-downloaded"
+                } else {
+                    "not-offered"
+                };
+                ModelRow {
+                    id: m.id.clone(),
+                    role: m.role.clone(),
+                    state: state_name.into(),
+                    total_bytes: m.total_bytes,
+                    downloaded_bytes: downloading.map(|(d, _)| *d).unwrap_or(if is_installed {
+                        m.total_bytes
+                    } else {
+                        0
+                    }),
+                    license_name: m.license.name.clone(),
+                    license_url: m.license.url.clone(),
+                    acceptance_required: m.license.acceptance_required,
+                    accepted: state.acceptances.accepted.contains_key(&m.id),
+                    error,
+                }
+            })
+            .collect();
+        RuntimeStatus {
+            // §8.3: Ready only when a supervised child reports it — no
+            // child exists before the P6.3 spike, so these stay false and
+            // the mic glyph stays absent (UI §7.3, quietly).
+            asr_ready: false,
+            llm_ready: false,
+            tier_detected: state.tier.detected_tier,
+            tier_effective: tier,
+            tier_overridden_above: state.tier.overridden_above,
+            consent: state.consent.as_str().into(),
+            consent_offer_bytes: self.manifest.total_bytes_at(tier),
+            models,
+            instance_lock_held: self.lock.is_some(),
+        }
+    }
+
+    /// Debug-panel detail (§8.1/§8.6): plan states + the orphan sweep +
+    /// config warnings.
+    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    pub fn debug_lines(&self) -> Vec<String> {
+        let state = self.state.lock().expect("runtime state");
+        let plan = {
+            let installed = self.manager_installed(&state);
+            plan(
+                &state.config,
+                state.tier.effective_tier,
+                &self.manifest,
+                &installed,
+            )
+        };
+        let describe = |name: &str, p: &ProcessPlan| match p {
+            ProcessPlan::NotConfigured { reason, .. } => {
+                format!("{name}: notConfigured — {reason}")
+            }
+            ProcessPlan::Run { model_id } => {
+                format!("{name}: run {model_id} (awaiting P6.3 vendored binaries)")
+            }
+            ProcessPlan::External { base_url } => format!("{name}: external {base_url}"),
+        };
+        let mut lines = vec![
+            format!(
+                "tier: detected {} effective {}{}",
+                state.tier.detected_tier,
+                state.tier.effective_tier,
+                if state.tier.overridden_above {
+                    " (override above detected)"
+                } else {
+                    ""
+                }
+            ),
+            describe("llm", &plan.llm),
+            describe("asr", &plan.asr),
+            describe("embedder", &plan.clip_embedder),
+            describe("text-embedder", &plan.text_embedder),
+            format!(
+                "instance lock: {}",
+                if self.lock.is_some() {
+                    "held"
+                } else {
+                    "NOT HELD"
+                }
+            ),
+            if self.lock.is_some() {
+                format!(
+                    "orphan sweep: killed {:?}, skipped {:?}",
+                    state.orphan_sweep.0, state.orphan_sweep.1
+                )
+            } else {
+                "orphan sweep: NOT RUN (instance lock not held, §8.5)".into()
+            },
+        ];
+        lines.extend(state.config_warnings.iter().cloned());
+        for (id, (done, total)) in &state.downloads {
+            lines.push(format!("download {id}: {done}/{total} bytes"));
+        }
+        for (id, err) in &state.download_errors {
+            lines.push(format!("download {id} FAILED: {err}"));
+        }
+        lines
+    }
+
+    // ----------------------------------------------------------- actions ----
+
+    /// §10.2–10.3: the one consent decision. "download" enqueues the
+    /// offered models whose license state permits (gated models wait for
+    /// their recorded acceptance).
+    pub fn set_consent(self: &Arc<Self>, decision: &str) {
+        let consent = Consent::parse(decision);
+        {
+            let mut state = self.state.lock().expect("runtime state");
+            state.consent = consent;
+        }
+        let runtime_dir = self.app_data.join("runtime");
+        let _ = std::fs::create_dir_all(&runtime_dir);
+        let _ = std::fs::write(runtime_dir.join("consent"), consent.as_str());
+        if consent == Consent::Download {
+            self.download_offered();
+        }
+    }
+
+    /// §5.3: record an acceptance (model id, license url, timestamp).
+    pub fn accept_license(&self, model_id: &str) -> Result<(), String> {
+        let Some(model) = self.manifest.model(model_id) else {
+            return Err(format!("unknown model {model_id:?}"));
+        };
+        let mut state = self.state.lock().expect("runtime state");
+        state
+            .acceptances
+            .accept(model_id, &model.license.url, &UtcMillis::now().to_rfc3339());
+        state
+            .acceptances
+            .save(&self.app_data.join("runtime/acceptances.json"))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Settings → download one model now (post-consent path; also the
+    /// "Later → settings" re-offer, §10.3). Joins the single queue —
+    /// never a transfer thread of its own (§5.2).
+    pub fn download_model(self: &Arc<Self>, model_id: &str) -> Result<(), String> {
+        let Some(model) = self.manifest.model(model_id).cloned() else {
+            return Err(format!("unknown model {model_id:?}"));
+        };
+        self.enqueue_downloads(vec![model]);
+        Ok(())
+    }
+
+    fn download_offered(self: &Arc<Self>) {
+        let tier = self
+            .state
+            .lock()
+            .expect("runtime state")
+            .tier
+            .effective_tier;
+        let offered: Vec<_> = self
+            .manifest
+            .offered_at(tier)
+            .into_iter()
+            .cloned()
+            .collect();
+        self.enqueue_downloads(offered);
+    }
+
+    /// §5.2 "Concurrency: one file at a time" is a property of the
+    /// download MANAGER, not of one model. Every requested model joins
+    /// one queue and a single `pp-download` worker drains it in order —
+    /// consent at Tier 1 enqueues four models and they transfer strictly
+    /// sequentially (the within-model file ordering is core's half of
+    /// the rule). The pacer throttle therefore applies to the one live
+    /// transfer, undiluted.
+    fn enqueue_downloads(self: &Arc<Self>, models: Vec<photoproof_core::runtime::ModelEntry>) {
+        let spawn_worker = {
+            let mut state = self.state.lock().expect("runtime state");
+            for model in models {
+                if state.downloads.contains_key(&model.id) {
+                    continue; // already queued or mid-transfer
+                }
+                state
+                    .downloads
+                    .insert(model.id.clone(), (0, model.total_bytes));
+                state.download_errors.remove(&model.id);
+                state.download_queue.push_back(model.id);
+            }
+            if state.download_worker_live || state.download_queue.is_empty() {
+                false
+            } else {
+                state.download_worker_live = true;
+                true
+            }
+        };
+        if spawn_worker {
+            let host = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("pp-download".into())
+                .spawn(move || host.drain_download_queue());
+            if spawned.is_err() {
+                // No worker came up: let a later enqueue try again.
+                self.state
+                    .lock()
+                    .expect("runtime state")
+                    .download_worker_live = false;
+            }
+        }
+    }
+
+    /// The one download worker: pops model ids until the queue is empty,
+    /// running each download to completion before the next starts.
+    fn drain_download_queue(&self) {
+        loop {
+            let next = {
+                let mut state = self.state.lock().expect("runtime state");
+                match state.download_queue.pop_front() {
+                    Some(id) => id,
+                    None => {
+                        state.download_worker_live = false;
+                        return;
+                    }
+                }
+            };
+            if let Some(model) = self.manifest.model(&next).cloned() {
+                self.run_download(&model);
+            }
+        }
+    }
+
+    /// One model, files strictly in sequence (core's loop); called only
+    /// from the single queue worker.
+    fn run_download(&self, model: &photoproof_core::runtime::ModelEntry) {
+        #[cfg(test)]
+        self.download_thread_log
+            .lock()
+            .expect("download thread log")
+            .push((model.id.clone(), std::thread::current().id()));
+        // Track progress off the bus while this download runs.
+        let progress_rx = self.bus.subscribe();
+        let acceptances = self
+            .state
+            .lock()
+            .expect("runtime state")
+            .acceptances
+            .clone();
+        let manager = self.manager();
+        let mut pacer = SleepPacer::new(self.capture_live.clone());
+        let result = manager.download_model(
+            model,
+            self.manifest.manifest_version,
+            &acceptances,
+            &mut pacer,
+            &UtcMillis::now().to_rfc3339(),
+        );
+        // Fold any progress events into the snapshot state.
+        let mut last = (manager.downloaded_bytes(model), model.total_bytes);
+        while let Ok(e) = progress_rx.try_recv() {
+            if let photoproof_core::runtime::RuntimeEvent::DownloadProgress {
+                model_id,
+                downloaded_bytes,
+                total_bytes,
+            } = e
+                && model_id == model.id
+            {
+                last = (downloaded_bytes, total_bytes);
+            }
+        }
+        let mut state = self.state.lock().expect("runtime state");
+        state.downloads.remove(&model.id);
+        match result {
+            Ok(_) => {}
+            Err(DownloadError::LicenseNotAccepted { .. }) => {
+                // Not an error row: the gate simply hasn't opened —
+                // settings shows the acceptance affordance instead.
+            }
+            Err(e) => {
+                state
+                    .download_errors
+                    .insert(model.id.clone(), e.to_string());
+            }
+        }
+        let _ = last;
+    }
+
+    /// Settings → remove a model's weights (§2.4). Installed records and
+    /// files go together; tier offers are unaffected (§6.2: selection
+    /// never deletes — but the user's explicit remove does).
+    pub fn remove_model(&self, model_id: &str) -> Result<(), String> {
+        let manager = self.manager();
+        manager
+            .remove_installed_record(model_id)
+            .map_err(|e| e.to_string())?;
+        let dir = manager.models_dir().join(model_id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Settings → "restart runtime" (§8.1: re-enters Spawning with a
+    /// fresh budget). No supervisor exists before P6.3; the action clears
+    /// surfaced download failures so a retry can run.
+    pub fn restart_runtime(&self) {
+        let mut state = self.state.lock().expect("runtime state");
+        state.download_errors.clear();
+    }
+
+    /// Settings → re-detect hardware (§6.1.4).
+    pub fn redetect_tier(&self) -> RuntimeStatus {
+        {
+            let mut state = self.state.lock().expect("runtime state");
+            let tier = resolve_tier(
+                &mut LiveProbe,
+                state.config.runtime.tier,
+                &self.app_data.join("runtime/tier.json"),
+                true,
+            );
+            state.tier = tier;
+        }
+        self.status()
+    }
+
+    /// Live download progress for the pump's snapshot events.
+    pub fn note_progress(&self, model_id: &str, downloaded: u64, total: u64) {
+        let mut state = self.state.lock().expect("runtime state");
+        if let Some(slot) = state.downloads.get_mut(model_id) {
+            *slot = (downloaded, total);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hosts under test pin `[runtime] tier = 0` via config — the
+    /// override always wins (§6.2), making these assertions independent
+    /// of whatever GPU the gate machine actually has (the founder box
+    /// carries an RTX 5080; CI may carry nothing).
+    fn host() -> (tempfile::TempDir, Arc<RuntimeHost>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 0\n").unwrap();
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        (dir, host)
+    }
+
+    /// Tier 0 (forced by the always-winning override): nothing offered,
+    /// nothing ready, the consent sum is zero, and the lock is held.
+    #[test]
+    fn tier_0_offers_nothing_and_spawns_nothing() {
+        let (_dir, host) = host();
+        let status = host.status();
+        assert_eq!(status.tier_effective, 0);
+        assert!(!status.asr_ready);
+        assert!(!status.llm_ready);
+        assert_eq!(status.consent, "undecided");
+        assert_eq!(status.consent_offer_bytes, 0, "§5.4 live sum at tier 0");
+        assert!(status.instance_lock_held);
+        assert!(
+            status.models.iter().all(|m| m.state == "not-offered"),
+            "tier 0 offers nothing: {:?}",
+            status.models.iter().map(|m| &m.state).collect::<Vec<_>>()
+        );
+        assert!(host.plan().spawns_nothing(), "Tier-0-whole: zero children");
+    }
+
+    #[test]
+    fn consent_is_remembered_across_hosts_and_never_stays_never() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 0\n").unwrap();
+        {
+            let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+            host.set_consent("never");
+        }
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        assert_eq!(host.status().consent, "never", "§10.3: Never is remembered");
+    }
+
+    #[test]
+    fn license_acceptance_is_recorded_with_url_and_timestamp_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 0\n").unwrap();
+        {
+            let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+            host.accept_license("gemma-4-e4b-it-q4_k_m").unwrap();
+            assert!(host.accept_license("no-such-model").is_err());
+        }
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        let status = host.status();
+        let gemma = status
+            .models
+            .iter()
+            .find(|m| m.id == "gemma-4-e4b-it-q4_k_m")
+            .unwrap();
+        assert!(gemma.accepted, "§5.3: acceptance recorded + persisted");
+        assert!(gemma.acceptance_required);
+        let on_disk = Acceptances::load(&dir.path().join("runtime/acceptances.json"));
+        let rec = &on_disk.accepted["gemma-4-e4b-it-q4_k_m"];
+        assert_eq!(rec.license_url, "https://ai.google.dev/gemma/terms");
+        assert!(rec.at.starts_with("20"), "RFC 3339 timestamp");
+    }
+
+    #[test]
+    fn manifest_json_lands_in_models_dir_for_the_debug_panel() {
+        let (dir, _host) = host();
+        assert!(dir.path().join("models/manifest.json").exists(), "§5.1");
+    }
+
+    #[test]
+    fn second_host_on_the_same_app_data_does_not_hold_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 0\n").unwrap();
+        let first = RuntimeHost::init(dir.path().to_path_buf());
+        let second = RuntimeHost::init(dir.path().to_path_buf());
+        assert!(first.status().instance_lock_held);
+        assert!(
+            !second.status().instance_lock_held,
+            "§8.5: one instance holds the lock; supervisors refuse without it"
+        );
+    }
+
+    /// §8.4/§8.5: the orphan sweep is the LOCK HOLDER's crash net. A host
+    /// that lost the lock race must not run it — the first instance's
+    /// healthy supervised children (alive PID + matching start-time) are
+    /// exactly what the sweep kills. The recorded child here is this very
+    /// test process with its CORRECT start-time: if the lockless host
+    /// swept, it would SIGKILL us.
+    #[test]
+    fn orphan_sweep_does_not_run_without_the_instance_lock() {
+        use photoproof_core::runtime::{ChildRecord, process_start_time};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 0\n").unwrap();
+        let first = RuntimeHost::init(dir.path().to_path_buf());
+        assert!(first.status().instance_lock_held);
+        // Simulate the first instance's live supervised child…
+        let reg = ChildRegistry::new(&dir.path().join("runtime")).unwrap();
+        let my_pid = std::process::id();
+        reg.record(ChildRecord {
+            process: "llm".into(),
+            pid: my_pid,
+            start_time: process_start_time(my_pid),
+            port: 4000,
+        })
+        .unwrap();
+        // …then a second host that loses the lock race.
+        let second = RuntimeHost::init(dir.path().to_path_buf());
+        assert!(!second.status().instance_lock_held);
+        assert_eq!(
+            reg.list().len(),
+            1,
+            "no lock ⇒ no sweep: children.json untouched (we are also \
+             alive to assert this — a sweep would have SIGKILLed us)"
+        );
+        assert!(
+            second
+                .debug_lines()
+                .join("\n")
+                .contains("orphan sweep: NOT RUN"),
+            "the skip is named for the debug panel"
+        );
+    }
+
+    /// §5.2: "one file at a time" is manager-wide, not per-model —
+    /// consent at Tier 1 drains every offered model through ONE worker
+    /// thread, strictly in order; nothing transfers concurrently. (Every
+    /// transfer fails fast here — compiled-manifest URLs are https and
+    /// the TLS client is P6.3 — which is exactly why thread identity is
+    /// the observable: the old fan-out ran four threads regardless.)
+    #[test]
+    fn consent_download_drains_all_offered_models_on_one_worker_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 1\n").unwrap();
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        let offered: Vec<String> = host
+            .manifest
+            .offered_at(1)
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
+        assert!(offered.len() >= 2, "Tier 1 offers several models");
+
+        host.set_consent("download");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            {
+                let state = host.state.lock().unwrap();
+                if state.downloads.is_empty()
+                    && state.download_queue.is_empty()
+                    && !state.download_worker_live
+                {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "download queue should drain (every transfer fails fast)"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let log = host.download_thread_log.lock().unwrap();
+        assert_eq!(
+            log.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            offered,
+            "every offered model ran, in enqueue order"
+        );
+        let worker = log[0].1;
+        assert!(
+            log.iter().all(|(_, t)| *t == worker),
+            "ONE worker thread ran them all — same thread ⇒ strictly \
+             sequential, never four concurrent transfers"
+        );
+        assert_ne!(
+            worker,
+            std::thread::current().id(),
+            "…and it is the background worker, not the caller"
+        );
+    }
+
+    #[test]
+    fn debug_lines_carry_plan_states_and_the_orphan_sweep() {
+        let (_dir, host) = host();
+        let lines = host.debug_lines().join("\n");
+        assert!(lines.contains("tier: detected"));
+        assert!(lines.contains("effective 0"), "the override pinned tier 0");
+        assert!(lines.contains("llm: notConfigured"));
+        assert!(lines.contains("asr: notConfigured"));
+        assert!(lines.contains("instance lock: held"));
+        assert!(lines.contains("orphan sweep"));
+    }
+}

@@ -14,9 +14,11 @@ mod commands;
 mod debug;
 mod dto;
 mod error;
+mod hardware;
 mod note;
 mod protocol;
 mod pump;
+mod runtime;
 mod scope;
 mod search_types;
 mod search_wire;
@@ -32,6 +34,17 @@ use state::App;
 
 pub fn run() {
     let builder = tauri::Builder::default()
+        // §8.5 single-instance discipline: a second launch never reaches
+        // the supervisor — it forwards focus to the first instance and
+        // exits. Registered FIRST (plugin guidance); the core's
+        // instance.lock is the belt-and-braces half supervisors check.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.unminimize();
+                let _ = main.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         // Window geometry persisted (featureset §6). The settings window is
         // denylisted: it stays the one modest window (UI §2.4). Known risk
@@ -89,6 +102,7 @@ pub fn run() {
             app.manage(state);
             pump::spawn_ingest_pump(app.handle().clone());
             pump::spawn_sidecar_pump(app.handle().clone());
+            pump::spawn_runtime_pump(app.handle().clone());
             Ok(())
         });
 
@@ -130,6 +144,12 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::settings_get,
         commands::app::set_stack_display,
         commands::app::runtime_status,
+        commands::app::runtime_consent,
+        commands::app::runtime_accept_license,
+        commands::app::runtime_download_model,
+        commands::app::runtime_remove_model,
+        commands::app::runtime_restart,
+        commands::app::runtime_redetect,
         commands::app::export_journal,
         commands::app::rebuild_index,
         commands::app::open_settings_window,
@@ -170,6 +190,12 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::settings_get,
         commands::app::set_stack_display,
         commands::app::runtime_status,
+        commands::app::runtime_consent,
+        commands::app::runtime_accept_license,
+        commands::app::runtime_download_model,
+        commands::app::runtime_remove_model,
+        commands::app::runtime_restart,
+        commands::app::runtime_redetect,
         commands::app::export_journal,
         commands::app::rebuild_index,
         commands::app::open_settings_window,

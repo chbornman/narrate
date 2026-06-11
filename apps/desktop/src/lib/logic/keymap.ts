@@ -145,7 +145,7 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   pencilUndoable: false,
   micArmed: false,
   micState: "disarmed",
-  asrUnavailable: true, // no ASR until P6.2 reports readiness
+  asrUnavailable: true, // degraded until a supervised ASR reports Ready (P6.3)
 };
 
 export function withDefaults(ctx: KeyContext): ActionContext {

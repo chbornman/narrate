@@ -1,5 +1,10 @@
-//! Audio plumbing for tests: a push-style frame source (the shape of
-//! CAPTURE §6.2's `push_audio` / `end_stream`) and small stream helpers.
+//! Audio plumbing: a push-style frame source (the shape of CAPTURE §6.2's
+//! `push_audio` / `end_stream`) and small stream helpers.
+//!
+//! Production plumbing, not mock behavior — the capture engine feeds its
+//! Transcriber stream through an [`AudioFeed`] whether the transcriber is
+//! the supervised sherpa client or a scripted mock (P6.2 obligation:
+//! moved out of the mock namespace; `mock` re-exports for back-compat).
 
 use std::collections::VecDeque;
 use std::pin::Pin;

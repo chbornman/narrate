@@ -173,7 +173,10 @@ export const GLOBAL_DEFS: ActionDef[] = [
     keys: [{ key: "m" }],
     scope: "global",
     group: "capture",
-    available: (ctx) => ctx.asrReady, // M2b
+    // Gated on the LIVE §8.3 readiness flag since P6.2; stays reserved
+    // (dispatches to nothing) until P6.3 wires the real mic device —
+    // arming needs cpal + the supervised sherpa client.
+    available: (ctx) => ctx.asrReady,
     reserved: true,
   },
 ];

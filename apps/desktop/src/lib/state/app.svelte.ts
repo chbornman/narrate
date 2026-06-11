@@ -123,6 +123,11 @@ export class Ui {
       await this.openFolder(this.roots[0].rootId, "");
     }
     this.shell.ingest = await ipc.ingestStatus();
+    try {
+      this.shell.onRuntimeStatus(await ipc.runtimeStatus());
+    } catch {
+      /* backend unavailable (tests/dev): runtime stays dark */
+    }
     await this.reportScope();
   }
 
@@ -593,7 +598,7 @@ export class Ui {
       autoAdvance: this.autoAdvance,
       lookAtFit: this.look.atFit,
       debugEnabled: this.debugEnabled,
-      asrReady: false, // P4.2: no ASR
+      asrReady: this.shell.asrReady, // live from runtime-status (P6.2, §8.3)
       sort: this.grid.sort,
       thumbStep: this.grid.thumbStep,
       surround: this.shell.surround,

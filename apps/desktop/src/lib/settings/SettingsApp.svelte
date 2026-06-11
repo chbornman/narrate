@@ -68,6 +68,28 @@
     }
   }
 
+  async function acceptLicense(modelId: string) {
+    runtime = await ipc.runtimeAcceptLicense(modelId);
+  }
+
+  async function downloadModel(modelId: string) {
+    runtime = await ipc.runtimeDownloadModel(modelId);
+  }
+
+  async function removeModel(modelId: string) {
+    runtime = await ipc.runtimeRemoveModel(modelId);
+  }
+
+  /** §8.1: Failed re-enters Spawning with a fresh budget. */
+  async function restartRuntime() {
+    runtime = await ipc.runtimeRestart();
+  }
+
+  /** §6.1.4: cached + re-detect on demand. */
+  async function redetect() {
+    runtime = await ipc.runtimeRedetect();
+  }
+
   async function runRebuild() {
     busy = true;
     try {
@@ -136,22 +158,60 @@
     </section>
   {/if}
 
-  <!-- 3. Models -->
+  <!-- 3. Models (renders RUNTIME's contract: tier, per-model rows with
+       resumable progress + license display, restart-runtime — §2.4) -->
   <section>
     <h2>Models</h2>
-    {#if runtime !== null && runtime.models.length === 0}
+    {#if runtime !== null}
       <p class="dim">
-        No models installed. Hardware tier: {runtime.hardwareTier ?? "not detected"}.
+        Hardware tier: {runtime.tierEffective}
+        {#if runtime.tierEffective !== runtime.tierDetected}
+          (detected {runtime.tierDetected}, overridden)
+        {/if}
+        {#if runtime.tierOverriddenAbove}
+          — set above detected hardware; models may not fit.
+        {/if}
       </p>
-      <p class="dim">
-        Without models, journaling is fully functional: typed notes, ratings,
-        and keyword search all work. Voice capture and semantic search light
-        up if models are added later.
-      </p>
-    {:else if runtime !== null}
-      {#each runtime.models as m (m.name)}
-        <div class="row"><span class="name">{m.name}</span><span class="state">{m.state}</span></div>
+      {#if runtime.tierEffective === 0}
+        <p class="dim">
+          Without models, journaling is fully functional: typed notes, the
+          pencil, ratings, and keyword search all work. Voice capture and
+          semantic search light up if models are added later.
+        </p>
+      {/if}
+      {#each runtime.models.filter((m) => m.state !== "not-offered") as m (m.id)}
+        <div class="row">
+          <span class="name">{m.id}</span>
+          <span class="state">
+            {#if m.state === "downloading"}
+              downloading — {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
+            {:else}
+              {m.state}
+            {/if}
+          </span>
+          {#if m.state === "not-downloaded" || m.state === "failed"}
+            {#if m.acceptanceRequired && !m.accepted}
+              <button class="quiet" onclick={() => void acceptLicense(m.id)}>
+                Accept license
+              </button>
+            {:else}
+              <button class="quiet" onclick={() => void downloadModel(m.id)}>Download</button>
+            {/if}
+          {/if}
+          {#if m.state === "installed"}
+            <button class="quiet" onclick={() => void removeModel(m.id)}>Remove</button>
+          {/if}
+        </div>
+        <div class="row license">
+          <a href={m.licenseUrl} target="_blank" rel="noreferrer">{m.licenseName}</a>
+          {#if m.accepted}<span class="dim">accepted</span>{/if}
+          {#if m.error !== null}<span class="dim">— {m.error}</span>{/if}
+        </div>
       {/each}
+      <div class="row">
+        <button class="quiet" onclick={() => void restartRuntime()}>Restart runtime</button>
+        <button class="quiet" onclick={() => void redetect()}>Re-detect hardware</button>
+      </div>
     {/if}
   </section>
 
@@ -245,5 +305,12 @@
   .row.pref .name {
     flex: initial;
     color: var(--text-dim);
+  }
+  .row.license {
+    margin: -4px 0 10px;
+    font-size: 11px;
+  }
+  .row.license a {
+    color: var(--text-faint);
   }
 </style>

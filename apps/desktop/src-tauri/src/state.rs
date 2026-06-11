@@ -12,6 +12,7 @@ use photoproof_core::sidecar::SidecarEngine;
 use photoproof_core::{EventStore, SessionContext, SessionId, UtcMillis};
 
 use crate::error::CmdError;
+use crate::runtime::RuntimeHost;
 use crate::scope::ScopeTracker;
 use crate::search_types;
 use crate::session::SessionManager;
@@ -38,6 +39,11 @@ pub struct App {
     /// The M1 search engine (RETRIEVAL §4, packet P3.1) on its own
     /// connection; `interrupt()` cancels in-flight queries on new keystrokes.
     pub searcher: Searcher,
+    /// The model runtime (RUNTIME, P6.2): instance lock, orphan sweep,
+    /// tier, manifest, consent, downloads. No supervised child exists
+    /// until P6.3 vendors real binaries; readiness stays false and the
+    /// app IS the degraded mode that is the whole M1 product (§7).
+    pub runtime: Arc<RuntimeHost>,
     pub shutdown: Arc<AtomicBool>,
 }
 
@@ -69,6 +75,11 @@ impl App {
         };
         let session = SessionManager::open(&store, ctx)?;
         let app_settings = settings::load(&app_data);
+        // RUNTIME init AFTER the journal spine: nothing about journaling
+        // ever blocks on the runtime (§7/§10.1). Acquires the §8.5
+        // instance lock, sweeps the §8.4 crash net, resolves config +
+        // tier, writes the manifest.
+        let runtime = Arc::new(RuntimeHost::init(app_data.clone()));
 
         Ok(Self {
             store,
@@ -83,8 +94,17 @@ impl App {
             settings: Mutex::new(app_settings),
             last_search: Mutex::new(None),
             searcher,
+            runtime,
             shutdown: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// §2.5 step 3, pump-owned: drain enqueued close processing. Called
+    /// from the sidecar pump tick — never from the close/quit path.
+    pub fn run_close_processing(&self) -> Result<(), CmdError> {
+        let mut session = self.session.lock().expect("session mutex");
+        session.run_pending_close_processing(&self.store)?;
+        Ok(())
     }
 
     /// Activity touch (CAPTURE §2.1/§2.2): refreshes the idle timer, rotating
@@ -101,10 +121,11 @@ impl App {
     }
 
     /// Shutdown (CAPTURE §2.5): close the session through the core engine
-    /// (capture drain — none attached until P6.2 — then sidecar flush, then
-    /// bookkeeping + the empty close-processor registry), and re-flush the
-    /// session journal afterwards so the sidecar carries `ended_ts`
-    /// (SIDECARS S3: immediate flush on shutdown).
+    /// (capture drain — `NoCapture` until P6.3 attaches the live engine;
+    /// the pump-owned bounded drain wait is `pump::drain_capture_at_quit`
+    /// — then sidecar flush, then bookkeeping; step 3 is enqueued for the
+    /// next launch's pump), and re-flush the session journal afterwards so
+    /// the sidecar carries `ended_ts` (SIDECARS S3).
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);

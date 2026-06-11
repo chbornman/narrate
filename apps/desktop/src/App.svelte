@@ -23,11 +23,13 @@
     IndicatorPulse,
     IndicatorState,
     IngestStatus,
+    RuntimeStatus,
   } from "./lib/types/dto";
   import Titlebar from "./lib/components/shell/Titlebar.svelte";
   import Indicator from "./lib/components/shell/Indicator.svelte";
   import NoteInput from "./lib/components/shell/NoteInput.svelte";
   import FirstRun from "./lib/components/shell/FirstRun.svelte";
+  import ConsentCard from "./lib/components/shell/ConsentCard.svelte";
   import Cheatsheet from "./lib/components/shell/Cheatsheet.svelte";
   import ContextMenuHost from "./lib/components/shell/ContextMenuHost.svelte";
   import DropConfirm from "./lib/components/shell/DropConfirm.svelte";
@@ -128,6 +130,9 @@
       // The Settings window's edits land live (set_stack_display emits to
       // every window; the grid re-pairs stacks on the spot).
       listen<AppSettings>("settings-changed", (e) => ui.applySettings(e.payload)),
+      // RUNTIME §8.3: readiness/download snapshots — features light up
+      // individually and silently (mic glyph appears, nothing else moves).
+      listen<RuntimeStatus>("runtime-status", (e) => ui.shell.onRuntimeStatus(e.payload)),
       // Drag a folder onto the window → register-root confirm (featureset
       // §6; the OS hands paths only on drop — DropConfirm renders them).
       getCurrentWebview().onDragDropEvent((e) => {
@@ -200,6 +205,9 @@
   <!-- exempt from lights-out: transient note input + the indicator -->
   <NoteInput />
   <Indicator />
+
+  <!-- one-time quiet model consent (UI §9.1.3) — a panel, never a gate -->
+  <ConsentCard />
 
   <ContextMenuHost />
   <ToastHost />

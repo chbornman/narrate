@@ -204,14 +204,21 @@ pub fn debug_search(app: S<'_>) -> Option<QueryEcho> {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugRuntime {
+    /// Plan/supervision lines (RUNTIME §8.1 detail: states, tier, the
+    /// orphan sweep, config warnings, download progress/failures).
     pub processes: Vec<String>,
+    /// The full status snapshot the settings/consent surfaces render.
+    pub status: crate::dto::RuntimeStatus,
 }
 
-/// Runtime tab: managed process table — empty until P6.2.
+/// Runtime tab (RUNTIME §8.1/§8.6): plan + supervision detail. No live
+/// child exists before the P6.3 spike vendors binaries; supervisor state
+/// histories and scheduler decisions join these lines when they do.
 #[tauri::command]
-pub fn debug_runtime() -> DebugRuntime {
+pub fn debug_runtime(app: S<'_>) -> DebugRuntime {
     DebugRuntime {
-        processes: Vec::new(),
+        processes: app.runtime.debug_lines(),
+        status: app.runtime.status(),
     }
 }
 

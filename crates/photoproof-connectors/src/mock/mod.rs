@@ -10,22 +10,35 @@
 //!   and platforms (hashing is FNV-1a + SplitMix64, not `DefaultHasher`).
 //! - **No wall-clock dependence**: all timing is the stream clock implied
 //!   by consumed audio; nothing sleeps, nothing reads `Instant::now()`.
+//!
+//! The two stub SERVERS here (`StubHttpServer`, `StubWsServer`) are the
+//! P6.2 exception to the no-wall-clock rule by necessity: they exercise
+//! the real localhost wire (real sockets ARE the honest OS boundary), but
+//! every behavior is scripted and bounded — no heuristics, no unbounded
+//! waits.
 
-mod audio;
 mod embedder;
+mod http_server;
 mod llm;
 mod reranker;
 mod transcriber;
 mod vad;
 mod vector_store;
+mod ws_server;
 
-pub use audio::{AudioFeed, collect, frames_stream, silent_frame};
+/// Back-compat re-export: `AudioFeed` and its helpers are production
+/// plumbing and live in [`crate::feed`] since P6.2 (the capture engine
+/// imports its audio inlet from there); existing `mock::` paths keep
+/// working.
+pub use crate::feed::{AudioFeed, collect, frames_stream, silent_frame};
 pub use embedder::MockEmbedder;
+pub use http_server::{Route, StubHttpServer, StubRequest, StubResponse};
 pub use llm::{CaptionCall, MockLanguageModel};
 pub use reranker::MockReranker;
 pub use transcriber::{MockTranscriber, ScriptEntry, ScriptedEvent};
 pub use vad::{MockVad, SpeechSpan};
 pub use vector_store::{MockRow, MockVectorStore};
+pub use ws_server::{StubWsServer, WsAction};
 
 /// FNV-1a 64-bit — stable across runs, platforms, and Rust versions
 /// (unlike `std::hash::DefaultHasher`, which guarantees neither).

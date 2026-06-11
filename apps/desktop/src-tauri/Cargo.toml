@@ -15,8 +15,20 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 photoproof-core = { path = "../../../crates/photoproof-core" }
+photoproof-connectors = { path = "../../../crates/photoproof-connectors" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Single-instance discipline (RUNTIME §8.5): the plugin forwards a second
+# launch's focus to the first instance; the core's instance.lock is the
+# belt-and-braces half supervisors check before any spawn.
+tauri-plugin-single-instance = "2"
+# Hardware-tier detection (RUNTIME §6.1): adapter enumeration via wgpu;
+# byte-accurate VRAM via the native layer (ash/Vulkan on Linux; DXGI and
+# Metal paths are cfg-gated, founder/CI-verified). No shaders, no surface:
+# enumeration only.
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "metal", "dx12"] }
+# Tiny executor for wgpu 29's async enumerate_adapters (probe-time only).
+pollster = "0.4"
 # Window geometry persistence (featureset §6) — new dependency, flagged:
 # named as INTEGRATION's to add in UI-ARCHITECTURE §5/Appendix A. Wayland
 # restore-drift risk is tracked in DOGFOOD §visual; the manual fallback
@@ -30,8 +42,12 @@ blake3 = { workspace = true }
 ulid = { workspace = true }
 http = "1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = "0.38"
+
 [dev-dependencies]
 tempfile = { workspace = true }
+futures-core = { workspace = true }
 
 [features]
 # The debug side panel (spec/UI.md §10, DECISIONS I6): its commands and event

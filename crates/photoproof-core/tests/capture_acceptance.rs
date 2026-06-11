@@ -613,12 +613,11 @@ fn c13_6_29_min_gap_same_session_31_min_gap_new_session() {
     let clock = FakeClock::new(WALL0);
     let mut sessions = SessionEngine::open(&store, ctx(), clock.clone()).unwrap();
     let first = sessions.id().clone();
-    let mut processing = CloseProcessing::new();
 
     // 29-minute gap: same session.
     clock.advance(29 * 60 * 1000);
     sessions
-        .on_activity(&store, &mut NoCapture, &mut NoFlush, &mut processing)
+        .on_activity(&store, &mut NoCapture, &mut NoFlush)
         .unwrap();
     assert_eq!(sessions.id(), &first);
     let last_activity_wall = sessions.last_activity_wall();
@@ -627,7 +626,7 @@ fn c13_6_29_min_gap_same_session_31_min_gap_new_session() {
     // ended_at = its last activity time (never `now`).
     clock.advance(31 * 60 * 1000);
     sessions
-        .on_activity(&store, &mut NoCapture, &mut NoFlush, &mut processing)
+        .on_activity(&store, &mut NoCapture, &mut NoFlush)
         .unwrap();
     let second = sessions.id().clone();
     assert_ne!(second, first);
@@ -711,7 +710,6 @@ fn c13_6_speech_is_activity_no_boundary_mid_utterance() {
     let clock = FakeClock::new(WALL0);
     let mut sessions = SessionEngine::open(&store, ctx(), clock.clone()).unwrap();
     let first = sessions.id().clone();
-    let mut processing = CloseProcessing::new();
 
     let vad = MockVad::new(
         SR,
@@ -757,7 +755,7 @@ fn c13_6_speech_is_activity_no_boundary_mid_utterance() {
     // UI click at minute 30.5 — past the boundary on UI activity alone.
     assert_eq!(
         sessions
-            .on_activity(&store, &mut engine, &mut NoFlush, &mut processing)
+            .on_activity(&store, &mut engine, &mut NoFlush)
             .unwrap(),
         Activity::Same,
         "speech is activity (§2.1): no rotation across a speech-filled window"
@@ -802,7 +800,6 @@ fn c13_6_armed_silence_still_rotates_and_the_engine_follows_the_rotation() {
     let clock = FakeClock::new(WALL0);
     let mut sessions = SessionEngine::open(&store, ctx(), clock.clone()).unwrap();
     let first = sessions.id().clone();
-    let mut processing = CloseProcessing::new();
 
     let vad = MockVad::new(SR, vec![]); // never speaks
     let transcriber = MockTranscriber::new("mock-asr", SR);
@@ -815,7 +812,7 @@ fn c13_6_armed_silence_still_rotates_and_the_engine_follows_the_rotation() {
     drive_span(&mut engine, &clock, &store, 0, 500, &[]);
     clock.advance(31 * MIN);
     let Activity::Rotated { closed, opened } = sessions
-        .on_activity(&store, &mut engine, &mut NoFlush, &mut processing)
+        .on_activity(&store, &mut engine, &mut NoFlush)
         .unwrap()
     else {
         panic!("an armed-but-silent mic must not suppress the idle boundary");
@@ -848,7 +845,6 @@ fn c13_6_mic_arm_and_disarm_are_activity() {
     let clock = FakeClock::new(WALL0);
     let mut sessions = SessionEngine::open(&store, ctx(), clock.clone()).unwrap();
     let first = sessions.id().clone();
-    let mut processing = CloseProcessing::new();
     let vad = MockVad::new(SR, vec![]);
     let transcriber = MockTranscriber::new("mock-asr", SR);
     let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), first.clone());
@@ -858,7 +854,7 @@ fn c13_6_mic_arm_and_disarm_are_activity() {
     clock.advance(25 * MIN); // minute 45: 45 past the last UI touch
     assert_eq!(
         sessions
-            .on_activity(&store, &mut engine, &mut NoFlush, &mut processing)
+            .on_activity(&store, &mut engine, &mut NoFlush)
             .unwrap(),
         Activity::Same,
         "mic ARM refreshed the idle timer"
@@ -868,7 +864,7 @@ fn c13_6_mic_arm_and_disarm_are_activity() {
     clock.advance(25 * MIN); // minute 90: 45 past UI, 25 past the disarm
     assert_eq!(
         sessions
-            .on_activity(&store, &mut engine, &mut NoFlush, &mut processing)
+            .on_activity(&store, &mut engine, &mut NoFlush)
             .unwrap(),
         Activity::Same,
         "mic DISARM refreshed the idle timer"
@@ -878,7 +874,7 @@ fn c13_6_mic_arm_and_disarm_are_activity() {
     clock.advance(31 * MIN);
     assert!(matches!(
         sessions
-            .on_activity(&store, &mut engine, &mut NoFlush, &mut processing)
+            .on_activity(&store, &mut engine, &mut NoFlush)
             .unwrap(),
         Activity::Rotated { .. }
     ));
@@ -1077,12 +1073,7 @@ fn session_close_drains_capture_into_the_closing_session() {
     engine.arm();
     drive(&mut engine, &clock, &store, 1000, &[]);
     sessions
-        .close_current(
-            &store,
-            &mut engine,
-            &mut NoFlush,
-            &mut CloseProcessing::new(),
-        )
+        .close_current(&store, &mut engine, &mut NoFlush)
         .unwrap();
     let events = store.events_for_image(&hash(5)).unwrap();
     assert_eq!(events.len(), 1);

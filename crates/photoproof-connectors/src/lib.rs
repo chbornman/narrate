@@ -27,17 +27,26 @@
 pub mod config;
 pub mod embedder;
 pub mod error;
+pub mod feed;
+pub mod http;
+pub mod keychain;
 pub mod llm;
 pub mod mock;
+pub mod openai;
 pub mod reranker;
+pub mod sherpa;
 pub mod transcriber;
 pub mod vad;
 pub mod vector_store;
 
 pub use embedder::{DecodedImage, Embedder, Embedding};
 pub use error::{ConnectorError, ConnectorResult};
+pub use feed::AudioFeed;
+pub use keychain::{KeyResolver, MockKeyResolver};
 pub use llm::{ChatMessage, ChatRequest, ChatResponse, Lane, LanguageModel, Role};
+pub use openai::{EndpointCell, HealthStatus, InFlightGauge, LostReports, OpenAiCompatClient};
 pub use reranker::{CandidateText, Reranker};
+pub use sherpa::SherpaOnlineTranscriber;
 pub use transcriber::{AudioFrame, SegmentKind, StreamMs, Transcriber, TranscriptSegment};
 pub use vad::{VadEvent, VadFrameResult, VoiceActivityDetector};
 pub use vector_store::{

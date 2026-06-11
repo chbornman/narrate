@@ -198,15 +198,21 @@ impl<C: Clock> SessionEngine<C> {
     /// the [`CaptureDrain`] seam, not just UI touches — the open session
     /// closes BEFORE the triggering activity is processed — §2.5 order:
     /// capture drain (mints into the closing session), sidecar flush,
-    /// bookkeeping + close processors — and a new session opens that the
-    /// triggering activity belongs to; the capture side is told via
+    /// bookkeeping — and a new session opens that the triggering activity
+    /// belongs to; the capture side is told via
     /// [`CaptureDrain::session_rotated`].
+    ///
+    /// §2.5 step 3 (close processors) is NOT run here: "step 3 never
+    /// blocks" — closure only ENQUEUES (`close_processing_done = false`);
+    /// the pump thread drains via [`CloseProcessing::run_pending`], and a
+    /// quit-before-done re-enqueues on next launch (P6.2 obligation:
+    /// processors off the inline close/quit path before real processors
+    /// register).
     pub fn on_activity(
         &mut self,
         store: &EventStore,
         drain: &mut dyn CaptureDrain,
         flush: &mut dyn SidecarFlush,
-        processing: &mut CloseProcessing,
     ) -> Result<Activity, StoreError> {
         self.sync_capture_activity(drain);
         let now_mono = self.clock.mono_ms();
@@ -218,7 +224,7 @@ impl<C: Clock> SessionEngine<C> {
             return Ok(Activity::Same);
         }
         let closed = self.id.clone();
-        self.close_steps(store, drain, flush, processing, true)?;
+        self.close_steps(store, drain, flush, true)?;
         let opened = store.open_session(self.ctx.clone())?;
         self.id = opened.clone();
         self.last_activity_mono = now_mono;
@@ -228,19 +234,17 @@ impl<C: Clock> SessionEngine<C> {
     }
 
     /// Clean shutdown (§2.5): steps 1–2 block quit (capped by the drain's
-    /// 5 s + the sidecar budget); step 3 never blocks — with the P6.1
-    /// registry empty it completes inline, and a quit-before-done is
-    /// re-enqueued by `close_processing_done = false`.
+    /// 5 s + the sidecar budget); step 3 never blocks — closure enqueues,
+    /// the pump (or the next launch) runs the processors.
     pub fn close_current(
         &mut self,
         store: &EventStore,
         drain: &mut dyn CaptureDrain,
         flush: &mut dyn SidecarFlush,
-        processing: &mut CloseProcessing,
     ) -> Result<(), StoreError> {
         // Speech after the last UI touch counts toward ended_at (§2.1).
         self.sync_capture_activity(drain);
-        self.close_steps(store, drain, flush, processing, true)
+        self.close_steps(store, drain, flush, true)
     }
 
     fn close_steps(
@@ -248,7 +252,6 @@ impl<C: Clock> SessionEngine<C> {
         store: &EventStore,
         drain: &mut dyn CaptureDrain,
         flush: &mut dyn SidecarFlush,
-        processing: &mut CloseProcessing,
         clean: bool,
     ) -> Result<(), StoreError> {
         let closing = self.id.clone();
@@ -259,9 +262,9 @@ impl<C: Clock> SessionEngine<C> {
         // ended_at = wall time of the LAST activity, never `now` (§2.2 —
         // a session's span never includes dead air at its tail).
         store.close_session(&closing, self.last_activity_wall)?;
+        // 3. ENQUEUE close processing (`close_processing_done = false`);
+        //    the pump runs it — never this path.
         store.record_session_close(&closing, clean)?;
-        // 3. Close processors (never block by contract; empty in P6.1).
-        processing.run_for(store, &closing)?;
         Ok(())
     }
 }
@@ -288,12 +291,7 @@ mod tests {
 
     fn touch(engine: &mut SessionEngine<FakeClock>, store: &EventStore) -> Activity {
         engine
-            .on_activity(
-                store,
-                &mut NoCapture,
-                &mut NoFlush,
-                &mut CloseProcessing::new(),
-            )
+            .on_activity(store, &mut NoCapture, &mut NoFlush)
             .unwrap()
     }
 
@@ -339,10 +337,21 @@ mod tests {
         assert_eq!(engine.id(), &opened);
         let rec = store.session(&closed).unwrap().unwrap();
         assert_eq!(rec.ended_ts, Some(last_wall), "ended_at = LAST activity");
+        // §2.5 step 3 never blocks: closure ENQUEUES; the pump completes.
         assert_eq!(
             store.session_close_state(&closed).unwrap(),
-            Some((true, true)),
-            "clean close; empty close processing completes inline"
+            Some((true, false)),
+            "clean close; close processing enqueued, not run inline"
+        );
+        let mut processing = CloseProcessing::new();
+        assert_eq!(
+            processing.run_pending(&store).unwrap(),
+            vec![closed.clone()],
+            "the pump drains the enqueued closure"
+        );
+        assert_eq!(
+            store.session_close_state(&closed).unwrap(),
+            Some((true, true))
         );
         assert!(store.session(&opened).unwrap().unwrap().ended_ts.is_none());
     }

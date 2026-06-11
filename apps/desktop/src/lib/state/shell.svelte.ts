@@ -7,7 +7,7 @@
  */
 import * as note from "../logic/note";
 import type { MenuSurface } from "../actions/menus";
-import type { IndicatorState, IngestStatus, ScopeView } from "../types/dto";
+import type { IndicatorState, IngestStatus, RuntimeStatus, ScopeView } from "../types/dto";
 import type { SurroundLevel } from "../theme/surround";
 import * as prefs from "./prefs";
 
@@ -56,7 +56,20 @@ export class ShellSlice {
   mic = $state<IndicatorState["mic"]>("disarmed");
   /** §5.4: a still-streaming utterance's bound scope (tether rendering). */
   streamingUtterance = $state<IndicatorState["streamingUtterance"]>(null);
+  /** THE one coherent ASR-readiness story (P6.2 reconciliation):
+   * `asrReady` is the EXISTENCE gate — RUNTIME §8.3 readiness, live off
+   * the `runtime-status` channel; mic surfaces (glyph, M-key row,
+   * Settings § Microphone) exist only when true. `asrUnavailable` is the
+   * DEGRADED gate — CAPTURE §11's indicator flag, live off the
+   * `indicator-state` channel; it renders the muted-mic state when the
+   * user MEANT to capture but the ASR died. Ready=false ⇒ surfaces
+   * absent; ready=true + unavailable=true ⇒ the quiet struck-through
+   * glyph (UI §7.3). */
+  asrReady = $state(false);
   asrUnavailable = $state(true);
+  /** Latest RUNTIME snapshot (settings Models rows, the consent card,
+   * download progress). */
+  runtime = $state<RuntimeStatus | null>(null);
   /** Monotonic pulse counter; the indicator animates on change (UI §7.4). */
   pulseCount = $state(0);
   lastPulseAt = 0;
@@ -133,6 +146,13 @@ export class ShellSlice {
       bound.count !== this.scope.count ||
       bound.previewHashes.join(",") !== this.scope.previewHashes.join(",");
     return { kind: bound.kind, count: bound.count, differs };
+  }
+
+  /** The RUNTIME snapshot (boot fetch + `runtime-status` events): §8.3
+   * readiness gates features into existence — silently (UI R4). */
+  onRuntimeStatus(status: RuntimeStatus) {
+    this.runtime = status;
+    this.asrReady = status.asrReady;
   }
 
   /** Pulse coalescing: rapid events render distinct pulses, coalesced

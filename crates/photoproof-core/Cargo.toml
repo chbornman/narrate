@@ -29,6 +29,18 @@ libc = "0.2.186"
 # --- capture deps (owned by packet P6.1; append below this line only) ---
 photoproof-connectors = { path = "../photoproof-connectors" }
 futures-core.workspace = true
+# --- runtime deps (owned by packet P6.2; append below this line only) ---
+# SHA-256 for the manifest's pinned-checksum verification (RUNTIME §5.1;
+# image identity stays BLAKE3 — download pins follow Hugging Face convention).
+sha2 = "0.10"
+
+[[bin]]
+# Scriptable stub child for runtime-supervision tests (RUNTIME §8 /
+# BUILD-LOOP honest-scope: supervision is verified against stub child
+# processes). Dev/test fixture — never shipped; the installer bundles the
+# desktop app only.
+name = "photoproof-stub-child"
+path = "src/bin/stub_child.rs"
 
 [dev-dependencies]
 tempfile.workspace = true
