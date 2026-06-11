@@ -575,6 +575,50 @@ Founder rulings from the wave-2 polish round, recorded at merge.
   change what counts as a different image) and JournalTab threads it
   down. (Founder, dogfood round 3, June 2026.)
 
+## Dogfood round 3 resolutions (June 2026, recorded at the wave-2 merge)
+
+The first founder-machine (macOS) session. Build-pass rulings from the
+fix packets it produced; the macOS portability finds themselves (libc
+kinfo_proc, FSEvents symlink-resolved paths, the stub volume probe) are
+ledger rows, not decisions.
+
+- **B62 (amends §10.5).** An offline volume is never evidence about a
+  FILE: a pass claimed while no online active path exists DEFERS — re-
+  pends with the long transient backoff and gives the claim's attempt
+  back — instead of burning lifetime attempts (a flapping volume killed
+  two-thirds of a folder's passes at the cap before this). The
+  restart/6-hour retry rescues `volume-offline` error rows REGARDLESS of
+  attempts with a fresh budget (heals pre-fix databases), and a volume's
+  online transition clears the defer backoff on pending rows too —
+  replugging must not wait out a 10-minute `not_before`.
+- **B63 (LIBRARY §4.1).** Level-3 heuristic volume matching is
+  implemented (it was specified but missing — heuristic-identified
+  volumes could never re-match and flapped offline), and ambiguity
+  refuses to guess: two indistinguishable candidate mounts leave the
+  volume OFFLINE. Misbinding is worse than waiting for a marker. macOS
+  identity is the volume UUID via getattrlist (no DiskArbitration
+  dependency); a firmlinked path (e.g. /Users on the Data volume)
+  reports "/" as its reachable mount so rel-path math holds while the
+  identity stays the Data volume's (the sealed snapshot's UUID churns
+  with OS updates).
+- **B64 (UI).** Grid identity travels by HASH across every async or
+  re-derivation boundary: items refreshes remap focus/selection through
+  the image hash (an exif pass filling captureTs re-sorts capture-desc
+  mid-session), pointer handlers carry the rendered unit's hash and
+  resolve indexes at event time, and the chevron toggles the pair
+  hosting that hash at execute time. Index-based identity across the
+  applySelection IPC await is how clicking one image toggled another's
+  pair. Keyboard/menu verbs stay focus-based — their subject IS the
+  focus at perform time.
+- **B65 (architecture).** Metrics live in a crate-level
+  `photoproof_core::metrics` module: lock-free cumulative StageStat
+  counters (the Prometheus model — rates fall out of snapshot diffing;
+  no reset method by design), `record()` as the stable seam (histograms
+  can grow inside without touching call sites), ingest's
+  PipelineMetrics as the first tenant. Logging is the `tracing` facade
+  in core with the ONE subscriber installed by the desktop shell
+  (env-filtered; quiet info default).
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).

@@ -28,6 +28,12 @@ managing = off-thesis).
   relink heuristics); the index is rebuildable. "Don't show again"
   toggle (default ON) via prefs.ts; escape layer 1; redaction-modal
   frame/focus pattern. (Founder, dogfood round 3, June 2026.)
+- [ ] **Copy actions confirm themselves** — wherever a copy affordance
+  exists ("Copy file path" on the thumb menu today; any future copy
+  icon/verb), clicking it must give quiet feedback that the copy landed
+  — e.g. a brief toast ("Path copied") or the icon flashing to a
+  checkmark; pick ONE register and use it everywhere. (Founder, dogfood
+  round 3, June 2026.)
 - [ ] **Stronger storage story beyond the welcome card** — the residue of
   the welcome-card item: hash-keyed sidecar recovery sweep,
   case-insensitive-filesystem rename semantics (APFS: a case-only rename

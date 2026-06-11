@@ -64,10 +64,23 @@ since `e60cb15` (optimized deps).
   (and any other makers you shoot) RAWs through the rawler embedded-preview
   extractor; verify no double-rotation (P9: makers pre-rotate
   inconsistently). Synthetic fixtures pass; real files pending.
-- [ ] **macOS / Windows volume identity** — DiskArbitration + volume-serial
-  recipes and real OS cloud-placeholder flags are implemented behind seams
-  but only Linux-probed here. Needs a real Mac/Win machine (or defer until
-  you target those platforms).
+- [x] **macOS volume identity** — DONE (dogfood round 3, June 2026): real
+  probe via getmntinfo + getattrlist(ATTR_VOL_UUID), firmlink-aware path
+  binding, §4.1 level-3 heuristic fallback (B63). Windows volume-serial
+  recipe still behind its seam — defer until Windows is a target.
+- [ ] **APFS case-insensitivity ruling** — s02_2 (case-only rename
+  relinks sidecar) fails on macOS: a case-only rename is NOT a rename on
+  default APFS. Decide the semantics (detect fs case-sensitivity and
+  branch, or treat case-only renames as same-file on insensitive
+  volumes); until then s02_2 is the one known-red test on macOS.
+- [ ] **Wave-2 eyeball pass (macOS)** — only you can judge: rounded
+  corners + traffic lights (Overlay titlebar; check the lights hide/show
+  with Tab lights-out), the welcome card copy + first-run feel, the
+  search entry-overlay dim + results-canvas expansion, the Lucide icon
+  pass (sizes/tone vs the old glyphs; ⏏ became Unplug), and RAW deep
+  zoom on your real ARWs (full-res embedded JPEG should serve now —
+  Sony chained-IFD sweep; run "Rebuild previews…" on the folder first to
+  pick up full-size artifacts).
 - [ ] **Offline-volume browsing, visual half** — unplug an ingested drive,
   confirm grid still browses cached previews and annotations queue.
 - [ ] **Visual/UX feel of the running app** (P3.2 shipped; install
