@@ -1,14 +1,22 @@
 <script lang="ts">
   /**
-   * The application shell (UI §2 + featureset): chrome REGIONS — Titlebar,
-   * SourceRail, GridSurface, LookSurface, Inspector, overlays — each gated
-   * {#if !ui.shell.chromeHidden} (Tab lights-out, featureset §0; future
-   * chrome obeys by construction because App mounts chrome only through
-   * gated regions). EXEMPT by ruling: the capture indicator (capture-state
-   * truth — modes must stay visible) and an open note input. On macOS the
-   * NATIVE traffic lights (Overlay titlebar) sit outside these DOM gates;
-   * the perform sink (app.svelte.ts, toggle-lights-out) hides/shows them
-   * in lockstep via set_traffic_lights_hidden.
+   * The application shell (UI §2 + featureset). LAYOUT CONTRACT (founder,
+   * June 12 2026): the canvas is ALWAYS the center section — main is
+   * columns [rail auto][center 1fr][inspector auto], and the center
+   * column is rows [canvas 1fr][filmstrip auto]. The filmstrip therefore
+   * spans the CANVAS width by construction and resizes as the side
+   * panels toggle; every edge bar is a peer Panel with one frame
+   * contract (primitives/Panel.svelte).
+   *
+   * Tab lights-out (featureset §0) is a SNAPSHOT-RESTORE at the root
+   * (app.svelte.ts toggleLightsOut): hiding records which panels were
+   * open and closes them; Tab again restores exactly that set. Titlebar
+   * and the grid header still gate on {#if !ui.shell.chromeHidden}.
+   * EXEMPT by ruling: the capture indicator (capture-state truth — modes
+   * must stay visible) and an open note input. On macOS the NATIVE
+   * traffic lights (Overlay titlebar) sit outside these DOM gates; the
+   * perform sink hides/shows them in lockstep via
+   * set_traffic_lights_hidden.
    *
    * The edge-dwell hotzone is DELETED — no auto-hide fly-outs (featureset
    * §3); the rail is a push panel on `\`. ContextMenuHost + ToastHost +
@@ -42,6 +50,7 @@
   import ContextMenuHost from "./lib/components/shell/ContextMenuHost.svelte";
   import DropConfirm from "./lib/components/shell/DropConfirm.svelte";
   import SourceRail from "./lib/components/rail/SourceRail.svelte";
+  import Filmstrip from "./lib/components/shell/Filmstrip.svelte";
   import GridSurface from "./lib/components/grid/GridSurface.svelte";
   import LookSurface from "./lib/components/look/LookSurface.svelte";
   import Inspector from "./lib/components/inspector/Inspector.svelte";
@@ -193,60 +202,67 @@
   {/if}
 
   <div class="main">
-    <!-- push panel: openness gated through lights-out inside the region -->
+    <!-- push panel: closed by the lights-out snapshot at the root -->
     <SourceRail />
 
-    <div class="surface">
-      {#if ui.surface === "grid"}
-        {#if ui.roots.length === 0}
-          <FirstRun />
-        {:else}
-          <GridSurface />
-          {#if ui.grid.units.length === 0}
-            <!-- empty folder: say the next action (featureset §6); during
-                 ingest photographs stream in, so the line stays honest -->
-            <div class="grid-empty">
-              {#if ui.collectionId !== null}
-                {@const memberCount =
-                  ui.collections.find((c) => c.id === ui.collectionId)?.memberCount ?? 0}
-                {#if memberCount > 0}
-                  <!-- members exist (the rail badge counts them) but none
-                       are renderable: every member is a hash this library
-                       never indexed (e.g. gathered on another machine and
-                       union-merged in, RETRIEVAL 10.2). Membership outlives
-                       files (10.1), so the copy must not claim nothing was
-                       gathered. -->
-                  <EmptyState
-                    line={`${memberCount} gathered ${memberCount === 1 ? "image is" : "images are"} not in this library — they appear once their files are indexed here.`}
-                  />
+    <!-- the CENTER column: canvas over filmstrip — the strip spans the
+         canvas width by construction (founder, June 12 2026) -->
+    <div class="center">
+      <div class="surface">
+        {#if ui.surface === "grid"}
+          {#if ui.roots.length === 0}
+            <FirstRun />
+          {:else}
+            <GridSurface />
+            {#if ui.grid.units.length === 0}
+              <!-- empty folder: say the next action (featureset §6); during
+                   ingest photographs stream in, so the line stays honest -->
+              <div class="grid-empty">
+                {#if ui.collectionId !== null}
+                  {@const memberCount =
+                    ui.collections.find((c) => c.id === ui.collectionId)?.memberCount ?? 0}
+                  {#if memberCount > 0}
+                    <!-- members exist (the rail badge counts them) but none
+                         are renderable: every member is a hash this library
+                         never indexed (e.g. gathered on another machine and
+                         union-merged in, RETRIEVAL 10.2). Membership outlives
+                         files (10.1), so the copy must not claim nothing was
+                         gathered. -->
+                    <EmptyState
+                      line={`${memberCount} gathered ${memberCount === 1 ? "image is" : "images are"} not in this library — they appear once their files are indexed here.`}
+                    />
+                  {:else}
+                    <!-- an empty collection states its own next action: the
+                         verb lives on the image context menu -->
+                    <EmptyState
+                      line="Nothing gathered yet — right-click an image and choose Add to collection."
+                    />
+                  {/if}
+                {:else if ui.shell.ingest.running}
+                  <EmptyState line="Indexing — photographs appear as they are found." />
                 {:else}
-                  <!-- an empty collection states its own next action: the
-                       verb lives on the image context menu -->
-                  <EmptyState
-                    line="Nothing gathered yet — right-click an image and choose Add to collection."
-                  />
+                  <EmptyState line="No photographs in this folder.">
+                    {#snippet action()}
+                      <button onclick={() => void ui.perform({ kind: "toggle-rail" })}>
+                        Browse sources
+                      </button>
+                    {/snippet}
+                  </EmptyState>
                 {/if}
-              {:else if ui.shell.ingest.running}
-                <EmptyState line="Indexing — photographs appear as they are found." />
-              {:else}
-                <EmptyState line="No photographs in this folder.">
-                  {#snippet action()}
-                    <button onclick={() => void ui.perform({ kind: "toggle-rail" })}>
-                      Browse sources
-                    </button>
-                  {/snippet}
-                </EmptyState>
-              {/if}
-            </div>
+              </div>
+            {/if}
           {/if}
+        {:else}
+          <LookSurface />
         {/if}
-      {:else}
-        <LookSurface />
-      {/if}
 
-      {#if ui.searchOpen}
-        <SearchOverlay />
-      {/if}
+        {#if ui.searchOpen}
+          <SearchOverlay />
+        {/if}
+      </div>
+
+      <!-- bottom edge of the CENTER column (F, both surfaces) -->
+      <Filmstrip />
     </div>
 
     <Inspector />
@@ -279,16 +295,30 @@
     display: flex;
     flex-direction: column;
   }
+  /* The layout contract (founder, June 12 2026): columns
+   * [rail auto][center 1fr][inspector auto]; the center column is rows
+   * [canvas 1fr][filmstrip auto]. Auto-sized Panel peers around a 1fr
+   * center — the panels PUSH, never overlay, and a closed panel
+   * collapses to nothing, so the filmstrip is canvas-width and the grid
+   * re-snaps columns by construction. */
   .main {
     flex: 1;
     display: flex;
-    min-height: 0; /* the flex row, panels push — never overlay */
+    min-height: 0;
+  }
+  .center {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .surface {
     position: relative;
     flex: 1;
     overflow: hidden;
     min-width: 0;
+    min-height: 0;
   }
   /* The empty-folder line floats over the (header-bearing) grid surface
    * without intercepting its pointer seats; only the action clicks. */

@@ -23,6 +23,16 @@ export const SESSION_SCOPE: ScopeView = {
  * happens to be a nearby number. */
 const PULSE_COALESCE_MS = 200;
 
+/** The set of panels open at lights-out time (founder, June 12 2026:
+ * Tab restores WHAT WAS OPEN — a snapshot, never a fixed default set).
+ * Captured/restored by the composition root (cross-slice: the inspector
+ * and filmstrip flags live on their own slices). */
+export interface PanelSnapshot {
+  rail: boolean;
+  inspector: false | "metadata" | "journal";
+  filmstrip: boolean;
+}
+
 export interface ContextMenuState {
   seat: MenuSurface;
   /** Pointer anchor; null = keyboard-summoned (host picks a default). */
@@ -32,10 +42,15 @@ export interface ContextMenuState {
 }
 
 export class ShellSlice {
-  /** Tab lights-out (featureset §0). Region OPEN state survives — every
-   * chrome region renders `open && !chromeHidden`, so restore is
-   * automatic. Exempt by ruling: the indicator and an open note input. */
+  /** Tab lights-out (featureset §0) — SNAPSHOT-RESTORE (founder, June 12
+   * 2026): the root records which panels were open (panelSnapshot below),
+   * closes them, and the next Tab restores exactly that set. Titlebar and
+   * the grid header still gate on this flag directly. Exempt by ruling:
+   * the indicator and an open note input. */
   chromeHidden = $state(false);
+  /** The open-panel set at hide time; null while chrome shows. Plain
+   * field, not $state: only the root reads it, at restore time. */
+  panelSnapshot: PanelSnapshot | null = null;
 
   // -- rail (push panel; D5: `\` toggles) ------------------------------------
   railOpen = $state(false);
@@ -119,10 +134,6 @@ export class ShellSlice {
   dismissWelcome() {
     this.welcomeOpen = false;
     prefs.saveWelcomeSeen(this.welcomeDontShowAgain);
-  }
-
-  toggleLightsOut() {
-    this.chromeHidden = !this.chromeHidden;
   }
 
   toggleRail() {

@@ -644,6 +644,59 @@ export class Ui {
   }
 
   // ---------------------------------------------------------------------------
+  // Tab lights-out (featureset §0) — cross-slice, so the flow lives here
+  // ---------------------------------------------------------------------------
+
+  /** SNAPSHOT-RESTORE (founder, June 12 2026): hiding records WHICH
+   * panels were open and closes them; the next Tab restores exactly that
+   * set — never a fixed default. The closes go AROUND the toggle methods
+   * on purpose: lights-out must not rewrite panel prefs (a quit while
+   * hidden keeps the user's standing intent) and must not steal rail
+   * focus. EXEMPT by ruling (DECISIONS): the capture indicator and an
+   * open note input stay visible — neither is a panel, so neither enters
+   * the snapshot. */
+  async toggleLightsOut() {
+    if (!this.shell.chromeHidden) {
+      this.shell.panelSnapshot = {
+        rail: this.shell.railOpen,
+        inspector: this.inspector.open,
+        filmstrip: this.look.filmstrip,
+      };
+      this.shell.railOpen = false;
+      this.shell.railFocused = false;
+      // close() (not a bare flag flip): unmounting the composer fires no
+      // blur, and the inline-edit/redaction substates must not go stale.
+      this.inspector.close();
+      this.look.filmstrip = false;
+      this.shell.chromeHidden = true;
+    } else {
+      const snap = this.shell.panelSnapshot;
+      this.shell.panelSnapshot = null;
+      this.shell.chromeHidden = false;
+      if (snap !== null) {
+        this.shell.railOpen = snap.rail;
+        this.look.filmstrip = snap.filmstrip;
+        if (snap.inspector !== false) {
+          this.inspector.openTab(snap.inspector);
+          await this.inspector.load(this.actionContext().activeHash);
+        }
+      }
+    }
+    // macOS: the traffic lights are NATIVE NSButtons (Overlay titlebar) —
+    // DOM gates can't reach them, and left visible they'd float over
+    // (and click-block) the chrome-less grid. Hide/show them in lockstep.
+    // Nothing persists: lib.rs strips DECORATIONS from the window-state
+    // flags, so a quit during lights-out still relaunches with chrome.
+    if (isMac()) {
+      try {
+        await ipc.setTrafficLightsHidden(this.shell.chromeHidden);
+      } catch {
+        /* tests / non-tauri dev */
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // grease pencil flows (P5.1 — CAPTURE §8.4–8.6; PencilOverlay is the glue)
   // ---------------------------------------------------------------------------
 
@@ -911,20 +964,7 @@ export class Ui {
         await this.goHome();
         break;
       case "toggle-lights-out":
-        this.shell.toggleLightsOut();
-        // macOS: the traffic lights are NATIVE NSButtons (Overlay
-        // titlebar) — the {#if !chromeHidden} region gates can't reach
-        // them, and left visible they'd float over (and click-block) the
-        // chrome-less grid. Hide/show them in lockstep. Nothing persists:
-        // lib.rs strips DECORATIONS from the window-state flags, so a
-        // quit during lights-out still relaunches with full chrome.
-        if (isMac()) {
-          try {
-            await ipc.setTrafficLightsHidden(this.shell.chromeHidden);
-          } catch {
-            /* tests / non-tauri dev */
-          }
-        }
+        await this.toggleLightsOut();
         break;
       case "toggle-rail":
         this.shell.toggleRail();

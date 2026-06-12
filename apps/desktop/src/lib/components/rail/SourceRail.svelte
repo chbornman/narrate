@@ -13,7 +13,6 @@
    */
   import { tick } from "svelte";
   import { ui } from "../../state/app.svelte";
-  import { RAIL_WIDTH_KEY } from "../../state/prefs";
   import { collectionKey } from "../../logic/sources";
   import type { CollectionRow, SourceRow } from "../../logic/sources";
   import Panel from "../../primitives/Panel.svelte";
@@ -72,14 +71,8 @@
   }
 </script>
 
-<Panel
-  side="left"
-  open={ui.shell.railOpen && !ui.shell.chromeHidden}
-  minSize={160}
-  maxSize={420}
-  persistKey={RAIL_WIDTH_KEY}
-  label="Sources"
->
+<!-- lights-out hides this through the root's panel snapshot, not a gate -->
+<Panel id="rail" edge="left" open={ui.shell.railOpen} label="Sources">
   <div class="rail-body">
     <!-- two PEER tabs; the strip is the rail's one piece of standing chrome -->
     <div class="tabs" role="tablist" aria-label="Source kind">

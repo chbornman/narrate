@@ -3,10 +3,11 @@
  * localStorage — small, synchronous, webview-local. ALL P4.2 keys are
  * declared up front (contract freeze): sort per folder · thumbnail size ·
  * filmstrip · surround (D6) · auto-advance (D7, default OFF) · cell-info
- * level · rail width/open · inspector width · global stack collapse ·
- * last folder. The rail PIN pref is gone with the pin affordance (the
- * rail is push-persistent — D5/DECISIONS 3).
+ * level · panel sizes + rail open · global stack collapse · last folder.
+ * The rail PIN pref is gone with the pin affordance (the rail is
+ * push-persistent — D5/DECISIONS 3).
  */
+import { clampSize } from "../primitives/panel";
 import { DEFAULT_SORT, DEFAULT_THUMB_STEP, type SortMode } from "../logic/sort";
 import {
   DEFAULT_SURROUND,
@@ -83,9 +84,48 @@ export function saveStackGlobal(collapsed: boolean) {
 
 // ---- panels -----------------------------------------------------------------
 
-/** Width prefs share keys with primitives/panel.ts persistKey storage. */
-export const RAIL_WIDTH_KEY = "pp.railWidth";
-export const INSPECTOR_WIDTH_KEY = "pp.inspectorWidth";
+/** One frame contract for every edge panel (founder, June 12 2026): the
+ * canvas is always the center; rail (left), inspector (right), and
+ * filmstrip (bottom of the center column) are peers with ONE remembered
+ * size each — GLOBAL, never per-surface (the filmstrip is the same panel
+ * in Grid and Look). min/max clamp drags AND junk stored values;
+ * defaultSize is the double-click-the-handle reset. */
+export interface PanelSpec {
+  defaultSize: number;
+  minSize: number;
+  maxSize: number;
+  /** Pre-refactor width key (P4.2), read once as a fallback so existing
+   * installs keep their widths across the layout-architecture round. */
+  legacyKey?: string;
+}
+
+export const PANEL_SPECS = {
+  rail: { defaultSize: 240, minSize: 160, maxSize: 420, legacyKey: "pp.railWidth" },
+  inspector: {
+    defaultSize: 320,
+    minSize: 260,
+    maxSize: 520,
+    legacyKey: "pp.inspectorWidth",
+  },
+  filmstrip: { defaultSize: 80, minSize: 56, maxSize: 200 },
+} as const satisfies Record<string, PanelSpec>;
+
+export type PanelId = keyof typeof PANEL_SPECS;
+
+export function loadPanelSize(id: PanelId): number {
+  const spec: PanelSpec = PANEL_SPECS[id];
+  const raw =
+    safeGet(`pp.panel.${id}.size`) ??
+    (spec.legacyKey === undefined ? null : safeGet(spec.legacyKey));
+  const v = Number(raw);
+  return raw !== null && Number.isFinite(v)
+    ? clampSize(v, spec.minSize, spec.maxSize)
+    : spec.defaultSize;
+}
+
+export function savePanelSize(id: PanelId, size: number) {
+  safeSet(`pp.panel.${id}.size`, String(size));
+}
 
 export function loadRailOpen(): boolean {
   return loadBool("pp.railOpen", true);
@@ -108,7 +148,7 @@ export function saveRailTab(tab: RailTab) {
 }
 
 // Inspector OPENNESS deliberately does not persist (DECISIONS 3): width
-// does (via INSPECTOR_WIDTH_KEY), openness resets each launch.
+// does (the inspector PanelSpec), openness resets each launch.
 
 // ---- look -------------------------------------------------------------------
 

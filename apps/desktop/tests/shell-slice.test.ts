@@ -1,8 +1,10 @@
 /**
  * Shell slice (state/shell.svelte.ts — the one slice FOUNDATIONS ships
- * complete): lights-out, rail open/focus handoff, the context-menu host
- * state, surround persistence, the note transient + scope echo, and pulse
- * coalescing.
+ * complete): rail open/focus handoff, the context-menu host state,
+ * surround persistence, the note transient + scope echo, and pulse
+ * coalescing. Lights-out became a cross-slice SNAPSHOT-RESTORE at the
+ * composition root (founder, June 12 2026) — its semantics are tested in
+ * ui-store.test.ts; the slice only carries chromeHidden + panelSnapshot.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { ShellSlice } from "../src/lib/state/shell.svelte";
@@ -18,17 +20,6 @@ let shell: ShellSlice;
 beforeEach(() => {
   localStorage.clear();
   shell = new ShellSlice();
-});
-
-describe("lights-out (featureset §0)", () => {
-  it("toggles one boolean; chrome OPEN state is never touched", () => {
-    shell.railOpen = true;
-    shell.toggleLightsOut();
-    expect(shell.chromeHidden).toBe(true);
-    expect(shell.railOpen).toBe(true); // restore-on-untoggle is automatic
-    shell.toggleLightsOut();
-    expect(shell.chromeHidden).toBe(false);
-  });
 });
 
 describe("rail (push panel, D5)", () => {
