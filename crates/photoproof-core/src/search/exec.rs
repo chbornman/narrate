@@ -18,16 +18,21 @@ use crate::id::{ContentHash, EventId, SessionId, UtcMillis};
 
 use super::filter::{CompiledFilters, FilterMode, compile};
 use super::query::{fts_match_query, highlight_terms};
-use super::snippet::map_snippet;
+use super::snippet::{CLOSE, ELLIPSIS, OPEN, map_snippet};
 use super::{
     DebugScores, Filter, ImageResult, ParsedQuery, PreviewRef, Provenance, QueryEcho, Quote,
     SearchError, SearchResults, SessionHit, SignalId,
 };
 
-/// §4 normative page bound.
-const HIT_LIMIT: usize = 500;
+/// §4 normative page bound. Interpolated into every FTS statement below
+/// (and the S3 sub-list in `hybrid.rs`) so the bound has one definition.
+pub(crate) const HIT_LIMIT: usize = 500;
 /// Defensive IN-list chunking (mirrors the store's discipline).
 const IN_LIST_CHUNK: usize = 30_000;
+/// `snippet()` max-tokens budget, from the §4 normative statement — how
+/// much context a result quote shows. 12 tokens reads as one phrase
+/// around the match without swamping the result row.
+const SNIPPET_TOKENS: u32 = 12;
 
 /// The §4 statement. `?1` is the MATCH string; filter params bind after it
 /// in clause order. `ORDER BY rank` (default rank = bm25) keeps the ordering
@@ -43,15 +48,17 @@ const IN_LIST_CHUNK: usize = 30_000;
 /// session hits are skipped: a zero-target event cannot satisfy an image
 /// constraint (R4).
 pub(crate) fn image_hits_sql(cf: &CompiledFilters) -> String {
-    let mut sql = String::from(
+    // The markers come from snippet.rs so the SQL can only ever emit what
+    // map_snippet parses back out — the wire contract has one definition.
+    let mut sql = format!(
         "WITH hits AS MATERIALIZED (\n\
          \x20 SELECT event_fts.rowid AS fts_rowid,\n\
          \x20        bm25(event_fts) AS s,\n\
-         \x20        snippet(event_fts, 0, '⟦', '⟧', '…', 12) AS snip\n\
+         \x20        snippet(event_fts, 0, '{OPEN}', '{CLOSE}', '{ELLIPSIS}', {SNIPPET_TOKENS}) AS snip\n\
          \x20 FROM event_fts\n\
          \x20 WHERE event_fts MATCH ?1\n\
          \x20 ORDER BY rank\n\
-         \x20 LIMIT 500\n\
+         \x20 LIMIT {HIT_LIMIT}\n\
          )\n\
          SELECT m.root_event_id, t.image_hash, h.s, h.snip\n\
          FROM hits h\n\
@@ -77,7 +84,9 @@ pub(crate) fn image_hits_sql(cf: &CompiledFilters) -> String {
 fn browse_sql(cf: &CompiledFilters) -> String {
     let mut sql = String::from("SELECT i.image_hash FROM images i\n");
     push_where(&mut sql, &cf.wheres);
-    sql.push_str("ORDER BY i.capture_ts DESC, i.image_hash ASC\nLIMIT 500");
+    sql.push_str(&format!(
+        "ORDER BY i.capture_ts DESC, i.image_hash ASC\nLIMIT {HIT_LIMIT}"
+    ));
     sql
 }
 
@@ -706,11 +715,11 @@ pub(crate) fn best_quote_for_image(
             "WITH hits AS MATERIALIZED (\n\
              \x20 SELECT event_fts.rowid AS fts_rowid,\n\
              \x20        bm25(event_fts) AS s,\n\
-             \x20        snippet(event_fts, 0, '⟦', '⟧', '…', 12) AS snip\n\
+             \x20        snippet(event_fts, 0, '{OPEN}', '{CLOSE}', '{ELLIPSIS}', {SNIPPET_TOKENS}) AS snip\n\
              \x20 FROM event_fts\n\
              \x20 WHERE event_fts MATCH ?1 AND event_fts.rowid IN ({marks})\n\
              \x20 ORDER BY rank\n\
-             \x20 LIMIT 500\n\
+             \x20 LIMIT {HIT_LIMIT}\n\
              )\n\
              SELECT m.root_event_id, h.s, h.snip\n\
              FROM hits h\n\
@@ -787,4 +796,24 @@ fn build_quote(
             linked_stroke: linked.get(&hit.root).cloned(),
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The §4 statement is normative down to its literals (RETRIEVAL §4):
+    /// after the constant interpolation it must still emit exactly the
+    /// spec's page bound, snippet markers, and token budget.
+    #[test]
+    fn section4_statement_pins_the_normative_literals() {
+        let cf = compile(&[], FilterMode::Hits, UtcMillis::from_epoch_ms(0))
+            .expect("empty filter set compiles");
+        let sql = image_hits_sql(&cf);
+        assert!(
+            sql.contains("snippet(event_fts, 0, '\u{27e6}', '\u{27e7}', '\u{2026}', 12)"),
+            "snippet call drifted from the normative statement: {sql}"
+        );
+        assert!(sql.contains("LIMIT 500"), "page bound drifted: {sql}");
+    }
 }

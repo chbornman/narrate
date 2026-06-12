@@ -25,6 +25,13 @@ use super::{
 /// §10.3 normative threshold for fuzzy collection-name resolution.
 pub(crate) const COLLECTION_MATCH_THRESHOLD: f64 = 0.80;
 
+/// Token budget for the §5.1 query-parse request. The output is one small
+/// JSON object; the cap exists to bound worst-case generation latency so
+/// the parse stays inside the 1.5 s budget. Deliberately NOT the
+/// scheduler's BACKGROUND_MAX_TOKENS — same number today, but a different
+/// lane with a different reason, and they must be free to diverge.
+const PARSE_MAX_TOKENS: u32 = 512;
+
 // ---------------------------------------------------------------------------
 // Grounding (the small lists the prompt carries + the validation vocab)
 // ---------------------------------------------------------------------------
@@ -282,7 +289,7 @@ pub(crate) fn build_request(raw_query: &str, grounding: &Grounding, now: UtcMill
 
     ChatRequest {
         messages,
-        max_tokens: 512,
+        max_tokens: PARSE_MAX_TOKENS,
         temperature: 0.0,
         json_schema: Some(output_schema()),
         priority: Lane::Interactive,

@@ -460,20 +460,22 @@ fn s3_summaries_fts(
     now: UtcMillis,
 ) -> Result<Vec<(String, f32)>, SearchError> {
     let cf = compile(filters, FilterMode::Browse, now)?;
-    // Same materialize-first discipline as the §4 statement.
-    let mut sql = String::from(
+    // Same materialize-first discipline AND candidate depth as the §4
+    // statement — the page bound has one definition (exec::HIT_LIMIT).
+    let mut sql = format!(
         "WITH shits AS MATERIALIZED (\n\
          \x20 SELECT summaries_fts.summary_id AS sid, bm25(summaries_fts) AS s\n\
          \x20 FROM summaries_fts\n\
          \x20 WHERE summaries_fts MATCH ?1\n\
          \x20 ORDER BY rank\n\
-         \x20 LIMIT 500\n\
+         \x20 LIMIT {hit_limit}\n\
          )\n\
          SELECT ds.scope_key, h.s\n\
          FROM shits h\n\
          JOIN derived_summaries ds ON ds.id = h.sid\n\
          JOIN images i ON i.image_hash = ds.scope_key\n\
          WHERE ds.scope = 'image'\n",
+        hit_limit = exec::HIT_LIMIT,
     );
     for w in &cf.wheres {
         sql.push_str("  AND ");
