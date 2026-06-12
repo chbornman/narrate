@@ -13,11 +13,13 @@
 //!   exists — the gate sits BEFORE any request is issued, and the test
 //!   asserts at the stub server.
 //!
-//! Transport: plain HTTP to explicit hosts (stub servers, LAN mirrors).
-//! The compiled manifest's `hf:` entries resolve to https — fetching them
-//! needs the TLS client decision deferred to P6.3 (no real weights are in
-//! scope here; the SHA pins are placeholders until the spike pins real
-//! artifacts).
+//! Transports: plain HTTP to explicit hosts (stub servers, LAN mirrors —
+//! the §13 acceptance tests drive this path) and **https via ureq/rustls
+//! (B66)** for the manifest's real `hf:` entries — synchronous like the
+//! rest of this worker, follows the HF resolve→CDN redirect, honors
+//! Range resume. Unpinned entries (B55 placeholders) are refused before
+//! any byte moves; proven against the real network by the ignored
+//! `real_https_fetch_verifies_the_smallest_pin` test.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -48,8 +50,12 @@ pub enum DownloadError {
     /// settings/debug panel (§5.2).
     #[error("checksum mismatch for {file} after automatic re-fetch")]
     ChecksumFailed { file: String },
-    #[error("https URLs need the P6.3 TLS client: {url}")]
-    TlsUnsupported { url: String },
+    /// B55 fail-closed PRE-FLIGHT: a manifest entry still carrying the
+    /// UNPINNED placeholder (all-zero sha / UNPINNED revision) is refused
+    /// BEFORE any byte moves — embedder entries stay in this state until
+    /// spike session 2 pins them.
+    #[error("manifest entry for {file} is unpinned (UNPINNED-P6.3); refusing to fetch")]
+    Unpinned { file: String },
     #[error("backend answered {status} for {url}")]
     Http { status: u16, url: String },
     #[error("io: {0}")]
@@ -251,9 +257,20 @@ impl DownloadManager {
         dest: &Path,
         pacer: &mut dyn Pacer,
     ) -> Result<u64, DownloadError> {
+        // B55 fail-closed pre-flight: an unpinned entry never reaches the
+        // network — not even a HEAD. (The embedder entries ship this way
+        // until spike session 2 pins them.)
+        if file.sha256.bytes().all(|b| b == b'0') || file.revision == "UNPINNED-P6.3" {
+            return Err(DownloadError::Unpinned {
+                file: file.file_name().to_owned(),
+            });
+        }
         let part = part_path(dest);
         let mut have: u64 = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         let url = file.url();
+        if url.starts_with("https://") {
+            return self.fetch_https(model, file, dest, &part, have, &url, pacer);
+        }
         let (addr, path) = parse_http_url(&url)?;
         let mut headers: Vec<(String, String)> = Vec::new();
         if have > 0 {
@@ -328,20 +345,111 @@ impl DownloadManager {
         }
         out.flush()?;
         drop(out);
-        // Verify SHA-256 over the COMPLETE file, then atomic rename.
-        let digest = sha256_file(&part)?;
+        self.verify_and_finish(model, file, &part, dest)?;
+        Ok(fetched)
+    }
+
+    /// The B66 TLS transport: `ureq` (rustls) for the manifest's real
+    /// `hf:` entries — synchronous like the rest of this worker, follows
+    /// the HF resolve→CDN redirect, honors Range resume. The stub-server
+    /// `http://` path above stays on the localhost-grade client the §13
+    /// acceptance tests drive.
+    fn fetch_https(
+        &self,
+        model: &ModelEntry,
+        file: &FileEntry,
+        dest: &Path,
+        part: &Path,
+        mut have: u64,
+        url: &str,
+        pacer: &mut dyn Pacer,
+    ) -> Result<u64, DownloadError> {
+        use std::io::Read;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(self.connect_timeout))
+            .timeout_recv_response(Some(self.read_timeout))
+            .build()
+            .into();
+        let mut req = agent.get(url);
+        if have > 0 {
+            req = req.header("Range", &format!("bytes={have}-"));
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::StatusCode(status)) => {
+                return Err(DownloadError::Http {
+                    status,
+                    url: url.into(),
+                });
+            }
+            // Transport-class failures (DNS, connect, TLS, mid-read cuts)
+            // are all resumable from the part file's length.
+            Err(_) => return Err(DownloadError::Interrupted { got_bytes: have }),
+        };
+        if resp.status() == 200 && have > 0 {
+            // Server ignored the Range: restart clean.
+            let _ = std::fs::remove_file(part);
+            have = 0;
+        }
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(part)?;
+        let mut reader = resp.into_body().into_reader();
+        let mut fetched: u64 = 0;
+        let mut last_progress = have;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.write_all(&buf[..n])?;
+                    have += n as u64;
+                    fetched += n as u64;
+                    pacer.pace(n);
+                    if have - last_progress >= 4 * 1024 * 1024 {
+                        last_progress = have;
+                        self.bus.publish(RuntimeEvent::DownloadProgress {
+                            model_id: model.id.clone(),
+                            downloaded_bytes: have,
+                            total_bytes: file.bytes,
+                        });
+                    }
+                }
+                Err(_) => {
+                    out.flush()?;
+                    return Err(DownloadError::Interrupted { got_bytes: have });
+                }
+            }
+        }
+        out.flush()?;
+        drop(out);
+        self.verify_and_finish(model, file, part, dest)?;
+        Ok(fetched)
+    }
+
+    /// Verify SHA-256 over the COMPLETE file, then atomic rename — shared
+    /// tail of both transports (§5.2 atomicity at file grain).
+    fn verify_and_finish(
+        &self,
+        model: &ModelEntry,
+        file: &FileEntry,
+        part: &Path,
+        dest: &Path,
+    ) -> Result<(), DownloadError> {
+        let digest = sha256_file(part)?;
         if digest != file.sha256.to_lowercase() {
             return Err(DownloadError::ChecksumFailed {
                 file: file.file_name().to_owned(),
             });
         }
-        std::fs::rename(&part, dest)?;
+        std::fs::rename(part, dest)?;
         self.bus.publish(RuntimeEvent::DownloadProgress {
             model_id: model.id.clone(),
             downloaded_bytes: file.bytes,
             total_bytes: file.bytes,
         });
-        Ok(fetched)
+        Ok(())
     }
 }
 
@@ -352,9 +460,6 @@ fn part_path(dest: &Path) -> PathBuf {
 }
 
 fn parse_http_url(url: &str) -> Result<(SocketAddr, String), DownloadError> {
-    if url.starts_with("https://") {
-        return Err(DownloadError::TlsUnsupported { url: url.into() });
-    }
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| DownloadError::BadUrl(url.into()))?;

@@ -34,6 +34,7 @@ futures-core.workspace = true
 # SHA-256 for the manifest's pinned-checksum verification (RUNTIME §5.1;
 # image identity stays BLAKE3 — download pins follow Hugging Face convention).
 sha2 = "0.10"
+ureq = "3"
 
 [[bin]]
 # Scriptable stub child for runtime-supervision tests (RUNTIME §8 /

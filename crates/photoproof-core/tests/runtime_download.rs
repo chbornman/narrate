@@ -337,8 +337,8 @@ fn https_urls_are_refused_with_zero_traffic_until_the_p63_tls_client() {
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
         .download_model(&model, 1, &Acceptances::default(), &mut NoPace, NOW)
-        .expect_err("https needs the P6.3 TLS decision");
-    assert!(matches!(err, DownloadError::TlsUnsupported { .. }));
+        .expect_err("an unpinned entry never reaches the network (B55)");
+    assert!(matches!(err, DownloadError::Unpinned { .. }), "{err:?}");
 }
 
 #[test]
@@ -384,4 +384,46 @@ fn download_progress_rides_the_bus_coalesced() {
         Some(&(payload.len() as u64, payload.len() as u64)),
         "completion event closes the series"
     );
+}
+
+/// REAL-NETWORK proof of the B66 transport (ignored: needs internet; run
+/// manually — `cargo test --test runtime_download real_https -- --ignored`).
+/// Fetches the smallest pinned artifact in the compiled manifest (the ASR
+/// tokens.txt, ~9 KB) through the full manager path: https via ureq/rustls,
+/// the HF resolve→CDN redirect, SHA-256 verification, atomic install.
+#[test]
+#[ignore]
+fn real_https_fetch_verifies_the_smallest_pin() {
+    use photoproof_core::runtime::manifest::compiled_manifest;
+    let m = compiled_manifest();
+    let asr = m
+        .models
+        .iter()
+        .find(|x| x.role == "asr")
+        .expect("asr entry");
+    let tokens = asr
+        .files
+        .iter()
+        .find(|f| f.path == "tokens.txt")
+        .expect("tokens file")
+        .clone();
+    let tiny = photoproof_core::runtime::manifest::ModelEntry {
+        id: "tokens-probe".into(),
+        role: "test".into(),
+        tiers: vec![1],
+        license: photoproof_core::runtime::manifest::License {
+            name: "n/a".into(),
+            url: "n/a".into(),
+            acceptance_required: false,
+        },
+        total_bytes: tokens.bytes,
+        files: vec![tokens],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    let out = manager
+        .download_model(&tiny, 1, &Acceptances::default(), &mut NoPace, NOW)
+        .expect("real https fetch + verify");
+    assert_eq!(out.files_fetched, 1);
+    assert!(manager.is_installed("tokens-probe"));
 }
