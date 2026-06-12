@@ -278,6 +278,26 @@ managing = off-thesis).
   (collections are the point; folders are mechanical). REMAINING for the
   design round: the full encouragement UX and autosuggest (below).
   (Founder, June 2026.)
+- [ ] **Collection-note composer (UI slice)**: the storage, merge rules,
+  and commands (add_collection_note / collection_notes) landed with
+  P7.3 - collections carry their own append-only notes, a deliberately
+  separate kind from image journal events (about the grouping's intent,
+  not any image). Missing: the composer - a notes area when viewing a
+  collection in the rail tab, possibly a "note the collection" verb
+  while its grid is open. (Founder, June 2026.)
+- [ ] **Collection-level rollups from member notes (LLM)** - founder
+  idea, June 2026; posture split to respect K14 ("machine prose is
+  retrieval fuel only; the journal preserves YOURS"): (a) FUEL TIER,
+  uncontroversial: LLM-derived collection summaries, invisible,
+  search/context only - "find that melancholy series" works without
+  visible machine prose; (b) NUDGE TIER: surface quiet observations
+  ("seven of twelve notes here mention fog") that invite the USER to
+  write the collection note - machine notices, human authors; ties into
+  the encourage-collecting principle and autosuggest below. AVOIDED by
+  recommendation: machine-drafted notes entering the store as content,
+  even behind an accept button - search provenance would quote words the
+  photographer never said. FOUNDER CALL pending on whether (b) ever
+  graduates toward drafting.
 - [ ] **Autosuggest collections** (founder, June 2026): the app should
   NATURALLY encourage collecting — that is the point of gathering all
   this disparate context. Beyond manual creation, propose collections
