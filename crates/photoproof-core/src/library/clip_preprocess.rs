@@ -11,13 +11,15 @@
 //! constants in one place and lets the deterministic tests below pin the
 //! crop math without a model.
 //!
-//! The transform MIRRORS the spike's clip_bench.py preprocessing exactly
-//! (docs/SPIKE-P7-EMBED.md): resize the SHORTEST side to 378 px preserving
-//! aspect ratio, then center-crop a 378x378 square. The OpenCLIP eval
-//! transform the DFN5B export was trained/validated against does precisely
-//! this; the preprocess_cfg's "squash" resize_mode is the training-time
-//! augmentation, not the eval transform the spike used and the spike is
-//! our verified ground truth.
+//! The transform is the OpenCLIP eval transform the DFN5B export was
+//! trained/validated against, and the one the spike's clip_bench.py used
+//! (docs/SPIKE-P7-EMBED.md): resize-shortest-side-to-378 then center-crop a
+//! 378x378 square. (The preprocess_cfg's "squash" resize_mode is the
+//! training-time augmentation, not the eval transform; the spike is our
+//! verified ground truth.) We implement it crop-FIRST-then-resize — which is
+//! geometrically the same window, the centered min(w,h) square — to bound the
+//! intermediate buffer; see `preprocess_clip_image` for WHY (extreme aspect
+//! ratios make the resize-first order allocate near a gigabyte).
 
 use image::RgbImage;
 use image::imageops::FilterType;
@@ -49,18 +51,23 @@ pub fn preprocess_clip_image(img: &DecodedImage) -> DecodedImage {
         return black_square(edge);
     };
 
-    // Resize so the SHORTEST side becomes `edge`, preserving aspect (the
-    // longer side overshoots and gets cropped away below).
+    // Resize-shortest-side-to-`edge` then center-crop `edge`x`edge` keeps
+    // exactly the centered `min(w,h)` x `min(w,h)` square of the SOURCE. We
+    // do that crop FIRST and resize only the square, instead of resizing the
+    // whole frame and cropping after. Equivalent up to filter edge effects,
+    // but it bounds the intermediate buffer at the square's size rather than
+    // letting it explode on extreme aspect ratios: a legal 65500x32 strip
+    // would otherwise upscale BOTH axes by 378/32 ~= 11.8 to a ~774000x378x3
+    // (~880 MB) transient that resize then walks pixel-by-pixel before the
+    // crop throws all but 378 columns away. A transient OOM aborts the
+    // process, which would breach the RUNTIME 3.3 never-crash posture from
+    // inside the background embedding pump.
     let (w, h) = (img.width.max(1), img.height.max(1));
-    let scale = f64::from(edge) / f64::from(w.min(h));
-    let rw = (f64::from(w) * scale).round().max(f64::from(edge)) as u32;
-    let rh = (f64::from(h) * scale).round().max(f64::from(edge)) as u32;
-    let resized = image::imageops::resize(&src, rw, rh, FilterType::CatmullRom);
-
-    // Center-crop the `edge` x `edge` square.
-    let left = (rw - edge) / 2;
-    let top = (rh - edge) / 2;
-    let cropped = image::imageops::crop_imm(&resized, left, top, edge, edge).to_image();
+    let square = w.min(h);
+    let left = (w - square) / 2;
+    let top = (h - square) / 2;
+    let centered = image::imageops::crop_imm(&src, left, top, square, square).to_image();
+    let cropped = image::imageops::resize(&centered, edge, edge, FilterType::CatmullRom);
 
     DecodedImage {
         width: edge,
@@ -133,6 +140,25 @@ mod tests {
         let mid = ((CLIP_IMAGE_EDGE / 2 * CLIP_IMAGE_EDGE + CLIP_IMAGE_EDGE / 2) * 3) as usize;
         assert_eq!(out.rgb8[mid], 255, "center should be the red stripe");
         assert_eq!(out.rgb8[mid + 2], 0);
+    }
+
+    /// An extreme-aspect strip must still produce the 378x378 square WITHOUT
+    /// the resize-first ~880 MB intermediate (regression guard for the
+    /// crop-first ordering). 9000x24 is a stand-in for a panorama/contact
+    /// strip; resize-first would scale to ~141750x378 here.
+    #[test]
+    fn extreme_aspect_strip_stays_bounded() {
+        let (w, h) = (9000u32, 24u32);
+        let out = preprocess_clip_image(&DecodedImage {
+            width: w,
+            height: h,
+            rgb8: solid(w, h, [10, 20, 30]),
+        });
+        assert_eq!(out.width, CLIP_IMAGE_EDGE);
+        assert_eq!(out.height, CLIP_IMAGE_EDGE);
+        // Uniform color survives the centered crop + resize unchanged.
+        let mid = ((CLIP_IMAGE_EDGE / 2 * CLIP_IMAGE_EDGE + CLIP_IMAGE_EDGE / 2) * 3) as usize;
+        assert_eq!(&out.rgb8[mid..mid + 3], &[10, 20, 30]);
     }
 
     /// A malformed buffer never panics — it yields the black fallback at
