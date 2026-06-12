@@ -87,6 +87,25 @@ since `e60cb15` (optimized deps).
   zoom on your real ARWs (full-res embedded JPEG should serve now —
   Sony chained-IFD sweep; run "Rebuild previews…" on the folder first to
   pick up full-size artifacts).
+- [ ] **Rail Collections tab (B71 first slice) — eyeball pass**: the rail
+  now has Folders/Collections peer tabs. Check: tab strip feel + persistence
+  across restarts; the inline "New collection..." footer (Enter commits,
+  Esc cancels); shelved/done rows dimmed but visible; opening a collection
+  drives the grid (title follows the name, members list live when
+  membership changes); "Add to collection" / "Remove from collection" on
+  the thumb context menu with membership checkmarks, acting on the whole
+  multi-selection; a member whose file is gone shows offline-badged rather
+  than disappearing (membership outlives files). Known limit: members
+  union-merged from another replica but never ingested here are skipped.
+- [ ] **Search behavior after P7.2 — confirm nothing regressed**: hybrid
+  search is ONE code path and with no models pinned it must feel exactly
+  like M1 (asserted byte-equal in tests; your fingers are the second
+  check). Collection chips work fully degraded — fuzzy name match, active
+  collections win ties; an unresolvable chip is now a HARD error, not a
+  silent whole-library browse. Semantic ranking (RRF fusion, voice-quote
+  provenance) stays dormant until embedders are pinned (spike session 2);
+  the debug panel shows per-signal ranks and dropped-clause reasons when
+  it wakes.
 - [ ] **Offline-volume browsing, visual half** — unplug an ingested drive,
   confirm grid still browses cached previews and annotations queue.
 - [ ] **Visual/UX feel of the running app** (P3.2 shipped; install
@@ -134,3 +153,9 @@ since `e60cb15` (optimized deps).
   profiles, E2E incl. kill -9 + redaction drills, DOGFOOD-M1.md written.
   Kill-9 harness item closed; NVIDIA/Wayland fix baked in; dev-loop fixes
   (thumb retry, optimized-dep profile) landed after live testing.
+- 2026-06-12: **Phase 7 (M3 retrieval) mock-verified** — P7.1 vector store,
+  P7.2 hybrid search, P7.3 collections store + the rail Collections tab
+  and the B72 live-dictation binding fix. Close gate: cargo 479 passed
+  (s02_2 known), clippy 0 warnings, svelte-check 0/0, vitest 610. Added
+  the Collections-tab and search-behavior eyeball items; embedder pins
+  wait on spike session 2, retrieval quality eval is post-dogfood.
