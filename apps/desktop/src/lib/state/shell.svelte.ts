@@ -58,6 +58,13 @@ export class ShellSlice {
   surround = $state<SurroundLevel>("black");
   fullscreen = $state(false);
 
+  // -- UI scale (desktop conventions: Cmd+= / Cmd+− / Cmd+0) -------------------
+  /** Webview zoom factor — the whole CHROME scales (distinct from Look's
+   * image zoom, which lives on plain keys in the look slice). This slice
+   * owns the state + persistence only; the actual webview call is IPC-
+   * adjacent and lives in the composition root (app.svelte.ts perform). */
+  uiZoom = $state<number>(1);
+
   // -- capture echo ------------------------------------------------------------
   note = $state<note.NoteState>(note.CLOSED);
   scope = $state<ScopeView>(SESSION_SCOPE);
@@ -102,7 +109,26 @@ export class ShellSlice {
     this.surround = prefs.loadSurround();
     this.railOpen = prefs.loadRailOpen();
     this.railTab = prefs.loadRailTab();
+    this.uiZoom = prefs.loadUiZoom();
     this.welcomeOpen = !prefs.loadWelcomeSeen();
+  }
+
+  /** One UI-zoom step along the ladder; clamps at the ends (a Cmd+= at
+   * max is simply inert — no wraparound, the browser convention). */
+  stepUiZoom(delta: 1 | -1) {
+    const steps = prefs.UI_ZOOM_STEPS;
+    const at = (steps as readonly number[]).indexOf(this.uiZoom);
+    // loadUiZoom validates by membership, so -1 means an in-memory value
+    // went off-ladder (impossible today); recover from the design size.
+    const from = at >= 0 ? at : (steps as readonly number[]).indexOf(1);
+    const next = Math.min(steps.length - 1, Math.max(0, from + delta));
+    this.uiZoom = steps[next];
+    prefs.saveUiZoom(this.uiZoom);
+  }
+
+  resetUiZoom() {
+    this.uiZoom = 1;
+    prefs.saveUiZoom(1);
   }
 
   /** Switch the rail tab (pointer on the tab strip). Keyboard focus stays

@@ -120,6 +120,26 @@ export function saveFilmstrip(on: boolean) {
   saveBool("pp.filmstrip", on);
 }
 
+// ---- UI scale (desktop-conventions pass, June 2026) --------------------------
+
+/** Webview-zoom ladder for Cmd+= / Cmd+− / Cmd+0 (browser-conventional
+ * steps; 1 is the design size). A LADDER rather than a free factor so
+ * repeated presses land on round, reproducible sizes — and so a persisted
+ * value can be validated by membership instead of range-clamping. */
+export const UI_ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.25, 1.5] as const;
+
+export function loadUiZoom(): number {
+  const v = Number(safeGet("pp.uiZoom"));
+  // Membership check: anything off-ladder (corrupt storage, an old build's
+  // experiment) silently resets to the design size rather than rendering
+  // the whole app at a weird scale forever.
+  return (UI_ZOOM_STEPS as readonly number[]).includes(v) ? v : 1;
+}
+
+export function saveUiZoom(factor: number) {
+  safeSet("pp.uiZoom", String(factor));
+}
+
 // ---- capture / viewing ------------------------------------------------------
 
 /** Auto-advance, default OFF (D7). */

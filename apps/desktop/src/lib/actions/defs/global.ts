@@ -138,6 +138,36 @@ export const GLOBAL_DEFS: ActionDef[] = [
     available: always,
     worksInInput: true,
   },
+  // UI scale (desktop-conventions pass, June 2026): Cmd-modified zoom
+  // chords scale the WEBVIEW (the whole chrome); Look's IMAGE zoom stays
+  // on plain +/−/= (defs/look.ts zoom-step) — no collision by modifier.
+  // Cmd+0 IS reused by Look's zoom-fit: scope precedence (look > global,
+  // match.ts) keeps Cmd+0 the image-fit key inside Look — the native View
+  // menu's Reset Zoom row still resets the UI scale from anywhere.
+  {
+    id: "ui-zoom",
+    verb: "Zoom UI in / out",
+    label: "Scale the whole UI (Look's image zoom is plain +/−)",
+    keys: [
+      { key: "=", ctrlOrMeta: true, arg: 1 },
+      { key: "+", ctrlOrMeta: true, arg: 1 }, // Cmd+Shift+= arrives as "+"
+      { key: "-", ctrlOrMeta: true, arg: -1 },
+    ],
+    scope: "global",
+    group: "system",
+    available: always,
+    worksInInput: true,
+    toAction: (_ctx, arg) => ({ kind: "ui-zoom", delta: arg as 1 | -1 }),
+  },
+  {
+    id: "ui-zoom-reset",
+    verb: "Reset UI zoom",
+    keys: [{ key: "0", ctrlOrMeta: true }],
+    scope: "global",
+    group: "system",
+    available: always,
+    worksInInput: true,
+  },
   {
     id: "open-settings",
     verb: "Settings…",
