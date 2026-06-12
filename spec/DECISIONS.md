@@ -737,6 +737,22 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   a real Embedder connector; CUDA/tier-2 numbers stay with spike
   session 2.
 
+- **B74 (founder, June 12 2026 — Nemotron 3.5 is the target ASR; chunk
+  size was the truncation root cause).** "We will keep building with the
+  new model": Nemotron 3.5 ASR Streaming 0.6B (June 4 release — same
+  cache-aware transducer architecture, 40 language-locales, NATIVE
+  punctuation + capitalization) replaces the current pin once its
+  deployment path ripens (official sherpa-onnx exports exist as of June
+  12; the Rust crate release is the remaining trigger). The dev
+  evaluation (docs/SPIKE-ASR35.md) also identified the ROOT CAUSE of the
+  entire tail-truncation defect class: att_context right-lookahead baked
+  into the EXPORT (~80 ms at the 160 ms preset starves word-final
+  tokens; 560 ms resolves it) — no runtime knob could ever have fixed
+  it, which the invariance sweeps proved. INTERIM: the current model's
+  560 ms int8 export is pinned on the existing crate (manifest-only
+  swap) for an immediate dictation-quality win; finals land ~0.5 s later,
+  irrelevant for journaling.
+
 ## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).

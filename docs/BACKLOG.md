@@ -48,6 +48,11 @@ managing = off-thesis).
   mechanism (--endpoint-grace-ms + energy early-out) defaulted OFF:
   the corpus showed deferred resets clip the next word's start when
   pauses run short.
+  RE-PRIORITIZED BY B74 (June 12): the truncation class root-caused to
+  the export's baked-in lookahead (docs/SPIKE-ASR35.md) - the 560 ms pin
+  swap supersedes further old-model pipeline forensics (dump-shipped tee
+  et al now low-priority); chunking FEEL tuning (rule2, merge policy)
+  remains live and applies to any model.
 
 - [ ] **Roots and subfolders: the long-practice design round** (founder,
   June 2026): today the model is a FLAT list of watched roots, each with
@@ -61,6 +66,22 @@ managing = off-thesis).
   collections-first philosophy shapes how much folder UI we even want.
   Pairs with the sidebar design pass already logged under founder
   appetite. (Founder, June 2026.)
+- [ ] **B summons the overlay** (founder, June 2026): pressing B in Look
+  with the tracing-paper overlay hidden currently does nothing - it
+  should show the overlay AND enter pencil mode in one keystroke; a
+  bound key must never be dead.
+- [ ] **Model-landscape survey** (founder, June 2026 - periodic): the
+  toolchain is modular by seam, so every block deserves a recurring
+  look at the leading alternatives: ASR, VAD, LLM, image embedder, text
+  embedder, reranker. docs/MODELS.md is the living matrix; refresh it
+  quarterly or when a release moves the frontier (the Nemotron 3.5 day
+  proved the swap evaluation costs an afternoon).
+- [ ] **Nemotron 3.5 upgrade watch** (B74): trigger = sherpa-onnx Rust
+  crate release with 3.5 support (runtime landed in their master June
+  12; official exports live at csukuangfj2/...-2026-06-11). Then: pin
+  the 560 ms int8 export, wire the per-stream language option, rerun
+  the voice corpus + Alice WER STREAMED, spike-style latency/RSS
+  numbers. Brings native punctuation/capitalization + 40 locales.
 - [ ] **Audiobook WER stress harness** (founder idea, June 2026): run a
   LONG known-transcript recording through the full pipeline - a LibriVox
   public-domain audiobook chapter (librivox.org) with its Project
@@ -72,7 +93,10 @@ managing = off-thesis).
   (solo reader, clean recording), afconvert to 16 kHz mono PCM16 into
   gitignored test-corpora/voice-long/, align the Gutenberg chapter
   text, add a WER scorer (sidecar script or a pp_voice_bench --expect
-  upgrade). (Founder, June 2026.)
+  upgrade). CORPUS FETCHED June 12: test-corpora/voice-long/ holds Alice
+  ch1 (LibriVox v8 solo, 64+128 kbps -> 16 kHz wavs) + the exact
+  Gutenberg transcript + caveats README; the scorer is the remaining
+  piece. (Founder, June 2026.)
 - [x] **Mid-ingest scroll stability** — landed: the scroll anchor pins
   the IMAGE (hash) across re-lists — when a re-sort moves it, the
   viewport follows it to its new offset (B64 applied to scroll); and

@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photoproof - Architecture</title>
+<style>
+  :root {
+    --bg: #141414;
+    --panel: #1d1d1d;
+    --panel2: #242424;
+    --line: #3a3a3a;
+    --text: #e8e6e1;
+    --dim: #9a968e;
+    --faint: #6b675f;
+    --red: #c0392b;        /* the grease pencil */
+    --green: #5f8f5f;      /* live wires */
+    --blue: #5b7d99;       /* child processes */
+    --violet: #7d6b99;     /* in-process models */
+    --gold: #8a8455;       /* truth stores */
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.55; font-size: 15px;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 4px; }
+  h1 .pencil { color: var(--red); }
+  .subtitle { color: var(--dim); margin: 0 0 6px; }
+  .stamp { color: var(--faint); font-family: var(--mono); font-size: 12px; margin-bottom: 40px; }
+  h2 {
+    font-size: 19px; font-weight: 600; margin: 56px 0 6px;
+    padding-top: 18px; border-top: 1px solid var(--line);
+  }
+  h2 .no { color: var(--faint); font-family: var(--mono); font-size: 14px; margin-right: 10px; }
+  .lede { color: var(--dim); margin: 0 0 22px; max-width: 70ch; }
+  .diagram {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px; margin: 18px 0; overflow-x: auto;
+  }
+  svg { display: block; margin: 0 auto; }
+  svg .wire { stroke: var(--faint); stroke-width: 1.2; fill: none; }
+  svg .wire-live { stroke: var(--green); }
+  svg .arrow { fill: var(--faint); }
+  svg .arrow-live { fill: var(--green); }
+  svg .wirelabel { font-family: var(--mono); font-size: 10px; fill: var(--faint); }
+
+  /* Cards inside foreignObject: real HTML, real wrapping. */
+  .card {
+    width: 100%; height: 100%; overflow: hidden;
+    background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px;
+    font-family: var(--sans); color: var(--text);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .card.core   { border-color: var(--red); }
+  .card.child  { border-color: var(--blue); }
+  .card.ort    { border-color: var(--violet); }
+  .card.store  { border-color: var(--gold); }
+  .card.frame  { background: transparent; }
+  .card h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; line-height: 1.3; }
+  .card p { margin: 0; font-size: 11.5px; color: var(--dim); line-height: 1.45; }
+  .card .tiny { font-size: 10px; color: var(--faint); font-family: var(--mono); margin-top: auto; padding-top: 4px; line-height: 1.4; }
+  .card ul { margin: 2px 0 0; padding-left: 16px; font-size: 11.5px; color: var(--dim); line-height: 1.5; }
+  .card li { margin: 0; }
+  .card .seam { font-family: var(--mono); font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; gap: 8px; }
+  .card .seam b { color: var(--text); font-weight: 500; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13.5px; }
+  th { text-align: left; color: var(--dim); font-weight: 600; border-bottom: 1px solid var(--line); padding: 8px 12px 8px 0; }
+  td { padding: 8px 12px 8px 0; border-bottom: 1px solid #262626; vertical-align: top; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill {
+    display: inline-block; padding: 1px 9px; border-radius: 9px;
+    font-family: var(--mono); font-size: 11px; white-space: nowrap; margin: 1px 0;
+  }
+  .pill-live { background: #24331f; color: #9ec79a; }
+  .pill-flight { background: #38301c; color: #d8b36a; }
+  .pill-spec { background: #2a2a2a; color: var(--dim); }
+  .pill-alt { background: #232a30; color: #92aec4; }
+  .legend { display: flex; gap: 22px; flex-wrap: wrap; margin: 10px 0 0; color: var(--dim); font-size: 12.5px; }
+  .legend span::before {
+    content: ""; display: inline-block; width: 10px; height: 10px;
+    border-radius: 3px; margin-right: 7px; vertical-align: -1px;
+    background: var(--panel2); border: 1.5px solid var(--line);
+  }
+  .lg-core::before { border-color: var(--red); }
+  .lg-child::before { border-color: var(--blue); }
+  .lg-ort::before { border-color: var(--violet); }
+  .lg-store::before { border-color: var(--gold); }
+  .principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-top: 16px; }
+  .principle { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .principle b { display: block; margin-bottom: 4px; }
+  .principle span { color: var(--dim); font-size: 13.5px; }
+  footer { color: var(--faint); font-size: 12.5px; margin-top: 64px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Photoproof <span class="pencil">/</span> architecture</h1>
+<p class="subtitle">The digital contact sheet with a grease pencil - local-first, append-only, modular by seam.</p>
+<p class="stamp">generated June 12, 2026 - regenerate at packet close - sources: spec/, docs/STATUS.md, docs/BUILD-LOOP.md</p>
+
+<h2><span class="no">1</span>What runs on the machine</h2>
+<p class="lede">
+One desktop process owns everything durable. Model inference lives either in
+supervised child processes (anything big, stateful, or crash-prone) or
+in-process via ONNX Runtime (only components that are tiny, deterministic, and
+stateless - a deliberate, narrow exception). Nothing here ever touches
+the network except model downloads, which are SHA-pinned and consent-gated.
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 600" width="1000" height="600">
+  <!-- Desktop app boundary -->
+  <foreignObject x="16" y="12" width="616" height="576">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card frame core">
+      <h3>photoproof desktop - one process</h3>
+      <p>Tauri 2 shell, Svelte 5 webview, Rust workspace</p>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="36" y="76" width="276" height="116">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>webview (Svelte 5)</h3>
+      <p>Grid, Look, Search; rail with Folders and Collections tabs; capture indicator; journal panel; debug panel (dev builds)</p>
+      <div class="tiny">thin by contract: zero business logic, image bytes never cross IPC</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="36" y="208" width="276" height="206">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card core">
+      <h3>photoproof-core</h3>
+      <ul>
+        <li>append-only event log, folds, redaction</li>
+        <li>sidecar engine (debounced truth mirror)</li>
+        <li>library: ingest passes, previews, watcher</li>
+        <li>capture engine: scope ring, VAD binding</li>
+        <li>search: FTS5 + hybrid RRF fusion</li>
+        <li>collections store; PPVEC vector store</li>
+        <li>model runtime: plans, supervision, downloads</li>
+      </ul>
+      <div class="tiny">every byte of user truth lives behind this line</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="36" y="430" width="276" height="140">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card ort">
+      <h3>in-process ONNX Runtime</h3>
+      <ul>
+        <li>silero VAD (~2 MB, compiled in) - the capture gate</li>
+        <li>EmbeddingGemma 300m q8 - annotation text</li>
+        <li>DFN5B CLIP ViT-H-378 - images + visual queries</li>
+      </ul>
+      <div class="tiny">admission rule: tiny, deterministic, fixed-shape models only</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="332" y="208" width="280" height="362">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>photoproof-connectors - the seams</h3>
+      <p class="seam"><b>Transcriber</b><span>WS client</span></p>
+      <p class="seam"><b>VoiceActivityDetector</b><span>in-proc</span></p>
+      <p class="seam"><b>Embedder (x2)</b><span>in-proc</span></p>
+      <p class="seam"><b>LanguageModel</b><span>HTTP client</span></p>
+      <p class="seam"><b>VectorStore</b><span>PPVEC</span></p>
+      <p class="seam"><b>Reranker</b><span>M3 eval</span></p>
+      <p style="margin-top:10px">Every model speaks through a trait. Deterministic mocks drive every test. Swapping a model is a manifest pin, never a rewrite.</p>
+      <p style="margin-top:8px">EndpointCell: live child ports exist in memory, never in config - a restart re-points silently.</p>
+      <div class="tiny">the cloud partner (M5, opt-in) plugs in here too</div>
+    </div>
+  </foreignObject>
+
+  <!-- Children -->
+  <foreignObject x="700" y="60" width="284" height="140">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card child">
+      <h3>pp-asr-server - the speech recognition child</h3>
+      <p>sherpa-onnx streaming transducer running Nemotron 0.6B int8. It decides where utterances end, and a final transcript always carries everything its live partials saw - never less.</p>
+      <div class="tiny">WebSocket - raw f32 frames in, result JSON out</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="700" y="226" width="284" height="140">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card child">
+      <h3>llama-server - the language model child</h3>
+      <p>Gemma 4 E2B QAT q4_0 with vision projector. Captions and summaries (retrieval fuel) plus the search query parse.</p>
+      <div class="tiny">HTTP, OpenAI-compatible wire format</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="700" y="430" width="284" height="140">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>process supervision</h3>
+      <p>Spawn, health probe, restart backoff, orphan sweep, single-instance lock, persistent child registry.</p>
+      <div class="tiny">children die with the parent - crash net proven on stub children and live</div>
+    </div>
+  </foreignObject>
+
+  <!-- wires -->
+  <path class="wire wire-live" d="M612 280 C 660 270, 660 180, 700 140"/>
+  <polygon class="arrow arrow-live" points="700,140 687,141 692,150"/>
+  <text x="636" y="196" class="wirelabel">WS :ephemeral</text>
+
+  <path class="wire wire-live" d="M612 330 C 660 326, 660 300, 700 294"/>
+  <polygon class="arrow arrow-live" points="700,294 688,290 689,300"/>
+  <text x="634" y="320" class="wirelabel">HTTP :ephemeral</text>
+
+  <path class="wire" d="M612 500 L700 500"/>
+  <polygon class="arrow" points="700,500 688,495 688,505"/>
+  <text x="630" y="492" class="wirelabel">spawn / tick</text>
+</svg>
+<div class="legend">
+  <span class="lg-core">the one durable process</span>
+  <span class="lg-child">supervised child processes</span>
+  <span class="lg-ort">in-process models (ort exception)</span>
+</div>
+</div>
+
+<h2><span class="no">2</span>Where truth lives</h2>
+<p class="lede">
+Sidecars beside the images are the canonical data; everything else is a
+rebuildable index. The journal is append-only: nothing is ever silently
+edited, and redaction - the one sanctioned violation - is a physical scrub
+that propagates everywhere, byte-scan provable.
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 380" width="1000" height="380">
+  <foreignObject x="16" y="20" width="200" height="150">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>capture</h3>
+      <ul>
+        <li>voice (mic, VAD-bound)</li>
+        <li>typed notes</li>
+        <li>grease pencil strokes</li>
+        <li>ratings 0-5</li>
+      </ul>
+      <div class="tiny">audio is NEVER written to disk</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="280" y="20" width="230" height="150">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card core">
+      <h3>append-only event log</h3>
+      <p>ULID-ordered; targets carried by BLAKE3 image hash; revision, retraction, and redaction as events.</p>
+      <div class="tiny">merge = set-union by event id</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="580" y="12" width="230" height="92">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card store">
+      <h3>.photoproof.json sidecars</h3>
+      <p>beside every annotated image</p>
+      <div class="tiny">THE TRUTH - walk away anytime</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="580" y="116" width="230" height="74">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card store">
+      <h3>collections.photoproof.json</h3>
+      <div class="tiny">intent groupings - union merge</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="580" y="212" width="230" height="150">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>rebuildable indexes</h3>
+      <ul>
+        <li>SQLite (WAL): events, library, FTS5, collections, ingest queue</li>
+        <li>PPVEC: int8 vectors, scrub + compact</li>
+        <li>preview cache (WebP 512 / 2560)</li>
+      </ul>
+      <div class="tiny">delete them all; rebuild from sidecars</div>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="16" y="212" width="230" height="150">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>your images</h3>
+      <p>Watched roots. Never moved, never written, never deleted. Identity is the BLAKE3 of the bytes: reorganize freely, annotations follow the pixels.</p>
+    </div>
+  </foreignObject>
+
+  <path class="wire" d="M216 95 L280 95"/>
+  <polygon class="arrow" points="280,95 268,90 268,100"/>
+  <path class="wire" d="M510 75 L580 56"/>
+  <polygon class="arrow" points="580,56 568,55 570,64"/>
+  <text x="520" y="56" class="wirelabel">2 s debounce</text>
+  <path class="wire" d="M510 120 C 550 160, 550 220, 580 250"/>
+  <polygon class="arrow" points="580,250 570,242 566,251"/>
+  <text x="500" y="196" class="wirelabel">transactional index</text>
+  <path class="wire" d="M246 287 L580 287"/>
+  <polygon class="arrow" points="580,287 568,282 568,292"/>
+  <text x="280" y="279" class="wirelabel">ingest passes: hash, EXIF, previews, embeddings</text>
+</svg>
+</div>
+
+<h2><span class="no">3</span>The model roster (every seam, every block)</h2>
+<p class="lede">
+Each block is replaceable behind its trait. Pins are exact: SHA-256 per file
+at an immutable revision; unpinned entries fail closed. This table is the
+human view of the compiled manifest plus the in-flight decisions.
+</p>
+
+<table>
+  <tr><th>Seam</th><th>Running today</th><th>Status</th><th>Next / alternates</th></tr>
+  <tr>
+    <td><b>ASR</b> (streaming STT)<br><span class="mono">Transcriber</span></td>
+    <td>Nemotron speech 0.6B en, 160 ms int8<br><span class="mono">via pp-asr-server / sherpa-onnx</span></td>
+    <td><span class="pill pill-live">live, founder-verified</span></td>
+    <td><span class="pill pill-flight">560 ms export swap (root-cause fix)</span><br>
+        <span class="pill pill-flight">Nemotron 3.5 @ 560 ms (decided target: +punctuation, 40 languages)</span><br>
+        <span class="pill pill-alt">MLX ports exist (Apple-native option)</span></td>
+  </tr>
+  <tr>
+    <td><b>VAD</b> (speech gate)<br><span class="mono">VoiceActivityDetector</span></td>
+    <td>silero-vad v5, in-process ort, compiled in (~2 MB)</td>
+    <td><span class="pill pill-live">live, founder-verified</span></td>
+    <td>hysteresis knobs exposed for tuning; 400 ms pre-roll feeds first words</td>
+  </tr>
+  <tr>
+    <td><b>LLM</b> (fuel + parse)<br><span class="mono">LanguageModel</span></td>
+    <td>Gemma 4 E2B QAT q4_0 + mmproj<br><span class="mono">via llama-server</span></td>
+    <td><span class="pill pill-live">live (child supervised)</span></td>
+    <td><span class="pill pill-alt">Gemma 4 E4B (tier 2 config option)</span><br>
+        consumers (captions, query parse) light up with M3 dogfood</td>
+  </tr>
+  <tr>
+    <td><b>Text embedder</b> (primary retrieval signal)<br><span class="mono">Embedder</span></td>
+    <td>EmbeddingGemma 300m q8, 768-dim, in-process ort</td>
+    <td><span class="pill pill-flight">wiring in flight</span></td>
+    <td><span class="pill pill-alt">Qwen3-Embedding 0.6B int8 (pinned alternative)</span><br>
+        <span class="pill pill-alt">llama.cpp /v1/embeddings (backend alternate)</span></td>
+  </tr>
+  <tr>
+    <td><b>Image embedder</b> (visual search)<br><span class="mono">Embedder</span></td>
+    <td>DFN5B CLIP ViT-H-14-378 (Immich export), 1024-dim</td>
+    <td><span class="pill pill-flight">wiring lands today (P7.4)</span></td>
+    <td>laptop backfill is idle-hours (~3 s/image CPU); desktop GPU numbers await spike session 2</td>
+  </tr>
+  <tr>
+    <td><b>Reranker</b><br><span class="mono">Reranker</span></td>
+    <td>none (RRF fusion only)</td>
+    <td><span class="pill pill-spec">seam ready</span></td>
+    <td>go/no-go at the M3 golden-query eval, post-dogfood</td>
+  </tr>
+  <tr>
+    <td><b>Cloud partner</b> (M5, paid tier)<br><span class="mono">LanguageModel</span></td>
+    <td>none - the free tier never touches the network</td>
+    <td><span class="pill pill-spec">spec'd</span></td>
+    <td>Claude connector, per-conversation consent</td>
+  </tr>
+</table>
+
+<h2><span class="no">4</span>The voice path, end to end</h2>
+<p class="lede">
+The one path with real-time constraints, and the most heavily verified: the
+binding rule snapshots your selection at the moment speech starts, so
+words follow your eyes even when you click away mid-sentence.
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 190" width="1000" height="190">
+  <foreignObject x="10" y="30" width="120" height="100">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>cpal mic</h3>
+      <p>16 kHz mono f32</p>
+    </div>
+  </foreignObject>
+  <foreignObject x="170" y="30" width="150" height="100">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card ort">
+      <h3>silero VAD</h3>
+      <p>onset stamp + gate</p>
+      <div class="tiny">pre-roll 400 ms</div>
+    </div>
+  </foreignObject>
+  <foreignObject x="360" y="30" width="160" height="100">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card core">
+      <h3>capture engine</h3>
+      <p>scope-at-onset binding</p>
+      <div class="tiny">60 s ring, zeroed on disarm</div>
+    </div>
+  </foreignObject>
+  <foreignObject x="560" y="30" width="160" height="100">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card child">
+      <h3>pp-asr-server</h3>
+      <p>endpoints + finals</p>
+      <div class="tiny">finals carry all partial text</div>
+    </div>
+  </foreignObject>
+  <foreignObject x="760" y="30" width="110" height="100">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card core">
+      <h3>event</h3>
+      <p>minted at onset ts</p>
+    </div>
+  </foreignObject>
+  <foreignObject x="900" y="30" width="90" height="100">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card store">
+      <h3>sidecar</h3>
+      <p>within seconds</p>
+    </div>
+  </foreignObject>
+
+  <path class="wire" d="M130 80 L170 80"/><polygon class="arrow" points="170,80 158,75 158,85"/>
+  <path class="wire" d="M320 80 L360 80"/><polygon class="arrow" points="360,80 348,75 348,85"/>
+  <path class="wire" d="M520 80 L560 80"/><polygon class="arrow" points="560,80 548,75 548,85"/>
+  <path class="wire" d="M720 80 L760 80"/><polygon class="arrow" points="760,80 748,75 748,85"/>
+  <path class="wire" d="M870 80 L900 80"/><polygon class="arrow" points="900,80 888,75 888,85"/>
+  <text x="240" y="165" class="wirelabel">gated frames + 3 s trailing silence over WS - audio exists only in memory, never on disk</text>
+</svg>
+</div>
+
+<h2><span class="no">5</span>Search: how a question finds a photograph</h2>
+<p class="lede">
+Keyword search works with zero models installed - the no-models mode is a complete product, not a fallback. With models, four signals fuse; your own words always outrank
+machine impressions (machine signals only ever ADD ways to find an image; they can be outweighed, never substituted for your words).
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 280" width="1000" height="280">
+  <foreignObject x="10" y="20" width="170" height="80">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>query</h3>
+      <p>"melancholy fog series"</p>
+    </div>
+  </foreignObject>
+  <foreignObject x="230" y="20" width="200" height="80">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <h3>parse (LLM, 2 s budget)</h3>
+      <p>filters + collection resolution</p>
+    </div>
+  </foreignObject>
+  <foreignObject x="230" y="116" width="200" height="60">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card">
+      <p>no-LLM fallback: keyword + chips - fully degraded-safe</p>
+    </div>
+  </foreignObject>
+
+  <foreignObject x="490" y="12" width="200" height="52">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card"><p class="seam"><b>your words</b><span>keyword index</span></p></div>
+  </foreignObject>
+  <foreignObject x="490" y="76" width="200" height="52">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card"><p class="seam"><b>your words</b><span>as vectors (meaning)</span></p></div>
+  </foreignObject>
+  <foreignObject x="490" y="140" width="200" height="52">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card"><p class="seam"><b>machine captions</b><span>invisible fuel</span></p></div>
+  </foreignObject>
+  <foreignObject x="490" y="204" width="200" height="52">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card"><p class="seam"><b>image content</b><span>what it looks like</span></p></div>
+  </foreignObject>
+
+  <foreignObject x="750" y="76" width="240" height="130">
+    <div xmlns="http://www.w3.org/1999/xhtml" class="card core">
+      <h3>RRF fusion + provenance</h3>
+      <p>Every result names its evidence: your own quote, dated, with session context.</p>
+      <div class="tiny">machine prose is fuel - never shown</div>
+    </div>
+  </foreignObject>
+
+  <path class="wire" d="M180 60 L230 60"/><polygon class="arrow" points="230,60 218,55 218,65"/>
+  <path class="wire" d="M430 50 L490 38"/><polygon class="arrow" points="490,38 478,36 480,46"/>
+  <path class="wire" d="M430 60 L490 102"/><polygon class="arrow" points="490,102 479,95 476,104"/>
+  <path class="wire" d="M430 70 L490 166"/><polygon class="arrow" points="490,166 481,157 477,166"/>
+  <path class="wire" d="M430 80 L490 230"/><polygon class="arrow" points="490,230 482,220 477,228"/>
+  <path class="wire" d="M690 38 C 720 38, 730 80, 750 100"/><polygon class="arrow" points="750,100 740,93 736,101"/>
+  <path class="wire" d="M690 102 L750 120"/><polygon class="arrow" points="750,120 738,113 736,123"/>
+  <path class="wire" d="M690 166 L750 148"/><polygon class="arrow" points="750,148 738,147 740,157"/>
+  <path class="wire" d="M690 230 C 720 230, 730 180, 750 165"/><polygon class="arrow" points="750,165 739,166 743,175"/>
+</svg>
+</div>
+
+<h2><span class="no">6</span>Principles the boxes obey</h2>
+<div class="principles">
+  <div class="principle"><b>Local-first, cloud-optional</b>
+    <span>The free tier never touches the network. Downloads are consent-gated, SHA-pinned, license-gated before the first byte.</span></div>
+  <div class="principle"><b>The journal is the product</b>
+    <span>Append-only event log; entries never overwritten. Retraction hides, redaction physically scrubs - everywhere, provably.</span></div>
+  <div class="principle"><b>Sidecars are the truth</b>
+    <span>SQLite and PPVEC are rebuildable indexes. Export = the sidecar set. You can always walk away with everything.</span></div>
+  <div class="principle"><b>Identity travels by hash</b>
+    <span>Images are known by BLAKE3 of their bytes, never paths. Reorganize freely; annotations follow the pixels.</span></div>
+  <div class="principle"><b>Collections over folders</b>
+    <span>Folders are mechanical; collections are intent - evented membership with history, tags with time, never moved files.</span></div>
+  <div class="principle"><b>Your words outrank the machine's</b>
+    <span>Machine prose is retrieval fuel only. No visible AI captions, scores, or tags. Photoproof preserves YOUR opinions.</span></div>
+  <div class="principle"><b>Degraded mode is a product</b>
+    <span>No models, no GPU, no consent? Typed notes, pencil, ratings, FTS search - fully functional. Models only add.</span></div>
+  <div class="principle"><b>Children die with the parent</b>
+    <span>Supervised processes carry health probes, restart budgets, an orphan sweep, and a single-instance lock. No zombies.</span></div>
+</div>
+
+<footer>
+Photoproof architecture - one page, hand-maintained beside docs/STATUS.md.
+Where this page and a spec disagree, the spec wins; spec section ids and decision numbers live there, not here. No build tooling: this
+file is self-contained HTML+SVG (foreignObject cards, so text wraps); edit
+and reload.
+</footer>
+
+</main>
+</body>
+</html>
