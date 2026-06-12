@@ -19,6 +19,7 @@ const model = (over: Partial<ModelRowDto> = {}): ModelRowDto => ({
   acceptanceRequired: true,
   accepted: false,
   error: null,
+  retryHint: null,
   ...over,
 });
 
