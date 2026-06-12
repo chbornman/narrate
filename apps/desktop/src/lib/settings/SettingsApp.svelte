@@ -229,6 +229,16 @@
           semantic search light up if models are added later.
         </p>
       {/if}
+      <!-- Plan-says-run-but-binary-missing (the June 2026 silent-dark
+           incident): one muted line per blocked process — without it the
+           rows below read "installed" while voice/LLM stay dead with no
+           explanation anywhere. -->
+      {#if runtime.asrBlocked !== null}
+        <p class="dim">Voice is unavailable: {runtime.asrBlocked}</p>
+      {/if}
+      {#if runtime.llmBlocked !== null}
+        <p class="dim">Local LLM is unavailable: {runtime.llmBlocked}</p>
+      {/if}
       {#each runtime.models.filter((m) => m.state !== "not-offered") as m (m.id)}
         <div class="row">
           <span class="name">{m.id}</span>

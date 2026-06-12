@@ -155,6 +155,14 @@ pub struct RuntimeStatus {
     /// Ready (never true in P6.2 — real binaries are the P6.3 spike).
     pub asr_ready: bool,
     pub llm_ready: bool,
+    /// Plan says Run but the binary could not be resolved (founder
+    /// incident, June 2026: a dev target prune ate pp-asr-server and the
+    /// mic key went dark with zero surfacing). Some(reason) means the
+    /// process will NEVER become ready until the binary returns — distinct
+    /// from `asr_ready == false`, which also covers the normal silent
+    /// warm-up. None = not blocked. Settings shows the reason quietly.
+    pub asr_blocked: Option<String>,
+    pub llm_blocked: Option<String>,
     /// P7.4 §3.3: the in-process embedder readiness — true once the ort
     /// sessions are constructed (additive; settings rows show running/idle
     /// state text). False keeps search keyword-only and the backfill dark.

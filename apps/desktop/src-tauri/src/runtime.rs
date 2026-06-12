@@ -352,6 +352,12 @@ impl RuntimeHost {
             // supervisors read false and the mic glyph stays away).
             asr_ready: self.supervisors.asr_ready(),
             llm_ready: self.supervisors.llm_ready(),
+            // Plan-says-Run-but-no-binary (the June 2026 silent-dark
+            // incident): the supervisors record the reason on the same
+            // apply() converge that would have spawned the child, so this
+            // surfacing is exactly as fresh as the readiness flags above.
+            asr_blocked: self.supervisors.asr_blocked(),
+            llm_blocked: self.supervisors.llm_blocked(),
             // P7.4 §3.3: in-process embedder readiness (sessions built).
             clip_ready: self.embedders.clip_ready(),
             text_embedder_ready: self.embedders.text_ready(),
@@ -420,6 +426,18 @@ impl RuntimeHost {
                 "orphan sweep: NOT RUN (instance lock not held, §8.5)".into()
             },
         ];
+        // The June 2026 silent-dark incident: the plan lines above say
+        // "run", but a Run plan whose binary resolution came up empty
+        // never spawns anything — name that per process or the panel
+        // shows a healthy-looking plan over a runtime that went dark.
+        for (name, blocked) in [
+            ("llm", self.supervisors.llm_blocked()),
+            ("asr", self.supervisors.asr_blocked()),
+        ] {
+            if let Some(reason) = blocked {
+                lines.push(format!("{name}: plan says run but {reason}"));
+            }
+        }
         // P7.4: the LIVE embedder-host slot state (building/ready/failed) —
         // the plan lines above describe the PLAN; these the actual ort
         // sessions, including a degraded-with-error load (§3.3).
@@ -694,6 +712,10 @@ mod tests {
         assert_eq!(status.tier_effective, 0);
         assert!(!status.asr_ready);
         assert!(!status.llm_ready);
+        // Dark by PLAN (tier 0 runs nothing) is not "blocked": the
+        // missing-binary surfacing must stay quiet here.
+        assert!(status.asr_blocked.is_none());
+        assert!(status.llm_blocked.is_none());
         assert_eq!(status.consent, "undecided");
         assert_eq!(status.consent_offer_bytes, 0, "§5.4 live sum at tier 0");
         assert!(status.instance_lock_held);

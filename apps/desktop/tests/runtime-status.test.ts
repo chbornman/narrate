@@ -25,6 +25,8 @@ const model = (over: Partial<ModelRowDto> = {}): ModelRowDto => ({
 const status = (over: Partial<RuntimeStatus> = {}): RuntimeStatus => ({
   asrReady: false,
   llmReady: false,
+  asrBlocked: null,
+  llmBlocked: null,
   clipReady: false,
   textEmbedderReady: false,
   tierDetected: 1,
