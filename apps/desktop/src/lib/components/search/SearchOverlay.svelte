@@ -34,8 +34,10 @@
   import SearchResultRow from "./SearchResultRow.svelte";
   import * as sel from "../../logic/selection";
 
-  // Keystroke debounce, sized inside the <100 ms search budget (UI §5.1)
-  // — the rest of the budget belongs to the backend round-trip.
+  // Keystroke debounce. UI §5.1 allows a debounce of at most 50 ms inside
+  // the <100 ms results budget — this value sits AT that spec ceiling, so
+  // it can only be tuned downward; the rest of the budget belongs to the
+  // backend round-trip.
   const SEARCH_DEBOUNCE_MS = 50;
 
   let inputEl: HTMLInputElement | undefined = $state();

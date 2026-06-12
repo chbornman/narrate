@@ -83,7 +83,9 @@
   );
   const popMore = $derived(Math.max(0, ui.shell.scope.count - POPOVER_THUMB_MAX));
 
-  // Pulse hold time: must outlast the 120 ms color/text-shadow
+  // Pulse hold time. The binding anchor is UI §7.4: "a single ~300 ms
+  // brightness pulse of the scope dot" — 320 implements that spec value.
+  // Secondary floor: it must also outlast the 120 ms color/text-shadow
   // transition on .segment.scope (style block below) so the brighten
   // visibly completes before the segment relaxes.
   const PULSE_MS = 320;
