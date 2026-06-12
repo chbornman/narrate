@@ -71,6 +71,11 @@ const INITIAL_WS_KEY_SEED: u64 = 0x5045_5252_4F31_3641;
 /// read half, because an armed-but-silent mic can sit for minutes.
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Silence appended before the "Done" sentinel at stream close — must
+/// exceed the model export's attention lookahead plus the endpoint
+/// horizon so the flush can emit every token (see the input-close path).
+const FLUSH_PAD_MS: u64 = 1_500;
+
 pub struct SherpaOnlineTranscriber {
     endpoint: EndpointCell,
     model_id: String,
@@ -387,6 +392,25 @@ impl Stream for SherpaStream<'_> {
                 }
                 Poll::Ready(None) => {
                     this.input_done = true;
+                    // The cache-aware transducer holds attention lookahead
+                    // (~480 ms at the 560 ms export): tokens for the last
+                    // spoken words only emit once ENOUGH AUDIO FOLLOWS
+                    // them. A bare "Done" right after speech strands those
+                    // tokens and the final arrives truncated or not at all
+                    // (spike P6.3 tail-padding finding; corpus June 12:
+                    // the last utterance abandoned at 560 ms). Pad the
+                    // stream with silence before the sentinel so the flush
+                    // drains complete.
+                    let pad = vec![0u8; (16_000 * FLUSH_PAD_MS as usize / 1000) * 4];
+                    if this.ws.send_binary(&pad).is_err() {
+                        this.finished = true;
+                        return Poll::Ready(Some(Err(ConnectorError::ConnectionLost(
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "asr websocket pad failed",
+                            ),
+                        ))));
+                    }
                     if this.ws.send_text("Done").is_err() {
                         this.finished = true;
                         return Poll::Ready(Some(Err(ConnectorError::ConnectionLost(

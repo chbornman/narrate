@@ -59,6 +59,13 @@ since `e60cb15` (optimized deps).
   endpointer (trailing-silence shipping), the stranded disarm drain, and
   dev-binary debug commands. Follow-up lives in BACKLOG "Voice chunking
   tuning".
+- [ ] **ASR 560 ms swap (B74 interim) - re-dogfood dictation**: settings
+  offers the new model id (nemotron...560ms-int8, ~660 MB; the old 160 ms
+  row becomes removable). Expect: word tails complete ("incredible",
+  "Keeper"), finals arriving about half a second later, first words
+  intact after long silences. The voice corpus validates it headlessly;
+  your live feel is the real gate. Then re-record a card or two so the
+  corpus carries the new baseline.
 - [ ] **Pencil feel + pressure (P5.1)** — **docs/DOGFOOD-M2.md is the
   script**: live-stroke latency, marks-zoom-with-image feel, pressure per
   platform (Wacom needs "Use Windows Ink" ON; your Linux stylus is the

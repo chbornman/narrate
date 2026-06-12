@@ -36,8 +36,8 @@ model = "claude-sonnet-latest"                  # structured output.
 
 [asr]
 backend = "local-sherpa"     # "local-sherpa" | "disabled"
-model = "nemotron-speech-streaming-en-0.6b-160ms-int8"
-chunk_ms = 160               # 80 | 160 | 560 | 1120 (model-supported)
+model = "nemotron-speech-streaming-en-0.6b-560ms-int8"
+chunk_ms = 560               # 80 | 160 | 560 | 1120 (model-supported)
 device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]
@@ -77,8 +77,8 @@ fn spec_literal_block_parses_with_no_warnings() {
     assert_eq!(c.llm.anthropic.model, "claude-sonnet-latest");
 
     assert_eq!(c.asr.backend, AsrBackend::LocalSherpa);
-    assert_eq!(c.asr.model, "nemotron-speech-streaming-en-0.6b-160ms-int8");
-    assert_eq!(c.asr.chunk_ms, 160);
+    assert_eq!(c.asr.model, "nemotron-speech-streaming-en-0.6b-560ms-int8");
+    assert_eq!(c.asr.chunk_ms, 560);
     assert_eq!(c.asr.device, AsrDevice::Cpu);
 
     assert_eq!(c.embedder.backend, EmbedderBackend::LocalOrt);
@@ -103,7 +103,7 @@ fn missing_sections_take_defaults() {
     // Only override one value; everything else stays at defaults.
     let loaded = from_toml_str("[asr]\nbackend = \"disabled\"\n").unwrap();
     assert_eq!(loaded.config.asr.backend, AsrBackend::Disabled);
-    assert_eq!(loaded.config.asr.chunk_ms, 160);
+    assert_eq!(loaded.config.asr.chunk_ms, 560);
     assert_eq!(loaded.config.llm, Config::default().llm);
     assert_eq!(loaded.config.runtime, Config::default().runtime);
 }

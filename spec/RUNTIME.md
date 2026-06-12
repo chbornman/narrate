@@ -62,7 +62,7 @@ Hosts the small LLM behind `LanguageModel`. One server, one model resident.
 - Binary: pinned `sherpa-onnx-online-websocket-server` (static, per platform) vendored in the app bundle, spawned on a random localhost port. **Wire protocol (corrected): raw float32 sample frames** in over the WebSocket, with a `"Done"` text message signaling end-of-stream — the 16-bit/16 kHz language in sherpa's docs describes wave *files*, not the socket ([online WebSocket docs](https://k2-fsa.github.io/sherpa/onnx/websocket/online-websocket.html)). Result JSON carries `text`, `tokens`, `timestamps`, `segment`, `start_time`, `is_final` ([C API](https://github.com/k2-fsa/sherpa-onnx/blob/master/sherpa-onnx/c-api/c-api.h)); the connector maps `segment` → `utterance_id` and adapts the rest to the `Transcriber` contract.
 - **Serving shape is a spike decision (§12.2).** The vendored websocket server is closer to a reference binary than a hardened server. The alternative: wrap the official [sherpa-onnx Rust crate](https://crates.io/crates/sherpa-onnx) in a **tiny purpose-built child process we own** — same process boundary, same wire contract, drops the demo-grade server. Either way P2 stays an external child (invariant 1.1). The spike MUST also test whether the Nemotron export emits usable token `timestamps` — unverified ([discussion #985](https://github.com/k2-fsa/sherpa-onnx/discussions/985)); CAPTURE's binding no longer depends on them (VAD onset is authoritative, CAPTURE §5), but the cross-check wants them.
 - Model: English `nemotron-speech-streaming-en-0.6b` int8 (published sherpa-onnx export) as the v1 default. The multilingual `nemotron-3.5-asr-streaming-0.6b` is the *target* default per SCOPE; its ONNX/sherpa export is unconfirmed, so: **the Transcriber contract (§4.1) is normative now; the multilingual serving recipe is an explicit M2b-spike deliverable (§12).** Fallback order: multilingual 3.5 → English 0.6b → ASR disabled (voice features dark, journal unaffected).
-- Chunk size: 160 ms default (config `chunk_ms`), trading ~200 ms extra latency for roughly half the CPU of 80 ms chunks.
+- Chunk size: 560 ms default (config `chunk_ms`) — B74 amendment: the export's attention lookahead is what completes word-final tokens before an endpoint mints, and the 160 ms preset truncated tails on the founder corpus (docs/SPIKE-ASR35.md). The added final latency (~0.5 s) is imperceptible for journaling.
 
 ### 3.3 In-process ONNX Runtime — embedders + silero-vad (the defended exception)
 
@@ -288,8 +288,8 @@ model = "claude-sonnet-latest"                  # structured output.
 
 [asr]
 backend = "local-sherpa"     # "local-sherpa" | "disabled"
-model = "nemotron-speech-streaming-en-0.6b-160ms-int8"
-chunk_ms = 160               # 80 | 160 | 560 | 1120 (model-supported)
+model = "nemotron-speech-streaming-en-0.6b-560ms-int8"
+chunk_ms = 560               # 80 | 160 | 560 | 1120 (model-supported)
 device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]

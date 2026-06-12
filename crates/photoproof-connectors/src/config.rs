@@ -325,8 +325,8 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             backend: AsrBackend::LocalSherpa,
-            model: "nemotron-speech-streaming-en-0.6b-160ms-int8".into(),
-            chunk_ms: 160,
+            model: "nemotron-speech-streaming-en-0.6b-560ms-int8".into(),
+            chunk_ms: 560,
             device: AsrDevice::Cpu,
         }
     }

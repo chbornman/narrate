@@ -220,7 +220,7 @@ mod tests {
             &compiled_manifest(),
             &installed(&[
                 "gemma-4-e2b-it-qat-q4_0",
-                "nemotron-speech-streaming-en-0.6b-160ms-int8",
+                "nemotron-speech-streaming-en-0.6b-560ms-int8",
             ]),
         );
         assert_eq!(
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(
             p.asr,
             ProcessPlan::Run {
-                model_id: "nemotron-speech-streaming-en-0.6b-160ms-int8".into()
+                model_id: "nemotron-speech-streaming-en-0.6b-560ms-int8".into()
             }
         );
 

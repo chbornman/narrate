@@ -2007,9 +2007,10 @@ fn c6_2_pre_roll_ships_the_audio_from_before_the_vad_onset() {
         2_000 - first <= PRE_ROLL_MS + 50,
         "pre-roll bounded: first shipped at {first} ms vs onset 2000 (cap {PRE_ROLL_MS} ms + one frame)"
     );
-    // Long-before silence stays unshipped: nothing from the first second.
+    // Long-before silence stays unshipped: nothing older than the cap
+    // (plus one 50 ms frame of boundary slack) ever reaches the wire.
     assert!(
-        seen.iter().all(|&t| t >= 1_000),
+        seen.iter().all(|&t| t + PRE_ROLL_MS + 50 >= 2_000),
         "deep silence never ships: {:?}",
         &seen[..4.min(seen.len())]
     );

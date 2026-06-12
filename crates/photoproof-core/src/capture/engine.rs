@@ -56,9 +56,13 @@ pub const TRAILING_SHIP_MS: u64 = 3_000;
 /// speech-probability crosses ENTER, which is 100-400 ms INTO the first
 /// word — without the pre-roll, that audio never reaches the recognizer
 /// and cold-start first words come back chopped ("Okay this contact" ->
-/// "This contact"; founder corpus, cold-starts card). 400 ms covers the
-/// detection lag with margin while keeping the resume burst small.
-pub const PRE_ROLL_MS: u64 = 400;
+/// "This contact"; founder corpus, cold-starts card). WHY 1 s and not
+/// the ~400 ms detection lag alone: the 560 ms model export holds
+/// ~480 ms of attention lookahead, so after a shipping gap the encoder
+/// also needs warm left context before the FIRST words' tokens emit —
+/// 400 ms lost "Print this one" after 4 s gaps; 1 s restored it
+/// (corpus, June 12).
+pub const PRE_ROLL_MS: u64 = 1_000;
 /// Debug-panel note cap (in-memory only).
 const DEBUG_NOTE_CAP: usize = 256;
 

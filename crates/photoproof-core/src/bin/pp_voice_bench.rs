@@ -227,7 +227,7 @@ fn default_model_dir() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
     PathBuf::from(home).join(
         "Library/Application Support/com.photoproof.desktop/models/\
-         nemotron-speech-streaming-en-0.6b-160ms-int8",
+         nemotron-speech-streaming-en-0.6b-560ms-int8",
     )
 }
 

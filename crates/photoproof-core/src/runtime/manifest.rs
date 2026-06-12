@@ -228,7 +228,7 @@ pub fn compiled_manifest() -> Manifest {
             // Three transducer sessions + tokens, exactly as sherpa loads
             // them.
             ModelEntry {
-                id: "nemotron-speech-streaming-en-0.6b-160ms-int8".into(),
+                id: "nemotron-speech-streaming-en-0.6b-560ms-int8".into(),
                 role: "asr".into(),
                 tiers: vec![1, 2],
                 license: License {
@@ -239,29 +239,29 @@ pub fn compiled_manifest() -> Manifest {
                 total_bytes: 661_919_416,
                 files: vec![
                     pinned(
-                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
-                        "237e551abd7a411ef92d3595454d9f6ab5fe7d6c",
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+                        "52056fdc070914a48dcd68b31b44d6a6f5b85902",
                         "encoder.int8.onnx",
-                        "71111f61b18e1e65e01e369434a5c0434868d2f44892742ae54240600c681209",
+                        "7d932213491ad355c6e5576705dc3494731a52af87d7a1b954559340147909d8",
                         652_916_849,
                     ),
                     pinned(
-                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
-                        "237e551abd7a411ef92d3595454d9f6ab5fe7d6c",
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+                        "52056fdc070914a48dcd68b31b44d6a6f5b85902",
                         "decoder.int8.onnx",
                         "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98",
                         7_257_753,
                     ),
                     pinned(
-                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
-                        "237e551abd7a411ef92d3595454d9f6ab5fe7d6c",
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+                        "52056fdc070914a48dcd68b31b44d6a6f5b85902",
                         "joiner.int8.onnx",
                         "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
                         1_735_862,
                     ),
                     pinned(
-                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25",
-                        "237e551abd7a411ef92d3595454d9f6ab5fe7d6c",
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+                        "52056fdc070914a48dcd68b31b44d6a6f5b85902",
                         "tokens.txt",
                         "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
                         8_952,
