@@ -104,7 +104,8 @@ mark {
 }
 
 /* Off-screen scratch element for the execCommand clipboard fallback
- * (state/app.svelte.ts copyText — created imperatively, styled here). */
+ * (primitives/copyflash.svelte.ts copyToClipboard — created imperatively,
+ * styled here). */
 .pp-offscreen {
   position: fixed;
   left: -9999px;

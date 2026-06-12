@@ -297,6 +297,9 @@ export const GRID_DEFS: ActionDef[] = [
     seats: ["thumb"],
     available: always,
     enabled: (ctx) => ctx.activeHash !== null,
+    // Clipboard verb: the menu row confirms through the shared copy
+    // register (a check flash) instead of closing into silence.
+    copyConfirm: true,
   },
   {
     id: "open-with-default",

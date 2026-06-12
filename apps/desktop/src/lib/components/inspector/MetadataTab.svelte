@@ -5,21 +5,21 @@
    * new parsing); copyable hash/path. Renders inspector.metadata through
    * logic/metadata.ts — the component is a thin table over labeled rows.
    */
+  import Check from "@lucide/svelte/icons/check";
   import { ui } from "../../state/app.svelte";
   import { metadataRows } from "../../logic/metadata";
+  import { copyFlash, copyToClipboard } from "../../primitives/copyflash.svelte";
   import EmptyState from "../../primitives/EmptyState.svelte";
 
   const rows = $derived(
     ui.inspector.metadata === null ? [] : metadataRows(ui.inspector.metadata),
   );
 
-  async function copy(value: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      /* clipboard unavailable (permissions/tests): the value stays selectable */
-    }
-  }
+  // The shared copy register (BACKLOG "Copy actions confirm themselves"):
+  // the glyph flashes to a check while copyFlash carries this row's key.
+  // A failed write (permissions/tests) flashes nothing — the value stays
+  // selectable as the fallback affordance.
+  const flashKey = (label: string) => `metadata:${label}`;
 </script>
 
 <div class="tab-body">
@@ -34,10 +34,15 @@
           {#if row.copyable}
             <button
               class="copy"
+              class:copied={copyFlash.key === flashKey(row.label)}
               aria-label="Copy {row.label}"
-              onclick={() => void copy(row.value)}
+              onclick={() => void copyToClipboard(flashKey(row.label), row.value)}
             >
-              ⧉
+              {#if copyFlash.key === flashKey(row.label)}
+                <Check size={11} aria-hidden="true" />
+              {:else}
+                ⧉
+              {/if}
             </button>
           {/if}
         </div>
@@ -85,12 +90,19 @@
     color: var(--text-faint);
     padding: 0 2px;
     visibility: hidden;
+    /* Lucide check is an <svg>: flex-center it alongside the text glyph. */
+    display: inline-flex;
+    align-items: center;
   }
   .mrow:hover .copy,
-  .copy:focus {
+  .copy:focus,
+  .copy.copied {
+    /* `.copied` keeps the confirmation visible even if the pointer has
+     * already left the row — the flash must not depend on hover. */
     visibility: visible;
   }
-  .copy:hover {
+  .copy:hover,
+  .copy.copied {
     color: var(--text);
   }
 </style>

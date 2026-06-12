@@ -77,7 +77,7 @@ export class ShellSlice {
   /** Monotonic pulse counter; the indicator animates on change (UI §7.4). */
   pulseCount = $state(0);
   lastPulseAt = 0;
-  ingest = $state<IngestStatus>({ running: false, done: 0, total: 0, errors: 0 });
+  ingest = $state<IngestStatus>({ running: false, done: 0, total: 0, errors: 0, passes: [] });
 
   debugOpen = $state(false);
 

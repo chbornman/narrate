@@ -8,9 +8,11 @@
    */
   // Lucide chevron for the submenu marker (BACKLOG "Adopt Lucide icons").
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Check from "@lucide/svelte/icons/check";
   import type { Action } from "../logic/keymap";
   import type { MenuModel, MenuRow } from "../actions/menus";
   import { navInit, navKey, rowsAt, type MenuNav } from "./menu";
+  import { copyFlash } from "./copyflash.svelte";
   import KeyHint from "./KeyHint.svelte";
 
   let {
@@ -28,10 +30,24 @@
     nav = navInit(model.rows);
   });
 
+  /** How long a copy row holds the menu open for its check (shorter than
+   * COPY_FLASH_MS: the menu closes while the check is still showing —
+   * closing INTO the flash reads as "done", lingering past it as lag). */
+  const COPY_CONFIRM_CLOSE_MS = 900;
+
   function activate(row: MenuRow) {
     if (row.disabled === true) return;
     if (row.action !== undefined) {
       onaction(row.action);
+      if (row.flashKey !== undefined) {
+        // Copy rows confirm inline (BACKLOG "Copy actions confirm
+        // themselves"): closing on activate would discard the only seat
+        // the check can flash on, so the close waits out the flash. The
+        // check itself renders only when the register reports the write
+        // landed — a failed copy shows nothing and the menu just closes.
+        setTimeout(onclose, COPY_CONFIRM_CLOSE_MS);
+        return;
+      }
       onclose();
     }
   }
@@ -96,6 +112,9 @@
         {#if row.keyHint !== undefined}
           <KeyHint chord={row.keyHint} />
         {/if}
+        {#if row.flashKey !== undefined && copyFlash.key === row.flashKey}
+          <span class="copied"><Check size={12} aria-hidden="true" /></span>
+        {/if}
         {#if row.kind === "submenu"}<span class="sub"><ChevronRight size={12} /></span>{/if}
       </button>
     {/if}
@@ -156,6 +175,12 @@
   .sub {
     color: var(--text-faint);
     display: inline-flex; /* svg baseline → flex centering */
+    align-items: center;
+  }
+  /* The copy-confirmation check: inherits the row's text color — the
+   * glyph appearing is the whole signal, no extra emphasis. */
+  .copied {
+    display: inline-flex;
     align-items: center;
   }
 </style>

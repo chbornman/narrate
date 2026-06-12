@@ -37,32 +37,12 @@ import type {
 } from "../types/dto";
 import type { LookEntry } from "../types/display";
 import type { Filter, SearchResults } from "../types/search";
+import { copyToClipboard } from "../primitives/copyflash.svelte";
 import * as prefs from "./prefs";
 import { ShellSlice } from "./shell.svelte";
 import { GridSlice } from "./grid.svelte";
 import { LookSlice } from "./look.svelte";
 import { InspectorSlice } from "./inspector.svelte";
-
-/** Clipboard write with the webview fallback: navigator.clipboard needs a
- * secure context some webviews (webkit2gtk dev origins) don't grant, so
- * "Copy file path" falls back to the classic textarea + execCommand path
- * (platform smoke check named in DOGFOOD §visual, Appendix B). */
-async function copyText(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    /* fall through */
-  }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.className = "pp-offscreen";
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  ta.remove();
-}
 
 export class Ui {
   // -- slices (contracts frozen by FOUNDATIONS) -------------------------------
@@ -1232,7 +1212,11 @@ export class Ui {
         if (hash !== null)
           try {
             const paths = await ipc.imageAbsPath(hash);
-            if (paths.absPath !== null) await copyText(paths.absPath);
+            // The shared register confirms the write (the menu row's
+            // check flashes off this key — BACKLOG "Copy actions
+            // confirm themselves").
+            if (paths.absPath !== null)
+              await copyToClipboard("copy-file-path", paths.absPath);
           } catch {
             /* offline volume / unreachable backend: quiet no-op */
           }

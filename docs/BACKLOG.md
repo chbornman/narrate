@@ -87,20 +87,31 @@ managing = off-thesis).
   relink heuristics); the index is rebuildable. "Don't show again"
   toggle (default ON) via prefs.ts; escape layer 1; redaction-modal
   frame/focus pattern. (Founder, dogfood round 3, June 2026.)
-- [ ] **Header shows background jobs** — a quiet indicator in the header
-  for work still running behind the scenes: ingest passes (hashing,
-  previews), preview rebuilds, doctor repairs, and — once M3 lands —
-  embedding/caption backfills. The ingest pill exists; this generalizes
-  it: one register for "the library is still digesting", with a count
-  and kind on hover, never a progress-bar circus. The per-pass counters
-  already exist (pass_counters; debug panel) — this is surfacing, not
-  plumbing. (Founder, June 2026.)
-- [ ] **Copy actions confirm themselves** — wherever a copy affordance
-  exists ("Copy file path" on the thumb menu today; any future copy
-  icon/verb), clicking it must give quiet feedback that the copy landed
-  — e.g. a brief toast ("Path copied") or the icon flashing to a
-  checkmark; pick ONE register and use it everywhere. (Founder, dogfood
-  round 3, June 2026.)
+- [x] **Header shows background jobs** — landed: `IngestStatus` now
+  carries a per-pass-kind `passes` breakdown (pending+running, versions
+  summed — pure surfacing of `pass_counters` over the existing
+  `ingest-progress` channel), and the titlebar shows one dim word
+  ("digesting") while ANY kind has queued work; count + kind live in
+  the hover title ("Still digesting — hashing 12 · building previews
+  480"), never a progress bar. Ingest, preview rebuilds, doctor
+  re-pends, and the M3 embedding/caption backfills all flow through
+  `ingest_passes`, so the register covers every background job by
+  construction (logic/jobs.ts maps queue names to reviewer words;
+  unknown passes surface verbatim). The §7.5 indicator hairline keeps
+  the fraction. (Founder, June 2026.)
+- [x] **Copy actions confirm themselves** — landed: ONE register, the
+  icon-to-check flash (toasts stay spec-capped at three triggers,
+  UI §7.5/R5, so the confirmation lives AT the affordance).
+  `primitives/copyflash.svelte.ts` is the shared seam: every copy
+  affordance writes through `copyToClipboard(key, text)` (the one
+  webview-fallback clipboard path now) and renders a brief Lucide check
+  while `copyFlash.key` matches — truthfully, only after the write
+  landed. Applied everywhere copy exists today: the Metadata tab's
+  hash/path glyphs flash to a check; the thumb menu's "Copy file path"
+  row (def-level `copyConfirm` flag → row `flashKey`) shows the check
+  and holds the menu open ~900 ms so the confirmation has a seat.
+  Future copy verbs join by setting `copyConfirm` on their def.
+  (Founder, dogfood round 3, June 2026.)
 - [ ] **Stronger storage story beyond the welcome card** — the residue of
   the welcome-card item: hash-keyed sidecar recovery sweep,
   case-insensitive-filesystem rename semantics (APFS: a case-only rename

@@ -77,6 +77,10 @@ export interface IngestStatus {
   done: number;
   total: number;
   errors: number;
+  /** Pass kinds with work still queued (pending + running), queue-spelled
+   * names, deterministic order — the header jobs pill's hover breakdown
+   * (BACKLOG "Header shows background jobs"). */
+  passes: { name: string; remaining: number }[];
 }
 
 /** RUNTIME (P6.2): tier + consent + per-model license/progress rows.

@@ -120,7 +120,7 @@ pub struct PreviewsChanged {
     pub hashes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStatus {
     pub running: bool,
@@ -129,6 +129,21 @@ pub struct IngestStatus {
     /// All known work units across all passes.
     pub total: u64,
     pub errors: u64,
+    /// Pass kinds with work still queued (BACKLOG "Header shows
+    /// background jobs"): the header pill's hover breakdown. Names as the
+    /// queue spells them; versions of the same pass are summed — a
+    /// version bump re-running a pass is the same KIND of work to the
+    /// reviewer. Deterministic (BTreeMap) order so the pump's `!=`
+    /// change detection never sees a phantom reorder.
+    pub passes: Vec<PassRemaining>,
+}
+
+/// One still-digesting pass kind: `remaining` = pending + running rows.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PassRemaining {
+    pub name: String,
+    pub remaining: u64,
 }
 
 /// RUNTIME contract seam (P6.2 fills this in; M1 is the degraded mode that

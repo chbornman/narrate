@@ -34,6 +34,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 import Titlebar from "../src/lib/components/shell/Titlebar.svelte";
 import SettingsApp from "../src/lib/settings/SettingsApp.svelte";
 import { isMac } from "../src/lib/logic/platform";
+import { ui } from "../src/lib/state/app.svelte";
 
 const MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
@@ -114,6 +115,36 @@ describe("Titlebar platform chrome", () => {
     const linux = render(SettingsApp);
     expect(linux.queryByLabelText("Close")).not.toBeNull();
     expect(linux.container.querySelector(".drag.mac")).toBeNull();
+  });
+
+  it("background-jobs pill: hidden when idle, one quiet word with the kind breakdown on hover", () => {
+    // BACKLOG "Header shows background jobs": the register is the word
+    // appearing; count + kind live in the hover title, never a progress
+    // bar. Everything queued in ingest_passes (ingest, rebuilds, doctor
+    // re-pends, model backfills) flows through the same passes list.
+    stubNavigator("MacIntel", MAC_UA);
+    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [] };
+    const idle = render(Titlebar, { title: "shoots" });
+    expect(idle.container.querySelector(".jobs")).toBeNull();
+
+    document.body.innerHTML = "";
+    ui.shell.ingest = {
+      running: true,
+      done: 3,
+      total: 500,
+      errors: 0,
+      passes: [
+        { name: "hash", remaining: 12 },
+        { name: "image-embedding", remaining: 485 },
+      ],
+    };
+    const busy = render(Titlebar, { title: "shoots" });
+    const pill = busy.container.querySelector(".jobs");
+    expect(pill?.textContent).toBe("digesting");
+    expect(pill?.getAttribute("title")).toBe(
+      "Still digesting — hashing 12 · embedding images 485",
+    );
+    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [] };
   });
 
   it("the bar itself stays a drag region on both platforms", () => {

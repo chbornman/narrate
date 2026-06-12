@@ -35,6 +35,7 @@
   import { resolveAction } from "../../actions/registry";
   import { tooltip } from "../../primitives/tooltip";
   import { isMac } from "../../logic/platform";
+  import { jobsRemaining, jobsTitle } from "../../logic/jobs";
   import type { Action } from "../../logic/keymap";
 
   let { title }: { title: string } = $props();
@@ -74,6 +75,13 @@
   </div>
   <span class="title" data-tauri-drag-region>{title}</span>
   <div class="cluster">
+    {#if jobsRemaining(ui.shell.ingest) > 0}
+      <!-- Background jobs (BACKLOG "Header shows background jobs"): one
+           quiet word while ANY pass kind has queued work — ingest, preview
+           rebuilds, doctor re-pends, model backfills. Count + kind stay on
+           hover; the hairline on the indicator keeps the §7.5 fraction. -->
+      <span class="jobs" role="status" title={jobsTitle(ui.shell.ingest)}>digesting</span>
+    {/if}
     <button
       class="chrome"
       aria-label="Search"
@@ -131,6 +139,14 @@
     display: flex;
     align-items: center;
     gap: 2px;
+  }
+  /* The background-jobs register: faint text, no motion — the word
+   * appearing IS the signal; detail waits on hover. */
+  .jobs {
+    color: var(--text-faint);
+    font-size: 11px;
+    padding: 0 6px;
+    white-space: nowrap;
   }
   /* macOS only: the three 12px lights sit at the default Overlay
      position (x≈12, vertically centered in a 28px bar — exactly this

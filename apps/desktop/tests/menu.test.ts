@@ -200,6 +200,17 @@ describe("menus.ts — seat models over the registry", () => {
     ).toBe(false);
   });
 
+  it("copy verbs carry the shared confirmation key; other verbs do not", () => {
+    // BACKLOG "Copy actions confirm themselves": the def-level flag keys
+    // the row into the copy register — any future copy verb joins by
+    // setting copyConfirm, never by touching the menu renderer.
+    const model = menuModel("thumb", ctx);
+    const copy = model.rows.find((r) => r.verb === "Copy file path");
+    expect(copy?.flashKey).toBe("copy-file-path");
+    const reveal = model.rows.find((r) => r.verb === "Show in file manager");
+    expect(reveal?.flashKey).toBeUndefined();
+  });
+
   it("the sort ▾ pseudo-seat is the same machinery, flat", () => {
     const model = menuModel("sort", ctx);
     expect(model.rows.length).toBe(4); // the complete v1 sort set

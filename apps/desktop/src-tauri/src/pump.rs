@@ -15,7 +15,7 @@ use photoproof_core::UtcMillis;
 use photoproof_core::library::QueueOptions;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::IngestStatus;
+use crate::dto::{IngestStatus, PassRemaining};
 use crate::state::App;
 
 const QUEUE_BATCH: usize = 64;
@@ -31,11 +31,26 @@ pub fn ingest_status(app: &App) -> IngestStatus {
         Err(_) => return IngestStatus::default(),
     };
     let mut s = IngestStatus::default();
-    for c in counters.values() {
+    // Per-KIND remaining work, versions summed (the header pill names
+    // kinds; a version bump re-running a pass is the same kind of work).
+    // BTreeMap keeps the breakdown order deterministic for `!=` below.
+    let mut remaining = std::collections::BTreeMap::<&str, u64>::new();
+    for ((name, _version), c) in &counters {
         s.done += c.done + c.skipped;
         s.total += c.pending + c.running + c.done + c.error + c.skipped;
         s.errors += c.error;
+        let queued = c.pending + c.running;
+        if queued > 0 {
+            *remaining.entry(name.as_str()).or_default() += queued;
+        }
     }
+    s.passes = remaining
+        .into_iter()
+        .map(|(name, remaining)| PassRemaining {
+            name: name.to_owned(),
+            remaining,
+        })
+        .collect();
     s.running = s.total > s.done + s.errors;
     s
 }
@@ -97,7 +112,9 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     Some((at, prev)) => *prev != status && at.elapsed() >= PROGRESS_INTERVAL,
                 };
                 if due {
-                    let _ = handle.emit("ingest-progress", status);
+                    // `passes` made the status non-Copy: clone for the
+                    // wire, keep the original as the change-detection prev.
+                    let _ = handle.emit("ingest-progress", status.clone());
                     last_emit = Some((Instant::now(), status));
                 }
                 if processed == 0 {

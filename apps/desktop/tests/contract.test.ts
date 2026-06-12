@@ -59,7 +59,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "folder_tree":
         return [];
       case "ingest_status":
-        return { running: false, done: 0, total: 0, errors: 0 };
+        return { running: false, done: 0, total: 0, errors: 0, passes: [] };
       case "image_journal":
         return [];
       default:

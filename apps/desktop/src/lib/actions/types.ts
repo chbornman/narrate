@@ -140,6 +140,12 @@ export interface ActionDef {
   toAction?: (ctx: ActionContext, arg?: unknown) => Action | null;
   /** Radio options for seat rendering (Rate ▸ / Sort ▸ / Size ▸ / Surround ▸). */
   options?: (ctx: ActionContext) => MenuOption[];
+  /** This verb writes the clipboard (BACKLOG "Copy actions confirm
+   * themselves"): menu rendering keys the row into the shared copy
+   * register — the row flashes a check when the write lands and the
+   * menu holds open just long enough to show it. Any future copy verb
+   * joins the register by setting this flag. */
+  copyConfirm?: true;
   /** Reserved seat (P/E/V, M, overlay-cycle): dispatches to nothing,
    * hidden from menus + cheatsheet until its packet. */
   reserved?: true;
