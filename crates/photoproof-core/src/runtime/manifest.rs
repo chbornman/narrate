@@ -66,7 +66,12 @@ impl FileEntry {
         }
     }
 
-    /// Final on-disk filename (exact filename pin).
+    /// Basename for display and error messages only. The on-disk location
+    /// is `models_dir/<model_id>/<path>` (path-preserving downloads, plan
+    /// P7.4 decision 1): nested entries like DFN5B's `visual/model.onnx`
+    /// and `textual/model.onnx` share this basename, so it pins NOTHING on
+    /// disk — never join `file_name()` to a model dir to resolve a file,
+    /// join `path`.
     pub fn file_name(&self) -> &str {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
