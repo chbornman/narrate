@@ -50,11 +50,17 @@ pub fn toggle_mic(app: S<'_>, handle: AppHandle) -> CmdResult<IndicatorState> {
             None => false,
             Some(engine) if engine.mic().is_armed() => {
                 let events = engine.disarm(&app.store);
+                let draining = engine.stream_open();
                 drop(capture);
                 // The thread sees the disarmed engine and exits; take()
                 // joins it (MicHandle::drop) and the cpal stream closes.
                 drop(app.mic.lock().expect("mic mutex").take());
                 announce_events(&handle, &events);
+                if draining {
+                    // A trailing final is still due (§6.4): with the mic
+                    // thread gone nothing pumps — the drain thread does.
+                    crate::mic::spawn_disarm_drain(handle.clone());
+                }
                 false
             }
             Some(engine) => {

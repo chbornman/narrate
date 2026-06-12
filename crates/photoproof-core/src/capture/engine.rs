@@ -33,6 +33,12 @@ use crate::event::StrokePayload;
 pub const ONSET_ERROR_BUDGET_MS: u64 = 250;
 /// §2.5/§6.4: trailing-final acceptance window after disarm/end_stream.
 pub const DRAIN_WINDOW_MS: u64 = 5_000;
+/// §6.3: trailing-silence window shipped to the ASR after the VAD gate
+/// closes, so the server-side endpoint rules (rule2 = 1.2 s of trailing
+/// silence after decoded speech; rule1 = 2.4 s) can observe the silence
+/// they fire on. Without it the endpointer starves and utterances only
+/// finalize at disarm.
+pub const TRAILING_SHIP_MS: u64 = 3_000;
 /// Debug-panel note cap (in-memory only).
 const DEBUG_NOTE_CAP: usize = 256;
 
@@ -135,6 +141,9 @@ pub struct CaptureEngine<'t, C: Clock> {
     committed: Committed,
     session: SessionId,
     abandoned: u64,
+    /// Stream-clock position of the last gate-open frame; drives the
+    /// trailing-silence ship window (§6.3, `TRAILING_SHIP_MS`).
+    last_voiced_at: Option<StreamMs>,
     debug: Vec<String>,
     /// §2.1: most recent capture-side ACTIVITY — mic arm/disarm, VAD
     /// speech (gated frames and boundary events), partial/final arrival
@@ -169,6 +178,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             },
             session,
             abandoned: 0,
+            last_voiced_at: None,
             debug: Vec::new(),
             last_activity: None,
         }
@@ -218,6 +228,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         match self.transcriber.stream(stream) {
             Ok(out) => {
                 self.vad.reset(); // re-arm rebuilds the chain from scratch (§6.2)
+                self.last_voiced_at = None; // new stream, new clock
                 self.pipeline = Some(Pipeline {
                     feed,
                     stream: out,
@@ -333,9 +344,20 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
                 }
             }
         }
-        if result.gate_open
-            && let Some(p) = &self.pipeline
-        {
+        // §6.3: the ASR owns endpointing, and its trailing-silence rules
+        // fire on RECEIVED audio — fully gating silence starves the
+        // endpointer and no final ever mints (founder dogfood: partials
+        // forever, zero journal entries). Ship the gate-open frames PLUS
+        // a trailing window long enough for the server-side rules to see
+        // their silence; long armed silence still ships nothing.
+        if result.gate_open {
+            self.last_voiced_at = Some(frame.captured_at);
+        }
+        let ship = result.gate_open
+            || self
+                .last_voiced_at
+                .is_some_and(|t| frame.captured_at.saturating_sub(t) <= TRAILING_SHIP_MS);
+        if ship && let Some(p) = &self.pipeline {
             p.feed.push(frame);
         }
         self.pump(store)

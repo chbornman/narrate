@@ -57,6 +57,43 @@ pub fn start(handle: AppHandle) -> MicHandle {
     MicHandle { stop, thread }
 }
 
+/// After a user disarm, trailing finals (their onsets predate the toggle,
+/// CAPTURE §6.4) are still due for up to the engine's 5 s drain window —
+/// but the mic thread is gone, so no audio frames arrive to drive `pump`.
+/// This short thread is the drain driver: it pumps until the engine
+/// closes the pipeline (the mid-session sibling of the quit path's
+/// `pump::drain_capture_at_quit`), announcing whatever mints.
+pub fn spawn_disarm_drain(handle: AppHandle) {
+    std::thread::Builder::new()
+        .name("pp-mic-drain".into())
+        .spawn(move || {
+            let Some(app) = handle.try_state::<Arc<App>>().map(|s| s.inner().clone()) else {
+                return;
+            };
+            loop {
+                std::thread::sleep(Duration::from_millis(150));
+                let (events, open) = {
+                    let mut capture = app.capture.lock().expect("capture mutex");
+                    let Some(engine) = capture.as_mut() else {
+                        return;
+                    };
+                    if engine.mic().is_armed() {
+                        return; // re-armed: push_audio drives the pump again
+                    }
+                    (engine.pump(&app.store), engine.stream_open())
+                };
+                announce_events(&handle, &events);
+                if !events.is_empty() || !open {
+                    let _ = handle.emit("indicator-state", indicator(&app));
+                }
+                if !open {
+                    return; // drained or deadline-abandoned (§6.4, ≤ 5 s)
+                }
+            }
+        })
+        .expect("spawn disarm drain");
+}
+
 /// Device failure after a successful arm (§6.6 STREAM failure): the mic
 /// cannot stay armed without audio — disarm through the engine (trailing
 /// finals still mint) and tell the indicator.

@@ -1535,3 +1535,62 @@ fn utterance_id_minted_at_onset_orders_before_a_mid_utterance_typed_note() {
         "voice id minted at onset precedes the later typed note in log order"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §6.3 endpointer feed — trailing silence ships, long silence does not
+// ---------------------------------------------------------------------------
+
+/// Founder dogfood (June 2026): the VAD gate shipped ONLY speech frames,
+/// so the ASR's trailing-silence endpoint rules never saw silence and no
+/// final ever minted while armed — partials forever, zero journal
+/// entries. The engine now ships a TRAILING_SHIP_MS window after the gate
+/// closes (enough for the server's rule2 = 1.2 s), and still ships
+/// nothing once the window passes. The mock's stream clock advances only
+/// on RECEIVED frames — exactly the real server's epistemics.
+#[test]
+fn c6_3_trailing_silence_reaches_the_endpointer_so_finals_mint_while_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 100,
+            end: 900,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![
+        // The server-side endpoint: ~1.2 s of RECEIVED silence after the
+        // utterance — reachable only because post-gate frames ship.
+        ScriptEntry {
+            at: 2100,
+            event: ScriptedEvent::Segment(final_seg(0, "one two three test", 100, 900)),
+        },
+        // Far past the ship window (gate close + TRAILING_SHIP_MS): must
+        // NOT fire while armed — long armed silence ships nothing.
+        ScriptEntry {
+            at: 6000,
+            event: ScriptedEvent::Segment(final_seg(1, "ghost", 5000, 5400)),
+        },
+    ]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(1)]);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+
+    let committed = drive(&mut engine, &clock, &store, 8_000, &[]);
+    assert_eq!(
+        committed.len(),
+        1,
+        "the endpointed final minted WHILE ARMED; the ghost stayed starved"
+    );
+    assert_eq!(committed[0].text.as_deref(), Some("one two three test"));
+    assert!(engine.mic().is_armed(), "no disarm was needed to finalize");
+    assert_eq!(engine.streaming_count(), 0, "the utterance settled");
+
+    // Disarm closes the input; the mock flushes the remainder — the ghost
+    // mints as a trailing final inside the §6.4 drain window.
+    let drained = engine.disarm(&store);
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].text.as_deref(), Some("ghost"));
+    assert!(!engine.stream_open());
+}
