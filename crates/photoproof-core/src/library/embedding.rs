@@ -414,6 +414,14 @@ impl Library {
                 return Ok(());
             }
         };
+        // Geometry to the CLIP square HERE in core (PLAN-P7.4 decision 3: the
+        // connector takes a DecodedImage already preprocessed BY CORE to
+        // 378x378). The Display/Thumb artifact is full-resolution (2560/512
+        // edge); the real OrtEmbedder::embed_image hard-rejects anything that
+        // is not exactly 378x378, so without this every image-embedding row
+        // would fail and retry forever once the live connector is wired. The
+        // mock accepts any size, which is why the unit suite never caught it.
+        let decoded = super::preprocess_clip_image(&decoded);
         let embedding = match pollster::block_on(embedder.embed_image(&decoded)) {
             Ok(e) => e,
             Err(e) => {
