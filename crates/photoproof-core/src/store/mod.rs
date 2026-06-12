@@ -588,6 +588,7 @@ impl EventStore {
         // 3.–6. Record the act, registry, scrub in place, purge indexes.
         let mut out = Vec::new();
         let mut scrubbed_ids = Vec::new();
+        let mut newly_scrubbed: Vec<Event> = Vec::new();
         for c in &members {
             if c.scrubbed() {
                 continue; // idempotence
@@ -620,8 +621,15 @@ impl EventStore {
                 .execute([c.id.as_str()])
                 .map_err(StoreError::from)?;
             scrubbed_ids.push(c.id.clone());
+            newly_scrubbed.push(c.clone());
             out.push(r.id);
         }
+        // RETRIEVAL §9.5/§1.1: derived rows that may PARAPHRASE the
+        // scrubbed content — summaries, their summaries_fts rows, the
+        // chain's sentiment rows — go in the same transaction as the
+        // content scrub; the affected image_summary vectors are marked
+        // dead here and physically zeroed below with the chunk vectors.
+        let summary_images = purge_redacted_derived(&tx, &newly_scrubbed)?;
         // 6.–7. FTS purge + queue propagation via the scoped recompute.
         let mut roots = BTreeSet::new();
         if anchor.kind == Kind::Remark {
@@ -640,6 +648,7 @@ impl EventStore {
         // sweep_dead re-zeroes, rather than zeroed bytes whose metadata
         // still claims them live.
         self.zero_vector_bytes(&w, &scrubbed_ids)?;
+        self.zero_summary_vector_bytes(&w, &summary_images)?;
         // 8. Physical hygiene: scrubbed plaintext must not linger in the WAL.
         //    The scrub above is already committed; a CheckpointBlocked error
         //    here means hygiene is incomplete, not that the redaction failed.
@@ -665,6 +674,29 @@ impl EventStore {
         }
         for id in event_ids {
             crate::retrieval::zero_deleted_rows_for_event(conn, dir, id.as_str())
+                .map_err(|e| StoreError::VectorScrub(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Zero the flat-file bytes of these images' dead image-keyed vectors —
+    /// the `image_summary` rows that redaction propagation marked when it
+    /// deleted their summary rows (RETRIEVAL §9.5: the vector follows its
+    /// summary). Same synchronous posture and same crash story as
+    /// [`Self::zero_vector_bytes`].
+    fn zero_summary_vector_bytes(
+        &self,
+        conn: &Connection,
+        image_hashes: &[ContentHash],
+    ) -> Result<(), StoreError> {
+        let Some(dir) = self.vectors_dir.as_deref() else {
+            return Ok(());
+        };
+        if image_hashes.is_empty() || !dir.exists() {
+            return Ok(());
+        }
+        for h in image_hashes {
+            crate::retrieval::zero_deleted_rows_for_image(conn, dir, h.as_str())
                 .map_err(|e| StoreError::VectorScrub(e.to_string()))?;
         }
         Ok(())
@@ -724,12 +756,23 @@ impl EventStore {
             merge_chunk(&tx, &valid, &incoming_kinds, &mut report, &mut touched)?;
             let (roots, dirty) = merge_affected(&tx, &touched)?;
             recompute_derived(&tx, &roots, &dirty)?;
+            // §9.5 propagation for merge-learned redactions, same
+            // transaction as the scrub. Every scrubbed touched event is
+            // covered (not just the newly scrubbed) — the set never
+            // under-covers, and it lazily heals databases whose earlier
+            // redactions predate this propagation.
+            let summary_images = if report.newly_scrubbed > 0 {
+                purge_redacted_derived(&tx, &scrubbed_events(&touched))?
+            } else {
+                Vec::new()
+            };
             tx.commit()?;
             // §8 step 2 scrubs in place per §7 steps 5–8; step 8 is the WAL
             // truncate — mandatory on every merge path that newly scrubs,
             // the ≤10k path included, or the plaintext lingers in the WAL.
             if report.newly_scrubbed > 0 {
                 self.zero_vector_bytes(&w, &scrubbed_event_ids(&touched))?;
+                self.zero_summary_vector_bytes(&w, &summary_images)?;
                 checkpoint_truncate(&w)?;
             }
         } else {
@@ -743,11 +786,19 @@ impl EventStore {
             let tx = w.transaction()?;
             let (roots, dirty) = merge_affected(&tx, &touched)?;
             recompute_derived(&tx, &roots, &dirty)?;
+            // §9.5 propagation — in the recompute transaction, matching the
+            // large-merge FTS posture (the scrubs committed per chunk).
+            let summary_images = if report.newly_scrubbed > 0 {
+                purge_redacted_derived(&tx, &scrubbed_events(&touched))?
+            } else {
+                Vec::new()
+            };
             tx.commit()?;
             // Newly learned redactions zero their flat-file vector bytes
             // before merge returns (RETRIEVAL §13.5), same as redact().
             if report.newly_scrubbed > 0 {
                 self.zero_vector_bytes(&w, &scrubbed_event_ids(&touched))?;
+                self.zero_summary_vector_bytes(&w, &summary_images)?;
             }
             schema::run_pragma(&w, "ANALYZE")?;
             w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
@@ -1777,6 +1828,17 @@ fn scrubbed_event_ids(touched: &[Event]) -> Vec<EventId> {
     ids
 }
 
+/// The scrubbed events a merge touched, deduped by id — the §9.5 derived-
+/// row propagation set (same never-under-covers posture as
+/// [`scrubbed_event_ids`], but the propagation needs the events' sessions
+/// and targets, not just ids).
+fn scrubbed_events(touched: &[Event]) -> Vec<Event> {
+    let mut events: Vec<Event> = touched.iter().filter(|e| e.scrubbed()).cloned().collect();
+    events.sort_by(|a, b| a.id.cmp(&b.id));
+    events.dedup_by(|a, b| a.id == b.id);
+    events
+}
+
 /// §8 step 4: affected chain roots and images for the post-union recompute.
 fn merge_affected(
     tx: &Connection,
@@ -1836,6 +1898,80 @@ fn merge_affected(
 // scoped recomputation from the truth tables, so incremental state always
 // equals `rebuild_derived()` (I7) and merge results are order-free (§8).
 // ---------------------------------------------------------------------------
+
+/// RETRIEVAL §9.5 / §1.1 redaction propagation into derived rows, in the
+/// same transaction as the content scrub: delete the scrubbed events'
+/// sentiment rows and every derived summary whose inputs may have included
+/// a scrubbed event, with the summaries' `summaries_fts` rows; mark the
+/// affected images' `image_summary` vectors dead (the caller zeroes their
+/// flat-file bytes after commit — the §13.5 posture). A summary may
+/// paraphrase the scrubbed content, so it must go the moment the call
+/// returns, not lazily.
+///
+/// The schema stores no per-summary input list (`inputs_hash` is an opaque
+/// cache key), so input membership is resolved by SCOPE, conservatively:
+/// image summaries are generated from the image's events (§9.1) — deleted
+/// for every image a scrubbed event targets; session summaries from the
+/// session's events (§9.3) — deleted for every scrubbed event's session;
+/// folder rollups from member images' summaries (§9.2) — the folder-path
+/// keying belongs to the not-yet-built generation pass, so the
+/// conservative cut is every folder row once any image summary went.
+/// Over-deletion is safe by design: derived rows are disposable fuel (E4)
+/// and regenerate in the background.
+///
+/// Returns the affected image hashes — the `image_summary` zeroing set.
+fn purge_redacted_derived(
+    tx: &Connection,
+    scrubbed: &[Event],
+) -> Result<Vec<ContentHash>, StoreError> {
+    if scrubbed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut images: BTreeSet<ContentHash> = BTreeSet::new();
+    let mut sessions: BTreeSet<SessionId> = BTreeSet::new();
+    for e in scrubbed {
+        tx.prepare_cached("DELETE FROM sentiment_scores WHERE event_id = ?1")?
+            .execute([e.id.as_str()])?;
+        sessions.insert(e.session_id.clone());
+        for h in db_effective_targets(tx, e)? {
+            images.insert(h);
+        }
+    }
+    let delete_scope = |scope: &str, key: &str| -> Result<(), StoreError> {
+        // FTS rows first: the subquery needs the summary rows still present.
+        tx.prepare_cached(
+            "DELETE FROM summaries_fts WHERE summary_id IN \
+             (SELECT id FROM derived_summaries WHERE scope = ?1 AND scope_key = ?2)",
+        )?
+        .execute(params![scope, key])?;
+        tx.prepare_cached("DELETE FROM derived_summaries WHERE scope = ?1 AND scope_key = ?2")?
+            .execute(params![scope, key])?;
+        Ok(())
+    };
+    for h in &images {
+        delete_scope("image", h.as_str())?;
+        // Mark, never DELETE (RETRIEVAL §1.1): the metadata row keeps the
+        // flat-file pointer for the physical zeroing.
+        tx.prepare_cached(
+            "UPDATE vectors SET deleted = 1 \
+             WHERE vec_kind = 'image_summary' AND image_hash = ?1",
+        )?
+        .execute([h.as_str()])?;
+    }
+    for s in &sessions {
+        delete_scope("session", s.as_str())?;
+    }
+    if !images.is_empty() {
+        tx.prepare_cached(
+            "DELETE FROM summaries_fts WHERE summary_id IN \
+             (SELECT id FROM derived_summaries WHERE scope = 'folder')",
+        )?
+        .execute([])?;
+        tx.prepare_cached("DELETE FROM derived_summaries WHERE scope = 'folder'")?
+            .execute([])?;
+    }
+    Ok(images.into_iter().collect())
+}
 
 fn recompute_derived(
     tx: &Connection,

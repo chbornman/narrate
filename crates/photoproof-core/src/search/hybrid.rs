@@ -26,7 +26,6 @@ use photoproof_connectors::llm::LanguageModel;
 use photoproof_connectors::vector_store::{VecHit, VecKind, VecSpace, VectorStore};
 use rusqlite::Connection;
 use rusqlite::types::Value;
-use serde_json::json;
 
 use crate::id::{ContentHash, UtcMillis};
 use crate::retrieval::instruct_query;
@@ -178,11 +177,22 @@ pub fn keyword_only_rig() -> HybridRig<'static, NoModel, NoModel, NoModel> {
     }
 }
 
+impl<L, TE, CE> HybridRig<'_, L, TE, CE> {
+    /// Whether any vector signal could consume an embedding text — S1/S3/S4
+    /// need both a store and an embedder.
+    pub(crate) fn any_vector_signal(&self) -> bool {
+        self.vectors.is_some() && (self.text.is_some() || self.clip.is_some())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stage 1 — parse (LLM when present; degenerate/fallback otherwise)
 // ---------------------------------------------------------------------------
 
-struct Parse {
+/// The stage-1 output, opaque outside this module: [`super::Searcher`]
+/// produces it via [`stage1_parse`] (outside the connection mutex — model
+/// IO must never hold the database lock) and hands it to [`run`].
+pub(crate) struct Parse {
     filters: Vec<Filter>,
     dropped: Vec<DroppedClause>,
     semantic: Option<String>,
@@ -225,23 +235,30 @@ impl Parse {
     }
 }
 
-fn stage1_parse<L: LanguageModel>(
-    conn: &Connection,
+/// Stage 1. Runs WITHOUT a database connection by design: the caller loads
+/// the grounding lists under a short lock first, so the blocking model
+/// call never holds the Searcher's connection mutex — a hung model must
+/// not wedge later searches (whose `sqlite3_interrupt` cancellation only
+/// reaches SQL) or pin the WAL read snapshot for its duration.
+///
+/// `grounding` is `None` when no LLM parse was requested (no model, or an
+/// empty query — filter chips alone are already typed); the degenerate
+/// parse runs in that case.
+pub(crate) fn stage1_parse<L: LanguageModel>(
+    grounding: Option<&parse::Grounding>,
     trimmed: &str,
     llm: Option<&L>,
     any_vector_signal: bool,
     now: UtcMillis,
     budget: Duration,
-) -> Result<Parse, SearchError> {
-    let Some(llm) = llm else {
-        return Ok(Parse::degenerate(trimmed, any_vector_signal));
+) -> Parse {
+    let (Some(llm), Some(grounding)) = (llm, grounding) else {
+        return Parse::degenerate(trimmed, any_vector_signal);
     };
     if trimmed.is_empty() {
-        // Nothing to parse; filter chips alone are already typed.
-        return Ok(Parse::degenerate(trimmed, any_vector_signal));
+        return Parse::degenerate(trimmed, any_vector_signal);
     }
-    let grounding = parse::load_grounding(conn)?;
-    let request = parse::build_request(trimmed, &grounding, now);
+    let request = parse::build_request(trimmed, grounding, now);
     let started = Instant::now();
     // block_on mirrors the embedding drain's posture: model IO is one call
     // at a time and a full async runtime would be dead weight here. The
@@ -251,23 +268,23 @@ fn stage1_parse<L: LanguageModel>(
     let response = pollster::block_on(llm.complete(request));
     let elapsed = started.elapsed();
     match response {
-        Ok(resp) if elapsed <= budget => match parse::validate_response(&resp.text, &grounding) {
-            Some(v) if !(v.filters.is_empty() && v.semantic.is_none()) => Ok(Parse {
+        Ok(resp) if elapsed <= budget => match parse::validate_response(&resp.text, grounding) {
+            Some(v) if !(v.filters.is_empty() && v.semantic.is_none()) => Parse {
                 keywords: v.semantic.clone(), // §5.1: keywords = semantic post-parse
                 semantic: v.semantic,
                 filters: v.filters,
                 dropped: v.dropped,
                 visual: v.visual,
                 fallback: false,
-            }),
+            },
             Some(v) => {
                 // Everything dropped and no remainder (§5.1) — fall back,
                 // keeping the rejects visible.
-                Ok(Parse::fallback(trimmed, v.dropped))
+                Parse::fallback(trimmed, v.dropped)
             }
             None => {
                 tracing::warn!("query parse returned undeserializable JSON; falling back");
-                Ok(Parse::fallback(trimmed, Vec::new()))
+                Parse::fallback(trimmed, Vec::new())
             }
         },
         Ok(_) => {
@@ -275,11 +292,11 @@ fn stage1_parse<L: LanguageModel>(
                 ?elapsed,
                 "query parse exceeded the latency budget; falling back"
             );
-            Ok(Parse::fallback(trimmed, Vec::new()))
+            Parse::fallback(trimmed, Vec::new())
         }
         Err(e) => {
             tracing::warn!(error = %e, "query parse model unavailable; falling back");
-            Ok(Parse::fallback(trimmed, Vec::new()))
+            Parse::fallback(trimmed, Vec::new())
         }
     }
 }
@@ -520,6 +537,7 @@ fn embed_text<E: Embedder>(embedder: &E, text: &str, what: &str) -> Option<Embed
 pub(crate) fn run<L, TE, CE>(
     conn: &Connection,
     raw: &str,
+    mut parsed: Parse,
     chips: &[Filter],
     rig: &HybridRig<'_, L, TE, CE>,
     opts: &HybridOptions,
@@ -530,24 +548,17 @@ where
     TE: Embedder,
     CE: Embedder,
 {
-    let trimmed = raw.trim();
-    let any_vector_signal = rig.vectors.is_some() && (rig.text.is_some() || rig.clip.is_some());
-
-    // Stage 1 — parse.
-    let mut parsed = stage1_parse(
-        conn,
-        trimmed,
-        rig.llm,
-        any_vector_signal,
-        now,
-        opts.parse_budget,
-    )?;
-
     // Chips merge in as-is (already typed; the same AST the parser emits).
     parsed.filters.extend(chips.iter().cloned());
 
-    // §10.3 — resolve collection names (no model required; the LLM-parsed
-    // clauses already resolved inside validation, this covers chips).
+    // §10.3 — resolve collection names (no model required). The LLM-parsed
+    // clauses already resolved inside the §5.1 validation firewall, so an
+    // unresolved ref here is a CHIP — typed user intent, not model output.
+    // The firewall's drop-with-debug-visibility is scoped to hallucinations;
+    // a chip that fails resolution is a hard error like every other
+    // unexecutable filter (filter.rs holds the same line one layer down):
+    // silently un-constraining it would broaden results invisibly — worst
+    // case, a chip-only query degrades to a whole-library browse.
     let needs_resolution = parsed
         .filters
         .iter()
@@ -563,10 +574,9 @@ where
                 Filter::Collection(c) if c.resolved.is_none() => {
                     match parse::resolve_collection(&rows, &c.raw) {
                         Ok(r) => resolved.push(Filter::Collection(r)),
-                        Err(reason) => parsed.dropped.push(DroppedClause {
-                            raw: json!({ "type": "collection", "name": c.raw }),
-                            reason,
-                        }),
+                        Err(reason) => {
+                            return Err(SearchError::UnresolvedCollection { raw: c.raw, reason });
+                        }
                     }
                 }
                 other => resolved.push(other),

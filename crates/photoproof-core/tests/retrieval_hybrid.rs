@@ -28,8 +28,8 @@ use photoproof_core::retrieval::{
     ChunkContext, PpvecStore, VecMeta, chunk_folded_text, instruct_query,
 };
 use photoproof_core::search::{
-    CollectionRef, Filter, FusionWeights, HybridOptions, HybridRig, NoModel, Provenance, SignalId,
-    keyword_only_rig,
+    CollectionRef, Filter, FusionWeights, HybridOptions, HybridRig, NoModel, Provenance,
+    SearchError, SignalId, keyword_only_rig,
 };
 use photoproof_core::{ContentHash, EventDraft, UtcMillis};
 
@@ -733,10 +733,12 @@ fn r10_3_collection_chip_resolves_and_constrains_to_current_members() {
     );
     assert!(out.query.parsed.dropped.is_empty());
 
-    // An unresolvable chip name drops with debug visibility — broadened
-    // results, never an error (§13.4 applies to chips through the same
-    // pipeline).
-    let out = hx
+    // An unresolvable chip name is a HARD error, never a silent drop: the
+    // §13.4 firewall covers LLM hallucinations, but a chip is typed user
+    // intent — un-constraining it would broaden results invisibly (a
+    // chip-only query would degrade to a whole-library browse), exactly
+    // what filter.rs forbids for unresolved collections one layer down.
+    let err = hx
         .env
         .searcher
         .hybrid_search(
@@ -745,10 +747,39 @@ fn r10_3_collection_chip_resolves_and_constrains_to_current_members() {
             &keyword_only_rig(),
             &HybridOptions::default(),
         )
-        .unwrap();
-    assert_eq!(out.images.len(), 2, "clause dropped, query executes");
-    assert_eq!(out.query.parsed.dropped.len(), 1);
-    assert!(out.query.parsed.dropped[0].reason.contains("no collection"));
+        .unwrap_err();
+    assert!(
+        matches!(&err, SearchError::UnresolvedCollection { raw, reason }
+            if raw == "zzz qqq" && reason.contains("no collection")),
+        "expected UnresolvedCollection, got {err}"
+    );
+}
+
+/// The chip-only sharp edge of the hard-error rule: an empty text query
+/// with an unresolvable collection chip must NOT fall through to a
+/// whole-library browse (the chip was the entire constraint).
+#[test]
+fn r10_3_chip_only_query_with_unresolvable_chip_errors_instead_of_browsing() {
+    let hx = Hx::new();
+    hx.append_at(
+        d_remark("fog at dawn", vec![hx.hashes[0].clone()]),
+        "2026-02-05T10:00:00.000Z",
+    );
+
+    let err = hx
+        .env
+        .searcher
+        .hybrid_search(
+            "",
+            &[chip_collection("zzz qqq")],
+            &keyword_only_rig(),
+            &HybridOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, SearchError::UnresolvedCollection { .. }),
+        "expected UnresolvedCollection, got {err}"
+    );
 }
 
 #[test]
@@ -870,14 +901,13 @@ fn b69_image_clip_votes_on_semantic_queries_without_a_gate() {
 // S3 — summaries rank, but are never quoted (E4 / §5.4)
 // ---------------------------------------------------------------------------
 
-fn insert_image_summary(hx: &Hx, hash: &ContentHash, text: &str) {
-    let conn = hx.env.conn();
+fn insert_summary(conn: &rusqlite::Connection, scope: &str, scope_key: &str, text: &str) {
     let id = ulid::Ulid::new().to_string();
     conn.execute(
         "INSERT INTO derived_summaries
            (id, scope, scope_key, text, model_id, prompt_ver, inputs_hash, generated_ts)
-         VALUES (?1, 'image', ?2, ?3, 'mock-gemma', 1, 'fixture', '2026-02-01T00:00:00.000Z')",
-        rusqlite::params![id, hash.as_str(), text],
+         VALUES (?1, ?2, ?3, ?4, 'mock-gemma', 1, 'fixture', '2026-02-01T00:00:00.000Z')",
+        rusqlite::params![id, scope, scope_key, text],
     )
     .unwrap();
     conn.execute(
@@ -885,6 +915,10 @@ fn insert_image_summary(hx: &Hx, hash: &ContentHash, text: &str) {
         rusqlite::params![text, id],
     )
     .unwrap();
+}
+
+fn insert_image_summary(hx: &Hx, hash: &ContentHash, text: &str) {
+    insert_summary(&hx.env.conn(), "image", hash.as_str(), text);
 }
 
 #[test]
@@ -943,4 +977,198 @@ fn s3_summary_hits_rank_images_but_never_appear_as_provenance() {
         rank_of(&out.images[0], SignalId::S3Summaries).is_some(),
         "the debug panel names the summary signal that ranked C"
     );
+}
+
+/// §5.4: the S3 provenance re-run queries "that image's own events" — its
+/// candidate universe is the image's events, NOT the global top-500 bm25
+/// cut. An image whose own matching event ranks below the global cut (a
+/// common term in a journal-heavy library) must still surface with its
+/// verbatim quote rather than being dropped or mislabeled.
+#[test]
+fn s3_provenance_rerun_is_scoped_to_the_images_own_events() {
+    let hx = Hx::new();
+    let (a, x) = (&hx.hashes[0], &hx.hashes[1]);
+    // 600 terse "fog" remarks on A out-rank (bm25 favors short documents)
+    // X's single long-winded remark, pushing it below the GLOBAL top-500
+    // cut that S2 takes (spec-sanctioned for S2, §4).
+    for _ in 0..600 {
+        hx.append_at(d_remark("fog", vec![a.clone()]), "2026-02-10T10:00:00.000Z");
+    }
+    hx.append_at(
+        d_remark(
+            "the fog at midnight sat heavy on the water while every light \
+             along the pier dissolved into the same grey nothing and I \
+             stayed at the rail far longer than I had planned to stay",
+            vec![x.clone()],
+        ),
+        "2026-02-10T11:00:00.000Z",
+    );
+    // Premise check: the M1/S2 path genuinely misses X (its event sits
+    // outside the global top 500), so only S3 can rank it.
+    let m1 = hx.env.searcher.search("fog", &[]).unwrap();
+    assert_eq!(
+        m1.images.iter().map(hash_of).collect::<Vec<_>>(),
+        vec![a.to_string()],
+        "fixture premise: X is below the global bm25 cut"
+    );
+
+    // X's summary matches the query, so S3 ranks it; the §5.4 re-run must
+    // then recover X's OWN matching event as the quote.
+    insert_image_summary(&hx, x, "she keeps returning to the fog set");
+
+    let out = hx
+        .env
+        .searcher
+        .hybrid_search("fog", &[], &keyword_only_rig(), &HybridOptions::default())
+        .unwrap();
+    let xr = out
+        .images
+        .iter()
+        .find(|r| hash_of(r) == x.to_string())
+        .expect("X surfaces via S3 with recoverable own-words evidence");
+    match &xr.provenance {
+        Provenance::Quote(q) => assert!(
+            q.text.contains("fog at midnight"),
+            "the quote is X's own event text, {q:?}"
+        ),
+        other => panic!("expected Quote (never VisualMatch — §6), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §9.5 / §13.5 — redaction propagation into derived rows
+// ---------------------------------------------------------------------------
+
+fn match_count(conn: &rusqlite::Connection, term: &str) -> i64 {
+    conn.query_row(
+        "SELECT count(*) FROM summaries_fts WHERE summaries_fts MATCH ?1",
+        [term],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn summary_count(conn: &rusqlite::Connection, scope: &str, key: &str) -> i64 {
+    conn.query_row(
+        "SELECT count(*) FROM derived_summaries WHERE scope = ?1 AND scope_key = ?2",
+        [scope, key],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// §9.5: redacting an event deletes — in the same call — every derived
+/// summary whose inputs may have included it (image, session, and folder
+/// scopes), their `summaries_fts` rows, and the chain's sentiment rows.
+/// §13.5: gone by the time `redact` returns; a paraphrase of scrubbed
+/// content must not stay byte-scannable or keep ranking S3.
+#[test]
+fn redaction_deletes_dependent_summaries_their_fts_rows_and_sentiment() {
+    let hx = Hx::new();
+    let (a, b) = (&hx.hashes[0], &hx.hashes[1]);
+    let secret = hx.append_at(
+        d_remark("the secret ritual at the jetty", vec![a.clone()]),
+        "2026-02-10T10:00:00.000Z",
+    );
+    hx.append_at(
+        d_remark("plain notes elsewhere", vec![b.clone()]),
+        "2026-02-11T10:00:00.000Z",
+    );
+
+    // Derived rows whose inputs may include the event: A's image summary,
+    // the session's summary, a folder rollup, the event's sentiment row.
+    // B's image summary is the survival control.
+    insert_image_summary(&hx, a, "keeps returning to the secret ritual at the jetty");
+    insert_image_summary(&hx, b, "an unrelated elsewhere candidate");
+    let conn = hx.env.conn();
+    insert_summary(
+        &conn,
+        "session",
+        hx.env.session.as_str(),
+        "the session circled the secret ritual",
+    );
+    insert_summary(
+        &conn,
+        "folder",
+        "photos",
+        "the folder gathers the ritual set",
+    );
+    conn.execute(
+        "INSERT INTO sentiment_scores (event_id, score, model_id, prompt_ver, scored_ts)
+         VALUES (?1, 1, 'mock-gemma', 1, '2026-02-12T00:00:00.000Z')",
+        [secret.id.as_str()],
+    )
+    .unwrap();
+
+    // The paraphrase ranks before the redaction (the leak being closed).
+    assert_eq!(match_count(&conn, "ritual"), 3);
+
+    hx.env.store.redact(&secret.id).unwrap();
+
+    // §13.5: absent the moment the call returns.
+    assert_eq!(summary_count(&conn, "image", a.as_str()), 0);
+    assert_eq!(summary_count(&conn, "session", hx.env.session.as_str()), 0);
+    assert_eq!(summary_count(&conn, "folder", "photos"), 0);
+    assert_eq!(
+        match_count(&conn, "ritual"),
+        0,
+        "paraphrase out of the index"
+    );
+    let sentiment: i64 = conn
+        .query_row("SELECT count(*) FROM sentiment_scores", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sentiment, 0, "the chain's sentiment rows are deleted");
+    // The unrelated summary survives — deletion is scoped, not a wipe.
+    assert_eq!(summary_count(&conn, "image", b.as_str()), 1);
+    assert_eq!(match_count(&conn, "elsewhere"), 1);
+
+    // And the live S3 path agrees: nothing ranks via the dead paraphrase.
+    let out = hx
+        .env
+        .searcher
+        .hybrid_search(
+            "ritual",
+            &[],
+            &keyword_only_rig(),
+            &HybridOptions::default(),
+        )
+        .unwrap();
+    assert!(out.images.is_empty() && out.session_hits.is_empty());
+}
+
+/// The merge path learns redactions too (§8 redaction supremacy): a
+/// redaction event arriving via merge propagates into derived rows the
+/// same way the local `redact()` call does.
+#[test]
+fn merge_learned_redaction_purges_dependent_summaries() {
+    let hx = Hx::new();
+    let a = &hx.hashes[0];
+    let victim = hx.append_at(
+        d_remark("the secret ritual at the jetty", vec![a.clone()]),
+        "2026-02-10T10:00:00.000Z",
+    );
+    insert_image_summary(&hx, a, "keeps returning to the secret ritual");
+    let conn = hx.env.conn();
+    assert_eq!(match_count(&conn, "ritual"), 1);
+
+    // A redaction event from another replica condemning the local victim.
+    let minted = hx.env.store.mint_at(ts("2026-02-12T09:00:00.000Z"));
+    let redaction = photoproof_core::Event {
+        id: minted.id,
+        v: 1,
+        session_id: hx.env.session.clone(),
+        ts: minted.ts,
+        source: photoproof_core::Source::System,
+        kind: photoproof_core::Kind::Redaction,
+        targets: Vec::new(),
+        text: None,
+        payload: None,
+        target_event: Some(victim.id.clone()),
+        linked_event: None,
+        redacted_by: None,
+    };
+    hx.env.store.merge(&[redaction]).unwrap();
+
+    assert_eq!(summary_count(&conn, "image", a.as_str()), 0);
+    assert_eq!(match_count(&conn, "ritual"), 0);
 }

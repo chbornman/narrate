@@ -469,9 +469,10 @@ CREATE TABLE IF NOT EXISTS collection_members ( -- membership is evented, not de
 );
 "#;
 
-/// Migration slot pre-allocated to packet P7.2 (spec/RETRIEVAL.md §9
-/// derived-summaries storage + the §1.1 `summaries_fts` table this spec
-/// owns). Only P7.2 edits this constant.
+/// Migration slot pre-allocated to packet P7.2 (the `derived_summaries`
+/// half of the spec/RETRIEVAL.md §9 common-storage DDL + the §1.1
+/// `summaries_fts` table this spec owns; the §9 `sentiment_scores` half
+/// lives in the v11 fix slot below). Only P7.2 edits this constant.
 const SUMMARIES_SCHEMA_SQL: &str = r#"
 -- RETRIEVAL §9 common storage (the table only; the generation passes are
 -- M2b/M3 work). Derived rows are retrieval FUEL ONLY (E4): never rendered
@@ -504,6 +505,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
 -- Mirror event_fts hygiene: redaction deletes dependent summaries (§9.5),
 -- and the scrub must not leave paraphrase tokens in dead FTS segments.
 INSERT INTO summaries_fts(summaries_fts, rank) VALUES('secure-delete', 1);
+"#;
+
+/// Migration slot for the P7.2 review fixes. Only that fix set edits this
+/// constant: the `sentiment_scores` half of the RETRIEVAL §9 common-storage
+/// DDL, which the P7.2 packet cut without naming the cut.
+const SUMMARIES_FIXES_SCHEMA_SQL: &str = r#"
+-- RETRIEVAL §9 common storage, second table. §9.4 gates sentiment as
+-- experimental — rows are written but consumed by nothing until the M3
+-- evaluation passes — but the table must exist now: the §9.5/§1.1
+-- redaction propagation ("delete the chain's sentiment rows", same
+-- transaction as the content scrub) ships with the live summaries query
+-- path and needs a table to act on, and the M2b/M3 writers expect the §9
+-- DDL whole.
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test); rows are derived and re-creatable, but the
+-- re-run must not error on an existing table.
+CREATE TABLE IF NOT EXISTS sentiment_scores (
+  event_id   TEXT PRIMARY KEY,                -- one score per text event
+  score      INTEGER NOT NULL CHECK (score BETWEEN -2 AND 2),
+  model_id   TEXT NOT NULL,
+  prompt_ver INTEGER NOT NULL,
+  scored_ts  TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
 "#;
 
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
@@ -566,6 +590,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     if version < 10 {
         conn.execute_batch(SUMMARIES_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 10")?;
+    }
+    if version < 11 {
+        conn.execute_batch(SUMMARIES_FIXES_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 11")?;
     }
     Ok(version)
 }

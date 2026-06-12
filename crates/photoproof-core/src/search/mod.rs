@@ -328,6 +328,13 @@ pub enum SearchError {
     /// runs before execution in [`Searcher::hybrid_search`].
     #[error("filter not executable: {0}")]
     UnsupportedFilter(&'static str),
+    /// A `Filter::Collection` chip whose name resolved below the §10.3
+    /// threshold. Chips are typed user intent, not model output: the §5.1
+    /// drop-with-debug-visibility firewall is scoped to LLM hallucinations,
+    /// so an unresolvable chip is a hard error — never a silently broadened
+    /// query (a hard constraint never guesses, and never vanishes).
+    #[error("collection '{raw}' not found: {reason}")]
+    UnresolvedCollection { raw: String, reason: String },
     #[error("corrupt row: {0}")]
     Corrupt(String),
 }
@@ -433,13 +440,38 @@ impl Searcher {
         CE: photoproof_connectors::Embedder,
     {
         let now = opts.now.unwrap_or_else(UtcMillis::now);
+        let trimmed = raw_query.trim();
+
+        // Stage 1 (the parse-LLM call) runs OUTSIDE the connection mutex: a
+        // hung model would otherwise wedge every later search — the
+        // search-as-you-type `sqlite3_interrupt` path can only cancel SQL —
+        // and pin a WAL read snapshot for its duration. The grounding lists
+        // it needs are read under a short lock of their own; they are tiny
+        // and a keystroke-stale copy cannot mis-execute anything, because
+        // resolution and filter execution re-read the store inside the
+        // query snapshot below.
+        let grounding = if rig.llm.is_some() && !trimmed.is_empty() {
+            let mut conn = self.conn.lock().expect("searcher mutex poisoned");
+            let tx = conn.transaction().map_err(SearchError::from)?;
+            let g = parse::load_grounding(&tx)?;
+            drop(tx); // read-only; rollback
+            Some(g)
+        } else {
+            None
+        };
+        let parsed = hybrid::stage1_parse(
+            grounding.as_ref(),
+            trimmed,
+            rig.llm,
+            rig.any_vector_signal(),
+            now,
+            opts.parse_budget,
+        );
+
         let mut conn = self.conn.lock().expect("searcher mutex poisoned");
-        // One read snapshot for the statement sequence (WAL). The parse-LLM
-        // call happens inside the lock: the Searcher owns one connection,
-        // and the rig is model-less in the shipping shell — revisit if a
-        // wired LLM ever contends with search-as-you-type interrupts.
+        // One read snapshot for the statement sequence (WAL).
         let tx = conn.transaction().map_err(SearchError::from)?;
-        let result = hybrid::run(&tx, raw_query, chips, rig, opts, now);
+        let result = hybrid::run(&tx, raw_query, parsed, chips, rig, opts, now);
         drop(tx); // read-only; rollback
         result
     }

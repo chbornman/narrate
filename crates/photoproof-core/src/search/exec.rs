@@ -664,34 +664,63 @@ impl ProvenanceInputs {
 /// summary text itself is never quoted (E4); when this finds nothing the
 /// caller discards the summary hit as provenance and consults the next
 /// signal.
+///
+/// The re-run's universe is THIS image's events, so the per-image
+/// constraint bounds the MATCH itself: the image's `fts_map` rowids are
+/// fetched first and pushed into the MATCH as rowid constraints. Resolving
+/// the MATCH globally and filtering afterward would take the LIMIT over
+/// the GLOBAL bm25 ranking — an image whose own matching event sat below
+/// that global cut would lose a perfectly quotable result (and be dropped
+/// or mislabeled `VisualMatch`, which §6 reserves for image_clip-only
+/// evidence). Scoping first also keeps `snippet()` evaluation bounded by
+/// the image's own rows, preserving the §4 laziness discipline.
 pub(crate) fn best_quote_for_image(
     conn: &Connection,
     match_q: &str,
     raw: &str,
     image_hash: &str,
 ) -> Result<Option<Quote>, SearchError> {
-    let mut hits: Vec<RawHit> = Vec::new();
+    let mut fts_rowids: Vec<i64> = Vec::new();
     {
-        // Same materialize-first shape as the §4 statement: resolve the
-        // MATCH before the joins, snippet only over the LIMITed set.
         let mut stmt = conn.prepare_cached(
+            "SELECT m.fts_rowid \
+             FROM event_targets t \
+             JOIN fts_map m ON m.root_event_id = t.event_id \
+             WHERE t.image_hash = ?1",
+        )?;
+        let mut rows = stmt.query([image_hash])?;
+        while let Some(row) = rows.next()? {
+            fts_rowids.push(row.get(0)?);
+        }
+    }
+    if fts_rowids.is_empty() {
+        return Ok(None);
+    }
+    let mut hits: Vec<RawHit> = Vec::new();
+    for chunk in fts_rowids.chunks(IN_LIST_CHUNK) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        // Same materialize-first shape as the §4 statement, with the
+        // image's rowids constraining the MATCH ahead of the rank cut.
+        // The LIMIT is the §4 defensive page bound, now per image.
+        let sql = format!(
             "WITH hits AS MATERIALIZED (\n\
              \x20 SELECT event_fts.rowid AS fts_rowid,\n\
              \x20        bm25(event_fts) AS s,\n\
              \x20        snippet(event_fts, 0, '⟦', '⟧', '…', 12) AS snip\n\
              \x20 FROM event_fts\n\
-             \x20 WHERE event_fts MATCH ?1\n\
+             \x20 WHERE event_fts MATCH ?1 AND event_fts.rowid IN ({marks})\n\
              \x20 ORDER BY rank\n\
              \x20 LIMIT 500\n\
              )\n\
              SELECT m.root_event_id, h.s, h.snip\n\
              FROM hits h\n\
-             JOIN fts_map m       ON m.fts_rowid = h.fts_rowid\n\
-             JOIN event_targets t ON t.event_id  = m.root_event_id\n\
-             WHERE t.image_hash = ?2\n\
-             ORDER BY h.s",
-        )?;
-        let mut rows = stmt.query(rusqlite::params![match_q, image_hash])?;
+             JOIN fts_map m ON m.fts_rowid = h.fts_rowid"
+        );
+        let mut params: Vec<Value> = Vec::with_capacity(1 + chunk.len());
+        params.push(Value::Text(match_q.to_owned()));
+        params.extend(chunk.iter().map(|r| Value::Integer(*r)));
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(params))?;
         while let Some(row) = rows.next()? {
             hits.push(RawHit {
                 root: row.get(0)?,
@@ -703,6 +732,9 @@ pub(crate) fn best_quote_for_image(
     if hits.is_empty() {
         return Ok(None);
     }
+    // Chunked execution loses the cross-chunk rank order; restore it
+    // (root id tiebreak for determinism).
+    hits.sort_by(|a, b| a.s.total_cmp(&b.s).then_with(|| a.root.cmp(&b.root)));
     let mut root_ids: Vec<String> = hits.iter().map(|h| h.root.clone()).collect();
     root_ids.sort();
     root_ids.dedup();

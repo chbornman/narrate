@@ -749,16 +749,40 @@ pub(crate) fn zero_deleted_rows_for_event(
     dir: &Path,
     event_id: &str,
 ) -> VectorStoreResult<usize> {
+    zero_deleted_rows(conn, dir, "event_id", event_id)
+}
+
+/// Image-keyed sibling of [`zero_deleted_rows_for_event`]: zeroes the dead
+/// `image_summary`/`image_clip` rows of one image. The events engine calls
+/// it when redaction propagation deletes an image's derived summary
+/// (RETRIEVAL §9.5 — the summary's vector follows its row), with the same
+/// synchronous timing as the event-chunk zeroing.
+pub(crate) fn zero_deleted_rows_for_image(
+    conn: &Connection,
+    dir: &Path,
+    image_hash: &str,
+) -> VectorStoreResult<usize> {
+    zero_deleted_rows(conn, dir, "image_hash", image_hash)
+}
+
+/// `key_column` is one of the two compile-time constants above — never
+/// user input — so the formatted SQL cannot be injected into.
+fn zero_deleted_rows(
+    conn: &Connection,
+    dir: &Path,
+    key_column: &str,
+    key: &str,
+) -> VectorStoreResult<usize> {
     let _io = file_io_lock();
     let rows: Vec<(String, String, i64)> = {
         let mut stmt = conn
-            .prepare_cached(
+            .prepare_cached(&format!(
                 "SELECT vec_kind, model_id, file_row FROM vectors
-                 WHERE event_id = ?1 AND deleted = 1",
-            )
+                 WHERE {key_column} = ?1 AND deleted = 1"
+            ))
             .map_err(db_err)?;
         let found = stmt
-            .query_map([event_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .map_err(db_err)?;
         found.collect::<Result<_, _>>().map_err(db_err)?
     };

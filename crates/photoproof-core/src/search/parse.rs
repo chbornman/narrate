@@ -26,7 +26,7 @@ use super::{
 pub(crate) const COLLECTION_MATCH_THRESHOLD: f64 = 0.80;
 
 // ---------------------------------------------------------------------------
-// Grounding (the small lists the prompt carries; also the validation vocab)
+// Grounding (the small lists the prompt carries + the validation vocab)
 // ---------------------------------------------------------------------------
 
 /// One collections-store row, as resolution and grounding need it.
@@ -38,18 +38,28 @@ pub(crate) struct CollectionRow {
     pub updated_ts: String,
 }
 
-/// Grounding lists (§5.1 prompt strategy) — also the hallucination
-/// firewall's vocabulary: a camera/lens the library has never seen, or a
-/// collection that resolves below threshold, drops its clause.
+/// Grounding lists (§5.1 prompt strategy) plus the hallucination
+/// firewall's vocabulary. The two are NOT the same lists: the prompt's
+/// camera/lens excerpts are capped at the 40 most-used (§5.1 keeps the
+/// prompt small), but the firewall validates against "the EXIF vocabulary"
+/// — the library's FULL distinct sets. A user can name gear the prompt
+/// excerpt omitted (rank 41+); the model echoing that name is grounded
+/// user intent, not a hallucination, and must not be dropped.
 pub(crate) struct Grounding {
     pub collections: Vec<CollectionRow>,
+    /// Prompt excerpt: ≤ 40 most-used camera strings.
     pub cameras: Vec<String>,
+    /// Prompt excerpt: ≤ 40 most-used lens strings.
     pub lenses: Vec<String>,
     pub roots: Vec<String>,
+    /// Firewall vocabulary: every distinct camera string in the library.
+    pub cameras_full: Vec<String>,
+    /// Firewall vocabulary: every distinct lens string in the library.
+    pub lenses_full: Vec<String>,
 }
 
 /// §5.1: "distinct camera/lens strings from EXIF (≤ 40 each, most-used
-/// first)".
+/// first)" — the PROMPT cap only, never the validation vocabulary.
 const VOCAB_LIMIT: usize = 40;
 
 pub(crate) fn load_grounding(conn: &Connection) -> Result<Grounding, SearchError> {
@@ -71,14 +81,18 @@ pub(crate) fn load_grounding(conn: &Connection) -> Result<Grounding, SearchError
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     };
-    let cameras = strings(&format!(
+    // One ordered query per vocabulary: the full list is the firewall's,
+    // its most-used-first prefix is the prompt's.
+    let cameras_full = strings(
         "SELECT camera_model FROM images WHERE camera_model IS NOT NULL
-         GROUP BY camera_model ORDER BY COUNT(*) DESC, camera_model LIMIT {VOCAB_LIMIT}"
-    ))?;
-    let lenses = strings(&format!(
+         GROUP BY camera_model ORDER BY COUNT(*) DESC, camera_model",
+    )?;
+    let lenses_full = strings(
         "SELECT lens_model FROM images WHERE lens_model IS NOT NULL
-         GROUP BY lens_model ORDER BY COUNT(*) DESC, lens_model LIMIT {VOCAB_LIMIT}"
-    ))?;
+         GROUP BY lens_model ORDER BY COUNT(*) DESC, lens_model",
+    )?;
+    let cameras = cameras_full.iter().take(VOCAB_LIMIT).cloned().collect();
+    let lenses = lenses_full.iter().take(VOCAB_LIMIT).cloned().collect();
     let roots =
         strings("SELECT display_name FROM roots WHERE state = 'active' ORDER BY display_name")?;
     Ok(Grounding {
@@ -86,6 +100,8 @@ pub(crate) fn load_grounding(conn: &Connection) -> Result<Grounding, SearchError
         cameras,
         lenses,
         roots,
+        cameras_full,
+        lenses_full,
     })
 }
 
@@ -418,12 +434,12 @@ fn validate_clause(clause: &Value, grounding: &Grounding) -> Result<Filter, Stri
         "date" => validate_date(payload),
         "camera" => {
             let w: ValueClause = de(payload)?;
-            vocab_match(&grounding.cameras, &w.value, "camera")?;
+            vocab_match(&grounding.cameras_full, &w.value, "camera")?;
             Ok(Filter::Camera(StringMatch::Contains(w.value)))
         }
         "lens" => {
             let w: ValueClause = de(payload)?;
-            vocab_match(&grounding.lenses, &w.value, "lens")?;
+            vocab_match(&grounding.lenses_full, &w.value, "lens")?;
             Ok(Filter::Lens(StringMatch::Contains(w.value)))
         }
         "folder" => {
@@ -660,6 +676,8 @@ mod tests {
             cameras: vec!["FUJIFILM X-T5".into()],
             lenses: Vec::new(),
             roots: Vec::new(),
+            cameras_full: vec!["FUJIFILM X-T5".into()],
+            lenses_full: Vec::new(),
         }
     }
 
@@ -681,6 +699,29 @@ mod tests {
         assert!(validate_clause(&v, &g).is_err());
         let v: Value = serde_json::json!({ "type": "camera", "value": "x-t5" });
         assert!(validate_clause(&v, &g).is_ok());
+    }
+
+    #[test]
+    fn firewall_vocabulary_is_the_full_exif_set_not_the_prompt_cap() {
+        // Gear past the prompt's 40-item cap still exists in the library;
+        // a clause naming it is grounded user intent and must validate
+        // (§5.1: "matching nothing in the EXIF vocabulary" — the LIBRARY's
+        // vocabulary, not the prompt excerpt).
+        let g = Grounding {
+            collections: Vec::new(),
+            cameras: Vec::new(), // prompt excerpt omitted this body
+            lenses: Vec::new(),  // and this lens
+            roots: Vec::new(),
+            cameras_full: vec!["RICOH GR III".into()],
+            lenses_full: vec!["XF35mmF1.4 R".into()],
+        };
+        let v: Value = serde_json::json!({ "type": "camera", "value": "gr iii" });
+        assert!(validate_clause(&v, &g).is_ok());
+        let v: Value = serde_json::json!({ "type": "lens", "value": "xf35mm" });
+        assert!(validate_clause(&v, &g).is_ok());
+        // A true vocabulary miss still drops.
+        let v: Value = serde_json::json!({ "type": "camera", "value": "Leica M11" });
+        assert!(validate_clause(&v, &g).is_err());
     }
 
     #[test]

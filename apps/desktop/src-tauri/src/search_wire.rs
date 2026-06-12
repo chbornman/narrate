@@ -277,7 +277,8 @@ mod tests {
 
     /// P7.2: a collection chip resolves against the collections store
     /// (§10.3, no model required) and constrains to current members; an
-    /// unresolvable name drops with debug visibility instead of erroring.
+    /// unresolvable name is a hard error — chips are typed user intent,
+    /// and silently un-constraining one would broaden results invisibly.
     #[test]
     fn collection_chip_resolves_through_the_hybrid_pipeline() {
         let dir = tempfile::tempdir().unwrap();
@@ -323,10 +324,11 @@ mod tests {
         let bad = dto::Filter::Collection {
             name: "zzz qqq".into(),
         };
-        let out = run_search(&searcher, "fog".into(), vec![bad]).unwrap();
-        assert_eq!(out.images.len(), 2, "dropped clause, query still runs");
-        assert_eq!(out.query.dropped.len(), 1);
-        assert!(out.query.dropped[0].reason.contains("no collection"));
+        let err = run_search(&searcher, "fog".into(), vec![bad]).unwrap_err();
+        assert!(
+            err.to_string().contains("'zzz qqq' not found"),
+            "unresolvable chip errors instead of broadening: {err}"
+        );
     }
 
     /// Filter DTO → core AST translation: untranslatable input errors,
