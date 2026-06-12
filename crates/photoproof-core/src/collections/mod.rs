@@ -24,7 +24,7 @@ pub use doc::{
     COLLECTIONS_FILENAME, COLLECTIONS_VERSION, CollectionEntry, CollectionStatus, CollectionsDoc,
     MemberEntry, NoteEntry, ParsedCollections, parse_collections,
 };
-pub use merge::merge_docs;
+pub use merge::{NoteConflict, merge_docs, merge_docs_reporting};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,6 +73,14 @@ pub struct CollectionRecord {
     pub note_count: usize,
 }
 
+/// What an import did: whether anything changed, plus the note-conflict
+/// losers (preserved, never silently discarded — SIDECARS §10.2 precedent).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportOutcome {
+    pub changed: bool,
+    pub note_conflicts: Vec<NoteConflict>,
+}
+
 /// §9.4-equivalent transient-failure backoff for the file writer.
 const BACKOFF_MS: [i64; 4] = [1_000, 5_000, 30_000, 300_000];
 
@@ -95,6 +103,11 @@ struct FileDebounce {
     retry_at: Option<i64>,
     /// False when a newer-version file owns the path (never overwrite).
     enabled: bool,
+    /// The version of the newer file that owns the path, when one does.
+    /// Kept so the lockout is REPORTABLE (SIDECARS §5.3 requires the user
+    /// learns about it): flush/export surface it as an error instead of
+    /// silently leaving truth in SQLite only.
+    newer_version: Option<u64>,
 }
 
 impl FileDebounce {
@@ -143,6 +156,12 @@ pub struct Collections {
     conn: Mutex<Connection>,
     file_path: PathBuf,
     writer: Mutex<FileDebounce>,
+    /// Serializes whole flushes (generation read, serialize, write, clear).
+    /// The writer mutex alone cannot: two concurrent `flush_file` calls can
+    /// interleave so a STALE serialization replaces a fresher write while
+    /// the fresher call already cleared the dirty state — leaving the file
+    /// behind the database with the writer marked clean.
+    flush_lock: Mutex<()>,
 }
 
 impl Collections {
@@ -172,6 +191,7 @@ impl Collections {
                 enabled: true,
                 ..FileDebounce::default()
             }),
+            flush_lock: Mutex::new(()),
         };
         me.reconcile_file_at_open(UtcMillis::now())?;
         Ok(me)
@@ -356,7 +376,10 @@ impl Collections {
     }
 
     /// Remove images (explicit hash list): closes the open interval rows —
-    /// evented, never destructive (§10.1). Returns the number closed.
+    /// evented, never destructive (§10.1). Returns the number of IMAGES
+    /// whose membership was closed, not the row count: the §10.2 union can
+    /// legitimately leave one image with several open interval rows (two
+    /// replicas re-added it independently), and a remove closes them all.
     pub fn remove_images(
         &self,
         collection_id: &str,
@@ -372,11 +395,14 @@ impl Collections {
                 // MAX(): a same-millisecond add+remove must not close the
                 // interval before it opened (added_ts can sit 1 ms ahead of
                 // the wall clock after the re-add bump above).
-                removed += tx.execute(
+                let closed = tx.execute(
                     "UPDATE collection_members SET removed_ts = MAX(?1, added_ts)
                       WHERE collection_id = ?2 AND image_hash = ?3 AND removed_ts IS NULL",
                     params![now.to_rfc3339(), collection_id, hash.as_str()],
                 )?;
+                if closed > 0 {
+                    removed += 1;
+                }
             }
             tx.commit()?;
         }
@@ -418,12 +444,15 @@ impl Collections {
         )
     }
 
-    /// Current members (open intervals), hash order.
+    /// Current members (open intervals), hash order. DISTINCT because
+    /// membership is a SET and interval rows are history: the §10.2 union
+    /// of two replicas that re-added the same image at different times
+    /// holds several open rows for one image, which is still ONE member.
     pub fn current_members(&self, id: &str) -> Result<Vec<ContentHash>, CollectionsError> {
         let conn = self.conn.lock().expect("collections mutex");
         require_collection(&conn, id)?;
         let mut stmt = conn.prepare(
-            "SELECT image_hash FROM collection_members
+            "SELECT DISTINCT image_hash FROM collection_members
               WHERE collection_id = ?1 AND removed_ts IS NULL ORDER BY image_hash",
         )?;
         let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
@@ -483,34 +512,42 @@ impl Collections {
     }
 
     /// Union-merge a document into the database (§10.2 rules via the pure
-    /// `merge_docs`). Returns true when anything changed; a change marks
-    /// the file dirty so the union mirrors back out.
+    /// `merge_docs_reporting`). A change marks the file dirty so the union
+    /// mirrors back out. Note conflicts (same id, different content —
+    /// producer corruption the merge resolved deterministically) ride the
+    /// outcome so no caller can lose the losing copy silently.
     pub fn import_doc(
         &self,
         incoming: &CollectionsDoc,
         now: UtcMillis,
-    ) -> Result<bool, CollectionsError> {
-        let changed = {
+    ) -> Result<ImportOutcome, CollectionsError> {
+        let outcome = {
             let mut conn = self.conn.lock().expect("collections mutex");
             let ours = read_doc(&conn)?;
-            let merged = merge_docs(&ours, incoming);
-            if merged == ours {
-                false
-            } else {
+            let (merged, note_conflicts) = merge_docs_reporting(&ours, incoming);
+            let changed = merged != ours;
+            if changed {
                 apply_doc(&mut conn, &merged)?;
-                true
+            }
+            ImportOutcome {
+                changed,
+                note_conflicts,
             }
         };
-        if changed {
+        if outcome.changed {
             self.mark_dirty(now);
         }
-        Ok(changed)
+        Ok(outcome)
     }
 
     /// Parse + union-merge a collections file (rebuild-from-export input).
     /// A newer-version file is an error, not silent skipping: the caller
     /// asked for THIS file's content and must learn it was untouchable.
-    pub fn import_file(&self, path: &Path, now: UtcMillis) -> Result<bool, CollectionsError> {
+    pub fn import_file(
+        &self,
+        path: &Path,
+        now: UtcMillis,
+    ) -> Result<ImportOutcome, CollectionsError> {
         let bytes = fs::read(path)?;
         match parse_collections(&bytes)? {
             ParsedCollections::Doc(doc) => self.import_doc(&doc, now),
@@ -523,7 +560,16 @@ impl Collections {
     /// One-click export (§10.2: "included in the full export beside the
     /// sidecar set + manifest"): flush the live file, then write the same
     /// canonical bytes into `dest`.
+    ///
+    /// While a newer-version file owns the app-data path this errors
+    /// instead of writing: the v2 file's collections were never merged
+    /// into this build's database, so a database-derived export would
+    /// silently omit them — the user asked to "walk away with everything"
+    /// and must learn this build cannot deliver that.
     pub fn export_to(&self, dest: &Path, now: UtcMillis) -> Result<PathBuf, CollectionsError> {
+        if let Some(v) = self.newer_version_lockout() {
+            return Err(CollectionsError::NewerVersion(v));
+        }
         // Explicit export is an immediate-flush trigger (SIDECARS §9.1).
         self.flush(now)?;
         let bytes = self.export_doc()?.to_bytes();
@@ -546,13 +592,22 @@ impl Collections {
     }
 
     /// Immediate flush (shutdown, export — the §9.1 bypass triggers).
-    /// A clean writer no-ops; a disabled writer (newer-version file owns
-    /// the path) never writes.
+    /// A clean writer no-ops. A DISABLED writer (newer-version file owns
+    /// the path) never writes — and when mutations are pending it errors,
+    /// because returning Ok would let a shutdown believe truth reached a
+    /// file when it lives in SQLite only (SIDECARS §5.3 requires the
+    /// condition to be surfaced, not swallowed).
     pub fn flush(&self, now: UtcMillis) -> Result<(), CollectionsError> {
-        let pending = {
+        let (pending, lockout) = {
             let w = self.writer.lock().expect("writer mutex");
-            w.enabled && w.first.is_some()
+            (w.first.is_some(), w.newer_version)
         };
+        if let Some(version) = lockout {
+            if pending {
+                return Err(CollectionsError::NewerVersion(version));
+            }
+            return Ok(());
+        }
         if pending {
             self.flush_file(now)?;
         }
@@ -564,14 +619,33 @@ impl Collections {
         self.writer.lock().expect("writer mutex").first.is_some()
     }
 
+    /// `Some(version)` while a newer-version file owns the app-data path:
+    /// mirroring is off and mutations accumulate in SQLite only. The shell
+    /// surfaces this; flush/export error on it rather than pretend.
+    pub fn newer_version_lockout(&self) -> Option<u64> {
+        self.writer.lock().expect("writer mutex").newer_version
+    }
+
     fn mark_dirty(&self, now: UtcMillis) {
         self.writer.lock().expect("writer mutex").note_dirty(now);
     }
 
     fn flush_file(&self, now: UtcMillis) -> Result<(), CollectionsError> {
+        // One flusher at a time across the whole read-serialize-write-clear
+        // span: see `flush_lock` for the stale-overwrite interleaving this
+        // prevents (pump tick racing a shutdown or export flush).
+        let _flushing = self.flush_lock.lock().expect("flush mutex");
         // Capture the generation BEFORE serializing: a mutation landing
         // while the file is being written keeps the writer dirty.
-        let generation = self.writer.lock().expect("writer mutex").generation;
+        let generation = {
+            let w = self.writer.lock().expect("writer mutex");
+            // Belt-and-braces: every caller already gates on `enabled`,
+            // but a write past this point would clobber a newer file.
+            if !w.enabled {
+                return Ok(());
+            }
+            w.generation
+        };
         let bytes = self.export_doc()?.to_bytes();
         match write_atomic(&self.file_path, &bytes) {
             Ok(_) => {
@@ -593,16 +667,30 @@ impl Collections {
     /// Open-time reconcile: merge an existing file into the database, then
     /// converge the file to the union. A corrupt file is renamed aside
     /// (preserved for inspection — SIDECARS §10.3 precedent), never
-    /// overwritten in place; a newer-version file disables the writer
-    /// entirely (SIDECARS §5.3: opaque and inviolable).
+    /// overwritten in place, and every individually-intact collection in
+    /// it is salvaged (one garbled field must not cost the user the whole
+    /// store); a newer-version file disables the writer entirely
+    /// (SIDECARS §5.3: opaque and inviolable).
     fn reconcile_file_at_open(&self, now: UtcMillis) -> Result<(), CollectionsError> {
         match fs::read(&self.file_path) {
             Ok(bytes) => match parse_collections(&bytes) {
                 Ok(ParsedCollections::Doc(doc)) => {
-                    self.import_doc(&doc, now)?;
+                    let outcome = self.import_doc(&doc, now)?;
+                    warn_note_conflicts(&outcome.note_conflicts);
                 }
-                Ok(ParsedCollections::NewerVersion { .. }) => {
-                    self.writer.lock().expect("writer mutex").enabled = false;
+                Ok(ParsedCollections::NewerVersion { version }) => {
+                    // Never silent: mirroring is OFF from here on, and
+                    // every mutation lands in SQLite only until a build
+                    // that understands the file runs. flush/export error
+                    // while this holds so the shell can tell the user.
+                    tracing::warn!(
+                        "collections file at {} is version {version} (newer than this \
+                         build's {COLLECTIONS_VERSION}); left untouched, mirroring disabled",
+                        self.file_path.display()
+                    );
+                    let mut w = self.writer.lock().expect("writer mutex");
+                    w.enabled = false;
+                    w.newer_version = Some(version);
                     return Ok(());
                 }
                 Err(e) => {
@@ -614,7 +702,21 @@ impl Collections {
                         "collections file unparseable ({e}); renamed aside to {}",
                         aside.display()
                     );
+                    // Rename FIRST: the original bytes must be preserved
+                    // before any salvage import triggers a rewrite.
                     fs::rename(&self.file_path, &aside)?;
+                    let (salvaged, errors) = doc::salvage_collections(&bytes);
+                    for err in &errors {
+                        tracing::warn!("collections salvage skipped an entry: {err}");
+                    }
+                    if !salvaged.collections.is_empty() {
+                        tracing::warn!(
+                            "salvaged {} intact collection(s) from the corrupt file",
+                            salvaged.collections.len()
+                        );
+                        let outcome = self.import_doc(&salvaged, now)?;
+                        warn_note_conflicts(&outcome.note_conflicts);
+                    }
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -628,6 +730,22 @@ impl Collections {
             tracing::warn!("collections file converge failed at open (pump retries): {e}");
         }
         Ok(())
+    }
+}
+
+/// The losing copy of a note conflict is preserved VERBATIM in the log
+/// (the open path has no integrity report to carry it; the rebuild path
+/// does and uses that instead).
+fn warn_note_conflicts(conflicts: &[NoteConflict]) {
+    for c in conflicts {
+        tracing::warn!(
+            "collections import resolved a note conflict in {}: losing copy preserved \
+             verbatim: id={} ts={} text={:?}",
+            c.collection_id,
+            c.loser.id,
+            c.loser.ts,
+            c.loser.text
+        );
     }
 }
 
@@ -651,9 +769,11 @@ fn query_records(
     tail: &str,
     args: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<CollectionRecord>, CollectionsError> {
+    // COUNT(DISTINCT image_hash), not COUNT(*): the §10.2 union can leave
+    // one image with several open interval rows; members are a set.
     let sql = format!(
         "SELECT c.id, c.name, c.description, c.status, c.created_ts, c.updated_ts,
-                (SELECT COUNT(*) FROM collection_members m
+                (SELECT COUNT(DISTINCT m.image_hash) FROM collection_members m
                   WHERE m.collection_id = c.id AND m.removed_ts IS NULL),
                 (SELECT COUNT(*) FROM collection_notes n WHERE n.collection_id = c.id)
            FROM collections c {tail}"

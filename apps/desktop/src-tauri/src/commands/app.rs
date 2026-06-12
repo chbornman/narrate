@@ -124,7 +124,10 @@ pub async fn export_journal(app: S<'_>, dest: String) -> CmdResult<ExportReportD
         )?;
         // RETRIEVAL §10.2: collections.photoproof.json travels beside the
         // sidecar set + manifest — "you can walk away with everything"
-        // includes your collections.
+        // includes your collections. When a newer-version file owns the
+        // app-data path this ERRORS (propagated to the user) instead of
+        // silently exporting a database-derived subset that omits the
+        // newer file's collections.
         app.collections
             .export_to(std::path::Path::new(&dest), now)?;
         let ts = now.to_rfc3339();

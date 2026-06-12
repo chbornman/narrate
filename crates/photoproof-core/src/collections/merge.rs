@@ -18,27 +18,55 @@ use std::collections::BTreeMap;
 
 use super::doc::{CollectionEntry, CollectionsDoc, MemberEntry, NoteEntry};
 
+/// A same-note-id / different-content pair the merge had to resolve.
+/// Notes are append-only (§10.1), so this is producer corruption — the
+/// merge converges deterministically, and the LOSING copy is preserved
+/// here verbatim so resolution is never silent destruction (the SIDECARS
+/// §10.2 conflict-loser precedent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteConflict {
+    pub collection_id: String,
+    pub note_id: String,
+    /// The losing copy, exactly as it appeared on the losing side.
+    pub loser: NoteEntry,
+}
+
 /// Merge two documents. Commutative and idempotent: ties are broken by
 /// deterministic byte order, never by argument position, so every replica
 /// converges to identical bytes regardless of merge order.
 pub fn merge_docs(a: &CollectionsDoc, b: &CollectionsDoc) -> CollectionsDoc {
+    merge_docs_reporting(a, b).0
+}
+
+/// [`merge_docs`] plus the note-conflict losers: import paths surface
+/// these (integrity report, open-time warning) instead of discarding the
+/// losing copy silently.
+pub fn merge_docs_reporting(
+    a: &CollectionsDoc,
+    b: &CollectionsDoc,
+) -> (CollectionsDoc, Vec<NoteConflict>) {
     let mut by_id: BTreeMap<String, CollectionEntry> = BTreeMap::new();
+    let mut conflicts = Vec::new();
     for c in a.collections.iter().chain(b.collections.iter()) {
         match by_id.get_mut(&c.id) {
             None => {
                 by_id.insert(c.id.clone(), c.clone());
             }
-            Some(existing) => merge_into(existing, c),
+            Some(existing) => merge_into(existing, c, &mut conflicts),
         }
     }
     let mut doc = CollectionsDoc {
         collections: by_id.into_values().collect(),
     };
     doc.normalize();
-    doc
+    (doc, conflicts)
 }
 
-fn merge_into(ours: &mut CollectionEntry, theirs: &CollectionEntry) {
+fn merge_into(
+    ours: &mut CollectionEntry,
+    theirs: &CollectionEntry,
+    conflicts: &mut Vec<NoteConflict>,
+) {
     // Metadata LWW by updated_ts (canonical fixed-width timestamps, so
     // string order is time order). On an exact updated_ts tie the
     // byte-wise lesser (name, description, status) tuple wins — arbitrary
@@ -71,15 +99,28 @@ fn merge_into(ours: &mut CollectionEntry, theirs: &CollectionEntry) {
     }
 
     // Notes: set-union by id. Same id with different content is producer
-    // corruption; the (ts, text) lesser tuple wins so both sides converge.
+    // corruption; the (ts, text) lesser tuple wins so both sides converge,
+    // and the losing copy is reported (never silently destroyed).
     let mut notes: BTreeMap<&str, &NoteEntry> = BTreeMap::new();
     for n in ours.notes.iter().chain(theirs.notes.iter()) {
         notes
             .entry(n.id.as_str())
             .and_modify(|kept| {
-                if (&n.ts, &n.text) < (&kept.ts, &kept.text) {
-                    *kept = n;
+                if (&n.ts, &n.text) == (&kept.ts, &kept.text) {
+                    return;
                 }
+                let loser = if (&n.ts, &n.text) < (&kept.ts, &kept.text) {
+                    let loser = (*kept).clone();
+                    *kept = n;
+                    loser
+                } else {
+                    n.clone()
+                };
+                conflicts.push(NoteConflict {
+                    collection_id: ours.id.clone(),
+                    note_id: loser.id.clone(),
+                    loser,
+                });
             })
             .or_insert(n);
     }
@@ -257,6 +298,35 @@ mod tests {
             merged.collections[0].members,
             vec![member(&h, T1, Some(T2)), member(&h, T3, None)]
         );
+    }
+
+    /// Same note id with different content: deterministic resolution AND
+    /// the losing copy surfaces as a reported conflict — never silent.
+    #[test]
+    fn note_conflict_reports_the_losing_copy_verbatim() {
+        let mut a = coll(C1, "x", T1);
+        a.notes = vec![note(N1, T1, "original wording")];
+        let mut b = coll(C1, "x", T1);
+        b.notes = vec![note(N1, T1, "tampered wording")];
+
+        let (merged, conflicts) = merge_docs_reporting(&doc(vec![a]), &doc(vec![b]));
+        // Lesser (ts, text) tuple wins; the other copy is the loser.
+        assert_eq!(
+            merged.collections[0].notes,
+            vec![note(N1, T1, "original wording")]
+        );
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].collection_id, C1);
+        assert_eq!(conflicts[0].note_id, N1);
+        assert_eq!(conflicts[0].loser, note(N1, T1, "tampered wording"));
+
+        // Identical copies are a plain union, not a conflict.
+        let mut a2 = coll(C1, "x", T1);
+        a2.notes = vec![note(N1, T1, "same")];
+        let mut b2 = coll(C1, "x", T1);
+        b2.notes = vec![note(N1, T1, "same")];
+        let (_, conflicts) = merge_docs_reporting(&doc(vec![a2]), &doc(vec![b2]));
+        assert!(conflicts.is_empty());
     }
 
     /// Merge laws the C2 family promises: idempotent, commutative, and

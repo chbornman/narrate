@@ -351,7 +351,7 @@ fn merging_a_stale_copy_never_unremoves_a_member_or_loses_a_note() {
     );
 
     // Idempotence: importing the same stale copy again changes nothing.
-    assert!(!c.import_file(&stale_path, t2).unwrap());
+    assert!(!c.import_file(&stale_path, t2).unwrap().changed);
 }
 
 #[test]
@@ -394,9 +394,180 @@ fn two_replicas_converge_through_file_exchange() {
     assert_eq!(merged.note_count, 1);
 }
 
+#[test]
+fn union_duplicate_open_intervals_still_read_as_one_member() {
+    // Two replicas both remove X then re-add it at DIFFERENT times: the
+    // 10.2 union legitimately holds one closed interval plus TWO open
+    // rows for the same image. Membership is a set; every read surface
+    // must report ONE member, and a remove closes all open rows.
+    let env_a = Env::new();
+    let env_b = Env::new();
+    let a = env_a.open();
+    let b = env_b.open();
+    let img = hash(0xee);
+
+    let t0 = ts("2026-06-01T10:00:00.000Z");
+    let rec = a.create("Racing", "", t0).unwrap();
+    a.add_images(&rec.id, std::slice::from_ref(&img), t0)
+        .unwrap();
+    a.flush(t0).unwrap();
+    b.import_file(&env_a.file(), t0).unwrap();
+
+    // Offline divergence: both remove, both re-add — at different times.
+    let t1 = ts("2026-06-02T10:00:00.000Z");
+    a.remove_images(&rec.id, std::slice::from_ref(&img), t1)
+        .unwrap();
+    a.add_images(
+        &rec.id,
+        std::slice::from_ref(&img),
+        ts("2026-06-03T10:00:00.000Z"),
+    )
+    .unwrap();
+    b.remove_images(&rec.id, std::slice::from_ref(&img), t1)
+        .unwrap();
+    b.add_images(
+        &rec.id,
+        std::slice::from_ref(&img),
+        ts("2026-06-04T10:00:00.000Z"),
+    )
+    .unwrap();
+
+    let t5 = ts("2026-06-05T10:00:00.000Z");
+    a.flush(t5).unwrap();
+    b.flush(t5).unwrap();
+    a.import_file(&env_b.file(), t5).unwrap();
+
+    // History keeps all three interval rows (closed + two open)...
+    let history = a.membership_history(&rec.id).unwrap();
+    assert_eq!(history.len(), 3, "union preserves both replicas' intervals");
+    assert_eq!(
+        history.iter().filter(|m| m.removed_ts.is_none()).count(),
+        2,
+        "two open rows for one image after the union"
+    );
+    // ...but membership is a SET: one image counts and lists once.
+    assert_eq!(a.get(&rec.id).unwrap().member_count, 1);
+    assert_eq!(a.current_members(&rec.id).unwrap(), vec![img.clone()]);
+    assert_eq!(a.collections_for_image(&img).unwrap().len(), 1);
+
+    // One remove closes the image's membership entirely and reports ONE
+    // image removed, not two rows.
+    let t6 = ts("2026-06-06T10:00:00.000Z");
+    assert_eq!(
+        a.remove_images(&rec.id, std::slice::from_ref(&img), t6)
+            .unwrap(),
+        1
+    );
+    assert_eq!(a.get(&rec.id).unwrap().member_count, 0);
+    assert!(a.current_members(&rec.id).unwrap().is_empty());
+}
+
+#[test]
+fn note_conflicts_are_reported_with_the_losing_copy() {
+    let env = Env::new();
+    let c = env.open();
+    let t0 = ts("2026-06-01T10:00:00.000Z");
+    let rec = c.create("Notes", "", t0).unwrap();
+    let note = c.add_note(&rec.id, "the original wording", t0).unwrap();
+
+    // A tampered/corrupted copy carries the SAME note id with different
+    // text. The merge resolves deterministically and the losing copy is
+    // surfaced — never silently destroyed (notes are append-only, 10.1).
+    let mut doc = c.export_doc().unwrap();
+    doc.collections[0].notes[0].text = "zzz tampered wording".to_owned();
+    let outcome = c.import_doc(&doc, ts("2026-06-02T10:00:00.000Z")).unwrap();
+    assert_eq!(outcome.note_conflicts.len(), 1);
+    assert_eq!(outcome.note_conflicts[0].note_id, note.id);
+    assert_eq!(
+        outcome.note_conflicts[0].loser.text, "zzz tampered wording",
+        "lesser (ts, text) wins; the import's copy is the preserved loser"
+    );
+    assert_eq!(
+        c.notes(&rec.id).unwrap()[0].text,
+        "the original wording",
+        "the stored note converged to the deterministic winner"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Guard rails: corrupt file, newer version, export placement
 // ---------------------------------------------------------------------------
+
+#[test]
+fn parse_rejects_duplicate_member_keys_and_note_ids() {
+    let img = "ab".repeat(32);
+    let dup_member = format!(
+        r#"{{"version": 1, "collections": [{{
+            "id": "01HV00000000000000000000A1", "name": "x", "description": "",
+            "status": "active",
+            "created_ts": "2026-01-01T10:00:00.000Z", "updated_ts": "2026-01-01T10:00:00.000Z",
+            "notes": [],
+            "members": [
+              {{"image_hash": "{img}", "added_ts": "2026-01-01T10:00:00.000Z",
+                "removed_ts": "2026-01-02T10:00:00.000Z"}},
+              {{"image_hash": "{img}", "added_ts": "2026-01-01T10:00:00.000Z",
+                "removed_ts": null}}
+            ]
+        }}]}}"#
+    );
+    // Accepting this would let the second row's null removed_ts win by
+    // file order in the new-collection import path — un-removing a member
+    // (the 13.9 guarantee) without ever consulting the merge rules.
+    assert!(matches!(
+        parse_collections(dup_member.as_bytes()),
+        Err(CollectionsError::Parse(msg)) if msg.contains("duplicate member key")
+    ));
+
+    let dup_note = r#"{"version": 1, "collections": [{
+        "id": "01HV00000000000000000000A1", "name": "x", "description": "",
+        "status": "active",
+        "created_ts": "2026-01-01T10:00:00.000Z", "updated_ts": "2026-01-01T10:00:00.000Z",
+        "notes": [
+          {"id": "01HV0000000000000000000N01", "ts": "2026-01-01T10:00:00.000Z", "text": "a"},
+          {"id": "01HV0000000000000000000N01", "ts": "2026-01-01T10:00:00.000Z", "text": "b"}
+        ],
+        "members": []
+    }]}"#;
+    assert!(matches!(
+        parse_collections(dup_note.as_bytes()),
+        Err(CollectionsError::Parse(msg)) if msg.contains("duplicate note id")
+    ));
+}
+
+#[test]
+fn corrupt_file_salvages_every_individually_intact_collection() {
+    // One garbled entry must not cost the user the whole store: the file
+    // is renamed aside (bytes preserved) AND the intact collections are
+    // imported.
+    let env = Env::new();
+    let good_id = "01HV00000000000000000000A1";
+    let content = format!(
+        r#"{{"version": 1, "collections": [
+          {{"id": "{good_id}", "name": "Intact", "description": "",
+            "status": "active",
+            "created_ts": "2026-01-01T10:00:00.000Z", "updated_ts": "2026-01-01T10:00:00.000Z",
+            "notes": [], "members": []}},
+          {{"id": "01HV00000000000000000000B2", "name": "Garbled", "description": "",
+            "status": "active",
+            "created_ts": "not a timestamp", "updated_ts": "2026-01-01T10:00:00.000Z",
+            "notes": [], "members": []}}
+        ]}}"#
+    );
+    fs::write(env.file(), content).unwrap();
+
+    let c = env.open();
+    let listed = c.list().unwrap();
+    assert_eq!(listed.len(), 1, "the intact collection was salvaged");
+    assert_eq!(listed[0].name, "Intact");
+    let aside: Vec<_> = fs::read_dir(&env.app_data)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            name.contains(".corrupt-").then_some(name)
+        })
+        .collect();
+    assert_eq!(aside.len(), 1, "the original bytes are preserved aside");
+}
 
 #[test]
 fn corrupt_file_is_renamed_aside_never_overwritten_in_place() {
@@ -422,18 +593,34 @@ fn corrupt_file_is_renamed_aside_never_overwritten_in_place() {
 }
 
 #[test]
-fn newer_version_file_is_opaque_and_inviolable() {
+fn newer_version_file_is_opaque_inviolable_and_loud() {
     let env = Env::new();
     let foreign = b"{\n  \"collections\": [],\n  \"version\": 2\n}\n".to_vec();
     fs::write(env.file(), &foreign).unwrap();
     let c = env.open();
+    // The lockout is reportable, not silent (SIDECARS 5.3: the user must
+    // learn mirroring is off).
+    assert_eq!(c.newer_version_lockout(), Some(2));
+
     let t0 = ts("2026-06-01T10:00:00.000Z");
     c.create("Local only", "", t0).unwrap();
-    c.flush(t0).unwrap();
     assert!(
         !c.pump(UtcMillis::from_epoch_ms(t0.epoch_ms() + 60_000))
             .unwrap()
     );
+    // An explicit flush with pending mutations ERRORS: truth would
+    // otherwise live in SQLite only while the caller believes it drained.
+    assert!(matches!(
+        c.flush(t0),
+        Err(CollectionsError::NewerVersion(2))
+    ));
+    // The one-click export errors too: a database-derived file would
+    // silently omit the v2 file's collections ("walk away with
+    // everything" cannot be delivered by this build).
+    assert!(matches!(
+        c.export_to(&env.app_data.join("export"), t0),
+        Err(CollectionsError::NewerVersion(2))
+    ));
     assert_eq!(
         fs::read(env.file()).unwrap(),
         foreign,
@@ -442,7 +629,7 @@ fn newer_version_file_is_opaque_and_inviolable() {
 }
 
 #[test]
-fn export_to_writes_the_file_beside_an_export_and_rebuild_ignores_it() {
+fn export_to_writes_the_file_beside_an_export_and_rebuild_consumes_it() {
     let env = Env::new();
     let c = env.open();
     let t0 = ts("2026-06-01T10:00:00.000Z");
@@ -458,13 +645,19 @@ fn export_to_writes_the_file_beside_an_export_and_rebuild_ignores_it() {
         "the export carries the same canonical bytes as the live file"
     );
 
-    // The sidecar rebuild scanner must not quarantine the collections file
-    // sitting beside the manifest (it is not event truth).
-    let store = std::sync::Arc::new(EventStore::open(&env.db).unwrap());
+    // RETRIEVAL 10.2: the export file is CONSUMED by rebuild-from-sidecars
+    // itself — the fresh-machine restore (only the one-click export in
+    // hand, empty app data) gets collections back with no extra step.
+    let env2 = Env::new();
+    let store = std::sync::Arc::new(EventStore::open(&env2.db).unwrap());
     let locator = photoproof_core::sidecar::MemoryLocator::new();
-    let engine =
-        photoproof_core::sidecar::SidecarEngine::new_shared(store, &env.db, &env.app_data, locator)
-            .unwrap();
+    let engine = photoproof_core::sidecar::SidecarEngine::new_shared(
+        store,
+        &env2.db,
+        &env2.app_data,
+        locator,
+    )
+    .unwrap();
     let report = photoproof_core::sidecar::rebuild_from_sidecars(
         &engine,
         &photoproof_core::sidecar::RebuildOptions::export_dir(&export_dir),
@@ -477,12 +670,22 @@ fn export_to_writes_the_file_beside_an_export_and_rebuild_ignores_it() {
         report.failures
     );
     assert!(report.collisions.is_empty());
+    assert_eq!(
+        report.collections_files_imported,
+        vec![path],
+        "the import is surfaced in the integrity report, never silent"
+    );
 
-    // And the file itself rebuilds collections into a fresh database.
-    let env2 = Env::new();
+    // The rebuilt database holds the collection, and the rebuild also
+    // converged the app-data mirror so the next open needs no extra step.
     let c2 = env2.open();
-    c2.import_file(&path, t0).unwrap();
     assert_eq!(c2.get(&rec.id).unwrap().member_count, 1);
+    assert!(
+        fs::read_to_string(env2.file())
+            .unwrap()
+            .contains("Exported"),
+        "the app-data mirror carries the imported union"
+    );
 }
 
 // ---------------------------------------------------------------------------

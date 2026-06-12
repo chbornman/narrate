@@ -3,13 +3,19 @@
 //! this packet; the rail tab builds on these commands and on the
 //! `collections-changed` snapshot event (the `roots-changed` pattern —
 //! mutations from any window land in every window live).
+//!
+//! Membership HISTORY (closed intervals) stays a core-level read until a
+//! surface needs it; everything else in §10.1 — including notes and the
+//! description — is reachable here.
+
+use std::sync::Mutex;
 
 use photoproof_core::ContentHash;
-use photoproof_core::collections::{CollectionRecord, CollectionStatus};
+use photoproof_core::collections::{CollectionRecord, CollectionStatus, NoteEntry};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use super::{S, parse_hash};
-use crate::dto::CollectionDto;
+use crate::dto::{CollectionDto, CollectionNoteDto};
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -26,6 +32,14 @@ fn dto(rec: CollectionRecord) -> CollectionDto {
     }
 }
 
+fn note_dto(n: NoteEntry) -> CollectionNoteDto {
+    CollectionNoteDto {
+        id: n.id,
+        ts: n.ts,
+        text: n.text,
+    }
+}
+
 fn snapshot(app: &App) -> CmdResult<Vec<CollectionDto>> {
     Ok(app.collections.list()?.into_iter().map(dto).collect())
 }
@@ -33,7 +47,18 @@ fn snapshot(app: &App) -> CmdResult<Vec<CollectionDto>> {
 /// Every mutation emits the fresh full snapshot — collections number in
 /// the tens, so snapshot payloads stay trivially small and the frontend
 /// never reconciles deltas.
+///
+/// WHY the lock spans snapshot-read AND emit: commands run on independent
+/// blocking threads, so two concurrent mutations could otherwise read
+/// snapshots in one order and emit them in the other — the last-delivered
+/// snapshot would then be the STALE one, and (since the frontend never
+/// reconciles deltas) every window would render stale state until the next
+/// mutation. Reading the snapshot inside the lock, after the mutation
+/// committed, guarantees each emitted snapshot is current as of its emit
+/// and emits leave in snapshot order.
 fn emit_collections_changed<R: Runtime>(app: &App, handle: &AppHandle<R>) {
+    static EMIT_ORDER: Mutex<()> = Mutex::new(());
+    let _ordered = EMIT_ORDER.lock().expect("collections emit mutex");
     if let Ok(list) = snapshot(app) {
         let _ = handle.emit("collections-changed", list);
     }
@@ -112,6 +137,63 @@ pub async fn set_collection_status<R: Runtime>(
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+#[tauri::command]
+pub async fn set_collection_description<R: Runtime>(
+    app: S<'_>,
+    handle: AppHandle<R>,
+    id: String,
+    description: String,
+) -> CmdResult<CollectionDto> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        app.collections
+            .set_description(&id, &description, photoproof_core::UtcMillis::now())?;
+        emit_collections_changed(&app, &handle);
+        Ok(dto(app.collections.get(&id)?))
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Append a note (§10.1: append-only — no edit or delete exists).
+#[tauri::command]
+pub async fn add_collection_note<R: Runtime>(
+    app: S<'_>,
+    handle: AppHandle<R>,
+    id: String,
+    text: String,
+) -> CmdResult<CollectionNoteDto> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        let note = app
+            .collections
+            .add_note(&id, &text, photoproof_core::UtcMillis::now())?;
+        // note_count is part of every snapshot row, so notes announce too.
+        emit_collections_changed(&app, &handle);
+        Ok(note_dto(note))
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Notes in id order (ULID order = time order).
+#[tauri::command]
+pub async fn collection_notes(app: S<'_>, id: String) -> CmdResult<Vec<CollectionNoteDto>> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(app
+            .collections
+            .notes(&id)?
+            .into_iter()
+            .map(note_dto)
+            .collect())
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 /// Add images by explicit hash list. Returns the number of NEWLY opened
 /// membership intervals (already-current members are skipped, §10.1).
 #[tauri::command]
@@ -139,7 +221,7 @@ pub async fn add_to_collection<R: Runtime>(
 
 /// Remove images by explicit hash list: closes the open intervals —
 /// evented, never destructive; history stays queryable (§10.1). Returns
-/// the number of intervals closed.
+/// the number of images whose membership was closed.
 #[tauri::command]
 pub async fn remove_from_collection<R: Runtime>(
     app: S<'_>,
@@ -279,22 +361,50 @@ mod tests {
         assert!(
             tauri::async_runtime::block_on(set_collection_status(
                 state.clone(),
-                handle,
+                handle.clone(),
                 created.id.clone(),
                 "archived".into(),
             ))
             .is_err()
         );
 
+        // The §10.1 notes/description surface (P7.3 follow-up to the
+        // original seven commands).
+        let described = tauri::async_runtime::block_on(set_collection_description(
+            state.clone(),
+            handle.clone(),
+            created.id.clone(),
+            "the fog series".into(),
+        ))
+        .expect("set_collection_description");
+        assert_eq!(described.description, "the fog series");
+
+        let noted = tauri::async_runtime::block_on(add_collection_note(
+            state.clone(),
+            handle,
+            created.id.clone(),
+            "started during the cold snap".into(),
+        ))
+        .expect("add_collection_note");
+        let notes =
+            tauri::async_runtime::block_on(collection_notes(state.clone(), created.id.clone()))
+                .expect("collection_notes");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, noted.id);
+        assert_eq!(notes[0].text, "started during the cold snap");
+
         let listed =
             tauri::async_runtime::block_on(list_collections(state)).expect("list_collections");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].member_count, 0, "membership was closed");
+        assert_eq!(listed[0].note_count, 1);
 
         // Every mutation emitted a snapshot: create, add, remove, rename,
-        // set-status (the failed set-status emits nothing).
+        // set-status, set-description, add-note (the failed set-status
+        // emits nothing).
         let got = payloads.lock().expect("payload mutex");
-        assert_eq!(got.len(), 5, "one snapshot per committed mutation");
+        assert_eq!(got.len(), 7, "one snapshot per committed mutation");
         assert!(got[4].contains("Quiet Hours II"));
+        assert!(got[6].contains("\"noteCount\":1"));
     }
 }

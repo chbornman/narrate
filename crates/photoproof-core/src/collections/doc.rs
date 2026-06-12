@@ -4,7 +4,7 @@
 //! sidecar canonical form (SIDECARS §3.5) so the debounced writer's
 //! mtime-stable byte comparison is exact.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
@@ -210,7 +210,12 @@ pub fn parse_collections(bytes: &[u8]) -> Result<ParsedCollections, CollectionsE
 
     // Duplicate collection ids inside ONE file are a producer bug, not a
     // merge input; folding them silently would hide corruption upstream.
+    // The same stance applies to duplicate note ids (file-wide: ULIDs are
+    // globally unique, and `collection_notes.id` is the table's primary
+    // key) — accepting them would let last-row-wins resolution bypass the
+    // merge rules when the collection is new to this database.
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
+    let mut seen_notes: BTreeSet<String> = BTreeSet::new();
     let mut collections = Vec::with_capacity(list.len());
     for (i, cv) in list.iter().enumerate() {
         let c = parse_collection(cv)
@@ -221,11 +226,71 @@ pub fn parse_collections(bytes: &[u8]) -> Result<ParsedCollections, CollectionsE
                 c.id
             )));
         }
+        for n in &c.notes {
+            if !seen_notes.insert(n.id.clone()) {
+                return Err(CollectionsError::Parse(format!(
+                    "collections[{i}]: duplicate note id {}",
+                    n.id
+                )));
+            }
+        }
         collections.push(c);
     }
     let mut doc = CollectionsDoc { collections };
     doc.normalize();
     Ok(ParsedCollections::Doc(doc))
+}
+
+/// Best-effort salvage of a file the strict parse rejected: every
+/// collection entry that individually validates is recovered; the rest
+/// are reported. The sidecar precedent (SIDECARS §12.3) quarantines per
+/// FILE because each file holds one image's journal — collections
+/// concentrate ALL user truth in one file, so one garbled note must not
+/// cost the user every intact collection. Strict `parse_collections`
+/// remains the contract for compliant files; this runs only after it
+/// has already failed, and the original bytes are preserved aside by
+/// the caller before anything is imported.
+pub(crate) fn salvage_collections(bytes: &[u8]) -> (CollectionsDoc, Vec<String>) {
+    let nothing = (CollectionsDoc::default(), Vec::new());
+    let Ok(Value::Object(top)) = serde_json::from_slice::<Value>(bytes) else {
+        return nothing; // not JSON at all: no entry boundaries to salvage
+    };
+    // A missing/garbled version cannot be trusted to be ours, and a newer
+    // version is opaque by contract — recover nothing in either case.
+    match top.get("version").and_then(Value::as_u64) {
+        Some(v) if v <= COLLECTIONS_VERSION => {}
+        _ => return nothing,
+    }
+    let Some(list) = top.get("collections").and_then(Value::as_array) else {
+        return nothing;
+    };
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen_notes: BTreeSet<String> = BTreeSet::new();
+    let mut collections = Vec::new();
+    let mut errors = Vec::new();
+    for (i, cv) in list.iter().enumerate() {
+        match parse_collection(cv) {
+            Ok(c) => {
+                if !seen.insert(c.id.clone()) {
+                    errors.push(format!(
+                        "collections[{i}]: duplicate collection id {}",
+                        c.id
+                    ));
+                    continue;
+                }
+                if let Some(n) = c.notes.iter().find(|n| seen_notes.contains(&n.id)) {
+                    errors.push(format!("collections[{i}]: duplicate note id {}", n.id));
+                    continue;
+                }
+                seen_notes.extend(c.notes.iter().map(|n| n.id.clone()));
+                collections.push(c);
+            }
+            Err(e) => errors.push(format!("collections[{i}]: {e}")),
+        }
+    }
+    let mut doc = CollectionsDoc { collections };
+    doc.normalize();
+    (doc, errors)
 }
 
 fn parse_collection(v: &Value) -> Result<CollectionEntry, String> {
@@ -240,7 +305,13 @@ fn parse_collection(v: &Value) -> Result<CollectionEntry, String> {
     let created_ts = req_ts(obj, "created_ts")?;
     let updated_ts = req_ts(obj, "updated_ts")?;
 
+    // Duplicate keys WITHIN one collection get the same strict rejection
+    // as duplicate collection ids: the merge resolves duplicates only
+    // across documents, so an in-file duplicate would otherwise fall
+    // through to last-row-wins in the database upsert — which can
+    // un-remove a member (a literal §13.9 violation).
     let mut notes = Vec::new();
+    let mut note_ids: BTreeSet<String> = BTreeSet::new();
     for (i, nv) in req_array(obj, "notes")?.iter().enumerate() {
         let n = nv
             .as_object()
@@ -248,6 +319,9 @@ fn parse_collection(v: &Value) -> Result<CollectionEntry, String> {
         let nid = req_str(n, "id").map_err(|e| format!("notes[{i}]: {e}"))?;
         if !valid_ulid_str(&nid) {
             return Err(format!("notes[{i}]: id is not a ULID: {nid}"));
+        }
+        if !note_ids.insert(nid.clone()) {
+            return Err(format!("notes[{i}]: duplicate note id {nid}"));
         }
         notes.push(NoteEntry {
             id: nid,
@@ -257,6 +331,7 @@ fn parse_collection(v: &Value) -> Result<CollectionEntry, String> {
     }
 
     let mut members = Vec::new();
+    let mut member_keys: BTreeSet<(String, String)> = BTreeSet::new();
     for (i, mv) in req_array(obj, "members")?.iter().enumerate() {
         let m = mv
             .as_object()
@@ -272,9 +347,15 @@ fn parse_collection(v: &Value) -> Result<CollectionEntry, String> {
             }
             Some(other) => return Err(format!("members[{i}]: removed_ts: {other}")),
         };
+        let added_ts = req_ts(m, "added_ts").map_err(|e| format!("members[{i}]: {e}"))?;
+        if !member_keys.insert((hash.clone(), added_ts.clone())) {
+            return Err(format!(
+                "members[{i}]: duplicate member key ({hash}, {added_ts})"
+            ));
+        }
         members.push(MemberEntry {
             image_hash: hash,
-            added_ts: req_ts(m, "added_ts").map_err(|e| format!("members[{i}]: {e}"))?,
+            added_ts,
             removed_ts,
         });
     }

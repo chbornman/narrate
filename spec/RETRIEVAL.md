@@ -822,7 +822,7 @@ CREATE TABLE collections (
   name        TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   status      TEXT NOT NULL CHECK (status IN ('active','shelved','done')),
-  created_ts  TEXT NOT NULL,                  -- RFC 3339 UTC
+  created_ts  TEXT NOT NULL,                  -- RFC 3339 UTC, millisecond precision (EVENTS 1.3)
   updated_ts  TEXT NOT NULL
 );
 CREATE TABLE collection_notes (               -- append-only, like the event log
@@ -866,13 +866,18 @@ appdata/collections.photoproof.json
   "collections": [ {
       "id": "01HV…", "name": "Quiet Hours", "description": "…",
       "status": "active",
-      "created_ts": "2026-01-02T19:00:00Z", "updated_ts": "2026-05-30T22:10:00Z",
+      "created_ts": "2026-01-02T19:00:00.000Z", "updated_ts": "2026-05-30T22:10:00.000Z",
       "notes":   [ { "id": "01HV…", "ts": "…", "text": "…" } ],
       "members": [ { "image_hash": "ab12…", "added_ts": "…", "removed_ts": null } ]
   } ]
 }
 ```
 
+- Every timestamp in the file is the one canonical form: RFC 3339 UTC with
+  exactly millisecond precision (EVENTS §1.3). This is normative, not a
+  serialization detail — the merge rules below compare timestamps as
+  strings, and only a single fixed-width form makes lexicographic order
+  equal chronological order. Readers reject other shapes.
 - Included in the one-click full export beside the sidecar set + manifest;
   consumed by rebuild-from-sidecars. "You can walk away with everything"
   includes your collections.

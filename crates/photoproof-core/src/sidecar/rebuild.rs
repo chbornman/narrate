@@ -65,7 +65,7 @@ impl RebuildOptions {
 pub fn rebuild_from_sidecars<L: ImageLocator>(
     engine: &SidecarEngine<'_, L>,
     opts: &RebuildOptions,
-    _now: UtcMillis,
+    now: UtcMillis,
 ) -> Result<IntegrityReport, SidecarError> {
     let mut report = IntegrityReport::default();
 
@@ -83,11 +83,21 @@ pub fn rebuild_from_sidecars<L: ImageLocator>(
     // `collections.photoproof.json` (RETRIEVAL §10.2, P7.3) sits beside the
     // manifest in every export directory and matches the sidecar suffix,
     // but it is not event truth: crate::collections owns its parse and
-    // union-merge. Skipping by name keeps it out of the quarantine report.
+    // union-merge, so the files are split out of the event scan here and
+    // consumed through that module below (§10.2 is normative: the export's
+    // collections file is "consumed by rebuild-from-sidecars" — a fresh
+    // machine restoring from the one-click export gets its collections back
+    // from THIS path, not from app data it does not have).
+    let mut collections_files: Vec<PathBuf> = Vec::new();
     files.retain(|p| {
-        p.file_name()
-            .map(|n| !n.eq_ignore_ascii_case(crate::collections::COLLECTIONS_FILENAME))
-            .unwrap_or(true)
+        let is_collections = p
+            .file_name()
+            .map(|n| n.eq_ignore_ascii_case(crate::collections::COLLECTIONS_FILENAME))
+            .unwrap_or(false);
+        if is_collections {
+            collections_files.push(p.clone());
+        }
+        !is_collections
     });
 
     // -- Step 2: parse & validate (failures quarantined, nothing aborts) ------
@@ -211,6 +221,14 @@ pub fn rebuild_from_sidecars<L: ImageLocator>(
         cross_check_manifest(mpath, manifest, &mut report);
     }
 
+    // -- Collections (RETRIEVAL §10.2): union-merge every scanned
+    //    `collections.photoproof.json` into the same database the engine
+    //    wraps. Failures are reported, never aborting — the event rebuild
+    //    above already succeeded.
+    if !collections_files.is_empty() {
+        import_collections_files(engine, collections_files, now, &mut report);
+    }
+
     // -- Step 8: post-rebuild convergence — rewrite any scanned sidecar now
     //    a subset of the union; the dirty queue then drains to empty by
     //    construction (DB == sidecars).
@@ -262,6 +280,60 @@ pub fn rebuild_from_sidecars<L: ImageLocator>(
     }
 
     Ok(report)
+}
+
+/// RETRIEVAL §10.2: import scanned collections files through the
+/// collections store (its parse + union-merge are the ONLY implementation
+/// of the §10.2 rules — the rebuild never re-states them). Opening the
+/// store over the engine's database also reconciles/converges the app-data
+/// mirror, so the imported union lands there too.
+fn import_collections_files<L: ImageLocator>(
+    engine: &SidecarEngine<'_, L>,
+    paths: Vec<PathBuf>,
+    now: UtcMillis,
+    report: &mut IntegrityReport,
+) {
+    use crate::collections::{Collections, CollectionsError};
+
+    let collections = match Collections::open(engine.db_path(), engine.app_data()) {
+        Ok(c) => c,
+        Err(e) => {
+            // Surface the failure on every file the user expected imported.
+            for path in paths {
+                report
+                    .failures
+                    .push((path, format!("collections store open failed: {e}")));
+            }
+            return;
+        }
+    };
+    for path in paths {
+        match collections.import_file(&path, now) {
+            Ok(outcome) => {
+                for c in outcome.note_conflicts {
+                    report.collection_note_conflicts.push((
+                        c.note_id,
+                        format!(
+                            "collection {}: losing copy ts={} text={:?}",
+                            c.collection_id, c.loser.ts, c.loser.text
+                        ),
+                    ));
+                }
+                report.collections_files_imported.push(path);
+            }
+            // §5.3: opaque and inviolable; counted, never imported.
+            Err(CollectionsError::NewerVersion(_)) => report.newer_version_files.push(path),
+            Err(e) => report.failures.push((path, e.to_string())),
+        }
+    }
+    // Mirror the merged union out to app data now rather than leaving it
+    // to the next mutation; a lockout (newer-version app-data file owns
+    // the mirror path) surfaces as a reported failure, never silently.
+    if let Err(e) = collections.flush(now) {
+        report
+            .failures
+            .push((engine.app_data().to_path_buf(), e.to_string()));
+    }
 }
 
 /// The owning session of a session journal (`image: null`): the first

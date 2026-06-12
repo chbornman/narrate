@@ -75,8 +75,11 @@ impl App {
         let engine =
             SidecarEngine::new_shared(store.clone(), &db_path, &app_data, library.clone())?;
         // Open AFTER the sidecar engine so the schema exists; the open-time
-        // reconcile union-merges an existing collections.photoproof.json
-        // into the database (the rebuild path needs no extra wiring).
+        // reconcile union-merges an existing app-data
+        // collections.photoproof.json into the database. The export-restore
+        // case (fresh machine, only the one-click export) is covered inside
+        // rebuild_from_sidecars, which imports the collections file it
+        // finds beside the manifest (RETRIEVAL 10.2).
         let collections = Arc::new(Collections::open(&db_path, &app_data)?);
         let searcher = Searcher::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?;
 

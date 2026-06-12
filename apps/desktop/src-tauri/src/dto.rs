@@ -331,3 +331,13 @@ pub struct CollectionDto {
     pub member_count: usize,
     pub note_count: usize,
 }
+
+/// One collection note (RETRIEVAL §10.1: append-only, never edited or
+/// deleted) as the rail tab's notes pane renders it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionNoteDto {
+    pub id: String,
+    pub ts: String,
+    pub text: String,
+}

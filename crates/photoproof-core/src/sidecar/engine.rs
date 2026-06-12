@@ -162,6 +162,12 @@ pub struct IntegrityReport {
     pub quarantined: Vec<(PathBuf, usize, String)>,
     /// Manifest cross-check discrepancies (§12.3, advisory).
     pub manifest_discrepancies: Vec<String>,
+    /// RETRIEVAL §10.2: `collections.photoproof.json` files found beside
+    /// the scanned roots and union-merged into the database.
+    pub collections_files_imported: Vec<PathBuf>,
+    /// Collections-file note conflicts (same note id, different content):
+    /// (note id, losing copy description) — preserved, never silent.
+    pub collection_note_conflicts: Vec<(String, String)>,
 }
 
 impl IntegrityReport {
@@ -267,6 +273,10 @@ pub struct SidecarEngine<'s, L: ImageLocator> {
     /// Own connection to the same database for the P2.1 tables (the
     /// EventStore's pool is private; WAL makes a sibling connection safe).
     pub(crate) conn: Mutex<Connection>,
+    /// The database path the store was opened on. Kept so rebuild can open
+    /// sibling engines over the same database (the collections store, when
+    /// an export carries `collections.photoproof.json` — RETRIEVAL §10.2).
+    pub(crate) db_path: PathBuf,
     pub(crate) app_data: PathBuf,
     pub(crate) locator: L,
     pub(crate) debouncer: Mutex<Debouncer>,
@@ -307,6 +317,7 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
         Ok(Self {
             store,
             conn: Mutex::new(conn),
+            db_path: db_path.as_ref().to_path_buf(),
             app_data: app_data.into(),
             locator,
             debouncer: Mutex::new(Debouncer::new()),
@@ -315,6 +326,11 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
 
     pub fn app_data(&self) -> &Path {
         &self.app_data
+    }
+
+    /// The database path this engine (and its store) was opened on.
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
     }
 
     fn with_conn<T>(
