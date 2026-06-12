@@ -70,6 +70,21 @@ impl FileEntry {
     pub fn file_name(&self) -> &str {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
+
+    /// B55 fail-closed: an all-zero sha or the UNPINNED-P6.3 revision
+    /// placeholder means this entry has not been through a spike session.
+    /// The downloader refuses it pre-flight; consent never enqueues it;
+    /// settings renders it as pending, not failed.
+    pub fn is_pinned(&self) -> bool {
+        !(self.sha256.bytes().all(|b| b == b'0') || self.revision == "UNPINNED-P6.3")
+    }
+}
+
+impl ModelEntry {
+    /// Every file pinned (see [`FileEntry::is_pinned`]).
+    pub fn is_pinned(&self) -> bool {
+        self.files.iter().all(FileEntry::is_pinned)
+    }
 }
 
 impl Manifest {

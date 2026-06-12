@@ -279,10 +279,15 @@ impl RuntimeHost {
                     "failed"
                 } else if downloading.is_some() {
                     "downloading"
-                } else if offered_here {
-                    "not-downloaded"
-                } else {
+                } else if !offered_here {
                     "not-offered"
+                } else if !m.is_pinned() {
+                    // B55: offered here but no pin yet (spike session 2) —
+                    // pending, not a failure; settings offers no Download
+                    // button.
+                    "unpinned"
+                } else {
+                    "not-downloaded"
                 };
                 ModelRow {
                     id: m.id.clone(),
@@ -424,6 +429,12 @@ impl RuntimeHost {
         let Some(model) = self.manifest.model(model_id).cloned() else {
             return Err(format!("unknown model {model_id:?}"));
         };
+        if !model.is_pinned() {
+            // B55: the worker would only fail closed; refuse at the seam
+            // (settings shows no Download button for unpinned rows — this
+            // guards the raw command).
+            return Err(format!("{model_id} is not pinned yet (spike session 2)"));
+        }
         self.enqueue_downloads(vec![model]);
         Ok(())
     }
@@ -435,10 +446,15 @@ impl RuntimeHost {
             .expect("runtime state")
             .tier
             .effective_tier;
+        // Unpinned entries (B55 fail-closed; the embedders until spike
+        // session 2) never enqueue: the worker would only mint a "failed"
+        // row for a download that cannot exist yet. Settings shows them
+        // as pending instead.
         let offered: Vec<_> = self
             .manifest
             .offered_at(tier)
             .into_iter()
+            .filter(|m| m.is_pinned())
             .cloned()
             .collect();
         self.enqueue_downloads(offered);
@@ -741,11 +757,13 @@ mod tests {
     }
 
     /// §5.2: "one file at a time" is manager-wide, not per-model —
-    /// consent at Tier 1 drains every offered model through ONE worker
-    /// thread, strictly in order; nothing transfers concurrently. (Every
-    /// transfer fails fast here — compiled-manifest URLs are https and
-    /// the TLS client is P6.3 — which is exactly why thread identity is
-    /// the observable: the old fan-out ran four threads regardless.)
+    /// consent at Tier 1 drains every PINNED offered model through ONE
+    /// worker thread, strictly in order; nothing transfers concurrently;
+    /// unpinned entries (B55: the embedders until spike session 2) never
+    /// enqueue and surface as "unpinned", not "failed". (Every transfer
+    /// fails fast here — no network in tests — which is exactly why
+    /// thread identity is the observable: the old fan-out ran four
+    /// threads regardless.)
     #[test]
     fn consent_download_drains_all_offered_models_on_one_worker_thread() {
         let dir = tempfile::tempdir().unwrap();
@@ -755,9 +773,10 @@ mod tests {
             .manifest
             .offered_at(1)
             .iter()
+            .filter(|m| m.is_pinned())
             .map(|m| m.id.clone())
             .collect();
-        assert!(offered.len() >= 2, "Tier 1 offers several models");
+        assert!(offered.len() >= 2, "Tier 1 offers several pinned models");
 
         host.set_consent("download");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -782,7 +801,7 @@ mod tests {
         assert_eq!(
             log.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
             offered,
-            "every offered model ran, in enqueue order"
+            "every PINNED offered model ran, in enqueue order"
         );
         let worker = log[0].1;
         assert!(
@@ -795,6 +814,39 @@ mod tests {
             std::thread::current().id(),
             "…and it is the background worker, not the caller"
         );
+    }
+
+    /// B55 surfaced honestly (founder dogfood, June 2026): an unpinned
+    /// entry is PENDING, not a failure — consent skips it (no error row
+    /// minted, asserted via the thread-log test above), status names the
+    /// distinct state, and the explicit download command refuses at the
+    /// seam instead of letting the worker mint "failed".
+    #[test]
+    fn unpinned_models_surface_as_pending_and_refuse_explicit_download() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 1\n").unwrap();
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        let unpinned: Vec<String> = host
+            .manifest
+            .models
+            .iter()
+            .filter(|m| !m.is_pinned())
+            .map(|m| m.id.clone())
+            .collect();
+        assert!(
+            !unpinned.is_empty(),
+            "the embedders ship unpinned until spike session 2"
+        );
+        let status = host.status();
+        for id in &unpinned {
+            let row = status.models.iter().find(|m| &m.id == id).unwrap();
+            assert_eq!(row.state, "unpinned", "{id} is pending, never failed");
+            assert!(row.error.is_none());
+            assert!(
+                host.download_model(id).is_err(),
+                "{id}: explicit download refuses at the seam"
+            );
+        }
     }
 
     #[test]

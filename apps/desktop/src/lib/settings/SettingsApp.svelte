@@ -214,6 +214,10 @@
           <span class="state">
             {#if m.state === "downloading"}
               downloading — {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
+            {:else if m.state === "unpinned"}
+              <!-- B55 fail-closed: no verified pin yet (embedders until
+                   spike session 2) — pending, not a failure. -->
+              coming in a later build
             {:else}
               {m.state}
             {/if}

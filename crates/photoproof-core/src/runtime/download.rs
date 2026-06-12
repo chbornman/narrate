@@ -260,7 +260,7 @@ impl DownloadManager {
         // B55 fail-closed pre-flight: an unpinned entry never reaches the
         // network — not even a HEAD. (The embedder entries ship this way
         // until spike session 2 pins them.)
-        if file.sha256.bytes().all(|b| b == b'0') || file.revision == "UNPINNED-P6.3" {
+        if !file.is_pinned() {
             return Err(DownloadError::Unpinned {
                 file: file.file_name().to_owned(),
             });
