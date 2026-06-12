@@ -33,7 +33,7 @@ pub struct App {
     pub session: Mutex<SessionManager>,
     /// Read-only sibling connection for the debug panel's raw-row reads
     /// (dev builds only; every product-facing read goes through core APIs).
-    #[cfg(feature = "debug-panel")]
+    #[cfg(any(feature = "debug-panel", debug_assertions))]
     pub readq: Mutex<rusqlite::Connection>,
     pub watchers: Mutex<HashMap<String, RootWatcherHandle>>,
     pub settings: Mutex<AppSettings>,
@@ -147,7 +147,7 @@ impl App {
             app_data,
             scope: Mutex::new(ScopeTracker::new()),
             session: Mutex::new(session),
-            #[cfg(feature = "debug-panel")]
+            #[cfg(any(feature = "debug-panel", debug_assertions))]
             readq: Mutex::new(open_read_only(&db_path)?),
             watchers: Mutex::new(HashMap::new()),
             settings: Mutex::new(app_settings),
@@ -272,7 +272,7 @@ impl photoproof_core::capture::SidecarFlush for EngineFlush<'_> {
 
 /// Read-only sibling connection over the shared WAL database (the debug
 /// panel's raw tail reads bypass core on purpose: they render raw rows).
-#[cfg(feature = "debug-panel")]
+#[cfg(any(feature = "debug-panel", debug_assertions))]
 fn open_read_only(db_path: &std::path::Path) -> rusqlite::Result<rusqlite::Connection> {
     use rusqlite::OpenFlags;
     let conn = rusqlite::Connection::open_with_flags(

@@ -57,7 +57,7 @@ impl ScopeTracker {
     }
 
     /// Snapshot history, oldest first (debug panel Capture tab).
-    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "debug-panel", debug_assertions)), allow(dead_code))]
     pub fn history(&self) -> impl Iterator<Item = &ScopeSnapshot> {
         self.ring.history()
     }

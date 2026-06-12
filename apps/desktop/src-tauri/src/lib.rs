@@ -10,7 +10,7 @@
 //! that serves preview bytes without ever touching IPC (P16).
 
 mod commands;
-#[cfg(feature = "debug-panel")]
+#[cfg(any(feature = "debug-panel", debug_assertions))]
 mod debug;
 mod dto;
 mod error;
@@ -157,7 +157,7 @@ pub fn run() {
 // OS-launcher verbs stay on the os.rs xdg-open-class spawns (Stage A) —
 // tauri-plugin-opener was deliberately NOT adopted: the command surface is
 // implemented and tested without it (deviation recorded in DECISIONS).
-#[cfg(not(feature = "debug-panel"))]
+#[cfg(not(any(feature = "debug-panel", debug_assertions)))]
 fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::capture::set_scope,
@@ -206,7 +206,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
 /// Dev builds additionally register the debug-panel commands (UI §10.1:
 /// they do not exist in release binaries; invoking one there fails as
 /// unknown — asserted by scripts/assert-release-clean.sh).
-#[cfg(feature = "debug-panel")]
+#[cfg(any(feature = "debug-panel", debug_assertions))]
 fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::capture::set_scope,

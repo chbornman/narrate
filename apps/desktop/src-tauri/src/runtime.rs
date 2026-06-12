@@ -59,7 +59,7 @@ impl Consent {
 struct HostState {
     config: Config,
     /// Read by the debug panel (feature-gated); kept in every build.
-    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "debug-panel", debug_assertions)), allow(dead_code))]
     config_warnings: Vec<String>,
     tier: TierDecision,
     consent: Consent,
@@ -75,7 +75,7 @@ struct HostState {
     download_queue: VecDeque<String>,
     download_worker_live: bool,
     /// Startup orphan sweep result (killed, skipped) for the debug panel.
-    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "debug-panel", debug_assertions)), allow(dead_code))]
     orphan_sweep: (Vec<String>, Vec<String>),
 }
 
@@ -325,7 +325,7 @@ impl RuntimeHost {
 
     /// Debug-panel detail (§8.1/§8.6): plan states + the orphan sweep +
     /// config warnings.
-    #[cfg_attr(not(feature = "debug-panel"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "debug-panel", debug_assertions)), allow(dead_code))]
     pub fn debug_lines(&self) -> Vec<String> {
         let state = self.state.lock().expect("runtime state");
         let plan = {

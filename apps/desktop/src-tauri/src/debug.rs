@@ -1,11 +1,14 @@
 //! Debug-panel commands (spec/UI.md §10, DECISIONS I6). This module exists
-//! ONLY under the `debug-panel` cargo feature: release binaries carry none
-//! of these commands, and invoking them fails as unknown.
+//! in DEV binaries (debug_assertions — matching the vite dev server, which
+//! always renders the panel) and under the explicit `debug-panel` cargo
+//! feature for debug bundles. Release binaries carry none of these
+//! commands, and invoking them fails as unknown
+//! (scripts/assert-release-clean.sh).
 //!
 //! Read-only except the explicitly-marked dev actions: force sidecar flush,
 //! force rescan (per root).
 
-#![cfg(feature = "debug-panel")]
+#![cfg(any(feature = "debug-panel", debug_assertions))]
 
 use std::sync::Arc;
 
