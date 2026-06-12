@@ -146,7 +146,36 @@ export const GRID_DEFS: ActionDef[] = [
     available: (ctx) => ctx.collections.length > 0,
     toAction: (_ctx, arg) =>
       typeof arg === "string" ? { kind: "add-to-collection", id: arg } : null,
-    options: (ctx) => ctx.collections.map((c) => ({ arg: c.id, label: c.name })),
+    options: (ctx) =>
+      ctx.collections.map((c) => ({
+        arg: c.id,
+        label: c.name,
+        // The promised membership marks (P7.3 command doc): checked =
+        // the ACTIVE image is already a current member, so re-picking a
+        // checked row is visibly a no-op instead of a silent one.
+        checked: ctx.activeMemberships.includes(c.id),
+      })),
+  },
+  // The reverse verb: collections are user truth (RETRIEVAL 10.2) and
+  // gathering must be reversible from the same menu that gathers — a
+  // one-way door on membership was the recorded P7.3-slice gap. The
+  // submenu lists only collections the ACTIVE image is currently in;
+  // multi-select removes the WHOLE stack-expanded selection (the
+  // add-to-collection symmetry).
+  {
+    id: "remove-from-collection",
+    verb: "Remove from collection",
+    keys: [], // pointer-only: the thumb seat submenu
+    scope: "grid",
+    group: "grid",
+    seats: ["thumb"],
+    available: (ctx) => ctx.activeMemberships.length > 0,
+    toAction: (_ctx, arg) =>
+      typeof arg === "string" ? { kind: "remove-from-collection", id: arg } : null,
+    options: (ctx) =>
+      ctx.collections
+        .filter((c) => ctx.activeMemberships.includes(c.id))
+        .map((c) => ({ arg: c.id, label: c.name })),
   },
   // ---- stacks (featureset §5, D1: live, reversible, display-level) --------
   {

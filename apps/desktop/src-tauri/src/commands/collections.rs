@@ -247,8 +247,12 @@ pub async fn remove_from_collection<R: Runtime>(
 
 /// Current members as grid rows (the rail's Collections tab: clicking a
 /// collection shows its members in the grid, exactly as folder selection
-/// drives it). Members the library index does not know — membership is
-/// evented and outlives files (§10.1) — are skipped: nothing to render.
+/// drives it). Only members the library has NEVER ingested are skipped
+/// (no images row — e.g. union-merged from another replica's export,
+/// §10.2): nothing to render. An indexed member whose every path went
+/// stale (file deleted, root removed) still renders, offline-badged —
+/// membership outlives files (§10.1), and member_count keeps counting
+/// it, so dropping it would make the rail badge and the grid disagree.
 #[tauri::command]
 pub async fn list_collection_members(app: S<'_>, id: String) -> CmdResult<Vec<GridItem>> {
     let app = app.inner().clone();
@@ -341,10 +345,13 @@ mod tests {
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].member_count, 1);
 
-        // The members grid read skips hashes the library index does not
-        // know (membership is evented and outlives files, §10.1): this
-        // member was never ingested, so there is nothing to render — and
-        // the command must not error over it.
+        // The members grid read skips hashes the library has NEVER
+        // ingested (membership is evented and outlives files, §10.1, so
+        // such members are legal — e.g. union-merged from another
+        // replica, §10.2): this member was never ingested, there is
+        // nothing to render — and the command must not error over it.
+        // (Indexed members with only STALE paths still render; that case
+        // is covered at the core layer in m1_core_api.rs.)
         let grid = tauri::async_runtime::block_on(list_collection_members(
             state.clone(),
             created.id.clone(),

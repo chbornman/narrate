@@ -14,6 +14,11 @@ const backend = vi.hoisted(() => ({
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   collections: [] as CollectionDto[],
   members: {} as Record<string, GridItem[]>,
+  /** Collection ids per image hash (collections_for_image). */
+  memberships: {} as Record<string, string[]>,
+  /** When set, list_collection_members parks on this promise — lets a
+   * test hold a members response in flight (the stale-response race). */
+  membersGate: null as Promise<void> | null,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -44,7 +49,19 @@ vi.mock("@tauri-apps/api/core", () => ({
         if (c !== undefined) c.memberCount += hashes.length;
         return hashes.length;
       }
+      case "remove_from_collection": {
+        const id = String(args?.id);
+        const hashes = (args?.hashes ?? []) as string[];
+        const c = backend.collections.find((c) => c.id === id);
+        if (c !== undefined) c.memberCount = Math.max(0, c.memberCount - hashes.length);
+        return hashes.length;
+      }
+      case "collections_for_image": {
+        const ids = backend.memberships[String(args?.hash)] ?? [];
+        return backend.collections.filter((c) => ids.includes(c.id));
+      }
       case "list_collection_members":
+        if (backend.membersGate !== null) await backend.membersGate;
         return backend.members[String(args?.id)] ?? [];
       case "list_folder":
       case "folder_tree":
@@ -95,6 +112,8 @@ beforeEach(() => {
   backend.calls.length = 0;
   backend.collections = [coll("01A", "Quiet Hours", "active", 2), coll("01B", "Fog", "shelved")];
   backend.members = { "01A": [item("m1"), item("m2")] };
+  backend.memberships = {};
+  backend.membersGate = null;
   localStorage.clear();
   ui = new Ui();
   ui.collections = [...backend.collections];
@@ -193,5 +212,70 @@ describe("create + live snapshots", () => {
     await ui.onCollectionsChanged([coll("01A", "Quiet Hours", "active", 3)]);
     expect(ui.grid.itemHashes.sort()).toEqual(["m1", "m2", "m3"]);
     expect(ui.collections).toHaveLength(1);
+  });
+});
+
+describe("Remove from collection (the add verb's mirror — no one-way door)", () => {
+  it("sends the WHOLE selection and refreshes the snapshot", async () => {
+    let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 0);
+    s = sel.toggle(s, ui.grid.unitHashes, 2);
+    await ui.applySelection(s);
+    await ui.perform({ kind: "remove-from-collection", id: "01A" });
+    expect(lastCall("remove_from_collection")?.args).toEqual({
+      id: "01A",
+      hashes: ["a", "c"],
+    });
+    // The awaited direct refresh landed the new count.
+    expect(ui.collections.find((c) => c.id === "01A")?.memberCount).toBe(0);
+  });
+
+  it("with no selection, the active image is the target", async () => {
+    ui.grid.sel = { order: [], focus: 1, anchor: 1 };
+    await ui.perform({ kind: "remove-from-collection", id: "01A" });
+    expect(lastCall("remove_from_collection")?.args).toEqual({
+      id: "01A",
+      hashes: ["b"],
+    });
+  });
+});
+
+describe("membership marks follow the active image (thumb menu checkmarks)", () => {
+  it("selection changes load the active image's current memberships", async () => {
+    backend.memberships = { a: ["01A"], b: [] };
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 0));
+    expect(ui.activeMemberships).toEqual(["01A"]);
+    expect(ui.actionContext().activeMemberships).toEqual(["01A"]);
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 1));
+    expect(ui.activeMemberships).toEqual([]);
+  });
+
+  it("add/remove refresh the marks for the unchanged active image", async () => {
+    await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 0));
+    backend.memberships = { a: ["01B"] };
+    await ui.perform({ kind: "add-to-collection", id: "01B" });
+    expect(ui.activeMemberships).toEqual(["01B"]);
+    backend.memberships = { a: [] };
+    await ui.perform({ kind: "remove-from-collection", id: "01B" });
+    expect(ui.activeMemberships).toEqual([]);
+  });
+});
+
+describe("stale async grid loads never clobber the current view", () => {
+  it("a held-up members response loses to a folder opened afterwards", async () => {
+    // Hold the collection's members fetch in flight…
+    let release!: () => void;
+    backend.membersGate = new Promise<void>((r) => (release = r));
+    const opening = ui.perform({ kind: "collection-open", id: "01A" });
+    backend.membersGate = null;
+    // …click a folder while it is still pending…
+    await ui.openFolder("r1", "");
+    expect(ui.collectionId).toBeNull();
+    const folderItems = ui.grid.itemHashes;
+    // …then let the stale members response land: the grid must still
+    // show the folder, not collection members under a folder header.
+    release();
+    await opening;
+    expect(ui.collectionId).toBeNull();
+    expect(ui.grid.itemHashes).toEqual(folderItems);
   });
 });

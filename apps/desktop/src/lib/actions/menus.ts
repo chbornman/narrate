@@ -46,8 +46,10 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "open-look",
     "rate",
     // Collections sit beside Rate: both are gather-while-reviewing verbs
-    // (B71: the app should encourage collecting).
+    // (B71: the app should encourage collecting). Remove rides directly
+    // under Add — membership is reversible from the menu that gathers.
     "add-to-collection",
+    "remove-from-collection",
     "stack-toggle-active",
     "flip-stack-member",
     "—",

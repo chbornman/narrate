@@ -89,6 +89,21 @@ export class Ui {
    * folder (the two are exclusive: openFolder/openCollection clear each
    * other). null = folder mode. */
   collectionId = $state<string | null>(null);
+  /** Collection ids the ACTIVE image is CURRENTLY in (open intervals) —
+   * the thumb menu's Add-to-collection checkmarks and the
+   * Remove-from-collection submenu. Follows the active image through
+   * reportScope (the inspector-follow pattern) and re-loads on
+   * collections-changed, because membership may be what changed. */
+  activeMemberships = $state<string[]>([]);
+  /** The hash activeMemberships describes — dedupes the follow fetch and
+   * guards a stale response against a focus that moved on mid-await. */
+  private membershipsHash: string | null = null;
+  /** Monotone token for async grid loads (openFolder / openCollection /
+   * refreshItems): only the LATEST load may setItems. Without it a
+   * stale collection-members response can overwrite a just-opened
+   * folder's items — or vice versa — because awaits reorder arrivals
+   * while the mode fields already describe the newer view. */
+  private gridLoad = 0;
 
   // -- search ------------------------------------------------------------------
   query = $state("");
@@ -199,6 +214,34 @@ export class Ui {
       this.surface === "look" ? this.look.currentHash : this.grid.activeHash;
     if (this.inspector.open !== false && this.inspector.hash !== active)
       await this.inspector.load(active);
+    // Membership marks follow the active image the same way: the thumb
+    // menu's checkmarks must be honest at open time, not after a click.
+    await this.refreshActiveMemberships();
+  }
+
+  /** Load the ACTIVE image's current memberships (collections_for_image).
+   * Skipped entirely while no collections exist — the common no-collection
+   * session pays zero extra IPC per focus move. `force` re-fetches for an
+   * unchanged hash (a collections-changed snapshot may mean THIS image's
+   * membership moved in another window). */
+  private async refreshActiveMemberships(force = false) {
+    const active =
+      this.surface === "look" ? this.look.currentHash : this.grid.activeHash;
+    if (!force && active === this.membershipsHash) return;
+    this.membershipsHash = active;
+    if (active === null || this.collections.length === 0) {
+      this.activeMemberships = [];
+      return;
+    }
+    try {
+      const list = (await ipc.collectionsForImage(active)) ?? [];
+      // The focus may have moved on during the await: a stale response
+      // must not label a different image's menu.
+      if (this.membershipsHash === active)
+        this.activeMemberships = list.map((c) => c.id);
+    } catch {
+      /* backend unavailable (tests/dev): no membership marks */
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -262,8 +305,13 @@ export class Ui {
     this.grid.folder = folder;
     this.grid.sort = prefs.loadSort(rootId, folder);
     this.grid.sel = sel.EMPTY;
-    this.grid.setItems(await ipc.listFolder(rootId, folder));
-    this.tree = await ipc.folderTree(rootId);
+    const load = ++this.gridLoad;
+    const items = await ipc.listFolder(rootId, folder);
+    if (load !== this.gridLoad) return; // a newer load owns the grid now
+    this.grid.setItems(items);
+    const tree = await ipc.folderTree(rootId);
+    if (load !== this.gridLoad) return;
+    this.tree = tree;
     prefs.saveLastFolder(rootId, folder);
     await this.reportScope();
   }
@@ -278,42 +326,52 @@ export class Ui {
     this.grid.rootId = null;
     this.grid.folder = "";
     this.grid.sel = sel.EMPTY;
-    this.grid.setItems((await ipc.listCollectionMembers(id)) ?? []);
+    const load = ++this.gridLoad;
+    const items = (await ipc.listCollectionMembers(id)) ?? [];
+    if (load !== this.gridLoad) return; // superseded mid-await (mode may differ)
+    this.grid.setItems(items);
     await this.reportScope();
   }
 
   /** `collections-changed` snapshot (any window's mutation — the
    * roots-changed pattern): replace the list whole; a viewed collection
-   * re-lists its members because membership may be what changed. */
+   * re-lists its members, and the active image's membership marks
+   * re-fetch, because membership may be what changed. */
   async onCollectionsChanged(collections: CollectionDto[]) {
     this.collections = collections;
     if (this.collectionId !== null) await this.refreshItems();
+    await this.refreshActiveMemberships(true);
   }
 
   /** The rail's inline create (its footer affordance, the add-root
    * sibling). The fresh snapshot is fetched directly — awaited and
    * deterministic for tests; the `collections-changed` event is the
    * cross-window catch-all, and replacing the same snapshot twice is
-   * harmless. */
+   * harmless. NO catch here: creating a collection is a user-truth write
+   * (RETRIEVAL §10.2) — a real persistence failure must not vanish as if
+   * the backend were merely a test mock (the rate() precedent; the
+   * fire-and-forget swallow is reserved for OS verbs like reveal). */
   async createCollection(name: string) {
     const trimmed = name.trim();
     if (trimmed === "") return;
-    try {
-      await ipc.createCollection(trimmed);
-      this.collections = (await ipc.listCollections()) ?? [];
-    } catch {
-      /* backend unavailable (tests/dev): nothing created */
-    }
+    await ipc.createCollection(trimmed);
+    this.collections = (await ipc.listCollections()) ?? [];
   }
 
-  /** Incremental refresh during ingest: keeps selection/focus (UI §3.3). */
+  /** Incremental refresh during ingest: keeps selection/focus (UI §3.3).
+   * The token is taken only when something will actually load — a no-op
+   * call must not cancel an in-flight open. */
   async refreshItems() {
     if (this.collectionId !== null) {
-      this.grid.setItems((await ipc.listCollectionMembers(this.collectionId)) ?? []);
+      const load = ++this.gridLoad;
+      const items = (await ipc.listCollectionMembers(this.collectionId)) ?? [];
+      if (load === this.gridLoad) this.grid.setItems(items);
       return;
     }
     if (this.grid.rootId === null) return;
-    this.grid.setItems(await ipc.listFolder(this.grid.rootId, this.grid.folder));
+    const load = ++this.gridLoad;
+    const items = await ipc.listFolder(this.grid.rootId, this.grid.folder);
+    if (load === this.gridLoad) this.grid.setItems(items);
   }
 
   /** Coalesced ingest progress (pump.rs, ≤1 per 400 ms): the indicator
@@ -839,6 +897,7 @@ export class Ui {
       micState: this.shell.mic,
       asrUnavailable: this.shell.asrUnavailable,
       collections: this.collections.map((c) => ({ id: c.id, name: c.name })),
+      activeMemberships: this.activeMemberships,
     };
   }
 
@@ -1075,22 +1134,26 @@ export class Ui {
         // Multi-select adds the WHOLE selection, stack-expanded (a
         // collapsed pair contributes both members — the CAPTURE §3 target
         // rule); the thumb right-click already selected an unselected cell.
-        const active = this.actionContext().activeHash;
-        const targets =
-          this.grid.selectionTargets.length > 0
-            ? this.grid.selectionTargets
-            : active !== null
-              ? [active]
-              : [];
+        // NO catch around the write: gathering is user truth (RETRIEVAL
+        // §10.2) and a real persistence failure must not vanish silently
+        // — the rejection propagates like rate()'s (the swallow idiom is
+        // reserved for fire-and-forget OS verbs).
+        const targets = this.collectionTargets();
         if (targets.length === 0) break;
-        try {
-          await ipc.addToCollection(action.id, targets);
-          // Direct refresh (awaited, deterministic for tests); the
-          // collections-changed event is the cross-window catch-all.
-          await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
-        } catch {
-          /* backend unavailable (tests/dev) */
-        }
+        await ipc.addToCollection(action.id, targets);
+        // Direct refresh (awaited, deterministic for tests); the
+        // collections-changed event is the cross-window catch-all.
+        await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
+        break;
+      }
+      case "remove-from-collection": {
+        // The add verb's mirror: membership is evented, never destructive
+        // (§10.1) — removal closes the open intervals and history stays.
+        // Same no-catch rule: closing membership is user truth too.
+        const targets = this.collectionTargets();
+        if (targets.length === 0) break;
+        await ipc.removeFromCollection(action.id, targets);
+        await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
         break;
       }
       case "rail-folder-open":
@@ -1240,6 +1303,16 @@ export class Ui {
   /** Rail rows for the Collections tab (logic/sources.ts provider). */
   railCollectionRows() {
     return collectionRows(this.collections);
+  }
+
+  /** Targets for the membership verbs: the WHOLE stack-expanded selection
+   * (CAPTURE §3 — a collapsed pair contributes both members), falling
+   * back to the active image; the thumb right-click already selected an
+   * unselected cell. */
+  private collectionTargets(): string[] {
+    if (this.grid.selectionTargets.length > 0) return this.grid.selectionTargets;
+    const active = this.actionContext().activeHash;
+    return active !== null ? [active] : [];
   }
 }
 

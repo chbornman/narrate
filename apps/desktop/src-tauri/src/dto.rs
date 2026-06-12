@@ -35,6 +35,11 @@ pub struct GridItem {
     pub file_name: String,
     /// Root-relative path of the file.
     pub rel_path: String,
+    /// Root the representative path sits under. The grid's stack pairing
+    /// keys on it: a COLLECTION grid mixes roots (B71), and identical
+    /// camera paths (DCIM/100CANON/IMG_0001.*) across two roots are
+    /// unrelated photographs that must never collapse into one cell.
+    pub root_id: Option<String>,
     /// EXIF capture timestamp (RFC 3339) when known.
     pub capture_ts: Option<String>,
     /// First-ingested timestamp (RFC 3339) — the "date added" sort key.

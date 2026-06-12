@@ -1,8 +1,13 @@
 /**
- * Source-rail row model (featureset §3), extracted from the old
- * Rail.svelte as pure functions: SourceSection providers — folders today;
- * collections and saved searches join as SIBLING SECTIONS in M3 with zero
- * rail edits (SourceList renders sections generically).
+ * Source-rail row models (featureset §3), extracted from the old
+ * Rail.svelte as pure functions. Folders render as SourceSection rows
+ * (SourceList); collections render as their own flat CollectionRow list
+ * (CollectionList) on a PEER TAB of the rail — the founder's June 2026
+ * direction (B71: collections are the point, folders are mechanical),
+ * which SUPERSEDED the earlier plan of collections joining as sibling
+ * sections. The two row shapes stay separate providers; only moveFocus
+ * is shared (generic over `key`). Saved searches, when they land, get
+ * the same treatment: a peer surface, not a folders section.
  */
 import type { CollectionDto, FolderNode, RootDto } from "../types/dto";
 

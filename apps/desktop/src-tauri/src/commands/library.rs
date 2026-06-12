@@ -188,6 +188,7 @@ pub(crate) fn grid_item(i: photoproof_core::library::FolderImage) -> GridItem {
         hash: i.hash.as_str().to_owned(),
         file_name: i.file_name,
         rel_path: i.rel_path,
+        root_id: i.root_id,
         capture_ts: i.capture_ts,
         added_ts: i.first_ingested_at,
         has_journal: i.has_journal,

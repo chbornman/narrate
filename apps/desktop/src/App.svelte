@@ -201,11 +201,25 @@
                  ingest photographs stream in, so the line stays honest -->
             <div class="grid-empty">
               {#if ui.collectionId !== null}
-                <!-- an empty collection states its own next action: the
-                     verb lives on the image context menu -->
-                <EmptyState
-                  line="Nothing gathered yet — right-click an image and choose Add to collection."
-                />
+                {@const memberCount =
+                  ui.collections.find((c) => c.id === ui.collectionId)?.memberCount ?? 0}
+                {#if memberCount > 0}
+                  <!-- members exist (the rail badge counts them) but none
+                       are renderable: every member is a hash this library
+                       never indexed (e.g. gathered on another machine and
+                       union-merged in, RETRIEVAL 10.2). Membership outlives
+                       files (10.1), so the copy must not claim nothing was
+                       gathered. -->
+                  <EmptyState
+                    line={`${memberCount} gathered ${memberCount === 1 ? "image is" : "images are"} not in this library — they appear once their files are indexed here.`}
+                  />
+                {:else}
+                  <!-- an empty collection states its own next action: the
+                       verb lives on the image context menu -->
+                  <EmptyState
+                    line="Nothing gathered yet — right-click an image and choose Add to collection."
+                  />
+                {/if}
               {:else if ui.shell.ingest.running}
                 <EmptyState line="Indexing — photographs appear as they are found." />
               {:else}

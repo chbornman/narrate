@@ -98,6 +98,11 @@ export interface ActionContext {
   /** Collections (B71), list order, for the thumb menu's Add-to-collection
    * submenu — id + name only: menus never need the full DTO. */
   collections: { id: string; name: string }[];
+  /** Collection ids the ACTIVE image is CURRENTLY a member of (open
+   * intervals) — the Add-to-collection checkmarks and the
+   * Remove-from-collection submenu. With a multi-selection the marks
+   * show the active image's truth (the Rate radio precedent). */
+  activeMemberships: string[];
 }
 
 /** CAPTURE §6.4 mic states, as the wire spells them (types/dto.ts twin). */

@@ -87,6 +87,10 @@ export type Action =
   | { kind: "collection-open"; id: string }
   // thumb seat submenu: add the WHOLE selection to the named collection
   | { kind: "add-to-collection"; id: string }
+  // thumb seat submenu: close the WHOLE selection's open membership
+  // intervals in the named collection (evented, never destructive —
+  // RETRIEVAL §10.1; gathering must be reversible from the same menu)
+  | { kind: "remove-from-collection"; id: string }
   | { kind: "open-inspector"; tab: "metadata" | "journal" }
   | { kind: "close-inspector" }
   // journal row verbs (pointer-seated; Stage C wires the flows)
@@ -161,6 +165,7 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   micState: "disarmed",
   asrUnavailable: true, // degraded until a supervised ASR reports Ready (P6.3)
   collections: [],
+  activeMemberships: [],
 };
 
 export function withDefaults(ctx: KeyContext): ActionContext {

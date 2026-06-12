@@ -88,6 +88,14 @@ export const createCollection = (name: string) =>
  * to the count of NEWLY added members (mutations emit `collections-changed`). */
 export const addToCollection = (id: string, hashes: string[]) =>
   invoke<number>("add_to_collection", { id, hashes });
+/** Close open membership intervals — evented, never destructive (§10.1);
+ * resolves to the count of members actually removed. */
+export const removeFromCollection = (id: string, hashes: string[]) =>
+  invoke<number>("remove_from_collection", { id, hashes });
+/** Collections the image is CURRENTLY a member of — feeds the thumb
+ * menu's membership checkmarks and the Remove-from-collection submenu. */
+export const collectionsForImage = (hash: string) =>
+  invoke<CollectionDto[]>("collections_for_image", { hash });
 /** Current members as grid rows — clicking a collection in the rail shows
  * its members in the grid, exactly as folder selection drives it. */
 export const listCollectionMembers = (id: string) =>

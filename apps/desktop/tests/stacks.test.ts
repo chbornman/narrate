@@ -11,12 +11,13 @@ import * as stacks from "../src/lib/logic/stacks";
 import { scopeLabel } from "../src/lib/logic/scope";
 import type { GridItem } from "../src/lib/types/dto";
 
-const item = (relPath: string): GridItem => {
+const item = (relPath: string, rootId?: string): GridItem => {
   const fileName = relPath.split("/").pop() as string;
   return {
-    hash: `h:${relPath}`,
+    hash: rootId === undefined ? `h:${relPath}` : `h:${rootId}/${relPath}`,
     fileName,
     relPath,
+    rootId,
     captureTs: null,
     addedTs: "2026-06-01T00:00:00Z",
     hasJournal: false,
@@ -47,7 +48,7 @@ describe("auto-pairing by basename + folder (D1)", () => {
     expect(m.units[0].primary.hash).toBe("h:a/IMG_1.jpg");
     expect(m.units[0].alt?.hash).toBe("h:a/IMG_1.cr2");
     expect(m.units[1].alt).toBeNull();
-    expect(m.pairs).toEqual(["a/img_1", null]);
+    expect(m.pairs).toEqual(["|a/img_1", null]);
   });
 
   it("the collapsed cell sits at the first-occurring member's position", () => {
@@ -60,6 +61,25 @@ describe("auto-pairing by basename + folder (D1)", () => {
     const m = collapsed([item("a/IMG_1.jpg"), item("b/IMG_1.cr2")]);
     expect(m.units.length).toBe(2);
     expect(m.pairs).toEqual([null, null]);
+  });
+
+  it("the same root-relative path under DIFFERENT roots never pairs (collection grids mix roots)", () => {
+    // Two card dumps registered as two roots both contain
+    // DCIM/100CANON/IMG_0001.* — unrelated photographs. A collection
+    // holding both must render two cells, never one collapsed pair
+    // whose hidden alt silently receives writes (B71 / CAPTURE §3).
+    const m = collapsed([
+      item("DCIM/100CANON/IMG_0001.JPG", "rootA"),
+      item("DCIM/100CANON/IMG_0001.CR3", "rootB"),
+    ]);
+    expect(m.units.length).toBe(2);
+    expect(m.pairs).toEqual([null, null]);
+    // Same paths under the SAME root still pair as before.
+    const same = collapsed([
+      item("DCIM/100CANON/IMG_0001.JPG", "rootA"),
+      item("DCIM/100CANON/IMG_0001.CR3", "rootA"),
+    ]);
+    expect(same.units.length).toBe(1);
   });
 
   it("extensions and basenames match case-insensitively", () => {
@@ -90,12 +110,12 @@ describe("live, reversible collapse (global + per-pair overrides)", () => {
     expect(m.units.length).toBe(3);
     expect(m.units.every((u) => u.alt === null)).toBe(true);
     // Both members keep the pair key — the collapse control stays live.
-    expect(m.pairs).toEqual(["a/img_1", "a/img_1", null]);
+    expect(m.pairs).toEqual(["|a/img_1", "|a/img_1", null]);
   });
 
   it("a per-pair override XORs the global state, both directions", () => {
-    expect(collapsed(items, ["a/img_1"]).units.length).toBe(3); // global collapsed, pair expanded
-    expect(expanded(items, ["a/img_1"]).units.length).toBe(2); // global expanded, pair collapsed
+    expect(collapsed(items, ["|a/img_1"]).units.length).toBe(3); // global collapsed, pair expanded
+    expect(expanded(items, ["|a/img_1"]).units.length).toBe(2); // global expanded, pair collapsed
   });
 
   it("isCollapsed is the XOR table", () => {
@@ -110,7 +130,7 @@ describe("live, reversible collapse (global + per-pair overrides)", () => {
 
 describe("R flip (featureset §5: the displayed member swaps)", () => {
   it("a flipped collapsed pair shows the RAW on top", () => {
-    const m = collapsed([item("a/IMG_1.jpg"), item("a/IMG_1.cr2")], [], ["a/img_1"]);
+    const m = collapsed([item("a/IMG_1.jpg"), item("a/IMG_1.cr2")], [], ["|a/img_1"]);
     expect(m.units[0].primary.hash).toBe("h:a/IMG_1.cr2");
     expect(m.units[0].alt?.hash).toBe("h:a/IMG_1.jpg");
   });
@@ -128,7 +148,7 @@ describe("expandTargets — the ● 2 truth (CAPTURE conformance, DECISIONS 4)",
   });
 
   it("a flipped pair reports the displayed member (RAW) first", () => {
-    const m = collapsed(items, [], ["a/img_1"]);
+    const m = collapsed(items, [], ["|a/img_1"]);
     expect(stacks.expandTargets(["h:a/IMG_1.cr2"], m.units)).toEqual([
       "h:a/IMG_1.cr2",
       "h:a/IMG_1.jpg",
@@ -192,7 +212,7 @@ describe("display-member preference (Settings → 'Stacked pairs show', dogfood 
   });
 
   it("R flips XOR the preference (flip under 'raw' shows the JPEG)", () => {
-    const m = build("raw", ["a/img_1"]);
+    const m = build("raw", ["|a/img_1"]);
     expect(m.units[0].primary.hash).toBe("h:a/IMG_1.jpg");
     expect(m.units[0].alt?.hash).toBe("h:a/IMG_1.cr2");
   });
@@ -218,7 +238,7 @@ describe("display-member preference (Settings → 'Stacked pairs show', dogfood 
       display: "raw",
     });
     expect(m.units.length).toBe(3);
-    expect(m.pairs).toEqual(["a/img_1", "a/img_1", null]);
+    expect(m.pairs).toEqual(["|a/img_1", "|a/img_1", null]);
   });
 });
 

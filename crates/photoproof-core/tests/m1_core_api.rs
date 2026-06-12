@@ -362,9 +362,83 @@ fn list_images_returns_badge_rows_in_input_order_and_skips_unknown_hashes() {
     );
     assert!(items[0].has_journal);
     assert!(!items[1].has_journal);
-    // rel_path is root-relative, exactly like list_folder's rows.
+    // rel_path is root-relative, exactly like list_folder's rows; root_id
+    // rides along (the frontend's stack pairing keys on it — a collection
+    // grid mixes roots).
     assert_eq!(items[1].rel_path, "iceland/img_0.jpg");
     assert_eq!(items[1].file_name, "img_0.jpg");
+    assert_eq!(items[1].root_id.as_deref(), Some("root1"));
+    assert!(!items[0].offline);
+}
+
+#[test]
+fn list_images_renders_indexed_members_whose_paths_all_went_stale() {
+    // Membership outlives files (RETRIEVAL §10.1, B71): a member whose
+    // every path row went stale — the file was deleted on disk, or its
+    // root was removed (a supported, reversible operation that keeps
+    // images/journals/previews for relink) — is still IN the index and
+    // must still render in the collection grid, offline-badged. Dropping
+    // it would make the rail badge (member_count, collections side) and
+    // the grid disagree forever, with no UI surface left to remove the
+    // phantom member from.
+    let f = lib_fixture();
+    seed_volume(&f.conn, "vol1", true, false);
+    seed_root(&f.conn, "root1", "vol1", "photos");
+    let gone = hash(50);
+    seed_image(&f.conn, &gone, None);
+    seed_path(
+        &f.conn,
+        "ps0",
+        &gone,
+        "vol1",
+        "root1",
+        "photos/iceland/gone.jpg",
+    );
+    f.conn
+        .execute(
+            "UPDATE paths SET state = 'stale', stale_reason = 'root-removed',
+                    stale_since = '2026-03-01T00:00:00Z'
+             WHERE path_id = 'ps0'",
+            [],
+        )
+        .unwrap();
+
+    let items = f.lib.list_images(std::slice::from_ref(&gone)).unwrap();
+    assert_eq!(items.len(), 1, "stale-path member still renders");
+    assert!(items[0].offline, "no active online path reads as offline");
+    assert_eq!(items[0].rel_path, "iceland/gone.jpg");
+    assert_eq!(items[0].file_name, "gone.jpg");
+
+    // An ACTIVE path, when one exists, beats any stale one as the
+    // representative — even when the stale rel_path sorts first.
+    let moved = hash(51);
+    seed_image(&f.conn, &moved, None);
+    seed_path(
+        &f.conn,
+        "ps1",
+        &moved,
+        "vol1",
+        "root1",
+        "photos/aaa/old.jpg",
+    );
+    f.conn
+        .execute(
+            "UPDATE paths SET state = 'stale', stale_reason = 'moved',
+                    stale_since = '2026-03-01T00:00:00Z'
+             WHERE path_id = 'ps1'",
+            [],
+        )
+        .unwrap();
+    seed_path(
+        &f.conn,
+        "ps2",
+        &moved,
+        "vol1",
+        "root1",
+        "photos/zzz/new.jpg",
+    );
+    let items = f.lib.list_images(std::slice::from_ref(&moved)).unwrap();
+    assert_eq!(items[0].rel_path, "zzz/new.jpg");
     assert!(!items[0].offline);
 }
 

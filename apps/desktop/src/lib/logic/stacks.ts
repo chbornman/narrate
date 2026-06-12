@@ -43,9 +43,16 @@ function folderOf(relPath: string): string {
   return slash < 0 ? "" : relPath.slice(0, slash);
 }
 
-/** Pair identity: folder + lowercased basename. */
+/** Pair identity: root + folder + lowercased basename. Root identity is
+ * load-bearing because a COLLECTION grid mixes roots (B71) while
+ * rel_path is only root-relative: two roots can both hold
+ * DCIM/100CANON/IMG_0001.JPG + .CR3 — unrelated photographs that must
+ * never collapse into one cell (a collapsed pair is one cell with TWO
+ * write-scope targets, so a false pair silently journals/rates a hidden
+ * stranger). Folder grids are single-root, so their keys just share a
+ * constant prefix. */
 export function pairKey(item: GridItem): string {
-  return `${folderOf(item.relPath)}/${basename(item.fileName)}`;
+  return `${item.rootId ?? ""}|${folderOf(item.relPath)}/${basename(item.fileName)}`;
 }
 
 export function isCollapsed(

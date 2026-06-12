@@ -19,6 +19,12 @@ export interface GridItem {
   hash: string;
   fileName: string;
   relPath: string;
+  /** Root the representative path sits under — stack pair identity
+   * includes it (logic/stacks.ts): a COLLECTION grid mixes roots (B71),
+   * and identical camera paths across two roots are unrelated images
+   * that must never collapse into one cell. Optional so test fixtures
+   * predate it; null = the path row has no root. */
+  rootId?: string | null;
   captureTs: string | null;
   addedTs: string;
   hasJournal: boolean;

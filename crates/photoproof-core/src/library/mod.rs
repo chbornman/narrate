@@ -2254,6 +2254,7 @@ impl Library {
                 hash: ContentHash::from_hex(&hash).map_err(|_| rusqlite::Error::InvalidQuery)?,
                 file_name,
                 rel_path: root_relative,
+                root_id: Some(root_id.to_owned()),
                 capture_ts: r.get(2)?,
                 first_ingested_at: r.get(3)?,
                 has_journal: r.get::<_, i64>(4)? != 0,
@@ -2270,19 +2271,29 @@ impl Library {
     /// as [`Library::list_folder`]; one prepared statement executed per
     /// hash because membership lists are working-set sized (B71: tens to
     /// low hundreds), unlike the 20k folders that forced the batched
-    /// folder query. Input order is preserved; hashes the index does not
-    /// know (membership intervals outlive files — removal is evented,
-    /// never destructive) are silently skipped: there is nothing to put
-    /// in a grid cell for them, and member_count stays honest on the
-    /// collections side.
+    /// folder query. Input order is preserved.
+    ///
+    /// Only hashes the index has NEVER ingested are skipped (no `images`
+    /// row — e.g. members union-merged from another replica's export,
+    /// RETRIEVAL §10.2): there is nothing to put in a grid cell for them.
+    /// An indexed member whose every path went STALE (file deleted, root
+    /// removed) still renders — membership outlives files (§10.1, B71),
+    /// its journal and preview persist, and the collection-side
+    /// member_count keeps counting it; dropping it here would make the
+    /// rail badge and the grid disagree forever. Such a member reads
+    /// `offline: true` (no active online path), so it shows like an
+    /// offline-volume member rather than vanishing.
     pub fn list_images(&self, hashes: &[ContentHash]) -> Result<Vec<FolderImage>, LibraryError> {
         let conn = self.db.lock().expect("poisoned");
-        // One representative ACTIVE path per image: online volumes first
-        // (an online copy should drive the file name shown), then
-        // rel_path for determinism. Root rel_path rides along so the
-        // returned rel_path stays root-relative like list_folder's.
+        // One representative path per image: active-and-online first (an
+        // online copy should drive the file name shown), then any active
+        // path, then a stale one (a member with only stale paths must
+        // still render — see the doc comment), then rel_path for
+        // determinism. Root rel_path rides along so the returned rel_path
+        // stays root-relative like list_folder's; root_id rides along so
+        // the frontend's stack pairing can tell roots apart.
         let mut stmt = conn.prepare_cached(
-            "SELECT p.rel_path, COALESCE(rt.rel_path, ''),
+            "SELECT p.rel_path, COALESCE(rt.rel_path, ''), p.root_id,
                     i.capture_ts, i.first_ingested_at,
                     COALESCE(s.has_text, 0) OR COALESCE(s.has_strokes, 0) AS has_journal,
                     r.rating,
@@ -2297,13 +2308,15 @@ impl Library {
                       WHERE pa.image_hash = p.image_hash AND pa.kind = 'thumb'
                     ) AS preview_ready
              FROM images i
-             JOIN paths p ON p.image_hash = i.image_hash AND p.state = 'active'
+             JOIN paths p ON p.image_hash = i.image_hash
              JOIN volumes v ON v.volume_id = p.volume_id
              LEFT JOIN roots rt ON rt.root_id = p.root_id
              LEFT JOIN image_journal_stats s ON s.image_hash = i.image_hash
              LEFT JOIN image_ratings r ON r.image_hash = i.image_hash
              WHERE i.image_hash = ?1
-             ORDER BY (v.state = 'online') DESC, p.rel_path
+             ORDER BY (p.state = 'active' AND v.state = 'online') DESC,
+                      (p.state = 'active') DESC,
+                      p.rel_path
              LIMIT 1",
         )?;
         let mut out = Vec::with_capacity(hashes.len());
@@ -2328,12 +2341,13 @@ impl Library {
                         hash: hash.clone(),
                         file_name,
                         rel_path: root_relative,
-                        capture_ts: r.get(2)?,
-                        first_ingested_at: r.get(3)?,
-                        has_journal: r.get::<_, i64>(4)? != 0,
-                        rating: r.get::<_, Option<i64>>(5)?.map(|v| v as u8),
-                        offline: r.get::<_, i64>(6)? != 0,
-                        preview_ready: r.get::<_, i64>(7)? != 0,
+                        root_id: r.get(2)?,
+                        capture_ts: r.get(3)?,
+                        first_ingested_at: r.get(4)?,
+                        has_journal: r.get::<_, i64>(5)? != 0,
+                        rating: r.get::<_, Option<i64>>(6)?.map(|v| v as u8),
+                        offline: r.get::<_, i64>(7)? != 0,
+                        preview_ready: r.get::<_, i64>(8)? != 0,
                     })
                 })
                 .optional()?;
@@ -2399,6 +2413,12 @@ pub struct FolderImage {
     pub file_name: String,
     /// Root-relative path of the file.
     pub rel_path: String,
+    /// Root the representative path sits under (`None` only for a path
+    /// row without a root). Carried because rel_path alone is ambiguous
+    /// across roots: a COLLECTION grid mixes roots (B71), and two roots
+    /// can both hold DCIM/100CANON/IMG_0001.* — unrelated photographs the
+    /// frontend's stack pairing must never collapse into one cell.
+    pub root_id: Option<String>,
     /// EXIF capture timestamp (RFC 3339) when known.
     pub capture_ts: Option<String>,
     /// First-ingested timestamp (RFC 3339) — the "date added" sort key.

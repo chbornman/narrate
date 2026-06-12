@@ -167,6 +167,39 @@ describe("menus.ts — seat models over the registry", () => {
     ).toBe(false);
   });
 
+  it("membership marks: Add checkmarks current memberships; Remove lists only them", () => {
+    const withMembership = {
+      ...ctx,
+      collections: [
+        { id: "01A", name: "Quiet Hours" },
+        { id: "01B", name: "Fog Series" },
+      ],
+      activeMemberships: ["01B"],
+    };
+    const model = menuModel("thumb", withMembership);
+    const add = model.rows.find(
+      (r) => r.kind === "submenu" && r.verb === "Add to collection",
+    );
+    // The active image's truth: Fog Series is checked, Quiet Hours not.
+    expect(add?.children?.map((c) => c.checked)).toEqual([false, true]);
+    const remove = model.rows.find(
+      (r) => r.kind === "submenu" && r.verb === "Remove from collection",
+    );
+    expect(remove?.children?.map((c) => c.verb)).toEqual(["Fog Series"]);
+    expect(remove?.children?.[0].action).toEqual({
+      kind: "remove-from-collection",
+      id: "01B",
+    });
+    // Not a member of anything → no Remove submenu (availability gate):
+    // membership is a one-way door no longer, but never a dead verb.
+    const noMembership = { ...withMembership, activeMemberships: [] };
+    expect(
+      menuModel("thumb", noMembership).rows.some(
+        (r) => r.verb === "Remove from collection",
+      ),
+    ).toBe(false);
+  });
+
   it("the sort ▾ pseudo-seat is the same machinery, flat", () => {
     const model = menuModel("sort", ctx);
     expect(model.rows.length).toBe(4); // the complete v1 sort set
