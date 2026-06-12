@@ -211,20 +211,20 @@ mod tests {
             1,
             &compiled_manifest(),
             &installed(&[
-                "gemma-4-e4b-it-q4_k_m",
-                "nemotron-speech-streaming-en-0.6b-int8",
+                "gemma-4-e2b-it-qat-q4_0",
+                "nemotron-speech-streaming-en-0.6b-160ms-int8",
             ]),
         );
         assert_eq!(
             p.llm,
             ProcessPlan::Run {
-                model_id: "gemma-4-e4b-it-q4_k_m".into()
+                model_id: "gemma-4-e2b-it-qat-q4_0".into()
             }
         );
         assert_eq!(
             p.asr,
             ProcessPlan::Run {
-                model_id: "nemotron-speech-streaming-en-0.6b-int8".into()
+                model_id: "nemotron-speech-streaming-en-0.6b-160ms-int8".into()
             }
         );
 

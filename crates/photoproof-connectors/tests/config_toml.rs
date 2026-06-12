@@ -17,7 +17,7 @@ vram_headroom_mb = 2048  # never plan above (detected VRAM - headroom), §9
 
 [llm]
 backend = "local-llamacpp"   # "local-llamacpp" | "openai-compatible" | "anthropic"
-model = "gemma-4-e4b-it-q4_k_m"   # manifest model id (local) or API model name
+model = "gemma-4-e2b-it-qat-q4_0"   # manifest model id (local) or API model name
 
 [llm.local-llamacpp]
 ctx_size = 16384             # TOTAL; divided across slots (#11681) → 8192/lane
@@ -36,7 +36,7 @@ model = "claude-sonnet-latest"                  # structured output.
 
 [asr]
 backend = "local-sherpa"     # "local-sherpa" | "disabled"
-model = "nemotron-speech-streaming-en-0.6b-int8"
+model = "nemotron-speech-streaming-en-0.6b-160ms-int8"
 chunk_ms = 160               # 80 | 160 | 560 | 1120 (model-supported)
 device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
@@ -62,7 +62,7 @@ fn spec_literal_block_parses_with_no_warnings() {
     assert_eq!(c.runtime.vram_headroom_mb, 2048);
 
     assert_eq!(c.llm.backend, LlmBackend::LocalLlamacpp);
-    assert_eq!(c.llm.model, "gemma-4-e4b-it-q4_k_m");
+    assert_eq!(c.llm.model, "gemma-4-e2b-it-qat-q4_0");
     assert_eq!(c.llm.local_llamacpp.ctx_size, 16384);
     assert_eq!(c.llm.local_llamacpp.parallel_slots, 2);
     assert_eq!(c.llm.local_llamacpp.gpu_layers, GpuLayers::Auto);
@@ -77,7 +77,7 @@ fn spec_literal_block_parses_with_no_warnings() {
     assert_eq!(c.llm.anthropic.model, "claude-sonnet-latest");
 
     assert_eq!(c.asr.backend, AsrBackend::LocalSherpa);
-    assert_eq!(c.asr.model, "nemotron-speech-streaming-en-0.6b-int8");
+    assert_eq!(c.asr.model, "nemotron-speech-streaming-en-0.6b-160ms-int8");
     assert_eq!(c.asr.chunk_ms, 160);
     assert_eq!(c.asr.device, AsrDevice::Cpu);
 

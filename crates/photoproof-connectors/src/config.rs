@@ -187,7 +187,11 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             backend: LlmBackend::LocalLlamacpp,
-            model: "gemma-4-e4b-it-q4_k_m".into(),
+            // B68 (P6.3 spike): E2B QAT q4_0 is the default — half the
+            // footprint, 2× the speed, schema probe 50/50, and the
+            // interactive parse fits §9's 2 s budget on the Tier-1 floor.
+            // E4B (gemma-4-e4b-it-q4_k_m) remains config-selectable.
+            model: "gemma-4-e2b-it-qat-q4_0".into(),
             local_llamacpp: LlamacppConfig::default(),
             openai_compatible: OpenAiCompatibleConfig::default(),
             anthropic: AnthropicConfig::default(),
@@ -321,7 +325,7 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             backend: AsrBackend::LocalSherpa,
-            model: "nemotron-speech-streaming-en-0.6b-int8".into(),
+            model: "nemotron-speech-streaming-en-0.6b-160ms-int8".into(),
             chunk_ms: 160,
             device: AsrDevice::Cpu,
         }

@@ -269,7 +269,7 @@ vram_headroom_mb = 2048  # never plan above (detected VRAM - headroom), §9
 
 [llm]
 backend = "local-llamacpp"   # "local-llamacpp" | "openai-compatible" | "anthropic"
-model = "gemma-4-e4b-it-q4_k_m"   # manifest model id (local) or API model name
+model = "gemma-4-e2b-it-qat-q4_0"   # manifest model id (local) or API model name
 
 [llm.local-llamacpp]
 ctx_size = 16384             # TOTAL; divided across slots (#11681) → 8192/lane
@@ -288,7 +288,7 @@ model = "claude-sonnet-latest"                  # structured output.
 
 [asr]
 backend = "local-sherpa"     # "local-sherpa" | "disabled"
-model = "nemotron-speech-streaming-en-0.6b-int8"
+model = "nemotron-speech-streaming-en-0.6b-160ms-int8"
 chunk_ms = 160               # 80 | 160 | 560 | 1120 (model-supported)
 device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
@@ -319,7 +319,7 @@ Each app release embeds a **model manifest** (compiled in; also written to `{mod
   "manifest_version": 3,
   "models": [
     {
-      "id": "gemma-4-e4b-it-q4_k_m",
+      "id": "gemma-4-e2b-it-qat-q4_0",
       "role": "llm",
       "tiers": [1, 2],
       "license": { "name": "Gemma Terms of Use",
