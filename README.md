@@ -23,8 +23,10 @@ M1 (the journal spine) and M2 (grease pencil + live voice capture) are built and
 # dev (debug panel included automatically in dev binaries; F12 toggles it)
 cd apps/desktop && cargo tauri dev
 
-# voice needs: brew install llama.cpp (P1 dev binary), then in-app consent
-# downloads the pinned models (Gemma E2B QAT + Nemotron streaming ASR)
+# voice needs only in-app consent: it downloads the pinned models
+# (Nemotron streaming ASR + Gemma E2B QAT) and the ASR child (pp-asr-server)
+# builds with the workspace. The LLM child additionally wants llama-server
+# on PATH in dev: brew install llama.cpp
 ```
 
 ## Tests and benches
