@@ -224,6 +224,77 @@ fn second_checksum_failure_surfaces_instead_of_looping() {
     assert!(!manager.is_installed("test-model"));
 }
 
+/// A quit that lands between the last byte and the verify leaves a
+/// byte-COMPLETE part (founder dogfood, June 2026). A Range resume from
+/// EOF draws 416 from real CDNs and the retry loop can never finish —
+/// the fix verifies the part in place with ZERO network.
+#[test]
+fn byte_complete_part_verifies_and_installs_with_zero_network() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(80_000, 7);
+    let model = model_with(&server, vec![("model.gguf", &payload)], false);
+    server.route(
+        "/model.gguf",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("test-model")).unwrap();
+    std::fs::write(dir.path().join("test-model/model.gguf.part"), &payload).unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect("the complete part verifies in place");
+    assert!(
+        server.requests().is_empty(),
+        "zero network: no resume request, no re-fetch"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("test-model/model.gguf")).unwrap(),
+        payload
+    );
+    assert!(manager.is_installed("test-model"));
+}
+
+/// The evil twin: full length, wrong bytes. The in-place verify fails,
+/// the part is deleted, and the single automatic retry fetches CLEAN
+/// (no Range — the corrupt part must not survive into the resume).
+#[test]
+fn corrupt_byte_complete_part_restarts_clean_once() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(80_000, 7);
+    let model = model_with(&server, vec![("model.gguf", &payload)], false);
+    server.route(
+        "/model.gguf",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("test-model")).unwrap();
+    std::fs::write(
+        dir.path().join("test-model/model.gguf.part"),
+        file_bytes(80_000, 201),
+    )
+    .unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect("one clean re-fetch saves it");
+    let requests = server.requests_for("/model.gguf");
+    assert_eq!(
+        requests.len(),
+        1,
+        "exactly one fetch, after the failed verify"
+    );
+    assert_eq!(requests[0].header("Range"), None, "clean, not a resume");
+    assert_eq!(
+        std::fs::read(dir.path().join("test-model/model.gguf")).unwrap(),
+        payload
+    );
+}
+
 /// §5.2: a model is installed only when ALL its files verify; files
 /// download one at a time, in manifest order.
 #[test]

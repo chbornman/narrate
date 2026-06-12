@@ -267,6 +267,18 @@ impl DownloadManager {
         }
         let part = part_path(dest);
         let mut have: u64 = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        // A byte-complete part — a quit landed between the last byte and
+        // the verify (founder dogfood, June 2026) — goes straight to
+        // verification: a Range from EOF draws 416 from real CDNs and the
+        // retry loop can never finish. An over-long part is corrupt;
+        // restart clean.
+        if have > file.bytes {
+            let _ = std::fs::remove_file(&part);
+            have = 0;
+        } else if have == file.bytes && file.bytes > 0 {
+            self.verify_and_finish(model, file, &part, dest)?;
+            return Ok(0);
+        }
         let url = file.url();
         if url.starts_with("https://") {
             return self.fetch_https(model, file, dest, &part, have, &url, pacer);
@@ -442,6 +454,10 @@ impl DownloadManager {
     ) -> Result<(), DownloadError> {
         let digest = sha256_file(part)?;
         if digest != file.sha256.to_lowercase() {
+            // The bytes are wrong; keeping them would re-fail every retry
+            // (resume Ranges past them, or the complete-part fast path
+            // re-verifies the same corruption). Restart clean.
+            let _ = std::fs::remove_file(part);
             return Err(DownloadError::ChecksumFailed {
                 file: file.file_name().to_owned(),
             });
