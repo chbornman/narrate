@@ -37,6 +37,34 @@ use photoproof_connectors::http::{self, HttpError};
 use super::bus::{RuntimeBus, RuntimeEvent};
 use super::manifest::{Acceptances, FileEntry, ModelEntry};
 
+/// Transfer chunk size, shared by both transports. Load-bearing twice:
+/// `pace()` runs once per chunk (so chunk size times throttle sleep sets
+/// the throttled bandwidth), and progress coalescing advances in these
+/// units. One constant keeps the plain-HTTP and TLS paths provably
+/// identical.
+const TRANSFER_CHUNK: usize = 64 * 1024;
+
+/// Per-chunk sleep while a capture session is live (§5.2 background
+/// priority). With the 64 KiB [`TRANSFER_CHUNK`] this caps throttled
+/// throughput at ~1.3 MB/s — slow enough to stay out of capture's way,
+/// fast enough that a model still arrives. The spec mandates the
+/// throttle itself, not a user-tunable rate, so this is a constant and
+/// not a config knob.
+const CAPTURE_THROTTLE_SLEEP: Duration = Duration::from_millis(50);
+
+/// HTTP timeout posture, one judgement in two numbers: connects fail
+/// fast so the resume/retry machinery kicks in quickly, while reads
+/// tolerate slow model CDNs — a 30 s stall is where "slow mirror" ends
+/// and "resumable interruption" begins. Both transports consume the
+/// pair (the localhost client and the ureq agent).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Coalescing step for `DownloadProgress` bus events: publish only every
+/// this-many bytes, because per-chunk publishing would flood the bus and
+/// the UI on multi-GB model files.
+const PROGRESS_STEP_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DownloadError {
     /// §13.7: the request was never issued.
@@ -81,7 +109,7 @@ impl SleepPacer {
     pub fn new(capture_live: Arc<AtomicBool>) -> Self {
         Self {
             capture_live,
-            throttle_sleep: Duration::from_millis(50),
+            throttle_sleep: CAPTURE_THROTTLE_SLEEP,
         }
     }
 }
@@ -119,8 +147,8 @@ impl DownloadManager {
         Self {
             models_dir,
             bus,
-            connect_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(30),
+            connect_timeout: CONNECT_TIMEOUT,
+            read_timeout: READ_TIMEOUT,
         }
     }
 
@@ -323,7 +351,7 @@ impl DownloadManager {
             .open(&part)?;
         let mut fetched: u64 = 0;
         let mut last_progress = have;
-        let mut buf = [0u8; 64 * 1024];
+        let mut buf = [0u8; TRANSFER_CHUNK];
         loop {
             match resp.read_some(&mut buf) {
                 Ok(0) => break,
@@ -332,8 +360,8 @@ impl DownloadManager {
                     have += n as u64;
                     fetched += n as u64;
                     pacer.pace(n);
-                    // Coalesced progress (≥ 4 MB steps) on the bus.
-                    if have - last_progress >= 4 * 1024 * 1024 {
+                    // Coalesced progress on the bus.
+                    if have - last_progress >= PROGRESS_STEP_BYTES {
                         last_progress = have;
                         self.bus.publish(RuntimeEvent::DownloadProgress {
                             model_id: model.id.clone(),
@@ -413,7 +441,7 @@ impl DownloadManager {
         let mut reader = resp.into_body().into_reader();
         let mut fetched: u64 = 0;
         let mut last_progress = have;
-        let mut buf = [0u8; 64 * 1024];
+        let mut buf = [0u8; TRANSFER_CHUNK];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -422,7 +450,7 @@ impl DownloadManager {
                     have += n as u64;
                     fetched += n as u64;
                     pacer.pace(n);
-                    if have - last_progress >= 4 * 1024 * 1024 {
+                    if have - last_progress >= PROGRESS_STEP_BYTES {
                         last_progress = have;
                         self.bus.publish(RuntimeEvent::DownloadProgress {
                             model_id: model.id.clone(),

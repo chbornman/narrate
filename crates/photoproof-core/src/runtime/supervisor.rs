@@ -129,6 +129,12 @@ enum StopPhase {
 /// 200 lines to the debug panel).
 const LOG_CAP: usize = 200;
 
+/// Cap on the backoff shift exponent — a u64 overflow guard, NOT policy.
+/// 2^16 times any sane `backoff_base_ms` already exceeds `backoff_cap_ms`,
+/// so the `.min(backoff_cap_ms)` after the multiply makes this cap inert;
+/// it exists only so `1 << n` cannot overflow during a long failure streak.
+const BACKOFF_SHIFT_CAP: u32 = 16;
+
 pub struct Supervisor<C: Clock> {
     cfg: SupervisorConfig,
     clock: C,
@@ -623,7 +629,7 @@ impl<C: Clock> Supervisor<C> {
         let delay = self
             .cfg
             .backoff_base_ms
-            .saturating_mul(1u64 << (n - 1).min(16))
+            .saturating_mul(1u64 << (n - 1).min(BACKOFF_SHIFT_CAP))
             .min(self.cfg.backoff_cap_ms);
         self.note(
             now,

@@ -15,6 +15,12 @@
 
 use std::path::Path;
 
+/// llama.cpp `-ngl` convention: any value above the model's layer count
+/// means "offload every layer", and 99 is the conventional sentinel
+/// (greater than any shipped model's depth). It is NOT a real layer
+/// count — do not "correct" it to one.
+pub const NGL_OFFLOAD_ALL: u32 = 99;
+
 /// §3.1 — `llama-server` argv. `mmproj`: the vision projector when the
 /// model entry ships one (captions); `gpu_layers`: `None` = offload all
 /// (`-ngl 99`, the Metal/CUDA default posture).
@@ -37,7 +43,7 @@ pub fn llama_server_args(
         "--parallel".into(),
         parallel_slots.to_string(),
         "-ngl".into(),
-        gpu_layers.unwrap_or(99).to_string(),
+        gpu_layers.unwrap_or(NGL_OFFLOAD_ALL).to_string(),
         // SPIKE-MANDATED (do not remove): see module docs.
         "--reasoning-budget".into(),
         "0".into(),
