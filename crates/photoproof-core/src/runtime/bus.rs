@@ -34,6 +34,12 @@ pub enum RuntimeEvent {
     /// The §8.3 gating signal: a feature appears/enables only when its
     /// backing service is Ready.
     Readiness { process: ProcessId, ready: bool },
+    /// MODEL-cumulative, never per-file: `downloaded_bytes` is bytes of
+    /// this model on disk (prior verified files + the in-flight file's
+    /// part), `total_bytes` the model's manifest total. A per-file
+    /// numerator displayed against the model total read ~0% across
+    /// DFN5B's ~400-file enumeration while gigabytes sat verified on
+    /// disk (founder dogfood, June 2026).
     DownloadProgress {
         model_id: String,
         downloaded_bytes: u64,

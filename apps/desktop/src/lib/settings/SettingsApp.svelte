@@ -246,6 +246,12 @@
           <span class="state">
             {#if m.state === "downloading"}
               downloading — {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
+              <!-- Auto-retry of an interrupted transfer: still
+                   "downloading", never a terminal "failed" until the
+                   retry schedule is exhausted. -->
+              {#if m.retryHint !== null}
+                <span class="dim">— {m.retryHint}</span>
+              {/if}
             {:else if m.state === "unpinned"}
               <!-- B55 fail-closed: no verified pin yet (embedders until
                    spike session 2) — pending, not a failure. -->
