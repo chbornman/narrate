@@ -8,6 +8,7 @@
 //! rebuildable from the filesystem plus the sidecar set. Identity is the
 //! BLAKE3-256 of file bytes — images are known by hash, never by path.
 
+mod clip_preprocess;
 mod embedding;
 mod exclusions;
 mod hashing;
@@ -20,6 +21,7 @@ mod scan;
 mod volumes;
 mod watcher;
 
+pub use clip_preprocess::{CLIP_IMAGE_EDGE, preprocess_clip_image};
 pub use embedding::EmbeddingRig;
 pub use exclusions::{
     ImageFormat, MAX_FILE_BYTES, classify_extension, is_excluded_dir_name, is_excluded_file_name,
