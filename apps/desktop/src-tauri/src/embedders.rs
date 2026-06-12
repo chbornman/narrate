@@ -117,22 +117,35 @@ fn clip_spec(model_id: &str) -> Option<ClipSpec> {
     }
 }
 
-/// The host. Both slots sit behind one mutex (transitions are cheap; only
-/// the background build does real work, off-lock). `generation` bumps on
-/// every build dispatch so a stale build thread's result is discarded if
-/// the plan moved on under it (config swap, drop).
+/// The host. Both slots sit behind one mutex each (transitions are cheap;
+/// only the background build does real work, off-lock). Each role has its
+/// OWN generation counter — a PER-ROLE bump so the other role's dispatch
+/// can never supersede this one's in-flight build (a single shared counter
+/// silently discarded the first role's finished session when the second
+/// dispatched). A bump discards a stale build thread's result if THIS role's
+/// plan moved on under it (config swap, drop).
 pub struct EmbedderHost {
     text: Arc<Mutex<Slot>>,
+    text_gen: Arc<AtomicU64>,
     clip: Arc<Mutex<Slot>>,
-    generation: Arc<AtomicU64>,
+    clip_gen: Arc<AtomicU64>,
+    /// Serializes the actual ort session construction across roles. WHY:
+    /// the CPU EP runs 4 intra-op threads (spike posture), so two heavy
+    /// loads at once oversubscribe the cores — measured, the DFN5B visual
+    /// load (~10 s alone) balloons past minutes when a second build runs
+    /// alongside. One load at a time keeps each at its measured cost; the
+    /// slots still flip to Ready independently as each finishes.
+    build_lock: Arc<Mutex<()>>,
 }
 
 impl EmbedderHost {
     pub fn new() -> Self {
         Self {
             text: Arc::new(Mutex::new(Slot::Idle)),
+            text_gen: Arc::new(AtomicU64::new(0)),
             clip: Arc::new(Mutex::new(Slot::Idle)),
-            generation: Arc::new(AtomicU64::new(0)),
+            clip_gen: Arc::new(AtomicU64::new(0)),
+            build_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -206,9 +219,11 @@ impl EmbedderHost {
     }
 
     /// Drop both slots to Idle (shutdown / restart). The build threads are
-    /// detached and the generation bump makes any in-flight build a no-op.
+    /// detached and each per-role generation bump makes any in-flight build
+    /// a no-op when it lands.
     pub fn shutdown(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.text_gen.fetch_add(1, Ordering::SeqCst);
+        self.clip_gen.fetch_add(1, Ordering::SeqCst);
         *self.text.lock().expect("text slot") = Slot::Idle;
         *self.clip.lock().expect("clip slot") = Slot::Idle;
     }
@@ -236,21 +251,26 @@ impl EmbedderHost {
         *slot = Slot::Building {
             model_id: model_id.clone(),
         };
-        let dispatch = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let generation = self.generation.clone();
+        let dispatch = self.text_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.text_gen.clone();
         let target_slot = self.text.clone();
+        let build_lock = self.build_lock.clone();
         // Build OFF the converge thread (load is seconds). The result lands
-        // back in the slot only if no newer build superseded it.
+        // back in the slot only if no newer build superseded it. The
+        // build_lock serializes the heavy ort load against the other role.
         let _ = std::thread::Builder::new()
             .name("pp-embed-build-text".into())
             .spawn(move || {
-                let built = OrtEmbedder::text(
-                    model_id.clone(),
-                    spec.recipe,
-                    &dir.join(spec.onnx),
-                    &dir.join(spec.tokenizer),
-                    spec.dims,
-                );
+                let built = {
+                    let _hold = build_lock.lock().expect("build lock");
+                    OrtEmbedder::text(
+                        model_id.clone(),
+                        spec.recipe,
+                        &dir.join(spec.onnx),
+                        &dir.join(spec.tokenizer),
+                        spec.dims,
+                    )
+                };
                 land_build(&target_slot, &generation, dispatch, model_id, built);
             });
     }
@@ -276,19 +296,23 @@ impl EmbedderHost {
         *slot = Slot::Building {
             model_id: model_id.clone(),
         };
-        let dispatch = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let generation = self.generation.clone();
+        let dispatch = self.clip_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.clip_gen.clone();
         let target_slot = self.clip.clone();
+        let build_lock = self.build_lock.clone();
         let _ = std::thread::Builder::new()
             .name("pp-embed-build-clip".into())
             .spawn(move || {
-                let built = OrtEmbedder::clip(
-                    model_id.clone(),
-                    &dir.join(spec.visual),
-                    &dir.join(spec.textual),
-                    &dir.join(spec.tokenizer),
-                    spec.dims,
-                );
+                let built = {
+                    let _hold = build_lock.lock().expect("build lock");
+                    OrtEmbedder::clip(
+                        model_id.clone(),
+                        &dir.join(spec.visual),
+                        &dir.join(spec.textual),
+                        &dir.join(spec.tokenizer),
+                        spec.dims,
+                    )
+                };
                 land_build(&target_slot, &generation, dispatch, model_id, built);
             });
     }
@@ -484,16 +508,33 @@ mod tests {
         if !gemma.join("onnx/model_quantized.onnx").exists()
             || !dfn.join("visual/model.onnx").exists()
         {
-            eprintln!("skipping: embedder snapshots absent under {}", snaps.display());
+            eprintln!(
+                "skipping: embedder snapshots absent under {}",
+                snaps.display()
+            );
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
         let models_dir = tmp.path().join("models");
-        std::fs::create_dir_all(&models_dir).unwrap();
-        // Symlink the snapshot dirs under their manifest ids — the host
-        // joins `<id>/onnx/...` etc., which resolves straight through.
-        std::os::unix::fs::symlink(&gemma, models_dir.join("embeddinggemma-300m-q8")).unwrap();
-        std::os::unix::fs::symlink(&dfn, models_dir.join("ViT-H-14-378-quickgelu__dfn5b")).unwrap();
+        // Build REAL id directories and symlink the snapshot's immediate
+        // children in (not the id dir itself): the DFN5B visual tower's
+        // external-data files load relative to `visual/model.onnx`, and
+        // mirroring `visual/`+`textual/`+`onnx/` as their own symlinks keeps
+        // that resolution identical to a direct snapshot path (the L3 test's
+        // working layout) — a single directory-level symlink at the id made
+        // ort's external-data resolution pathologically slow.
+        let gemma_dir = models_dir.join("embeddinggemma-300m-q8");
+        let dfn_dir = models_dir.join("ViT-H-14-378-quickgelu__dfn5b");
+        std::fs::create_dir_all(&gemma_dir).unwrap();
+        std::fs::create_dir_all(&dfn_dir).unwrap();
+        std::os::unix::fs::symlink(gemma.join("onnx"), gemma_dir.join("onnx")).unwrap();
+        std::os::unix::fs::symlink(
+            gemma.join("tokenizer.json"),
+            gemma_dir.join("tokenizer.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(dfn.join("visual"), dfn_dir.join("visual")).unwrap();
+        std::os::unix::fs::symlink(dfn.join("textual"), dfn_dir.join("textual")).unwrap();
 
         let host = EmbedderHost::new();
         host.apply(
@@ -508,12 +549,10 @@ mod tests {
 
         // The build is on a background thread (load is seconds — the DFN5B
         // visual tower especially: a 2.7 GB session over ~100 external-data
-        // files, slower still under the debug test profile). Poll for
-        // readiness with a generous cap.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-        while (!host.text_ready() || !host.clip_ready())
-            && std::time::Instant::now() < deadline
-        {
+        // files; ~13 s for the pair under the debug profile in the spike).
+        // Poll for readiness with a generous cap.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while (!host.text_ready() || !host.clip_ready()) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let lines = host.debug_lines().join("\n");
