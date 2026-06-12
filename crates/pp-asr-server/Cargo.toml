@@ -1,0 +1,11 @@
+[package]
+name = "pp-asr-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sherpa-onnx = "1.13.2"
+tungstenite = "0.29"

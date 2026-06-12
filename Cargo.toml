@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/photoproof-core",
     "crates/photoproof-connectors",
-    "apps/desktop/src-tauri",
+    "apps/desktop/src-tauri", "crates/pp-asr-server",
 ]
 
 [workspace.package]
