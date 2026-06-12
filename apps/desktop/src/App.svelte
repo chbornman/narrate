@@ -100,6 +100,23 @@
     touchActivity();
   }
 
+  // The M two-gesture mic's release half (CAPTURE §6.4): the registry is
+  // keydown-only, so the keyup is a raw key fact — the hold-E / Space-pan
+  // precedent. UNCONDITIONAL (no suppression mirror): the press side was
+  // already gated by the registry (§11 typing suppression, asrReady), so
+  // with no gesture in flight the machine no-ops — and when a gesture IS
+  // in flight, the release must always resolve or a hold could wedge the
+  // mic open (e.g. focus landed in an input mid-hold).
+  function onKeyup(e: KeyboardEvent) {
+    if (e.key === "m" || e.key === "M") void ui.micRelease();
+  }
+
+  // Window loss mid-hold: the keyup will never arrive (the same reason
+  // LookStage releases Space/hold-E on blur).
+  function onWindowBlur() {
+    void ui.micWindowBlur();
+  }
+
   // ---- activity reporting (CAPTURE §2.1), throttled -------------------------
 
   // At most one report per minute: the throttle must stay far below the
@@ -185,7 +202,12 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} onpointerdown={touchActivity} />
+<svelte:window
+  onkeydown={onKeydown}
+  onkeyup={onKeyup}
+  onblur={onWindowBlur}
+  onpointerdown={touchActivity}
+/>
 
 <div class="shell" data-surround={ui.shell.surround}>
   {#if !ui.shell.chromeHidden}

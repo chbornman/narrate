@@ -178,7 +178,8 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
     "remove-last-chip": "chip × buttons in the search overlay",
     "pencil-eraser":
       "pointer-native: the stylus eraser end (hold-E is the keyboard form; a menu item cannot hold)",
-    "toggle-mic": "indicator mic segment click (Indicator.svelte via resolveAction)",
+    "mic-press":
+      'indicator mic segment click (Indicator.svelte via resolveAction, arg "toggle" — a click is a tap; a menu item cannot hold)',
     // pencil-undo is SEATED (look-backdrop "Undo stroke") — its keyboard-
     // only exemption was removed by the post-P5.1 polish round.
   };

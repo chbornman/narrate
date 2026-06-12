@@ -7,9 +7,10 @@
  *
  * The pencil band went live with P5.1 (B sticky toggle, hold-E eraser,
  * O overlay, Ctrl+Z undo — UI §4.4/§11; the P4.2 reserved P/E/V rows were
- * reconciled onto the spec's keys). The mic row (M) stays RESERVED until
- * M2b. Single-letter shortcuts are suppressed while any text input is
- * focused (UI §11; rule owned by actions/match.ts).
+ * reconciled onto the spec's keys). The mic key (M) is live since P6.4
+ * and two-gesture since the June 2026 ruling: tap toggles, hold is
+ * push-to-talk (logic/michold.ts). Single-letter shortcuts are suppressed
+ * while any text input is focused (UI §11; rule owned by actions/match.ts).
  */
 import { match } from "../actions/match";
 import { REGISTRY } from "../actions/registry";
@@ -118,8 +119,12 @@ export type Action =
   | { kind: "pencil-eraser" }
   | { kind: "pencil-undo" }
   | { kind: "cycle-overlay" }
-  // reserved rows — dispatch to nothing until M2b
-  | { kind: "toggle-mic" };
+  // voice capture (M2b; two-gesture M since the June 2026 ruling):
+  // mic-press is the M KEYDOWN — it begins the tap-vs-hold machine
+  // (logic/michold.ts); toggle-mic is the instantaneous pointer form
+  // (indicator segment click — a click IS a tap, so it toggles).
+  | { kind: "toggle-mic" }
+  | { kind: "mic-press" };
 
 /** The P3.2 KeyContext fields — still required, so existing fixtures and
  * callers compile unchanged. */

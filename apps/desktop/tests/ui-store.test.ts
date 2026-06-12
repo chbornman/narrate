@@ -41,6 +41,20 @@ vi.mock("@tauri-apps/api/core", () => ({
         return [];
       case "ingest_status":
         return { running: false, done: 0, total: 0, errors: 0, passes: [] };
+      case "toggle_mic":
+      case "set_mic": {
+        // Echo the §11 indicator the way the core does — set_mic lands
+        // the DESIRED state (the idempotent primitive); the toggle tests
+        // below only assert which command fired, so a fixed armed echo
+        // suffices for toggle_mic.
+        const armed = cmd === "set_mic" ? args?.armed === true : true;
+        return {
+          currentScope: { kind: "session", count: 0, previewHashes: [] },
+          mic: armed ? "armedIdle" : "disarmed",
+          streamingUtterance: null,
+          degraded: { asrUnavailable: false },
+        };
+      }
       default:
         return null;
     }
@@ -50,6 +64,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { Ui } from "../src/lib/state/app.svelte";
 import * as sel from "../src/lib/logic/selection";
+import { MIC_HOLD_MS } from "../src/lib/logic/michold";
 
 const item = (hash: string): GridItem => ({
   hash,
@@ -265,5 +280,73 @@ describe("P4.2 contract flows", () => {
     await ui.perform({ kind: "look-close" });
     expect(ui.surface).toBe("grid");
     expect(ui.grid.unitHashes[ui.grid.sel.focus]).toBe("b"); // same image active
+  });
+});
+
+describe("M two-gesture mic (CAPTURE §6.4 — tap toggles, hold is push-to-talk)", () => {
+  // michold.ts takes time as data, so hold gestures are simulated by
+  // REWINDING the recorded press timestamp past the threshold — no fake
+  // timers, no Date.now mocking (the confirmhold.test.ts spirit).
+  const rewindPress = () => {
+    ui.micHold = { ...ui.micHold, pressedAt: Date.now() - MIC_HOLD_MS };
+  };
+  const setMicCalls = () => ipcLog.calls.filter((c) => c.cmd === "set_mic");
+
+  it("press from disarmed arms IMMEDIATELY; a quick release keeps it armed (tap = toggle on)", async () => {
+    await ui.perform({ kind: "mic-press" });
+    expect(lastCall("set_mic")?.args).toEqual({ armed: true });
+    expect(ui.shell.mic).toBe("armedIdle");
+    await ui.micRelease(); // released within the same tick: a tap
+    expect(setMicCalls()).toHaveLength(1); // no disarm shipped
+    expect(ui.shell.mic).toBe("armedIdle");
+  });
+
+  it("hold from disarmed is push-to-talk: release DISARMS explicitly (never a blind toggle)", async () => {
+    await ui.perform({ kind: "mic-press" });
+    rewindPress();
+    await ui.micRelease();
+    expect(lastCall("set_mic")?.args).toEqual({ armed: false });
+    expect(ui.shell.mic).toBe("disarmed");
+  });
+
+  it("from armed: press is silent, a hold is inert, and only a TAP toggles off", async () => {
+    ui.shell.mic = "armedIdle"; // armed earlier via toggle
+    await ui.perform({ kind: "mic-press" });
+    expect(setMicCalls()).toHaveLength(0); // press decides nothing from armed
+    rewindPress();
+    await ui.micRelease(); // hold from armed: PTT only applies from disarmed
+    expect(setMicCalls()).toHaveLength(0);
+    expect(ui.shell.mic).toBe("armedIdle");
+    await ui.perform({ kind: "mic-press" });
+    await ui.micRelease(); // immediate release = tap → toggle OFF
+    expect(lastCall("set_mic")?.args).toEqual({ armed: false });
+    expect(ui.shell.mic).toBe("disarmed");
+  });
+
+  it("auto-repeat keydowns are absorbed: one arm, and the FIRST press times the hold", async () => {
+    await ui.perform({ kind: "mic-press" });
+    rewindPress();
+    await ui.perform({ kind: "mic-press" }); // auto-repeat mid-hold
+    expect(setMicCalls()).toHaveLength(1); // armed once
+    await ui.micRelease(); // still measured from the first press: PTT
+    expect(lastCall("set_mic")?.args).toEqual({ armed: false });
+  });
+
+  it("window blur mid-gesture disarms the mic THIS gesture opened (a hold never wedges)", async () => {
+    await ui.perform({ kind: "mic-press" });
+    await ui.micWindowBlur();
+    expect(lastCall("set_mic")?.args).toEqual({ armed: false });
+    expect(ui.shell.mic).toBe("disarmed");
+  });
+
+  it("a stray keyup (the press was suppressed while typing) drives no IPC", async () => {
+    await ui.micRelease();
+    expect(setMicCalls()).toHaveLength(0);
+  });
+
+  it("the pointer form (indicator click) stays a plain toggle on toggle_mic", async () => {
+    await ui.perform({ kind: "toggle-mic" });
+    expect(lastCall("toggle_mic")).toBeDefined();
+    expect(setMicCalls()).toHaveLength(0);
   });
 });
