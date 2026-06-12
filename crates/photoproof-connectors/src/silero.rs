@@ -35,10 +35,18 @@ const EXIT: f32 = 0.35;
 /// enough that intra-sentence pauses don't flap the gate, far below the
 /// ASR's endpointing horizon (endpointing stays the ASR's, CAPTURE §6.3).
 const HANG_WINDOWS: u32 = 15;
+/// LSTM state tensor shape — the silero v5 model contract. WHY one
+/// definition: the state allocation and the ort tensor shape must agree,
+/// and a drift between them would surface only as a runtime ort error,
+/// never a compile error.
+const STATE_DIMS: [usize; 3] = [2, 1, 128];
+/// Flat length of the state buffer, derived so it can never disagree
+/// with the shape above.
+const STATE_LEN: usize = STATE_DIMS[0] * STATE_DIMS[1] * STATE_DIMS[2];
 
 pub struct SileroVad {
     session: Session,
-    /// LSTM state, shape [2, 1, 128]; zeroed on reset.
+    /// LSTM state, shape [`STATE_DIMS`]; zeroed on reset.
     state: Vec<f32>,
     ctx: [f32; CONTEXT],
     /// Tail samples not yet forming a full window.
@@ -69,7 +77,7 @@ impl SileroVad {
             .map_err(|e| ConnectorError::Decode(format!("silero session: {e}")))?;
         Ok(Self {
             session,
-            state: vec![0.0; 2 * 128],
+            state: vec![0.0; STATE_LEN],
             ctx: [0.0; CONTEXT],
             pending: Vec::with_capacity(WINDOW * 2),
             consumed: 0,
@@ -91,7 +99,7 @@ impl SileroVad {
 
         let x = Tensor::from_array(([1usize, CONTEXT + WINDOW], input))
             .map_err(|e| ConnectorError::Decode(format!("silero input: {e}")))?;
-        let state = Tensor::from_array(([2usize, 1, 128], self.state.clone()))
+        let state = Tensor::from_array((STATE_DIMS, self.state.clone()))
             .map_err(|e| ConnectorError::Decode(format!("silero state: {e}")))?;
         let sr = Tensor::from_array(([] as [usize; 0], vec![i64::from(SAMPLE_RATE)]))
             .map_err(|e| ConnectorError::Decode(format!("silero sr: {e}")))?;

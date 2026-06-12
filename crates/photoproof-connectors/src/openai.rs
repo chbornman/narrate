@@ -35,6 +35,36 @@ use crate::error::{ConnectorError, ConnectorResult};
 use crate::http::{self, Disconnect, Header, HttpError};
 use crate::llm::{ChatRequest, ChatResponse, LanguageModel, Role};
 
+/// Connect timeout for the supervised local backend. WHY: the peer is a
+/// child process we spawned on loopback, so a connect that takes anywhere
+/// near 2 s is already a liveness signal, not network latency. The sherpa
+/// transcriber uses this same constant for the same reason; tuning happens
+/// through `with_timeouts()`, the deliberate programmatic seam.
+pub(crate) const SUPERVISED_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Connect timeout for a user-configured external OAI endpoint. WHY:
+/// deliberately looser than [`SUPERVISED_CONNECT_TIMEOUT`] — an external
+/// endpoint may sit across a LAN or VPN, so it gets more connect headroom.
+const EXTERNAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Read timeout for chat completions, both supervised and external. WHY:
+/// it must outlast the slowest legitimate background completion on the
+/// Tier-1 floor, because expiry surfaces as `ConnectorError::Timeout` and
+/// feeds the supervisor's Busy-not-Lost reasoning (RUNTIME §8.1) — a value
+/// too low would misreport a healthy-but-loaded backend.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Token budget for the synthetic `caption_image` chat request. WHY:
+/// captions are retrieval fuel, never user-facing prose (kernel posture),
+/// so this bounds background-lane occupancy rather than quality; tuning it
+/// is a spec decision, not a user preference (no RUNTIME §4.4 key).
+const CAPTION_MAX_TOKENS: u32 = 256;
+
+/// Sampling temperature for the caption request. WHY: low-but-nonzero
+/// keeps captions factual and stable for embedding while avoiding the
+/// repetition pathologies of pure greedy decoding.
+const CAPTION_TEMPERATURE: f32 = 0.2;
+
 /// Requests currently in flight against this backend. Shared with the
 /// supervisor: health-probe timeouts while `count() > 0` mean **Busy, not
 /// Lost** (RUNTIME §8.1).
@@ -150,8 +180,8 @@ impl OpenAiCompatClient {
             api_key: None,
             gauge: InFlightGauge::new(),
             lost: LostReports::new(),
-            connect_timeout: Duration::from_secs(2),
-            read_timeout: Duration::from_secs(300),
+            connect_timeout: SUPERVISED_CONNECT_TIMEOUT,
+            read_timeout: DEFAULT_READ_TIMEOUT,
         }
     }
 
@@ -172,8 +202,8 @@ impl OpenAiCompatClient {
             api_key,
             gauge: InFlightGauge::new(),
             lost: LostReports::new(),
-            connect_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(300),
+            connect_timeout: EXTERNAL_CONNECT_TIMEOUT,
+            read_timeout: DEFAULT_READ_TIMEOUT,
         })
     }
 
@@ -419,8 +449,8 @@ impl LanguageModel for OpenAiCompatClient {
                 role: Role::User,
                 content: prompt.to_owned(),
             }],
-            max_tokens: 256,
-            temperature: 0.2,
+            max_tokens: CAPTION_MAX_TOKENS,
+            temperature: CAPTION_TEMPERATURE,
             json_schema: None,
             priority: crate::llm::Lane::Background,
         };

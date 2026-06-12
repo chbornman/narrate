@@ -330,6 +330,27 @@ fn read_response(stream: TcpStream) -> Result<Response, HttpError> {
 // needs: handshake, masked binary/text frames out, unmasked frames in.
 // ---------------------------------------------------------------------------
 
+/// Cap on the handshake response head, which is read byte-by-byte until
+/// `\r\n\r\n`. WHY: a non-WebSocket peer that streams an unbounded body
+/// would otherwise keep the byte-at-a-time reader growing forever; any
+/// legitimate 101 head is a few hundred bytes, so past this the peer is
+/// malformed, not slow.
+const MAX_HANDSHAKE_HEAD_BYTES: usize = 16 * 1024;
+
+/// Per-frame increment of the client mask counter. WHY: this is the 32-bit
+/// golden-ratio (Weyl) constant, chosen so successive masks form a long
+/// non-repeating sequence; any odd constant would work. Masking satisfies
+/// RFC 6455's client-must-mask rule only — it is not a security property
+/// on loopback (see [`WsClient::mask_counter`]).
+const MASK_COUNTER_STEP: u32 = 0x9E37_79B9;
+
+/// Maximum accepted inbound frame payload. WHY: the 8-byte extended length
+/// field is attacker/corruption-controlled, and `read_ws_frame` allocates
+/// the full payload up front — without a ceiling a single corrupt header
+/// could drive a giant allocation. P2 result frames are small JSON, so
+/// anything near this bound is malformed, not legitimate.
+const MAX_WS_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Inbound WebSocket message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WsMessage {
@@ -403,7 +424,7 @@ impl WsClient {
                 }
                 _ => head_bytes.push(byte[0]),
             }
-            if head_bytes.len() > 16 * 1024 {
+            if head_bytes.len() > MAX_HANDSHAKE_HEAD_BYTES {
                 return Err(HttpError::Malformed("oversized handshake response".into()));
             }
         }
@@ -452,7 +473,7 @@ impl WsClient {
     }
 
     fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), HttpError> {
-        self.mask_counter = self.mask_counter.wrapping_add(0x9E37_79B9);
+        self.mask_counter = self.mask_counter.wrapping_add(MASK_COUNTER_STEP);
         let mask = self.mask_counter.to_le_bytes();
         let mut frame = Vec::with_capacity(payload.len() + 14);
         frame.push(0x80 | opcode); // FIN + opcode
@@ -511,7 +532,7 @@ pub fn read_ws_frame(mut stream: &TcpStream) -> Result<(u8, Vec<u8>), HttpError>
         stream.read_exact(&mut b).map_err(HttpError::from_io)?;
         len = u64::from_be_bytes(b);
     }
-    if len > 64 * 1024 * 1024 {
+    if len > MAX_WS_FRAME_BYTES {
         return Err(HttpError::Malformed(format!("oversized ws frame: {len}")));
     }
     let mask = if masked {

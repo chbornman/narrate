@@ -43,8 +43,26 @@ use futures_core::stream::{BoxStream, Stream};
 
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::http::{self, WsClient, WsMessage};
-use crate::openai::EndpointCell;
+use crate::openai::{EndpointCell, SUPERVISED_CONNECT_TIMEOUT};
 use crate::transcriber::{AudioFrame, SegmentKind, StreamMs, Transcriber, TranscriptSegment};
+
+/// Input sample rate shipped to the server. WHY: the Nemotron streaming
+/// model's contract (transcriber.rs: "Nemotron: 16_000") and the P2 wire
+/// contract (RUNTIME §3.2: 16 kHz mono f32). Must agree with
+/// silero's SAMPLE_RATE and pp-asr-server's accept_waveform argument.
+const SAMPLE_RATE: u32 = 16_000;
+
+/// Initial WebSocket handshake key seed, incremented per connection. WHY:
+/// the value is arbitrary (ASCII "PERRO16A") and exists only so handshakes
+/// are deterministic for tests; the key has no security role on loopback.
+const INITIAL_WS_KEY_SEED: u64 = 0x5045_5252_4F31_3641;
+
+/// Socket write timeout for shipping audio frames. WHY: a localhost ASR
+/// that cannot drain a small binary frame within 10 s is dead, and this
+/// timeout is what converts that into ConnectionLost so the engine disarms
+/// (CAPTURE §6.6). Reads are unaffected — the reader thread clears its
+/// read half, because an armed-but-silent mic can sit for minutes.
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct SherpaOnlineTranscriber {
     endpoint: EndpointCell,
@@ -60,9 +78,9 @@ impl SherpaOnlineTranscriber {
         Self {
             endpoint,
             model_id: model_id.into(),
-            sample_rate: 16_000,
-            connect_timeout: Duration::from_secs(2),
-            key_seed: AtomicU64::new(0x5045_5252_4F31_3641),
+            sample_rate: SAMPLE_RATE,
+            connect_timeout: SUPERVISED_CONNECT_TIMEOUT,
+            key_seed: AtomicU64::new(INITIAL_WS_KEY_SEED),
         }
     }
 }
@@ -82,9 +100,8 @@ impl Transcriber for SherpaOnlineTranscriber {
             addr,
             "/",
             self.connect_timeout,
-            // Writes use this timeout; the READER thread clears it below
-            // (an armed-but-silent mic can sit for minutes).
-            Duration::from_secs(10),
+            // Writes use this timeout; the READER thread clears it below.
+            WS_WRITE_TIMEOUT,
             seed,
         )
         .map_err(|_| ConnectorError::NotReady("asr websocket handshake failed"))?;
@@ -401,6 +418,16 @@ impl Stream for SherpaStream<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the P2 wire contract (RUNTIME §3.2: 16 kHz mono f32). The
+    /// server side (pp-asr-server) and the in-process VAD (silero) carry
+    /// the same value; a change here is a cross-crate protocol change,
+    /// not a local tweak.
+    #[test]
+    fn sample_rate_is_the_p2_wire_contract() {
+        let t = SherpaOnlineTranscriber::new("nemotron", EndpointCell::new());
+        assert_eq!(t.sample_rate(), 16_000);
+    }
 
     #[test]
     fn parse_maps_the_3_2_wire_fields_onto_the_contract() {
