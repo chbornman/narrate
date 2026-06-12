@@ -2265,6 +2265,85 @@ impl Library {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Badge rows for an explicit hash list — the collection-members grid
+    /// read (RETRIEVAL §10, the rail's Collections tab). Same badge shape
+    /// as [`Library::list_folder`]; one prepared statement executed per
+    /// hash because membership lists are working-set sized (B71: tens to
+    /// low hundreds), unlike the 20k folders that forced the batched
+    /// folder query. Input order is preserved; hashes the index does not
+    /// know (membership intervals outlive files — removal is evented,
+    /// never destructive) are silently skipped: there is nothing to put
+    /// in a grid cell for them, and member_count stays honest on the
+    /// collections side.
+    pub fn list_images(&self, hashes: &[ContentHash]) -> Result<Vec<FolderImage>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        // One representative ACTIVE path per image: online volumes first
+        // (an online copy should drive the file name shown), then
+        // rel_path for determinism. Root rel_path rides along so the
+        // returned rel_path stays root-relative like list_folder's.
+        let mut stmt = conn.prepare_cached(
+            "SELECT p.rel_path, COALESCE(rt.rel_path, ''),
+                    i.capture_ts, i.first_ingested_at,
+                    COALESCE(s.has_text, 0) OR COALESCE(s.has_strokes, 0) AS has_journal,
+                    r.rating,
+                    NOT EXISTS (
+                      SELECT 1 FROM paths p2
+                      JOIN volumes v2 ON v2.volume_id = p2.volume_id
+                      WHERE p2.image_hash = p.image_hash
+                        AND p2.state = 'active' AND v2.state = 'online'
+                    ) AS offline,
+                    EXISTS (
+                      SELECT 1 FROM preview_artifacts pa
+                      WHERE pa.image_hash = p.image_hash AND pa.kind = 'thumb'
+                    ) AS preview_ready
+             FROM images i
+             JOIN paths p ON p.image_hash = i.image_hash AND p.state = 'active'
+             JOIN volumes v ON v.volume_id = p.volume_id
+             LEFT JOIN roots rt ON rt.root_id = p.root_id
+             LEFT JOIN image_journal_stats s ON s.image_hash = i.image_hash
+             LEFT JOIN image_ratings r ON r.image_hash = i.image_hash
+             WHERE i.image_hash = ?1
+             ORDER BY (v.state = 'online') DESC, p.rel_path
+             LIMIT 1",
+        )?;
+        let mut out = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            let row = stmt
+                .query_row(params![hash.as_str()], |r| {
+                    let rel: String = r.get(0)?;
+                    let root_rel: String = r.get(1)?;
+                    // Strip the root prefix exactly like list_folder does.
+                    let prefix_len = if root_rel.is_empty() {
+                        0
+                    } else {
+                        root_rel.len() + 1
+                    };
+                    let root_relative = rel.get(prefix_len..).unwrap_or("").to_owned();
+                    let file_name = root_relative
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&root_relative)
+                        .to_owned();
+                    Ok(FolderImage {
+                        hash: hash.clone(),
+                        file_name,
+                        rel_path: root_relative,
+                        capture_ts: r.get(2)?,
+                        first_ingested_at: r.get(3)?,
+                        has_journal: r.get::<_, i64>(4)? != 0,
+                        rating: r.get::<_, Option<i64>>(5)?.map(|v| v as u8),
+                        offline: r.get::<_, i64>(6)? != 0,
+                        preview_ready: r.get::<_, i64>(7)? != 0,
+                    })
+                })
+                .optional()?;
+            if let Some(item) = row {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
     /// Folder tree of one root (the rail), derived from active path rows.
     /// `rel_path`s are root-relative; children sorted by name.
     pub fn folder_tree(&self, root_id: &str) -> Result<Vec<FolderTreeNode>, LibraryError> {

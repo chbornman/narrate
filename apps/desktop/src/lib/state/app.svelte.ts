@@ -19,6 +19,7 @@ import { navigationSet } from "../logic/looknav";
 import { scopeTargets } from "../logic/scope";
 import { afterCommit } from "../logic/advance";
 import {
+  collectionRows,
   flatRows,
   moveFocus as railMoveFocus,
   sections,
@@ -28,6 +29,7 @@ import type { Action } from "../logic/keymap";
 import type { ActionContext } from "../actions/types";
 import type {
   AppSettings,
+  CollectionDto,
   FolderNode,
   IngestStatus,
   RootDto,
@@ -78,6 +80,15 @@ export class Ui {
   // -- roots & folder tree (shared by rail + grid) ----------------------------
   roots = $state<RootDto[]>([]);
   tree = $state<FolderNode[]>([]);
+
+  // -- collections (B71 — rail Collections tab, P7.3 store) -------------------
+  /** Full snapshot, backend list order; replaced whole on every
+   * `collections-changed` event (never reconciled as deltas). */
+  collections = $state<CollectionDto[]>([]);
+  /** The grid is showing this collection's current members instead of a
+   * folder (the two are exclusive: openFolder/openCollection clear each
+   * other). null = folder mode. */
+  collectionId = $state<string | null>(null);
 
   // -- search ------------------------------------------------------------------
   query = $state("");
@@ -130,6 +141,13 @@ export class Ui {
     } catch {
       /* backend unavailable (tests/dev): runtime stays dark */
     }
+    // After the folder is on screen — collections are rail furniture, not
+    // boot-critical. `?? []`: test mocks resolve unknown commands to null.
+    try {
+      this.collections = (await ipc.listCollections()) ?? [];
+    } catch {
+      /* backend unavailable (tests/dev): no collections yet */
+    }
     await this.reportScope();
   }
 
@@ -146,6 +164,10 @@ export class Ui {
   }
 
   get folderName(): string {
+    if (this.collectionId !== null) {
+      const c = this.collections.find((c) => c.id === this.collectionId);
+      if (c !== undefined) return c.name;
+    }
     if (this.grid.folder !== "")
       return this.grid.folder.split("/").pop() ?? this.grid.folder;
     const root = this.roots.find((r) => r.rootId === this.grid.rootId);
@@ -207,7 +229,9 @@ export class Ui {
    * the grid never sits on a dead folder. */
   async onRootsChanged(roots: RootDto[]) {
     this.applyRootsSnapshot(roots);
-    if (this.grid.rootId === null && roots.length > 0)
+    // A collection view has rootId null BY DESIGN — never yank it to a
+    // folder just because a roots snapshot landed.
+    if (this.collectionId === null && this.grid.rootId === null && roots.length > 0)
       await this.openFolder(roots[0].rootId, "");
   }
 
@@ -233,6 +257,7 @@ export class Ui {
     // Opening a folder always lands on the Grid: navigating sources while in
     // Look exits the single-image view (founder dogfood, round 1).
     if (this.surface === "look") await this.leaveLook();
+    this.collectionId = null; // folder mode and collection mode are exclusive
     this.grid.rootId = rootId;
     this.grid.folder = folder;
     this.grid.sort = prefs.loadSort(rootId, folder);
@@ -243,8 +268,50 @@ export class Ui {
     await this.reportScope();
   }
 
+  /** Open a collection's current members in the grid — the folder-open
+   * sibling (B71: collections drive the grid exactly as folders do). The
+   * grid leaves folder mode entirely: rootId goes null so folder-keyed
+   * machinery (sort persistence, last-folder, ingest re-list) stands down. */
+  async openCollection(id: string) {
+    if (this.surface === "look") await this.leaveLook();
+    this.collectionId = id;
+    this.grid.rootId = null;
+    this.grid.folder = "";
+    this.grid.sel = sel.EMPTY;
+    this.grid.setItems((await ipc.listCollectionMembers(id)) ?? []);
+    await this.reportScope();
+  }
+
+  /** `collections-changed` snapshot (any window's mutation — the
+   * roots-changed pattern): replace the list whole; a viewed collection
+   * re-lists its members because membership may be what changed. */
+  async onCollectionsChanged(collections: CollectionDto[]) {
+    this.collections = collections;
+    if (this.collectionId !== null) await this.refreshItems();
+  }
+
+  /** The rail's inline create (its footer affordance, the add-root
+   * sibling). The fresh snapshot is fetched directly — awaited and
+   * deterministic for tests; the `collections-changed` event is the
+   * cross-window catch-all, and replacing the same snapshot twice is
+   * harmless. */
+  async createCollection(name: string) {
+    const trimmed = name.trim();
+    if (trimmed === "") return;
+    try {
+      await ipc.createCollection(trimmed);
+      this.collections = (await ipc.listCollections()) ?? [];
+    } catch {
+      /* backend unavailable (tests/dev): nothing created */
+    }
+  }
+
   /** Incremental refresh during ingest: keeps selection/focus (UI §3.3). */
   async refreshItems() {
+    if (this.collectionId !== null) {
+      this.grid.setItems((await ipc.listCollectionMembers(this.collectionId)) ?? []);
+      return;
+    }
     if (this.grid.rootId === null) return;
     this.grid.setItems(await ipc.listFolder(this.grid.rootId, this.grid.folder));
   }
@@ -771,6 +838,7 @@ export class Ui {
       micArmed: this.shell.mic === "armedIdle" || this.shell.mic === "armedSpeaking",
       micState: this.shell.mic,
       asrUnavailable: this.shell.asrUnavailable,
+      collections: this.collections.map((c) => ({ id: c.id, name: c.name })),
     };
   }
 
@@ -952,6 +1020,17 @@ export class Ui {
         break;
       // ---- panels -----------------------------------------------------------
       case "rail-nav": {
+        // Arrow routing follows the VISIBLE tab: collections are a flat
+        // list (no expand/collapse), so left/right are no-ops there.
+        if (this.shell.railTab === "collections") {
+          if (action.dir === "up" || action.dir === "down")
+            this.shell.railFocusKey = railMoveFocus(
+              this.railCollectionRows(),
+              this.shell.railFocusKey,
+              action.dir,
+            );
+          break;
+        }
         const rows = flatRows(this.railSections());
         if (action.dir === "up" || action.dir === "down") {
           this.shell.railFocusKey = railMoveFocus(
@@ -971,11 +1050,46 @@ export class Ui {
         break;
       }
       case "rail-enter": {
+        if (this.shell.railTab === "collections") {
+          const row = this.railCollectionRows().find(
+            (r) => r.key === this.shell.railFocusKey,
+          );
+          if (row !== undefined) {
+            await this.openCollection(row.id);
+            this.shell.railFocused = false; // focus returns to the grid
+          }
+          break;
+        }
         const rows = flatRows(this.railSections());
         const row = rows.find((r) => r.key === this.shell.railFocusKey);
         if (row !== undefined) {
           await this.openFolder(row.rootId, row.folder);
           this.shell.railFocused = false; // focus returns to the grid
+        }
+        break;
+      }
+      case "collection-open":
+        await this.openCollection(action.id);
+        break;
+      case "add-to-collection": {
+        // Multi-select adds the WHOLE selection, stack-expanded (a
+        // collapsed pair contributes both members — the CAPTURE §3 target
+        // rule); the thumb right-click already selected an unselected cell.
+        const active = this.actionContext().activeHash;
+        const targets =
+          this.grid.selectionTargets.length > 0
+            ? this.grid.selectionTargets
+            : active !== null
+              ? [active]
+              : [];
+        if (targets.length === 0) break;
+        try {
+          await ipc.addToCollection(action.id, targets);
+          // Direct refresh (awaited, deterministic for tests); the
+          // collections-changed event is the cross-window catch-all.
+          await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
+        } catch {
+          /* backend unavailable (tests/dev) */
         }
         break;
       }
@@ -1121,6 +1235,11 @@ export class Ui {
       treeRootId: this.grid.rootId,
       collapsed: this.shell.railCollapsed,
     });
+  }
+
+  /** Rail rows for the Collections tab (logic/sources.ts provider). */
+  railCollectionRows() {
+    return collectionRows(this.collections);
   }
 }
 

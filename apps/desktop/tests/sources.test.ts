@@ -6,6 +6,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  collectionKey,
+  collectionRows,
   flatRows,
   folderSection,
   moveFocus,
@@ -14,7 +16,7 @@ import {
   toggleExpand,
   type SourcesInput,
 } from "../src/lib/logic/sources";
-import type { FolderNode, RootDto } from "../src/lib/types/dto";
+import type { CollectionDto, FolderNode, RootDto } from "../src/lib/types/dto";
 
 const root = (rootId: string, online = true): RootDto => ({
   rootId,
@@ -67,6 +69,49 @@ describe("folders provider", () => {
 
   it("sections() is the provider aggregation seam (folders only in P4.2)", () => {
     expect(sections(input).map((s) => s.id)).toEqual(["folders"]);
+  });
+});
+
+describe("collections provider (B71 — the rail's Collections tab)", () => {
+  const coll = (id: string, name: string, status: string, memberCount = 0): CollectionDto => ({
+    id,
+    name,
+    description: "",
+    status,
+    createdTs: "2026-06-01T00:00:00.000Z",
+    updatedTs: "2026-06-01T00:00:00.000Z",
+    memberCount,
+    noteCount: 0,
+  });
+
+  it("maps the snapshot in backend order with stable keys and counts", () => {
+    const rows = collectionRows([
+      coll("01A", "Quiet Hours", "active", 12),
+      coll("01B", "Fog Series", "shelved", 3),
+    ]);
+    expect(rows.map((r) => r.key)).toEqual([collectionKey("01A"), collectionKey("01B")]);
+    expect(rows.map((r) => r.label)).toEqual(["Quiet Hours", "Fog Series"]);
+    expect(rows[0].memberCount).toBe(12);
+  });
+
+  it("shelved/done rows are status-dimmed, never hidden", () => {
+    const rows = collectionRows([
+      coll("01A", "Quiet Hours", "active"),
+      coll("01B", "Fog Series", "shelved"),
+      coll("01C", "Iceland", "done"),
+    ]);
+    expect(rows.map((r) => r.dim)).toEqual([false, true, true]);
+    expect(rows.length).toBe(3);
+  });
+
+  it("collection rows ride the same moveFocus as folder rows", () => {
+    const rows = collectionRows([
+      coll("01A", "Quiet Hours", "active"),
+      coll("01B", "Fog Series", "shelved"),
+    ]);
+    expect(moveFocus(rows, null, "down")).toBe(rows[0].key);
+    expect(moveFocus(rows, rows[0].key, "down")).toBe(rows[1].key);
+    expect(moveFocus(rows, rows[1].key, "down")).toBe(rows[1].key);
   });
 });
 

@@ -23,6 +23,7 @@
   import * as ipc from "./lib/ipc/commands";
   import type {
     AppSettings,
+    CollectionDto,
     IndicatorPulse,
     IndicatorState,
     IngestStatus,
@@ -148,6 +149,11 @@
       // Root edits from any window (Settings add/remove — the same
       // pattern): the rail updates instantly off the fresh snapshot.
       listen<RootDto[]>("roots-changed", (e) => void ui.onRootsChanged(e.payload)),
+      // Collection mutations from any window (same snapshot pattern): the
+      // rail's Collections tab — and a viewed collection's grid — follow.
+      listen<CollectionDto[]>("collections-changed", (e) =>
+        void ui.onCollectionsChanged(e.payload),
+      ),
       // RUNTIME §8.3: readiness/download snapshots — features light up
       // individually and silently (mic glyph appears, nothing else moves).
       listen<RuntimeStatus>("runtime-status", (e) => ui.shell.onRuntimeStatus(e.payload)),
@@ -194,7 +200,13 @@
             <!-- empty folder: say the next action (featureset §6); during
                  ingest photographs stream in, so the line stays honest -->
             <div class="grid-empty">
-              {#if ui.shell.ingest.running}
+              {#if ui.collectionId !== null}
+                <!-- an empty collection states its own next action: the
+                     verb lives on the image context menu -->
+                <EmptyState
+                  line="Nothing gathered yet — right-click an image and choose Add to collection."
+                />
+              {:else if ui.shell.ingest.running}
                 <EmptyState line="Indexing — photographs appear as they are found." />
               {:else}
                 <EmptyState line="No photographs in this folder.">

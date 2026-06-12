@@ -329,6 +329,46 @@ fn a2_list_folder_returns_direct_children_with_badges() {
 }
 
 #[test]
+fn list_images_returns_badge_rows_in_input_order_and_skips_unknown_hashes() {
+    // The collection-members grid read (RETRIEVAL §10, rail Collections
+    // tab): same badge shape as list_folder, keyed by explicit hashes.
+    let f = lib_fixture();
+    seed_volume(&f.conn, "vol1", true, false);
+    seed_root(&f.conn, "root1", "vol1", "photos");
+    let (a, b) = (hash(40), hash(41));
+    for (i, h) in [&a, &b].iter().enumerate() {
+        seed_image(&f.conn, h, Some("2026-03-01T00:00:00Z"));
+        seed_path(
+            &f.conn,
+            &format!("pl{i}"),
+            h,
+            "vol1",
+            "root1",
+            &format!("photos/iceland/img_{i}.jpg"),
+        );
+    }
+    f.store
+        .append(&f.session, d_remark("keeper", vec![b.clone()]), None)
+        .unwrap();
+
+    // Membership outlives files (§10.1 evented removal): a hash the index
+    // does not know yields no row instead of an error.
+    let ghost = hash(42);
+    let items = f.lib.list_images(&[b.clone(), ghost, a.clone()]).unwrap();
+    assert_eq!(
+        items.iter().map(|i| i.hash.clone()).collect::<Vec<_>>(),
+        vec![b.clone(), a.clone()],
+        "input order preserved, unknown hash skipped"
+    );
+    assert!(items[0].has_journal);
+    assert!(!items[1].has_journal);
+    // rel_path is root-relative, exactly like list_folder's rows.
+    assert_eq!(items[1].rel_path, "iceland/img_0.jpg");
+    assert_eq!(items[1].file_name, "img_0.jpg");
+    assert!(!items[0].offline);
+}
+
+#[test]
 fn a2_offline_badge_when_only_paths_are_on_offline_volumes() {
     let f = lib_fixture();
     seed_volume(&f.conn, "vol-on", true, false);

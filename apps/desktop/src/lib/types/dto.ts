@@ -225,6 +225,22 @@ export interface RedactReportDto {
   offlinePending: string[];
 }
 
+/** One collection (RETRIEVAL §10, B71) as the rail's Collections tab and
+ * the thumb menu's Add-to-collection submenu render it. Counts cover
+ * CURRENT members (open intervals) only. Snapshots arrive whole on the
+ * `collections-changed` event — the frontend never reconciles deltas. */
+export interface CollectionDto {
+  id: string;
+  name: string;
+  description: string;
+  /** "active" | "shelved" | "done" — shelved/done rows render dimmed. */
+  status: string;
+  createdTs: string;
+  updatedTs: string;
+  memberCount: number;
+  noteCount: number;
+}
+
 /** image_abs_path result (D4: reveal / copy path / open-default). */
 export interface ImagePathsDto {
   /** Best online absolute path, null when every path is offline. */

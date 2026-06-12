@@ -13,6 +13,8 @@
    * outside the app while it isn't watching and relinking depends on the
    * LIBRARY §7 heuristics. The card says so before the user learns it the
    * hard way. The index, by contrast, is rebuildable (SIDECARS principle 1).
+   * The closing paragraph states the founder's hierarchy of importance
+   * (June 2026): collections are the point, folders are mechanical.
    *
    * "Don't show again" persists via prefs.ts (default ON — the common path
    * reads this exactly once); the flag lives on the shell slice so the Esc
@@ -74,6 +76,15 @@
         Photoproof’s own database is only an index. It can always be
         rebuilt from your images and their sidecars — losing it never loses
         your work.
+      </p>
+
+      <!-- collections over folders (founder, June 2026): the card states
+           the hierarchy of importance once, quietly -->
+      <p>
+        Folders here are mechanical — just where files happen to sit.
+        <strong>Collections</strong> are what matter: gather images by
+        intent, with the notes and context you collect. They live in the
+        rail, beside Folders.
       </p>
 
       <div class="buttons">

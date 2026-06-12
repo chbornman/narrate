@@ -45,6 +45,9 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
   thumb: [
     "open-look",
     "rate",
+    // Collections sit beside Rate: both are gather-while-reviewing verbs
+    // (B71: the app should encourage collecting).
+    "add-to-collection",
     "stack-toggle-active",
     "flip-stack-member",
     "—",

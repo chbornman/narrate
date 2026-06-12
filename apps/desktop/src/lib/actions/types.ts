@@ -95,6 +95,9 @@ export interface ActionContext {
   micState: MicState;
   /** §11 degraded flag: ASR down/absent — the muted-mic glyph, quietly. */
   asrUnavailable: boolean;
+  /** Collections (B71), list order, for the thumb menu's Add-to-collection
+   * submenu — id + name only: menus never need the full DTO. */
+  collections: { id: string; name: string }[];
 }
 
 /** CAPTURE §6.4 mic states, as the wire spells them (types/dto.ts twin). */

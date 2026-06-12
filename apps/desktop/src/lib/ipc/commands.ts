@@ -8,6 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  CollectionDto,
   ExportReportDto,
   FolderNode,
   GridItem,
@@ -77,6 +78,20 @@ export const folderTree = (rootId: string) =>
   invoke<FolderNode[]>("folder_tree", { rootId });
 export const listFolder = (rootId: string, folder: string) =>
   invoke<GridItem[]>("list_folder", { rootId, folder });
+
+// -- collections (RETRIEVAL §10, B71 — rail Collections tab, P7.3 store) -----
+
+export const listCollections = () => invoke<CollectionDto[]>("list_collections");
+export const createCollection = (name: string) =>
+  invoke<CollectionDto>("create_collection", { name });
+/** Open membership intervals for every hash not already a member; resolves
+ * to the count of NEWLY added members (mutations emit `collections-changed`). */
+export const addToCollection = (id: string, hashes: string[]) =>
+  invoke<number>("add_to_collection", { id, hashes });
+/** Current members as grid rows — clicking a collection in the rail shows
+ * its members in the grid, exactly as folder selection drives it. */
+export const listCollectionMembers = (id: string) =>
+  invoke<GridItem[]>("list_collection_members", { id });
 
 // -- ingest / settings / export ---------------------------------------------
 

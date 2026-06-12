@@ -95,6 +95,18 @@ export function saveRailOpen(open: boolean) {
   saveBool("pp.railOpen", open);
 }
 
+/** Rail tab — Folders | Collections as peers (founder, June 2026).
+ * Persisted like railOpen: the rail comes back the way it was left. */
+export type RailTab = "folders" | "collections";
+
+export function loadRailTab(): RailTab {
+  return safeGet("pp.railTab") === "collections" ? "collections" : "folders";
+}
+
+export function saveRailTab(tab: RailTab) {
+  safeSet("pp.railTab", tab);
+}
+
 // Inspector OPENNESS deliberately does not persist (DECISIONS 3): width
 // does (via INSPECTOR_WIDTH_KEY), openness resets each launch.
 

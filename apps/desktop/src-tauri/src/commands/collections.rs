@@ -15,7 +15,7 @@ use photoproof_core::collections::{CollectionRecord, CollectionStatus, NoteEntry
 use tauri::{AppHandle, Emitter, Runtime};
 
 use super::{S, parse_hash};
-use crate::dto::{CollectionDto, CollectionNoteDto};
+use crate::dto::{CollectionDto, CollectionNoteDto, GridItem};
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -245,6 +245,22 @@ pub async fn remove_from_collection<R: Runtime>(
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// Current members as grid rows (the rail's Collections tab: clicking a
+/// collection shows its members in the grid, exactly as folder selection
+/// drives it). Members the library index does not know — membership is
+/// evented and outlives files (§10.1) — are skipped: nothing to render.
+#[tauri::command]
+pub async fn list_collection_members(app: S<'_>, id: String) -> CmdResult<Vec<GridItem>> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let members = app.collections.current_members(&id)?;
+        let items = app.library.list_images(&members)?;
+        Ok(items.into_iter().map(super::library::grid_item).collect())
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 /// Collections this image is CURRENTLY a member of (the Look's membership
 /// row and the grid's context menu checkmarks).
 #[tauri::command]
@@ -324,6 +340,17 @@ mod tests {
                 .expect("collections_for_image");
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].member_count, 1);
+
+        // The members grid read skips hashes the library index does not
+        // know (membership is evented and outlives files, §10.1): this
+        // member was never ingested, so there is nothing to render — and
+        // the command must not error over it.
+        let grid = tauri::async_runtime::block_on(list_collection_members(
+            state.clone(),
+            created.id.clone(),
+        ))
+        .expect("list_collection_members");
+        assert!(grid.is_empty(), "un-ingested members render no grid rows");
 
         let removed = tauri::async_runtime::block_on(remove_from_collection(
             state.clone(),

@@ -82,6 +82,11 @@ export type Action =
   | { kind: "rebuild-previews"; rootId: string }
   // rail footer button + rail-folder seat: OS picker → register root
   | { kind: "add-root" }
+  // collections (B71 — rail Collections tab, first slice): open a
+  // collection's current members in the grid (the folder-open sibling)
+  | { kind: "collection-open"; id: string }
+  // thumb seat submenu: add the WHOLE selection to the named collection
+  | { kind: "add-to-collection"; id: string }
   | { kind: "open-inspector"; tab: "metadata" | "journal" }
   | { kind: "close-inspector" }
   // journal row verbs (pointer-seated; Stage C wires the flows)
@@ -155,6 +160,7 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   micArmed: false,
   micState: "disarmed",
   asrUnavailable: true, // degraded until a supervised ASR reports Ready (P6.3)
+  collections: [],
 };
 
 export function withDefaults(ctx: KeyContext): ActionContext {

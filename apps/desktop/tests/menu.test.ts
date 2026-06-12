@@ -143,6 +143,30 @@ describe("menus.ts — seat models over the registry", () => {
     expect(model.rows[5].action).toEqual({ kind: "add-root" });
   });
 
+  it("Add to collection renders as a submenu of collection names threading ids", () => {
+    const withCollections = {
+      ...ctx,
+      collections: [
+        { id: "01A", name: "Quiet Hours" },
+        { id: "01B", name: "Fog Series" },
+      ],
+    };
+    const model = menuModel("thumb", withCollections);
+    const sub = model.rows.find(
+      (r) => r.kind === "submenu" && r.verb === "Add to collection",
+    );
+    expect(sub?.children?.map((c) => c.verb)).toEqual(["Quiet Hours", "Fog Series"]);
+    expect(sub?.children?.[1].action).toEqual({
+      kind: "add-to-collection",
+      id: "01B",
+    });
+    // No collections → the verb does not exist (availability gate): the
+    // rail's Collections tab is where creation lives, not a dead submenu.
+    expect(
+      menuModel("thumb", ctx).rows.some((r) => r.verb === "Add to collection"),
+    ).toBe(false);
+  });
+
   it("the sort ▾ pseudo-seat is the same machinery, flat", () => {
     const model = menuModel("sort", ctx);
     expect(model.rows.length).toBe(4); // the complete v1 sort set

@@ -181,6 +181,22 @@ pub async fn rebuild_previews(app: S<'_>, root_id: String) -> CmdResult<usize> {
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// Core badge row → wire shape — shared with the collection-members grid
+/// read (commands/collections.rs), so both grid listings stay one mapping.
+pub(crate) fn grid_item(i: photoproof_core::library::FolderImage) -> GridItem {
+    GridItem {
+        hash: i.hash.as_str().to_owned(),
+        file_name: i.file_name,
+        rel_path: i.rel_path,
+        capture_ts: i.capture_ts,
+        added_ts: i.first_ingested_at,
+        has_journal: i.has_journal,
+        rating: i.rating,
+        offline: i.offline,
+        preview_ready: i.preview_ready,
+    }
+}
+
 fn folder_node(n: photoproof_core::library::FolderTreeNode) -> FolderNode {
     FolderNode {
         name: n.name,
@@ -209,20 +225,7 @@ pub async fn list_folder(app: S<'_>, root_id: String, folder: String) -> CmdResu
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let items = app.library.list_folder(&root_id, &folder)?;
-        Ok(items
-            .into_iter()
-            .map(|i| GridItem {
-                hash: i.hash.as_str().to_owned(),
-                file_name: i.file_name,
-                rel_path: i.rel_path,
-                capture_ts: i.capture_ts,
-                added_ts: i.first_ingested_at,
-                has_journal: i.has_journal,
-                rating: i.rating,
-                offline: i.offline,
-                preview_ready: i.preview_ready,
-            })
-            .collect())
+        Ok(items.into_iter().map(grid_item).collect())
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?

@@ -4,7 +4,7 @@
  * collections and saved searches join as SIBLING SECTIONS in M3 with zero
  * rail edits (SourceList renders sections generically).
  */
-import type { FolderNode, RootDto } from "../types/dto";
+import type { CollectionDto, FolderNode, RootDto } from "../types/dto";
 
 export interface SourceRow {
   /** Stable key: `${sectionId}:${rootId}:${folder}`. */
@@ -96,9 +96,42 @@ export function flatRows(secs: readonly SourceSection[]): SourceRow[] {
   return secs.flatMap((s) => s.rows);
 }
 
-/** ↑/↓ over the flattened rows; null focus starts at the edge. */
+// ---------------------------------------------------------------------------
+// Collections rows (B71 — the rail's Collections tab, sibling of folders)
+// ---------------------------------------------------------------------------
+
+export interface CollectionRow {
+  /** Stable key: `collections:${id}` — same namespace shape as folder keys. */
+  key: string;
+  id: string;
+  label: string;
+  memberCount: number;
+  status: string;
+  /** Shelved/done collections render status-dimmed, never hidden. */
+  dim: boolean;
+}
+
+export function collectionKey(id: string): string {
+  return `collections:${id}`;
+}
+
+/** Backend list order is kept (id order = creation order): the rail shows
+ * collections as the user accreted them — no re-sorting surprises. */
+export function collectionRows(collections: readonly CollectionDto[]): CollectionRow[] {
+  return collections.map((c) => ({
+    key: collectionKey(c.id),
+    id: c.id,
+    label: c.name,
+    memberCount: c.memberCount,
+    status: c.status,
+    dim: c.status !== "active",
+  }));
+}
+
+/** ↑/↓ over the flattened rows; null focus starts at the edge. Generic
+ * over the key so folder AND collection rows share one mover. */
 export function moveFocus(
-  rows: readonly SourceRow[],
+  rows: readonly { key: string }[],
   currentKey: string | null,
   dir: "up" | "down",
 ): string | null {

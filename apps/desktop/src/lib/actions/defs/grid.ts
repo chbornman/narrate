@@ -131,6 +131,23 @@ export const GRID_DEFS: ActionDef[] = [
     available: always,
     enabled: gridKeysFree,
   },
+  // "Add to collection" (B71 first slice): the image context menu's verb —
+  // a submenu of collection names; multi-select adds the WHOLE selection
+  // (the perform sink reads the stack-expanded targets). Exists only when
+  // a collection exists: an empty submenu would be a dead end, and the
+  // rail's Collections tab is where creation lives.
+  {
+    id: "add-to-collection",
+    verb: "Add to collection",
+    keys: [], // pointer-only: the thumb seat submenu
+    scope: "grid",
+    group: "grid",
+    seats: ["thumb"],
+    available: (ctx) => ctx.collections.length > 0,
+    toAction: (_ctx, arg) =>
+      typeof arg === "string" ? { kind: "add-to-collection", id: arg } : null,
+    options: (ctx) => ctx.collections.map((c) => ({ arg: c.id, label: c.name })),
+  },
   // ---- stacks (featureset §5, D1: live, reversible, display-level) --------
   {
     id: "stack-toggle-active",

@@ -38,6 +38,10 @@ export class ShellSlice {
   railFocused = $state(false);
   railFocusKey = $state<string | null>(null);
   railCollapsed = $state<ReadonlySet<string>>(new Set());
+  /** Folders | Collections — two PEER tabs (founder, June 2026: collections
+   * are the point; folders are mechanical). Arrow/Enter routing follows the
+   * visible tab (app.svelte.ts perform cases). */
+  railTab = $state<prefs.RailTab>("folders");
 
   // -- overlays / hosts --------------------------------------------------------
   cheatsheetOpen = $state(false);
@@ -91,7 +95,16 @@ export class ShellSlice {
   loadPrefs() {
     this.surround = prefs.loadSurround();
     this.railOpen = prefs.loadRailOpen();
+    this.railTab = prefs.loadRailTab();
     this.welcomeOpen = !prefs.loadWelcomeSeen();
+  }
+
+  /** Switch the rail tab (pointer on the tab strip). Keyboard focus stays
+   * on the rail; the focus key is left alone — a key from the hidden tab
+   * simply matches no row until arrows re-anchor it. */
+  setRailTab(tab: prefs.RailTab) {
+    this.railTab = tab;
+    prefs.saveRailTab(tab);
   }
 
   /** Every dismissal path (the card's button AND Esc) lands here and

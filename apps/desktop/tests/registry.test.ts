@@ -208,6 +208,9 @@ describe("seat coverage (menus can render every seated verb)", () => {
       railOpen: true,
       debugEnabled: false,
       asrReady: false,
+      // Add-to-collection exists only when a collection exists (its
+      // availability gate); coverage needs one on the table.
+      collections: [{ id: "01C", name: "Quiet Hours" }],
     });
     const seats: MenuSeat[] = ["thumb", "gutter", "rail-folder", "look-backdrop"];
     for (const seat of seats) {
