@@ -1226,15 +1226,27 @@ fn s11_rebuild_derived_rebuilds_summaries_fts_from_summary_rows() {
         .unwrap();
     assert_eq!(rows, summaries, "one FTS row per summary, no extras");
 
-    // And the live S3 path consumes the rebuilt index: the summary ranks
-    // its image again through the model-free pipeline.
+    // And the live S3 path consumes the rebuilt index. Image a also
+    // matches "fog" via S2 (its remark mentions fog), so the bare result
+    // list cannot tell whether S3 read the rebuilt rows -- only the
+    // per-signal debug provenance can: S3Summaries appears there iff the
+    // restored summary row reached fusion through the query pipeline.
+    let opts = HybridOptions {
+        include_debug: true,
+        ..HybridOptions::default()
+    };
     let out = hx
         .env
         .searcher
-        .hybrid_search("fog", &[], &keyword_only_rig(), &HybridOptions::default())
+        .hybrid_search("fog", &[], &keyword_only_rig(), &opts)
         .unwrap();
     assert_eq!(out.images.len(), 1);
     assert_eq!(out.images[0].image_hash, *a);
+    assert!(
+        rank_of(&out.images[0], SignalId::S3Summaries).is_some(),
+        "the rebuilt summaries_fts must rank a through the live S3 path, \
+         not just answer direct SQL probes"
+    );
 }
 
 // ---------------------------------------------------------------------------
