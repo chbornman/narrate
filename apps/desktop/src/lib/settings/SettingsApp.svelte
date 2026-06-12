@@ -26,6 +26,27 @@
    * is dropped and the drag strip insets past the lights. */
   const mac = isMac();
 
+  /** P7.4 decision 4: an installed embedder row shows running/idle state
+   * text. The in-process ort sessions load AFTER install (seconds for DFN5B),
+   * so "installed" alone cannot tell a loaded embedder from one still building
+   * or whose native load failed — the readiness booleans in the same
+   * RuntimeStatus payload carry that. We map the three pinned embedder ids to
+   * their role's readiness flag; non-embedder rows return "" (no suffix).
+   * Trivially additive (lane spec) — no new DTO surface. The booleans only
+   * distinguish ready from not-ready; the build-vs-fail detail lives in the
+   * debug panel (debug_lines), out of scope for this row. */
+  const TEXT_EMBEDDER_IDS = ["embeddinggemma-300m-q8", "qwen3-embedding-0.6b-int8"];
+  const CLIP_EMBEDDER_IDS = ["ViT-H-14-378-quickgelu__dfn5b"];
+  function embedderStatus(modelId: string, rt: RuntimeStatus): string {
+    if (TEXT_EMBEDDER_IDS.includes(modelId)) {
+      return rt.textEmbedderReady ? "running" : "idle (loading)";
+    }
+    if (CLIP_EMBEDDER_IDS.includes(modelId)) {
+      return rt.clipReady ? "running" : "idle (loading)";
+    }
+    return "";
+  }
+
   let roots = $state<RootDto[]>([]);
   let runtime = $state<RuntimeStatus | null>(null);
   let settings = $state<AppSettings | null>(null);
@@ -220,6 +241,9 @@
               coming in a later build
             {:else}
               {m.state}
+              {#if m.state === "installed" && runtime !== null && embedderStatus(m.id, runtime) !== ""}
+                — {embedderStatus(m.id, runtime)}
+              {/if}
             {/if}
           </span>
           {#if m.state === "not-downloaded" || m.state === "failed"}
