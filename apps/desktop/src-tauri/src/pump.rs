@@ -37,10 +37,28 @@ const SIDECAR_TICK: Duration = Duration::from_millis(500);
 const RUNTIME_PUMP_TICK: Duration = Duration::from_millis(500);
 
 pub fn ingest_status(app: &App) -> IngestStatus {
-    match app.library.pass_counters() {
+    let queue = match app.library.pass_counters() {
         Ok(c) => status_from_counters(&c),
         Err(_) => IngestStatus::default(),
-    }
+    };
+    let (scanning, discovered) = app.scans.snapshot();
+    overlay_walk(queue, scanning, discovered)
+}
+
+/// Overlay the LIVE walk state onto the queue-derived status. Pass rows
+/// only materialize at hash time — and hashing starts only after the full
+/// walk (size-ordered queue, §1.2) — so the queue counters read idle for
+/// the WHOLE walk of a slow volume. Folding the walk into `running` keeps
+/// every "work is pending" consumer honest at once: the header pill, the
+/// empty-state copy, the mid-scan grid re-list (founder, June 2026: "No
+/// photographs" shown over a folder busily being scanned). The changing
+/// `discovered` count also makes the pump's `!=` change detection emit
+/// during the walk, on the same coalesced cadence as everything else.
+fn overlay_walk(mut s: IngestStatus, scanning: bool, discovered: u64) -> IngestStatus {
+    s.scanning = scanning;
+    s.discovered = discovered;
+    s.running = s.running || scanning;
+    s
 }
 
 /// Pure fold from the queue's pass counters to the wire status — split
@@ -407,6 +425,22 @@ mod status_tests {
                 remaining: 9,
             }]
         );
+    }
+
+    /// A walk with ZERO pass rows is still pending work: `running` must
+    /// flip true the moment the scan registers, or the empty grid lies
+    /// "No photographs" for the whole walk (the founder incident this
+    /// overlay exists for).
+    #[test]
+    fn a_live_walk_keeps_running_true_with_empty_counters() {
+        let s = super::overlay_walk(status_from_counters(&BTreeMap::new()), true, 137);
+        assert!(s.running, "scanning alone is pending work");
+        assert!(s.scanning);
+        assert_eq!(s.discovered, 137);
+
+        let idle = super::overlay_walk(status_from_counters(&BTreeMap::new()), false, 0);
+        assert!(!idle.running, "no walk, no queue: truly idle");
+        assert!(!idle.scanning);
     }
 
     /// The breakdown order is deterministic (name-sorted): the pump's `!=`

@@ -136,6 +136,15 @@ pub struct IngestStatus {
     /// reviewer. Deterministic (BTreeMap) order so the pump's `!=`
     /// change detection never sees a phantom reorder.
     pub passes: Vec<PassRemaining>,
+    /// A filesystem walk (add-root initial scan / rescan) is in flight.
+    /// Pass rows only materialize at hash time, so the counters above read
+    /// idle for the WHOLE walk of a slow volume — this flag is what keeps
+    /// `running` honest through that window (founder, June 2026: "No
+    /// photographs" shown over a folder busily being scanned).
+    pub scanning: bool,
+    /// Files discovered so far by in-flight walks (after exclusions) —
+    /// the empty grid's quiet "N photographs found so far…" line.
+    pub discovered: u64,
 }
 
 /// One still-digesting pass kind: `remaining` = pending + running rows.

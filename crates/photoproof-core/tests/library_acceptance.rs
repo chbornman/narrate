@@ -610,6 +610,40 @@ impl Env {
     }
 }
 
+/// The live discovered counter (`ScanOptions::discovered`, ingest
+/// empty-state honesty): the walk bumps it once per indexable file — the
+/// shell's "N photographs found so far" line during the dark window before
+/// any pass row exists. Excluded files never count: the number shown must
+/// match what indexing will actually deliver.
+#[test]
+fn scan_discovered_counter_tracks_files_seen() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    for i in 0..5u32 {
+        env.write(&format!("photos/img{i}.jpg"), &unique_jpeg(i + 1));
+    }
+    env.write("photos/.hidden.jpg", &unique_jpeg(99)); // dotfile: excluded
+    env.write("photos/notes.txt", b"not an image"); // extension: excluded
+    let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let report = env
+        .lib
+        .scan_root(
+            &root,
+            &ScanOptions {
+                discovered: Some(Arc::clone(&counter)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(report.files_seen, 5, "exclusions applied before counting");
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        5,
+        "live counter agrees with the report's files_seen"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. Interrupt / resume
 // ---------------------------------------------------------------------------

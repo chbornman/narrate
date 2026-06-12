@@ -15,6 +15,8 @@ const status = (passes: IngestStatus["passes"]): IngestStatus => ({
   total: 0,
   errors: 0,
   passes,
+  scanning: false,
+  discovered: 0,
 });
 
 describe("jobs.ts — the background-jobs register", () => {

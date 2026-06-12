@@ -56,7 +56,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "list_roots":
         return [];
       case "ingest_status":
-        return { running: false, done: 0, total: 0, errors: 0, passes: [] };
+        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
       default:
         return null;
     }
@@ -326,6 +326,64 @@ describe("add-root from the rail (founder dogfood, rounds 1+2)", () => {
     dialog.nextDir = null;
     await ui.perform({ kind: "add-root" });
     expect(lastCall("add_root")).toBeUndefined();
+    expect(ui.shell.ingestExpecting).toBe(false); // no scan, no bridge
+  });
+});
+
+describe("ingest empty-state honesty (founder incident, June 2026)", () => {
+  // Between the add/rescan click and the pump's first scanning=true emit,
+  // ingest.running still reads false — the optimistic `ingestExpecting`
+  // bridge is what keeps the empty grid from lying "No photographs" over
+  // a folder about to be walked.
+  it("add-root raises the bridge; the first real status event clears it", async () => {
+    dialog.nextDir = "/shoots/longwalk";
+    expect(ui.shell.ingestExpecting).toBe(false);
+    await ui.perform({ kind: "add-root" });
+    expect(ui.shell.ingestExpecting).toBe(true); // no event yet: bridge holds
+    await ui.onIngestProgress({
+      running: true,
+      done: 0,
+      total: 0,
+      errors: 0,
+      passes: [],
+      scanning: true,
+      discovered: 42,
+    });
+    // The walk-aware status owns the copy now — and carries the count.
+    expect(ui.shell.ingestExpecting).toBe(false);
+    expect(ui.shell.ingest.scanning).toBe(true);
+    expect(ui.shell.ingest.discovered).toBe(42);
+  });
+
+  it("rescan raises the bridge; even an instantly-idle event clears it", async () => {
+    await ui.perform({ kind: "rescan-root", rootId: "R1" });
+    expect(ui.shell.ingestExpecting).toBe(true);
+    // An empty root's scan can finish before any running emit lands: the
+    // idle event must still stand the bridge down or "Indexing" strands.
+    await ui.onIngestProgress({
+      running: false,
+      done: 0,
+      total: 0,
+      errors: 0,
+      passes: [],
+      scanning: false,
+      discovered: 0,
+    });
+    expect(ui.shell.ingestExpecting).toBe(false);
+  });
+
+  it("a refused add-root stands the bridge down — no scan will ever run", async () => {
+    dialog.nextDir = "/not/a/folder";
+    ipcLog.failAddRoot = true;
+    await expect(ui.perform({ kind: "add-root" })).rejects.toThrow("not a folder");
+    expect(ui.shell.ingestExpecting).toBe(false);
+  });
+
+  it("a fully refused drop stands the bridge down too", async () => {
+    ipcLog.failAddRoot = true;
+    ui.offerDrop(["/not/a/folder.jpg"]);
+    await ui.confirmDrop();
+    expect(ui.shell.ingestExpecting).toBe(false);
   });
 });
 
@@ -339,22 +397,22 @@ describe("mid-scan grid re-list (founder, SMB, June 2026)", () => {
     const nowSpy = vi.spyOn(Date, "now");
 
     nowSpy.mockReturnValue(100_000);
-    await ui2.onIngestProgress({ running: true, done: 1, total: 10, errors: 0, passes: [] });
+    await ui2.onIngestProgress({ running: true, done: 1, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
     expect(calls()).toBe(before + 1); // first running tick lists
 
     nowSpy.mockReturnValue(100_500);
-    await ui2.onIngestProgress({ running: true, done: 2, total: 10, errors: 0, passes: [] });
+    await ui2.onIngestProgress({ running: true, done: 2, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
     expect(calls()).toBe(before + 1); // inside the 2 s throttle: no re-list
 
     nowSpy.mockReturnValue(103_000);
-    await ui2.onIngestProgress({ running: true, done: 5, total: 10, errors: 0, passes: [] });
+    await ui2.onIngestProgress({ running: true, done: 5, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
     expect(calls()).toBe(before + 2); // throttle elapsed
 
-    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [] });
+    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
     expect(calls()).toBe(before + 3); // running→idle edge: exact final state
     expect(ui2.shell.ingest.running).toBe(false);
 
-    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [] });
+    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
     expect(calls()).toBe(before + 3); // already idle: indicator only
     nowSpy.mockRestore();
   });
