@@ -135,6 +135,10 @@ ledger as founder-machine-deferred with a checklist entry.
 
 ## Status ledger
 
+The packet-grain ledger below tracks loop progress; the capability-grain view
+(exactly what has and hasn't been built, per spec area) lives in
+[STATUS.md](STATUS.md) and must be updated at every packet close.
+
 | Packet | Status | Gate result | Commit |
 |---|---|---|---|
 | P0 Scaffold | ✅ done | fmt/clippy/test green (2 tests) | `d2b1ec2` |
