@@ -50,6 +50,18 @@ pub struct SupervisorHost {
     /// §8.5: supervisors refuse to spawn without the instance lock.
     lock: Option<Arc<InstanceLock>>,
     stop: Arc<AtomicBool>,
+    /// The silent-dark incident (founder machine, June 2026): a target
+    /// prune ate `pp-asr-server`, the plan still said Run, and `apply`'s
+    /// `_` arm did nothing visible — `asr_ready()` read false forever
+    /// with NOTHING anywhere saying why. These carry the human reason
+    /// whenever a plan says Run but binary resolution returns None, so
+    /// status() and the debug panel can name the failure instead of
+    /// going dark. None = not blocked (which includes the normal
+    /// "spawning, not ready yet" warm-up). Rewritten on EVERY apply()
+    /// — the same converge cadence that drives the supervisors — so the
+    /// reason clears itself the moment the binary reappears.
+    asr_blocked: Mutex<Option<String>>,
+    llm_blocked: Mutex<Option<String>>,
 }
 
 /// `llama-server`: PATH for dev, app-sibling for bundles. None = the plan
@@ -147,6 +159,8 @@ impl SupervisorHost {
             registry,
             lock,
             stop: Arc::new(AtomicBool::new(false)),
+            asr_blocked: Mutex::new(None),
+            llm_blocked: Mutex::new(None),
         }
     }
 
@@ -164,6 +178,20 @@ impl SupervisorHost {
             .expect("llm supervisor")
             .as_ref()
             .is_some_and(|s| s.is_ready())
+    }
+
+    /// Plan says Run but `pp-asr-server` could not be resolved: the human
+    /// reason, or None when not blocked. Distinguishes "will never become
+    /// ready until the binary returns" from the silent warm-up that
+    /// `asr_ready() == false` also covers.
+    pub fn asr_blocked(&self) -> Option<String> {
+        self.asr_blocked.lock().expect("asr blocked").clone()
+    }
+
+    /// Same surfacing for `llama-server` — it shares the silent-dark
+    /// failure mode (PATH-or-sibling resolution can also come up empty).
+    pub fn llm_blocked(&self) -> Option<String> {
+        self.llm_blocked.lock().expect("llm blocked").clone()
     }
 
     /// Map the (re)computed plan onto the machines: build a supervisor
@@ -184,6 +212,7 @@ impl SupervisorHost {
             let mut slot = self.asr.lock().expect("asr supervisor");
             match (&plan.asr, asr_binary()) {
                 (ProcessPlan::Run { model_id }, Some(binary)) => {
+                    *self.asr_blocked.lock().expect("asr blocked") = None;
                     if slot.is_none()
                         && let Some(entry) = manifest.model(model_id)
                     {
@@ -206,7 +235,27 @@ impl SupervisorHost {
                         *slot = Some(sup);
                     }
                 }
+                (ProcessPlan::Run { .. }, None) => {
+                    // The incident arm: the plan wants P2 but there is no
+                    // binary to spawn (in dev a target prune removes it —
+                    // `tauri dev` only rebuilds the app, not sibling
+                    // workspace bins). Used to fall into `_` and vanish;
+                    // now the reason is recorded for status()/debug_lines
+                    // and any live supervisor (binary deleted mid-run)
+                    // still winds down through the §8.4 order.
+                    *self.asr_blocked.lock().expect("asr blocked") = Some(
+                        "pp-asr-server binary is missing beside the app executable \
+                         (dev: `cargo build -p pp-asr-server` restores it)"
+                            .into(),
+                    );
+                    if let Some(sup) = slot.as_mut() {
+                        sup.stop();
+                    }
+                }
                 _ => {
+                    // Plan went dark (NotConfigured/External): not blocked —
+                    // the plan itself names that state in debug_lines.
+                    *self.asr_blocked.lock().expect("asr blocked") = None;
                     if let Some(sup) = slot.as_mut() {
                         sup.stop();
                     }
@@ -218,6 +267,7 @@ impl SupervisorHost {
             let mut slot = self.llm.lock().expect("llm supervisor");
             match (&plan.llm, llama_binary()) {
                 (ProcessPlan::Run { model_id }, Some(binary)) => {
+                    *self.llm_blocked.lock().expect("llm blocked") = None;
                     if slot.is_none()
                         && let Some(entry) = manifest.model(model_id)
                     {
@@ -240,7 +290,22 @@ impl SupervisorHost {
                         *slot = Some(sup);
                     }
                 }
+                (ProcessPlan::Run { .. }, None) => {
+                    // Same silent-dark failure mode as P2: weights are
+                    // installed (the plan says Run) but no binary resolved
+                    // — without a recorded reason the LLM features just
+                    // never light up and nothing says why.
+                    *self.llm_blocked.lock().expect("llm blocked") = Some(
+                        "llama-server binary not found beside the app executable \
+                         or on PATH (dev: `brew install llama.cpp`)"
+                            .into(),
+                    );
+                    if let Some(sup) = slot.as_mut() {
+                        sup.stop();
+                    }
+                }
                 _ => {
+                    *self.llm_blocked.lock().expect("llm blocked") = None;
                     if let Some(sup) = slot.as_mut() {
                         sup.stop();
                     }
@@ -286,5 +351,61 @@ impl SupervisorHost {
 
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use photoproof_core::runtime::compiled_manifest;
+
+    fn not_configured() -> ProcessPlan {
+        ProcessPlan::NotConfigured {
+            reason: "test".into(),
+            fixable_by_download: false,
+        }
+    }
+
+    /// The June 2026 incident, pinned: the plan says Run for P2 but no
+    /// `pp-asr-server` sits beside the executable (the test binary lives
+    /// in target/{profile}/deps — deterministically empty of it), so apply
+    /// must record a VISIBLE reason instead of silently doing nothing —
+    /// and clear it again when the plan goes dark. P1 shares the arm
+    /// shape but resolves via PATH too, so only P2 is deterministic here.
+    #[test]
+    fn plan_run_without_binary_records_a_blocked_reason() {
+        let host = SupervisorHost::new(RuntimeBus::new(), None, None);
+        let manifest = compiled_manifest();
+        let run = RuntimePlan {
+            effective_tier: 1,
+            llm: not_configured(),
+            asr: ProcessPlan::Run {
+                model_id: "any".into(),
+            },
+            clip_embedder: not_configured(),
+            text_embedder: not_configured(),
+        };
+        host.apply(&run, &manifest, Path::new("/nonexistent"), 4096, 1, 560);
+        let reason = host.asr_blocked().expect("the missing binary is named");
+        assert!(
+            reason.contains("pp-asr-server"),
+            "the reason names the binary: {reason}"
+        );
+        assert!(!host.asr_ready(), "blocked is never ready");
+        assert!(
+            host.llm_blocked().is_none(),
+            "llm plan is dark, not blocked"
+        );
+
+        // Plan goes dark → the blocked reason clears on the same converge.
+        let dark = RuntimePlan {
+            effective_tier: 1,
+            llm: not_configured(),
+            asr: not_configured(),
+            clip_embedder: not_configured(),
+            text_embedder: not_configured(),
+        };
+        host.apply(&dark, &manifest, Path::new("/nonexistent"), 4096, 1, 560);
+        assert!(host.asr_blocked().is_none());
     }
 }
