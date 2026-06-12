@@ -63,6 +63,14 @@ managing = off-thesis).
   relink heuristics); the index is rebuildable. "Don't show again"
   toggle (default ON) via prefs.ts; escape layer 1; redaction-modal
   frame/focus pattern. (Founder, dogfood round 3, June 2026.)
+- [ ] **Header shows background jobs** — a quiet indicator in the header
+  for work still running behind the scenes: ingest passes (hashing,
+  previews), preview rebuilds, doctor repairs, and — once M3 lands —
+  embedding/caption backfills. The ingest pill exists; this generalizes
+  it: one register for "the library is still digesting", with a count
+  and kind on hover, never a progress-bar circus. The per-pass counters
+  already exist (pass_counters; debug panel) — this is surfacing, not
+  plumbing. (Founder, June 2026.)
 - [ ] **Copy actions confirm themselves** — wherever a copy affordance
   exists ("Copy file path" on the thumb menu today; any future copy
   icon/verb), clicking it must give quiet feedback that the copy landed
