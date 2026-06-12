@@ -6,6 +6,8 @@
 //! Filters are hard constraints: a DTO this layer cannot translate is an
 //! error, never a silent drop (RETRIEVAL §5.1 firewall discipline).
 
+use photoproof_connectors::OrtEmbedder;
+use photoproof_connectors::vector_store::VectorStore;
 use photoproof_core::search::{
     self as core_search, CollectionRef, Comparison, DateField, DateRange, Filter as CoreFilter,
     PathMatch, RelativeRange as CoreRelativeRange, SearchError, Searcher, Season, StringMatch,
@@ -24,12 +26,57 @@ impl From<SearchError> for CmdError {
 
 /// Execute a search and translate the result contract for IPC.
 ///
-/// Runs the §5 hybrid pipeline with the no-models rig (P7.2): with no
-/// embedders/LLM wired this is exactly the M1 keyword path — the shipping
-/// degraded posture — plus §10.3 collection-chip resolution against the
-/// collections store (no model required). Model slots wire in here once
-/// the runtime serves them.
+/// Runs the §5 hybrid pipeline. P7.4 decision 6: when an embedder is ready
+/// the rig is fed from the `EmbedderHost` + the PPVEC store — query-time
+/// text embedding for S1/S3, S4 CLIP query embedding (B69 always-votes).
+/// **ABSOLUTE INVARIANT:** with NO embedder ready the call goes through the
+/// `keyword_only_rig()` path UNCHANGED — byte-identical to today's M1
+/// keyword search (the existing search tests pin this). The parse LLM seam
+/// stays `None` in this lane (out of scope); NL parse wires in later.
 pub fn run_search(
+    app: &crate::state::App,
+    raw: String,
+    filters: Vec<dto::Filter>,
+) -> CmdResult<dto::SearchResults> {
+    let text = app.runtime.embedders.text();
+    let clip = app.runtime.embedders.clip();
+
+    if text.is_none() && clip.is_none() {
+        // Degraded posture: no embedder ready ⇒ the exact M1 keyword path,
+        // byte-for-byte (`run_search_keyword`). This branch must never
+        // diverge from P7.2 behavior — the search tests pin it.
+        return run_search_keyword(&app.searcher, raw, filters);
+    }
+
+    // Semantic rig: the ready embedders + the vector store. `llm: None`
+    // keeps the degenerate parse (no NL parse this lane). An embedder
+    // present but its space empty still yields no vector hits — the signals
+    // are additive (B69), never error.
+    let core_filters: Vec<CoreFilter> = filters
+        .iter()
+        .map(filter_to_core)
+        .collect::<CmdResult<_>>()?;
+    let rig = core_search::HybridRig::<core_search::NoModel, OrtEmbedder, OrtEmbedder> {
+        llm: None,
+        text: text.as_deref(),
+        clip: clip.as_deref(),
+        vectors: Some(app.vectors.as_ref() as &dyn VectorStore),
+    };
+    let results = app.searcher.hybrid_search(
+        &raw,
+        &core_filters,
+        &rig,
+        &core_search::HybridOptions::default(),
+    )?;
+    Ok(results_to_dto(results, filters))
+}
+
+/// The M1 keyword-only path (the shipping degraded posture): the §5 hybrid
+/// pipeline with every model slot `None`, which the engine documents as the
+/// degenerate case of itself — byte-identical to the P7.2 search, plus
+/// §10.3 collection-chip resolution (no model required). The degraded
+/// branch of `run_search` and the search tests both go through here.
+fn run_search_keyword(
     searcher: &Searcher,
     raw: String,
     filters: Vec<dto::Filter>,
@@ -261,7 +308,7 @@ mod tests {
             .unwrap();
 
         let searcher = Searcher::open(&db).unwrap();
-        let out = run_search(&searcher, "fog ba".into(), Vec::new()).unwrap();
+        let out = run_search_keyword(&searcher, "fog ba".into(), Vec::new()).unwrap();
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].image_hash, target.to_string());
         match &out.images[0].provenance {
@@ -316,7 +363,7 @@ mod tests {
         let chip = dto::Filter::Collection {
             name: "quiet hours".into(),
         };
-        let out = run_search(&searcher, "fog".into(), vec![chip]).unwrap();
+        let out = run_search_keyword(&searcher, "fog".into(), vec![chip]).unwrap();
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].image_hash, member.to_string());
         assert!(out.query.dropped.is_empty());
@@ -324,7 +371,7 @@ mod tests {
         let bad = dto::Filter::Collection {
             name: "zzz qqq".into(),
         };
-        let err = run_search(&searcher, "fog".into(), vec![bad]).unwrap_err();
+        let err = run_search_keyword(&searcher, "fog".into(), vec![bad]).unwrap_err();
         assert!(
             err.to_string().contains("'zzz qqq' not found"),
             "unresolvable chip errors instead of broadening: {err}"

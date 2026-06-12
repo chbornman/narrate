@@ -14,7 +14,7 @@ use crate::search_types::{Filter, SearchResults};
 pub fn search(app: S<'_>, query: String, filters: Vec<Filter>) -> CmdResult<SearchResults> {
     app.touch()?;
     app.searcher.interrupt();
-    let results = crate::search_wire::run_search(&app.searcher, query, filters)?;
+    let results = crate::search_wire::run_search(&app, query, filters)?;
     *app.last_search.lock().expect("last_search mutex") = Some(results.query.clone());
     Ok(results)
 }
