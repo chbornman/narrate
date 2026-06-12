@@ -255,6 +255,42 @@ impl PpvecStore {
         }
         let conn = self.db.lock().expect("poisoned");
         let _io = file_io_lock();
+        // REDACTION RACE GUARD (RETRIEVAL §13.5/§13.12, review L4-host). The
+        // embedding drain reads a chunk's body, releases every lock, runs the
+        // ort embed (tens of ms to ~3 s), then lands here. A redaction can
+        // commit in that window: it scrubs the event (redacted_by set, text
+        // NULLed), marks the vector rows deleted=1, and zeroes the flat-file
+        // bytes synchronously before `redact()` returns. Without this guard
+        // the UPDATE below would flip deleted back to 0 and write an embedding
+        // of the now-redacted text — permanently, since the scrubbed event is
+        // gone from event_fts so neither the per-image pass nor the
+        // session-level sweep ever revisits it, and sweep_dead only zeroes
+        // deleted=1 rows. So: for an annotation-chunk row, re-check under THIS
+        // connection lock (atomic with the write) whether the source event is
+        // redacted; if so, skip the write entirely and leave the row dead.
+        // A plain revision does NOT set redacted_by (it appends a new event),
+        // so legitimate re-embeds are unaffected — only redaction is blocked.
+        if let VecUnit::AnnotationChunk { event_id, .. } = &key.unit {
+            // Block ONLY when the source event exists AND is scrubbed
+            // (redacted_by set). Absence is NOT a block: PpvecStore is a
+            // standalone derived store — a vector may legitimately be upserted
+            // for an event row not present in THIS database (and the unit
+            // tests plant synthetic ids), so a missing row means "no redaction
+            // evidence", allow. A plain revision leaves redacted_by NULL, so
+            // re-embeds still land; only an actual scrub refuses.
+            let scrubbed: Option<bool> = conn
+                .query_row(
+                    "SELECT redacted_by IS NOT NULL FROM annotation_events WHERE id = ?1",
+                    [event_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(db_err)?
+                .map(|flag| flag != 0);
+            if scrubbed == Some(true) {
+                return Ok(());
+            }
+        }
         // One source-dims per space: mixing embedder dimensions in one
         // space is corruption, never a soft fallback.
         let existing_dims: Option<i64> = conn

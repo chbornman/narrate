@@ -250,6 +250,102 @@ fn r13_12_redaction_scrub_zeroes_row_bytes_byte_scan() {
     ));
 }
 
+/// REDACTION RACE (RETRIEVAL §13.5/§13.12, review L4-host). The embedding
+/// drain reads a chunk body, releases its locks, runs the (slow) embed, then
+/// lands in `upsert_with_meta`. If a redaction commits in that window — vector
+/// rows marked deleted=1, flat-file bytes zeroed synchronously, the event
+/// scrubbed — the stale upsert must NOT resurrect the row and write an
+/// embedding of the redacted text. Here we drive the exact interleave: embed,
+/// redact, then a STALE `upsert_with_meta` of the pre-redaction vector. The
+/// guard must leave the row dead and the bytes zeroed.
+#[test]
+fn stale_upsert_after_redaction_does_not_resurrect_the_vector() {
+    use photoproof_core::retrieval::VecMeta;
+    use photoproof_core::{EventDraft, EventStore, RemarkSource, SessionContext};
+
+    let fx = Fixture::new();
+    // EventStore and PpvecStore share the same db file AND the same
+    // vectors dir (default_vectors_dir == <db parent>/vectors == fx dir), so
+    // the redaction's synchronous zeroing hits the same flat file the store
+    // wrote — exactly the production wiring.
+    let events = EventStore::open(fx.db()).unwrap();
+    let sid = events
+        .open_session(SessionContext {
+            app_version: "0.0.0-test".into(),
+            device_id: "a".repeat(32),
+            root_context: None,
+        })
+        .unwrap();
+    let target = photoproof_core::ContentHash::from_bytes_of(b"redaction-race-image");
+    let ev = events
+        .append(
+            &sid,
+            EventDraft::Remark {
+                source: RemarkSource::Typed,
+                text: "the secret coordinates are forty two north".into(),
+                targets: vec![target],
+            },
+            None,
+        )
+        .unwrap();
+
+    let store = fx.open();
+    let key = chunk_key(ev.id.as_str(), 0);
+    // 1. The drain's first embed lands a live vector for the event's chunk.
+    let secret_vec = emb(vec![1.0; MRL_DIMS]);
+    let secret_row = vec![6u8; MRL_DIMS]; // 1/sqrt(512)*127 -> 6 each dim
+    store
+        .upsert_with_meta(
+            &key,
+            &secret_vec,
+            &VecMeta {
+                inputs_hash: "h0".into(),
+                char_start: Some(0),
+                char_end: Some(10),
+            },
+        )
+        .unwrap();
+    assert!(
+        contains_row(&read_file(&store, &space()), &secret_row),
+        "the live embedding is on disk before redaction"
+    );
+
+    // 2. The user redacts the event: marks the vector deleted, zeroes the
+    //    bytes synchronously (§13.5), scrubs the event (redacted_by set).
+    events.redact(&ev.id).unwrap();
+    assert!(
+        !contains_row(&read_file(&store, &space()), &secret_row),
+        "redaction zeroed the bytes synchronously"
+    );
+
+    // 3. The stale in-flight embed lands AFTER the redaction. Without the
+    //    guard this would flip deleted back to 0 and re-write the secret.
+    store
+        .upsert_with_meta(
+            &key,
+            &secret_vec,
+            &VecMeta {
+                inputs_hash: "h0".into(),
+                char_start: Some(0),
+                char_end: Some(10),
+            },
+        )
+        .expect("stale upsert returns Ok, just does nothing");
+
+    // The bytes stay zeroed and the row stays out of search — permanently.
+    assert!(
+        !contains_row(&read_file(&store, &space()), &secret_row),
+        "stale upsert must NOT resurrect the redacted vector's bytes"
+    );
+    let mut q = vec![0.0f32; MRL_DIMS];
+    q[0] = 1.0;
+    let hits = store.search(&emb(q), space(), 10).unwrap();
+    assert!(
+        hits.is_empty(),
+        "redacted vector must not be served as a search hit"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // §1.3 lifecycle: upsert-replace, logical delete, compaction
 // ---------------------------------------------------------------------------
