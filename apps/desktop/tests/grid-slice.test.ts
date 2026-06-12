@@ -287,3 +287,15 @@ describe("mid-ingest re-sort keeps IDENTITY, not indexes (founder dogfood, June 
     expect(g.selectionTargets).toEqual(["h:a.jpg", "h:a.cr2"]);
   });
 });
+
+describe("focusNav: scroll-into-view keys on USER moves only (scroll stability)", () => {
+  it("bumps on setSelection, never on a re-list's focus remap", () => {
+    const g = new GridSlice();
+    g.setItems([item("a.jpg"), item("b.jpg")]);
+    expect(g.focusNav).toBe(0); // ingest re-list: no nav
+    g.setSelection({ order: ["h:a.jpg"], focus: 0, anchor: 0 });
+    expect(g.focusNav).toBe(1); // the user moved
+    g.setItems([item("a.jpg"), item("b.jpg"), item("c.jpg")]);
+    expect(g.focusNav).toBe(1); // re-list remapped focus silently
+  });
+});

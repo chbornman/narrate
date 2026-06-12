@@ -8,17 +8,13 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
-- [ ] **Mid-ingest scroll stability** — every preview/exif tick that
-  re-lists the folder can yank the grid scroll back to the top while the
-  founder is already reviewing — exactly when staying put matters most.
-  Diagnosis pointers: capture-desc re-sorts as exif fills captureTs (the
-  image under the cursor MOVES — the keep-active-visible effect then
-  scrolls to its new position), and the scroll anchor is index-based
-  (logic/gridlayout captureAnchor), so an insert-above shifts what the
-  index points at. Fix direction: anchor by HASH across setItems (the
-  B64 identity rule applied to scroll), and suppress keep-active-visible
-  scrolling for re-lists the user didn't initiate. (Founder, dogfood
-  round 3, June 2026.)
+- [x] **Mid-ingest scroll stability** — landed: the scroll anchor pins
+  the IMAGE (hash) across re-lists — when a re-sort moves it, the
+  viewport follows it to its new offset (B64 applied to scroll); and
+  scroll-focus-into-view keys on `focusNav` (bumped only by
+  setSelection, the user-driven path), so a refresh's silent focus
+  remap never yanks the viewport. (Founder, dogfood round 3, June
+  2026.)
 - [ ] **Import progressively: cards before hashes, previews in tiers** —
   big-folder import should SHOW something immediately: (a) discovery
   pass lists filenames and paints placeholder cards before hashing

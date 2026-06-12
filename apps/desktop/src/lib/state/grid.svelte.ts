@@ -134,8 +134,17 @@ export class GridSlice {
     this.fixupSelection(prevActive);
   }
 
+  /** Monotone counter bumped on USER-driven selection changes only —
+   * Grid's scroll-focus-into-view effect keys on this, never on focus
+   * itself: a mid-ingest re-list remaps focus by hash (B64) and the
+   * followed image may have re-sorted far away; yanking the viewport
+   * after a refresh the user never asked for is the scroll-stability
+   * bug (founder, dogfood round 3). */
+  focusNav = $state(0);
+
   setSelection(next: sel.SelState) {
     this.sel = next;
+    this.focusNav += 1;
   }
 
   setSort(mode: SortMode) {

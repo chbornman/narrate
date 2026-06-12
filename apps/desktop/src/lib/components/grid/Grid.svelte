@@ -99,14 +99,46 @@
     if (anchor !== null) setScroll(layout.restoreScroll(geom, anchor, units.length, vh));
   });
 
+  /** The IMAGE under the anchor index — mid-ingest scroll stability
+   * (founder, dogfood round 3): every re-list can re-sort (exif fills
+   * captureTs under capture-desc), moving content beneath a still
+   * viewport. Pinning the anchor by hash is B64's identity rule applied
+   * to scroll position. */
+  let anchorHash: string | null = null;
+
   function onScroll() {
     scrollTop = viewportEl?.scrollTop ?? 0;
-    ui.grid.scrollAnchor = layout.captureAnchor(geom, scrollTop, units.length);
+    const anchor = layout.captureAnchor(geom, scrollTop, units.length);
+    ui.grid.scrollAnchor = anchor;
+    anchorHash = anchor === null ? null : (ui.grid.unitHashes[anchor.index] ?? null);
   }
 
-  // Keep the active cell visible when keyboard focus moves.
+  // Items changed (ingest re-list, stack re-pair): keep the anchored
+  // IMAGE where it was, not whatever now occupies its old index.
+  let prevUnitHashes = ui.grid.unitHashes;
   $effect(() => {
+    const hashes = ui.grid.unitHashes;
+    if (hashes === prevUnitHashes) return;
+    prevUnitHashes = hashes;
+    const anchor = ui.grid.scrollAnchor;
+    if (!restored || anchorHash === null || anchor === null) return;
+    const idx = hashes.indexOf(anchorHash);
+    if (idx < 0 || idx === anchor.index) return;
+    const moved = { index: idx, offset: anchor.offset };
+    ui.grid.scrollAnchor = moved;
+    setScroll(layout.restoreScroll(geom, moved, hashes.length, vh));
+  });
+
+  // Keep the active cell visible when the USER moves focus (focusNav —
+  // never on focus value alone: a re-list remaps focus by hash, and
+  // following the remap would yank the viewport after a refresh the
+  // user never asked for).
+  let prevFocusNav = ui.grid.focusNav;
+  $effect(() => {
+    const nav = ui.grid.focusNav;
     const f = ui.grid.sel.focus;
+    if (nav === prevFocusNav) return;
+    prevFocusNav = nav;
     if (!restored || f < 0 || viewportEl === undefined) return;
     const top = layout.position(geom, f).y;
     const bottom = top + geom.cell;
