@@ -118,9 +118,17 @@ impl Library {
         // keyed per image, so no ingest_passes row can ever reach them.
         // Sweep them directly each drain instead — cheap when fresh, since
         // the §1.2 inputs_hash check skips unchanged chunks without
-        // touching the embedder.
+        // touching the embedder. The sweep is UNBOUNDED (every stale
+        // session-level remark in one turn — a first backfill over a journal
+        // with hundreds of voice remarks is minutes of ort CPU), so it must
+        // honor `cancel` per remark just like the per-item loop below:
+        // arming the mic (capture_live) preempts it instead of monopolizing
+        // the machine the politeness rule reserves for capture.
         if let Some(embedder) = rig.text {
-            self.embed_sessionlevel_text(embedder, rig.vectors, &mut report)?;
+            self.embed_sessionlevel_text(embedder, rig.vectors, opts, &mut report)?;
+            if report.cancelled {
+                return Ok(report);
+            }
         }
 
         loop {
@@ -307,6 +315,7 @@ impl Library {
         &self,
         embedder: &TE,
         vectors: &PpvecStore,
+        opts: &QueueOptions,
         report: &mut QueueReport,
     ) -> Result<(), LibraryError> {
         let space = VecSpace {
@@ -328,6 +337,18 @@ impl Library {
             rows.collect::<Result<_, _>>()?
         };
         for (event_id, body, annotated_date) in roots {
+            // Honor cancellation between remarks: this sweep is unbounded, so
+            // an armed mic (capture_live, wired as `cancel` by the drain) must
+            // be able to preempt it mid-sweep — fresh chunks already no-op via
+            // the inputs_hash check, so the cost is only in stale ones, which
+            // we stop embedding the moment the flag flips. The half-swept rows
+            // stay stale and the next idle drain resumes them.
+            if let Some(cancel) = &opts.cancel
+                && cancel.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                report.cancelled = true;
+                return Ok(());
+            }
             let ctx = ChunkContext {
                 date: Some(annotated_date),
                 // Zero targets => no folder; collections land in P7.3.

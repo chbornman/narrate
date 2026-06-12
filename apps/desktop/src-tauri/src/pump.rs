@@ -169,9 +169,17 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
 ///
 /// PAUSE while `capture_live`: embedding batches hold while the mic owns the
 /// machine (RUNTIME §9 — "while the mic is armed … embedding batches" pause;
-/// same posture as downloads). The pause is honored at batch granularity:
-/// an in-flight batch finishes (bounded by `EMBED_BATCH`), nothing new
-/// starts.
+/// same posture as downloads). Two layers enforce it, matching the downloads
+/// posture (per-chunk, not per-batch — download.rs's SleepPacer consults the
+/// SAME flag inside its transfer loop):
+///   1. No new batch starts while armed (the early return below).
+///   2. `cancel` is wired to `capture_live`, and the core drain checks it
+///      before every item claim AND before the unbounded session-level
+///      remark sweep — so a mic armed MID-batch (or mid-sweep) preempts at
+///      the next item rather than running the whole `EMBED_BATCH` (~24 s of
+///      DFN5B inference) or an arbitrarily long first sweep of stale remarks.
+///      Cancelling leaves the in-flight rows pending; the next idle turn
+///      resumes them.
 ///
 /// DEGRADED: with no embedder ready this returns 0 and the rows sit pending
 /// — the journal is whole, the backfill is simply dark (RETRIEVAL §3 /
@@ -197,7 +205,11 @@ fn drain_embeddings(app: &App) -> usize {
     match app.library.process_embedding_queue(
         &rig,
         &QueueOptions {
-            cancel: None,
+            // Per-item pause: capture_live is already an Arc<AtomicBool>, and
+            // the core drain checks it before each claim and before the
+            // session-level sweep, so arming the mic mid-drain preempts the
+            // backfill instead of letting a long turn compete with capture.
+            cancel: Some(app.runtime.capture_live.clone()),
             max_items: Some(EMBED_BATCH),
         },
     ) {
