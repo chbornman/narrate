@@ -197,6 +197,19 @@ export const GLOBAL_DEFS: ActionDef[] = [
     worksInInput: true,
   },
   {
+    id: "toggle-station-detail",
+    verb: "What's happening",
+    label: "Pin the station's status detail open",
+    keys: [], // pointer-only: the station's info seat (Station.svelte)
+    scope: "global",
+    group: "system",
+    // The seat itself appears only when activities exist (station model);
+    // the VERB is always available — pinning an empty detail is a no-op
+    // body, not an error, and availability gating belongs to defs, never
+    // to a component's whim about what state the shell happens to hold.
+    available: always,
+  },
+  {
     // ONE mic verb, two input forms (June 2026 ruling: M is SOLELY the
     // microphone key). The M KEYDOWN dispatches `mic-press`, which begins
     // the tap-vs-hold machine (logic/michold.ts: tap toggles, hold is

@@ -129,7 +129,9 @@ export type Action =
   // (logic/michold.ts); toggle-mic is the instantaneous pointer form
   // (indicator segment click — a click IS a tap, so it toggles).
   | { kind: "toggle-mic" }
-  | { kind: "mic-press" };
+  | { kind: "mic-press" }
+  // the station's info seat (pointer-only): pin the expansion open
+  | { kind: "toggle-station-detail" };
 
 /** The P3.2 KeyContext fields — still required, so existing fixtures and
  * callers compile unchanged. */
