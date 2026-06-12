@@ -47,10 +47,16 @@ HEADER
 
 # LC_ALL=C sort: a stable, locale-independent order so regenerations diff
 # cleanly. find prunes the HF .cache metadata dir and any rknpu/armnn files.
+# -ipath (whole relative path), NOT -iname (basename only): upstream ships the
+# NPU variants in DIRECTORY form — visual/rknpu/rk3566..rk3588/model.rknn and
+# textual/rknpu/... — whose basename "model.rknn" never matches '*rknpu*'. A
+# basename filter would silently pin ~7 GB of .rknn blobs ort never loads when
+# someone regenerates against a full `hf download` snapshot. -ipath catches
+# both the directory-form and any basename-form (textual/model.armnn) variants.
 find visual textual -type f \
     ! -path '*/.cache/*' \
-    ! -iname '*rknpu*' \
-    ! -iname '*armnn*' \
+    ! -ipath '*rknpu*' \
+    ! -ipath '*armnn*' \
     | LC_ALL=C sort \
     | while read -r p; do
         sha=$(shasum -a 256 "$p" | awk '{print $1}')
