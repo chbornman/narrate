@@ -81,6 +81,14 @@ export interface IngestStatus {
    * names, deterministic order — the header jobs pill's hover breakdown
    * (BACKLOG "Header shows background jobs"). */
   passes: { name: string; remaining: number }[];
+  /** A filesystem walk (add-root initial scan / rescan) is in flight. Pass
+   * counters lag the walk — rows only appear at hash time — so this is
+   * what keeps `running` true through the walk's dark window (founder,
+   * June 2026: "No photographs" over a folder busily being scanned). */
+  scanning: boolean;
+  /** Files discovered so far by in-flight walks (after exclusions) — the
+   * empty grid's quiet "N photographs found so far…" line. */
+  discovered: number;
 }
 
 /** RUNTIME (P6.2): tier + consent + per-model license/progress rows.

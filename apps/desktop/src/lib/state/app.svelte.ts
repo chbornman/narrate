@@ -286,7 +286,18 @@ export class Ui {
       return; // non-tauri dev/tests: no picker to show
     }
     if (typeof dir !== "string") return;
-    const root = await ipc.addRoot(dir);
+    // The lying window (founder, June 2026): between this call and the
+    // pump's first scanning=true emit, ingest.running is still false —
+    // the empty state must read "indexing", never "no photographs".
+    // Optimistic; the first real status event clears it (onIngestProgress).
+    this.shell.ingestExpecting = true;
+    let root: RootDto;
+    try {
+      root = await ipc.addRoot(dir);
+    } catch (e) {
+      this.shell.ingestExpecting = false; // terminal: no scan will run
+      throw e;
+    }
     await this.refreshRoots();
     await this.openFolder(root.rootId, "");
   }
@@ -378,6 +389,11 @@ export class Ui {
    * state is exact. */
   private lastIngestRefresh = 0;
   async onIngestProgress(status: IngestStatus) {
+    // Real status arrived: the optimistic add-root/rescan bridge stands
+    // down — `running` (walk-aware via `scanning`) owns the empty-state
+    // copy from here. Cleared on EVERY event, idle ones included: an
+    // instantly-finished scan must not leave "Indexing" stranded.
+    this.shell.ingestExpecting = false;
     const wasRunning = this.shell.ingest.running;
     this.shell.ingest = status;
     if (this.grid.rootId === null) return;
@@ -528,6 +544,9 @@ export class Ui {
   async confirmDrop() {
     const paths = this.dropPaths;
     if (paths === null) return;
+    // Same optimistic bridge as the picker flow: registration kicks an
+    // initial scan, and the empty state must say so immediately.
+    this.shell.ingestExpecting = true;
     let first: string | null = null;
     for (const path of paths) {
       try {
@@ -535,6 +554,9 @@ export class Ui {
         first ??= root.rootId;
       } catch (e) {
         this.dropError = e instanceof Error ? e.message : String(e);
+        // Only a FULLY refused drop stands the bridge down — once one
+        // root registered, its scan is real and the events will clear it.
+        if (first === null) this.shell.ingestExpecting = false;
         return;
       }
     }
@@ -1162,10 +1184,14 @@ export class Ui {
         }
         break;
       case "rescan-root":
+        // The add-root optimistic bridge applies here too: a rescan's
+        // walk has the same dark window before its first status emit.
+        this.shell.ingestExpecting = true;
         try {
           await ipc.rescanRoot(action.rootId);
         } catch {
           /* unreachable backend in tests */
+          this.shell.ingestExpecting = false;
         }
         break;
       case "rebuild-previews":

@@ -40,7 +40,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "list_roots":
         return [];
       case "ingest_status":
-        return { running: false, done: 0, total: 0, errors: 0, passes: [] };
+        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
       default:
         return null;
     }

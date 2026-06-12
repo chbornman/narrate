@@ -83,7 +83,25 @@ export class ShellSlice {
   /** Monotonic pulse counter; the indicator animates on change (UI §7.4). */
   pulseCount = $state(0);
   lastPulseAt = 0;
-  ingest = $state<IngestStatus>({ running: false, done: 0, total: 0, errors: 0, passes: [] });
+  ingest = $state<IngestStatus>({
+    running: false,
+    done: 0,
+    total: 0,
+    errors: 0,
+    passes: [],
+    scanning: false,
+    discovered: 0,
+  });
+  /** Optimistic "ingest is coming" bridge (founder, June 2026): between
+   * the add-root/rescan click and the pump's first scanning=true emit,
+   * `ingest.running` still reads false — and the empty grid would lie
+   * "No photographs" over a folder about to be walked. Set synchronously
+   * by the perform sink (app.svelte.ts); cleared by the FIRST real status
+   * event (onIngestProgress — the backend's walk-aware `running` takes
+   * over from there) or when the add/rescan call terminally errors.
+   * In-memory only, never persisted: a refresh/restart starts false and
+   * boot fetches real status, so a stale flag cannot strand. */
+  ingestExpecting = $state(false);
 
   debugOpen = $state(false);
 

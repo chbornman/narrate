@@ -90,14 +90,23 @@ pub async fn add_root<R: Runtime>(
             .library
             .register_root(std::path::Path::new(&path), None)?;
         // Initial scan on its own thread: it only enqueues ingest passes;
-        // the pump processes them.
+        // the pump processes them. The walk registers with `app.scans` so
+        // `ingest_status` reports it live (scanning + discovered) — pass
+        // rows only exist from hash time, and without this the empty grid
+        // read "No photographs" for the whole walk of a slow volume
+        // (founder, June 2026).
         {
-            let lib = app.library.clone();
+            let scan_app = app.clone();
             let rid = root_id.clone();
             std::thread::Builder::new()
                 .name("pp-initial-scan".into())
                 .spawn(move || {
-                    if let Err(e) = lib.scan_root(&rid, &ScanOptions::default()) {
+                    let _walk = scan_app.scans.begin(); // guard: de-registers on every exit
+                    let opts = ScanOptions {
+                        discovered: Some(scan_app.scans.counter()),
+                        ..ScanOptions::default()
+                    };
+                    if let Err(e) = scan_app.library.scan_root(&rid, &opts) {
                         eprintln!("photoproof: initial scan failed for {rid}: {e}");
                     }
                 })
@@ -157,7 +166,17 @@ pub async fn rescan_root(app: S<'_>, root_id: String) -> CmdResult<()> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app.touch()?;
-        app.library.scan_root(&root_id, &ScanOptions::default())?;
+        // Same live-walk registration as add_root's initial scan: this
+        // command blocks until the rescan completes, and the pump reports
+        // scanning + discovered to the empty grid meanwhile.
+        let _walk = app.scans.begin();
+        app.library.scan_root(
+            &root_id,
+            &ScanOptions {
+                discovered: Some(app.scans.counter()),
+                ..ScanOptions::default()
+            },
+        )?;
         Ok(())
     })
     .await

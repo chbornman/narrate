@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use photoproof_connectors::SherpaOnlineTranscriber;
@@ -91,7 +91,61 @@ pub struct App {
     /// The running mic thread, present exactly while armed; dropping the
     /// handle stops and joins it (and the cpal stream with it).
     pub mic: Mutex<Option<crate::mic::MicHandle>>,
+    /// Live walk visibility (ingest empty-state honesty): user-initiated
+    /// scans (add-root initial scan, rescan) register here so
+    /// `pump::ingest_status` can report `scanning`/`discovered` WHILE the
+    /// walk runs — the queue's pass counters only materialize at hash
+    /// time, which left the whole walk dark and the empty grid lying "No
+    /// photographs" (founder, June 2026).
+    pub scans: ScanTracker,
     pub shutdown: Arc<AtomicBool>,
+}
+
+/// Registry of in-flight filesystem walks. `begin()` hands out a guard so
+/// EVERY exit path (success, error, unwind) de-registers — a failed scan
+/// must never pin `scanning: true` forever.
+#[derive(Default)]
+pub struct ScanTracker {
+    /// In-flight walk count (an add-root scan and a rescan can overlap).
+    active: AtomicUsize,
+    /// Files discovered across in-flight walks. Shared as an `Arc` because
+    /// `ScanOptions::discovered` (core) takes the counter by handle — the
+    /// walk thread bumps it directly, no channel, no polling seam.
+    discovered: Arc<AtomicU64>,
+}
+
+impl ScanTracker {
+    /// Register a walk. The counter resets only on the FIRST concurrent
+    /// walk: it reads as "found so far" for the current burst of scan
+    /// activity, not a forever-total across the app's lifetime.
+    pub fn begin(&self) -> ScanGuard<'_> {
+        if self.active.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.discovered.store(0, Ordering::SeqCst);
+        }
+        ScanGuard(self)
+    }
+
+    /// The shared counter for `ScanOptions::discovered`.
+    pub fn counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.discovered)
+    }
+
+    /// (scanning, discovered) — folded into `IngestStatus` by the pump.
+    pub fn snapshot(&self) -> (bool, u64) {
+        (
+            self.active.load(Ordering::SeqCst) > 0,
+            self.discovered.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// De-registers its walk on drop (the RAII shape `begin()` documents).
+pub struct ScanGuard<'a>(&'a ScanTracker);
+
+impl Drop for ScanGuard<'_> {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl App {
@@ -206,6 +260,7 @@ impl App {
             runtime,
             capture,
             mic: Mutex::new(None),
+            scans: ScanTracker::default(),
             shutdown: Arc::new(AtomicBool::new(false)),
         })
     }

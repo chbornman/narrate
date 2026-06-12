@@ -17,7 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, OnceLock};
 
 use rayon::prelude::*;
 use rusqlite::params;
@@ -52,6 +53,16 @@ pub struct ScanOptions {
     /// scans; the watcher uses P0 through its own path.
     pub priority: i64,
     pub cancel: Option<CancelFlag>,
+    /// Live discovered-file counter: the walk bumps it once per indexable
+    /// file seen (the `files_seen` accounting, live instead of post-hoc).
+    /// Pass rows only materialize at HASH time, so without this the whole
+    /// walk of a slow volume is invisible to status readers — the shell's
+    /// empty grid lied "No photographs" over a folder mid-scan (founder,
+    /// June 2026). A shared atomic, not a callback, for the same reason
+    /// `cancel` is one: a Relaxed add per file is noise next to the `stat`
+    /// preceding it, and emission coalescing stays the CALLER's policy —
+    /// no event discipline leaks into the core.
+    pub discovered: Option<Arc<AtomicU64>>,
 }
 
 impl Default for ScanOptions {
@@ -59,6 +70,7 @@ impl Default for ScanOptions {
         Self {
             priority: PRIORITY_SCAN,
             cancel: None,
+            discovered: None,
         }
     }
 }
@@ -285,6 +297,9 @@ pub(crate) fn scan_root(
             continue;
         }
         report.files_seen += 1;
+        if let Some(counter) = &opts.discovered {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if !sentinels.is_empty() {
             let s = ingest::placeholder_sentinel(&volume.volume_id, &rel);
             if sentinels.contains(s.as_str()) {

@@ -226,8 +226,19 @@
                     line="Nothing gathered yet — right-click an image and choose Add to collection."
                   />
                 {/if}
-              {:else if ui.shell.ingest.running}
-                <EmptyState line="Indexing — photographs appear as they are found." />
+              {:else if ui.shell.ingest.running || ui.shell.ingestExpecting}
+                <!-- pending work must NEVER read "No photographs" (founder,
+                     June 2026): ingestExpecting bridges the click→first-emit
+                     gap on add/rescan; `running` (walk-aware via `scanning`)
+                     carries from the first real event; the live discovered
+                     count keeps a slow volume's long walk honest -->
+                {#if ui.shell.ingest.scanning && ui.shell.ingest.discovered > 0}
+                  <EmptyState
+                    line={`Indexing — ${ui.shell.ingest.discovered.toLocaleString()} ${ui.shell.ingest.discovered === 1 ? "photograph" : "photographs"} found so far…`}
+                  />
+                {:else}
+                  <EmptyState line="Indexing — photographs appear as they are found." />
+                {/if}
               {:else}
                 <EmptyState line="No photographs in this folder.">
                   {#snippet action()}
