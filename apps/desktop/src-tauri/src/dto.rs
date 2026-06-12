@@ -194,6 +194,11 @@ pub struct ModelRow {
     pub accepted: bool,
     /// Download failure detail surfaced in settings/debug (§5.2).
     pub error: Option<String>,
+    /// Present while the worker auto-retries an interrupted transfer:
+    /// the row stays "downloading" (a cut is weather, not a verdict —
+    /// `error` is written only when the retry schedule is exhausted) and
+    /// this names the in-progress retry for settings to show.
+    pub retry_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

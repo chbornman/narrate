@@ -452,10 +452,67 @@ fn download_progress_rides_the_bus_coalesced() {
         "…but COALESCED, not per-chunk: {}",
         progress.len()
     );
+    assert!(
+        progress.iter().all(|(_, t)| *t == model.total_bytes),
+        "every event speaks in MODEL totals: {progress:?}"
+    );
     assert_eq!(
         progress.last(),
         Some(&(payload.len() as u64, payload.len() as u64)),
         "completion event closes the series"
+    );
+}
+
+/// Progress is MODEL-cumulative across files: the second file's events
+/// carry the first file's bytes as a baseline, and every event's
+/// denominator is the model's manifest total. The regression this pins:
+/// per-file numerators displayed against the model total made DFN5B's
+/// ~400-file enumeration read ~0% in settings while gigabytes sat
+/// verified on disk.
+#[test]
+fn progress_is_model_cumulative_across_files() {
+    let server = StubHttpServer::start();
+    let a = file_bytes(5_000_000, 5); // each > the 4 MB coalescing step,
+    let b = file_bytes(6_000_000, 6); // so both files emit in-flight events
+    let model = model_with(&server, vec![("a.bin", &a), ("b.bin", &b)], false);
+    server.route("/a.bin", StubResponse::RangedFile { file: a.clone() });
+    server.route("/b.bin", StubResponse::RangedFile { file: b.clone() });
+    let bus = RuntimeBus::new();
+    let rx = bus.subscribe();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), bus);
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect("download");
+    let mut progress = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let RuntimeEvent::DownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            ..
+        } = e
+        {
+            progress.push((downloaded_bytes, total_bytes));
+        }
+    }
+    let total = (a.len() + b.len()) as u64;
+    assert!(
+        progress.iter().all(|(_, t)| *t == total),
+        "every denominator is the MODEL total: {progress:?}"
+    );
+    assert!(
+        progress.windows(2).all(|w| w[0].0 <= w[1].0),
+        "the series never moves backwards (a per-file numerator would \
+         reset to ~0 when file b starts): {progress:?}"
+    );
+    assert!(
+        progress.iter().any(|(d, _)| *d > a.len() as u64),
+        "file b's events ride on file a's completed bytes: {progress:?}"
+    );
+    assert_eq!(
+        progress.last(),
+        Some(&(total, total)),
+        "the series closes at the model total"
     );
 }
 

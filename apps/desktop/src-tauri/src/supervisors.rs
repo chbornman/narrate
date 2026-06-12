@@ -150,6 +150,15 @@ impl SupervisorHost {
         }
     }
 
+    /// True once `shutdown()` latched the stop flag — the quit signal as
+    /// seen from the runtime's worker threads. `App::shutdown` flips it
+    /// exactly once, at quit; the download worker reads it between
+    /// auto-retry backoff slices so a quit never waits out a 30 s backoff
+    /// (and no new transfer starts during teardown).
+    pub fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
     pub fn asr_ready(&self) -> bool {
         self.asr
             .lock()

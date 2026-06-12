@@ -27,6 +27,32 @@ use photoproof_core::runtime::{
 use crate::dto::{ModelRow, RuntimeStatus};
 use crate::hardware::LiveProbe;
 
+/// Backoff before each automatic resume of an Interrupted transfer — and
+/// ONLY that class: a connection cut or read stall on a multi-GB CDN
+/// transfer is weather, not a verdict, and the part files mean every
+/// retry resumes instead of restarting. Checksum/license/HTTP-status/
+/// unpinned failures keep failing fast — retrying those re-runs a proof
+/// that already came back false. Four retries (five attempts total) with
+/// growing gaps outlasts the blips the founder actually hit (3× in one
+/// dogfood night) without hammering a CDN that is genuinely down.
+#[cfg(not(test))]
+const INTERRUPTED_BACKOFF: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(30),
+];
+/// Tests run offline, where every connect fails into the same
+/// Interrupted class as a mid-read cut — so they exercise the full
+/// five-attempt POLICY. Only the schedule shrinks; minutes of wall sleep
+/// would teach the drain test nothing.
+#[cfg(test)]
+const INTERRUPTED_BACKOFF: [std::time::Duration; 4] = [std::time::Duration::from_millis(1); 4];
+
+/// The backoff sleeps in slices this long so the quit signal is observed
+/// promptly — a quit mid-backoff must not hang on a 30 s sleep.
+const BACKOFF_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// §10.3: "Later" re-offers from settings only; "Never" is remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consent {
@@ -90,12 +116,21 @@ struct HostState {
     tier: TierDecision,
     consent: Consent,
     acceptances: Acceptances,
-    /// model id → live download progress (downloaded, total). An entry
-    /// exists from enqueue to completion — queued models show as
-    /// "downloading" at 0 bytes.
+    /// model id → live download progress (downloaded, total), both in
+    /// MODEL-cumulative bytes (bytes of the model on disk over its
+    /// manifest total — the bus speaks the same language). An entry
+    /// exists from enqueue to completion; it is seeded from the on-disk
+    /// baseline so a resumed multi-GB part never reads "0 bytes".
     downloads: BTreeMap<String, (u64, u64)>,
     /// model id → surfaced failure (§5.2: settings + debug panel).
     download_errors: BTreeMap<String, String>,
+    /// model id → live auto-retry hint while the worker waits out an
+    /// interrupted transfer. Present ONLY between an interruption and the
+    /// final verdict — the row stays "downloading" (no error row) so a
+    /// connection cut on a multi-GB CDN transfer doesn't flash a terminal
+    /// "failed" the founder has to click through (happened 3× in one
+    /// dogfood night).
+    download_retries: BTreeMap<String, String>,
     /// §5.2 "one file at a time" is a rule of the download MANAGER, not
     /// of one model: pending model ids drain through ONE worker thread.
     download_queue: VecDeque<String>,
@@ -210,6 +245,7 @@ impl RuntimeHost {
                 acceptances,
                 downloads: BTreeMap::new(),
                 download_errors: BTreeMap::new(),
+                download_retries: BTreeMap::new(),
                 download_queue: VecDeque::new(),
                 download_worker_live: false,
                 orphan_sweep,
@@ -343,6 +379,7 @@ impl RuntimeHost {
                     acceptance_required: m.license.acceptance_required,
                     accepted: state.acceptances.accepted.contains_key(&m.id),
                     error,
+                    retry_hint: state.download_retries.get(&m.id).cloned(),
                 }
             })
             .collect();
@@ -514,15 +551,29 @@ impl RuntimeHost {
     /// the rule). The pacer throttle therefore applies to the one live
     /// transfer, undiluted.
     fn enqueue_downloads(self: &Arc<Self>, models: Vec<photoproof_core::runtime::ModelEntry>) {
+        // Seed the progress row from the ON-DISK baseline, not zero: a
+        // resumed download has its prior gigabytes in final + part files,
+        // and a "0 bytes" row on resume reads like the progress was lost.
+        // Stat the files BEFORE taking the state lock — downloaded_bytes
+        // walks up to ~400 entries for DFN5B, and fs IO under the host
+        // lock would stall every concurrent status() call.
+        let manager = self.manager();
+        let models: Vec<(photoproof_core::runtime::ModelEntry, u64)> = models
+            .into_iter()
+            .map(|m| {
+                let on_disk = manager.downloaded_bytes(&m);
+                (m, on_disk)
+            })
+            .collect();
         let spawn_worker = {
             let mut state = self.state.lock().expect("runtime state");
-            for model in models {
+            for (model, on_disk) in models {
                 if state.downloads.contains_key(&model.id) {
                     continue; // already queued or mid-transfer
                 }
                 state
                     .downloads
-                    .insert(model.id.clone(), (0, model.total_bytes));
+                    .insert(model.id.clone(), (on_disk, model.total_bytes));
                 state.download_errors.remove(&model.id);
                 state.download_queue.push_back(model.id);
             }
@@ -569,15 +620,15 @@ impl RuntimeHost {
     }
 
     /// One model, files strictly in sequence (core's loop); called only
-    /// from the single queue worker.
+    /// from the single queue worker. Interrupted transfers auto-retry on
+    /// the [`INTERRUPTED_BACKOFF`] schedule before anything terminal is
+    /// surfaced.
     fn run_download(&self, model: &photoproof_core::runtime::ModelEntry) {
         #[cfg(test)]
         self.download_thread_log
             .lock()
             .expect("download thread log")
             .push((model.id.clone(), std::thread::current().id()));
-        // Track progress off the bus while this download runs.
-        let progress_rx = self.bus.subscribe();
         let acceptances = self
             .state
             .lock()
@@ -586,28 +637,72 @@ impl RuntimeHost {
             .clone();
         let manager = self.manager();
         let mut pacer = SleepPacer::new(self.capture_live.clone());
-        let result = manager.download_model(
-            model,
-            self.manifest.manifest_version,
-            &acceptances,
-            &mut pacer,
-            &UtcMillis::now().to_rfc3339(),
-        );
-        // Fold any progress events into the snapshot state.
-        let mut last = (manager.downloaded_bytes(model), model.total_bytes);
-        while let Ok(e) = progress_rx.try_recv() {
-            if let photoproof_core::runtime::RuntimeEvent::DownloadProgress {
-                model_id,
-                downloaded_bytes,
-                total_bytes,
-            } = e
-                && model_id == model.id
-            {
-                last = (downloaded_bytes, total_bytes);
+        let attempt = |pacer: &mut SleepPacer| {
+            manager.download_model(
+                model,
+                self.manifest.manifest_version,
+                &acceptances,
+                pacer,
+                &UtcMillis::now().to_rfc3339(),
+            )
+        };
+        let mut result = attempt(&mut pacer);
+        let attempts_total = 1 + INTERRUPTED_BACKOFF.len();
+        for (retry, backoff) in INTERRUPTED_BACKOFF.iter().enumerate() {
+            if !matches!(result, Err(DownloadError::Interrupted { .. })) {
+                break; // success, or a class where retrying re-proves a falsehood
             }
+            {
+                let mut state = self.state.lock().expect("runtime state");
+                // The row stays "downloading" — download_errors is written
+                // only when the schedule is exhausted, so a single cut
+                // never flashes a terminal "failed". The hint names what
+                // the worker is actually doing for settings to surface.
+                state.download_retries.insert(
+                    model.id.clone(),
+                    format!(
+                        "connection interrupted — retrying (attempt {} of {})",
+                        retry + 2,
+                        attempts_total
+                    ),
+                );
+                // Refresh the displayed bytes from disk: bus events
+                // coalesce every 4 MB, so the cut usually lands past the
+                // last published number and the part files hold the truth.
+                if let Some(slot) = state.downloads.get_mut(&model.id) {
+                    slot.0 = manager.downloaded_bytes(model);
+                }
+            }
+            // Backoff in the worker thread — like the pacer, this is the
+            // one honest kind of sleep: waiting out network weather is IO
+            // pacing, not decision logic, and this dedicated thread has
+            // nothing else to do. Sliced so the quit signal (the
+            // supervisors' stop latch, flipped once by App::shutdown) is
+            // observed within a beat instead of after up to 30 s.
+            let deadline = std::time::Instant::now() + *backoff;
+            loop {
+                if self.supervisors.stopping() {
+                    // Quitting: no further attempt, and no error row for a
+                    // download that was never given its retries — the part
+                    // files keep the progress for the next launch.
+                    let mut state = self.state.lock().expect("runtime state");
+                    state.downloads.remove(&model.id);
+                    state.download_retries.remove(&model.id);
+                    return;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::sleep(BACKOFF_SLICE.min(deadline - now));
+            }
+            // Each retry resumes from the part files (core Ranges from
+            // their lengths); nothing already verified moves again.
+            result = attempt(&mut pacer);
         }
         let mut state = self.state.lock().expect("runtime state");
         state.downloads.remove(&model.id);
+        state.download_retries.remove(&model.id);
         match result {
             Ok(_) => {}
             Err(DownloadError::LicenseNotAccepted { .. }) => {
@@ -620,7 +715,6 @@ impl RuntimeHost {
                     .insert(model.id.clone(), e.to_string());
             }
         }
-        let _ = last;
     }
 
     /// Settings → remove a model's weights (§2.4). Installed records and
@@ -661,7 +755,9 @@ impl RuntimeHost {
         self.status()
     }
 
-    /// Live download progress for the pump's snapshot events.
+    /// Live download progress for the pump's snapshot events. The bus
+    /// speaks model-cumulative bytes over the manifest total (bus.rs),
+    /// which is exactly what the settings row divides — stored verbatim.
     pub fn note_progress(&self, model_id: &str, downloaded: u64, total: u64) {
         let mut state = self.state.lock().expect("runtime state");
         if let Some(slot) = state.downloads.get_mut(model_id) {

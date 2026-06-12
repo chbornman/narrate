@@ -62,7 +62,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Coalescing step for `DownloadProgress` bus events: publish only every
 /// this-many bytes, because per-chunk publishing would flood the bus and
-/// the UI on multi-GB model files.
+/// the UI on multi-GB model files. The published numbers are
+/// MODEL-cumulative (bytes of this model on disk over its manifest
+/// total), never per-file: DFN5B is ~400 files, mostly tiny shards, and a
+/// per-file numerator against the model total read ~0% in settings while
+/// gigabytes sat verified on disk (founder dogfood, June 2026).
 const PROGRESS_STEP_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -275,6 +279,12 @@ impl DownloadManager {
             files_fetched: 0,
             bytes_fetched: 0,
         };
+        // Model-cumulative progress baseline: bytes of files BEFORE the
+        // in-flight one, already verified-complete (skipped below or just
+        // fetched). Files transfer strictly in manifest order, so prior
+        // files are always whole — `base + have` is exactly "bytes of this
+        // model on disk", the one meaning the settings row displays.
+        let mut base: u64 = 0;
         for file in &model.files {
             // Path-preserving dest under models_dir/<model_id>/<file.path>.
             // The subdirectory layout is load-bearing: ort resolves the
@@ -289,9 +299,10 @@ impl DownloadManager {
                 std::fs::create_dir_all(parent)?;
             }
             if std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(file.bytes) {
+                base += file.bytes;
                 continue; // verified at rename time on a previous run
             }
-            match self.fetch_and_verify(model, file, &dest, pacer) {
+            match self.fetch_and_verify(model, file, &dest, pacer, base) {
                 Ok(bytes) => {
                     outcome.files_fetched += 1;
                     outcome.bytes_fetched += bytes;
@@ -301,7 +312,7 @@ impl DownloadManager {
                     // automatic retry, then surface.
                     let _ = std::fs::remove_file(part_path(&dest));
                     let _ = std::fs::remove_file(&dest);
-                    match self.fetch_and_verify(model, file, &dest, pacer) {
+                    match self.fetch_and_verify(model, file, &dest, pacer, base) {
                         Ok(bytes) => {
                             outcome.files_fetched += 1;
                             outcome.bytes_fetched += bytes;
@@ -311,18 +322,26 @@ impl DownloadManager {
                 }
                 Err(e) => return Err(e),
             }
+            // Errors returned above; reaching here means the file verified
+            // and renamed, so it joins the cumulative baseline.
+            base += file.bytes;
         }
         // All files verified ⇒ installed (§5.2 atomicity at model grain).
         self.record_installed(&model.id, manifest_version, now_rfc3339)?;
         Ok(outcome)
     }
 
+    /// `base` is the model-cumulative byte count of the files already
+    /// complete before this one — every progress event publishes
+    /// `base + have` against `model.total_bytes` so the bus always speaks
+    /// in model terms (see [`PROGRESS_STEP_BYTES`]).
     fn fetch_and_verify(
         &self,
         model: &ModelEntry,
         file: &FileEntry,
         dest: &Path,
         pacer: &mut dyn Pacer,
+        base: u64,
     ) -> Result<u64, DownloadError> {
         // B55 fail-closed pre-flight: an unpinned entry never reaches the
         // network — not even a HEAD. (The embedder entries ship this way
@@ -348,12 +367,12 @@ impl DownloadManager {
             let _ = std::fs::remove_file(&part);
             have = 0;
         } else if have == file.bytes && file.bytes > 0 {
-            self.verify_and_finish(model, file, &part, dest)?;
+            self.verify_and_finish(model, file, &part, dest, base)?;
             return Ok(0);
         }
         let url = file.url();
         if url.starts_with("https://") {
-            return self.fetch_https(model, file, dest, &part, have, &url, pacer);
+            return self.fetch_https(model, file, dest, &part, have, &url, pacer, base);
         }
         let (addr, path) = parse_http_url(&url)?;
         let mut headers: Vec<(String, String)> = Vec::new();
@@ -404,13 +423,14 @@ impl DownloadManager {
                     have += n as u64;
                     fetched += n as u64;
                     pacer.pace(n);
-                    // Coalesced progress on the bus.
+                    // Coalesced progress on the bus, in MODEL-cumulative
+                    // terms (the only meaning the settings row displays).
                     if have - last_progress >= PROGRESS_STEP_BYTES {
                         last_progress = have;
                         self.bus.publish(RuntimeEvent::DownloadProgress {
                             model_id: model.id.clone(),
-                            downloaded_bytes: have,
-                            total_bytes: file.bytes,
+                            downloaded_bytes: base + have,
+                            total_bytes: model.total_bytes,
                         });
                     }
                 }
@@ -429,7 +449,7 @@ impl DownloadManager {
         }
         out.flush()?;
         drop(out);
-        self.verify_and_finish(model, file, &part, dest)?;
+        self.verify_and_finish(model, file, &part, dest, base)?;
         Ok(fetched)
     }
 
@@ -450,6 +470,7 @@ impl DownloadManager {
         mut have: u64,
         url: &str,
         pacer: &mut dyn Pacer,
+        base: u64,
     ) -> Result<u64, DownloadError> {
         use std::io::Read;
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -498,8 +519,8 @@ impl DownloadManager {
                         last_progress = have;
                         self.bus.publish(RuntimeEvent::DownloadProgress {
                             model_id: model.id.clone(),
-                            downloaded_bytes: have,
-                            total_bytes: file.bytes,
+                            downloaded_bytes: base + have,
+                            total_bytes: model.total_bytes,
                         });
                     }
                 }
@@ -511,7 +532,7 @@ impl DownloadManager {
         }
         out.flush()?;
         drop(out);
-        self.verify_and_finish(model, file, part, dest)?;
+        self.verify_and_finish(model, file, part, dest, base)?;
         Ok(fetched)
     }
 
@@ -523,6 +544,7 @@ impl DownloadManager {
         file: &FileEntry,
         part: &Path,
         dest: &Path,
+        base: u64,
     ) -> Result<(), DownloadError> {
         let digest = sha256_file(part)?;
         if digest != file.sha256.to_lowercase() {
@@ -538,10 +560,14 @@ impl DownloadManager {
             });
         }
         std::fs::rename(part, dest)?;
+        // Per-file completion event, still in model-cumulative terms — for
+        // DFN5B's ~290 sub-4 MB shards this is the ONLY event each file
+        // emits (the coalescing step never trips), so it is what actually
+        // advances the settings row through the long shard stretch.
         self.bus.publish(RuntimeEvent::DownloadProgress {
             model_id: model.id.clone(),
-            downloaded_bytes: file.bytes,
-            total_bytes: file.bytes,
+            downloaded_bytes: base + file.bytes,
+            total_bytes: model.total_bytes,
         });
         Ok(())
     }

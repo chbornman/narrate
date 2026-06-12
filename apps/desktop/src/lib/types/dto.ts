@@ -114,12 +114,19 @@ export interface ModelRowDto {
   /** "not-offered" | "not-downloaded" | "downloading" | "installed" | "failed". */
   state: string;
   totalBytes: number;
+  /** Model-cumulative: bytes of this model on disk, never per-file. */
   downloadedBytes: number;
   licenseName: string;
   licenseUrl: string;
   acceptanceRequired: boolean;
   accepted: boolean;
   error: string | null;
+  /**
+   * Set while an interrupted transfer is auto-retrying: the row stays
+   * "downloading" (error is terminal, written only after the retry
+   * schedule is exhausted) and this names the retry in flight.
+   */
+  retryHint: string | null;
 }
 
 export interface AppSettings {
