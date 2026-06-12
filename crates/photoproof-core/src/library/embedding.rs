@@ -14,9 +14,9 @@
 //!
 //! Degraded posture: with no embedder configured the drain claims nothing
 //! and the rows sit pending — idle, NotConfigured-style, never errors —
-//! matching the runtime's degraded contract. The embedders themselves are
-//! not downloadable yet (manifest unpinned until spike session 2);
-//! everything here ships mock-verified.
+//! matching the runtime's degraded contract. The embedder models are pinned
+//! and downloadable post-B73; the live ort connector that fills these rows
+//! lands in P7.4 L3/L4. Everything here ships mock-verified until then.
 //!
 //! B69 (retrieval stays additive): the image_clip signal is built
 //! unconditionally beside the text signal; journal coverage never retires

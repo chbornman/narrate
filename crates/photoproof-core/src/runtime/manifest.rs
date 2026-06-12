@@ -11,6 +11,13 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+// The DFN5B external-data enumeration (400 files: visual/ + textual/) lives in
+// a checked-in generated literal — see gen_dfn5b_manifest.sh for WHY a
+// generator. `include!` keeps it a pure compiled `&[(path, sha, bytes)]` slice
+// with no network and no runtime discovery; the manifest builder below maps it
+// into FileEntry rows at the pinned revision.
+include!("dfn5b_files.rs");
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub manifest_version: u32,
@@ -20,7 +27,9 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
-    /// "llm" | "asr" | "embedder" | "text-embedder".
+    /// "llm" | "llm-alt" | "asr" | "embedder" | "text-embedder" |
+    /// "text-embedder-alt" (the "*-alt" roles are config-selectable
+    /// alternatives, offered at higher tiers — the llm-alt precedent).
     pub role: String,
     /// Tiers this model is OFFERED at (§6.2 — selection changes offers,
     /// never deletes installed weights).
@@ -127,18 +136,11 @@ impl Manifest {
 /// The compiled-in manifest for this release. LLM + ASR pins are REAL as
 /// of the P6.3 spike session 1 (docs/SPIKE-P6.3.md — SHA-256 measured on
 /// downloaded artifacts, revisions = the HF repo commits served at pin
-/// time). Embedder pins remain placeholders until spike session 2's
-/// bake-off; their downloads fail closed by construction, which is
-/// exactly right while those recipes are unverified.
+/// time). The embedder pins are REAL as of the P7 embed spike (B73,
+/// docs/SPIKE-P7-EMBED.md): EmbeddingGemma-300m q8 is the text-embedder
+/// default, Qwen3-Embedding-0.6B int8 the configured alternative, and
+/// DFN5B is enumerated in full (graph + ~400 external-data files).
 pub fn compiled_manifest() -> Manifest {
-    const UNPINNED: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-    let f = |repo: &str, path: &str, bytes: u64| FileEntry {
-        repo: repo.into(),
-        revision: "UNPINNED-P6.3".into(),
-        path: path.into(),
-        sha256: UNPINNED.into(),
-        bytes,
-    };
     let pinned = |repo: &str, revision: &str, path: &str, sha256: &str, bytes: u64| FileEntry {
         repo: repo.into(),
         revision: revision.into(),
@@ -146,6 +148,16 @@ pub fn compiled_manifest() -> Manifest {
         sha256: sha256.into(),
         bytes,
     };
+    // DFN5B at its single pinned Immich revision: map the generated literal
+    // (path, sha, bytes) tuples into FileEntry rows. total_bytes is the SUM of
+    // every enumerated file — never a hand-typed estimate.
+    const DFN5B_REPO: &str = "hf:immich-app/ViT-H-14-378-quickgelu__dfn5b";
+    const DFN5B_REVISION: &str = "a5925c6e44f6381544a7263296662135ff4df0ff";
+    let dfn5b_files: Vec<FileEntry> = DFN5B_FILES
+        .iter()
+        .map(|(path, sha256, bytes)| pinned(DFN5B_REPO, DFN5B_REVISION, path, sha256, *bytes))
+        .collect();
+    let dfn5b_total: u64 = dfn5b_files.iter().map(|f| f.bytes).sum();
     Manifest {
         manifest_version: 1,
         models: vec![
@@ -256,34 +268,92 @@ pub fn compiled_manifest() -> Manifest {
                     ),
                 ],
             },
+            // B73: DFN5B (ViT-H-14-378-quickgelu, Immich's ONNX export) is the
+            // CLIP embedder — founder-confirmed feasible on M-series. Pinned in
+            // full: the visual tower's graph onnx PLUS ~400 external-data weight
+            // files (the ort-load-bearing set; see dfn5b_files.rs). License is
+            // Apple ASCL, served via the Immich repo; acceptance gates.
             ModelEntry {
                 id: "ViT-H-14-378-quickgelu__dfn5b".into(),
                 role: "embedder".into(),
                 tiers: vec![1, 2],
                 license: License {
-                    name: "Apple DFN model license".into(),
-                    url: "https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-378".into(),
-                    // Spike confirms exact terms (§5.3); the conservative
-                    // default gates.
+                    name: "Apple Sample Code License (ASCL)".into(),
+                    url: "https://huggingface.co/immich-app/ViT-H-14-378-quickgelu__dfn5b".into(),
                     acceptance_required: true,
                 },
-                total_bytes: 2_600_000_000,
-                files: vec![
-                    f("hf:immich-app/ViT-H-14-378-quickgelu__dfn5b", "visual/model.onnx", 2_400_000_000),
-                    f("hf:immich-app/ViT-H-14-378-quickgelu__dfn5b", "textual/model.onnx", 200_000_000),
-                ],
+                total_bytes: dfn5b_total,
+                files: dfn5b_files,
             },
+            // B73: EmbeddingGemma-300m q8 is the text-embedder DEFAULT — better
+            // paraphrase separation than Qwen3, 768 dims (half the PPVEC bytes),
+            // 316 MB. onnx-community export: graph + external .onnx_data weights
+            // + tokenizer.json (the `tokenizers` crate loads it, L3). Gemma terms
+            // gate (same flow as the LLM; a distinct model id keeps its own
+            // acceptance record — existing behavior).
             ModelEntry {
-                id: "qwen3-embedding-0.6b-int8".into(),
+                id: "embeddinggemma-300m-q8".into(),
                 role: "text-embedder".into(),
                 tiers: vec![1, 2],
+                license: License {
+                    name: "Gemma Terms of Use".into(),
+                    url: "https://ai.google.dev/gemma/terms".into(),
+                    acceptance_required: true,
+                },
+                total_bytes: 329_781_810,
+                files: vec![
+                    pinned(
+                        "hf:onnx-community/embeddinggemma-300m-ONNX",
+                        "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+                        "onnx/model_quantized.onnx",
+                        "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8",
+                        567_874,
+                    ),
+                    pinned(
+                        "hf:onnx-community/embeddinggemma-300m-ONNX",
+                        "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+                        "onnx/model_quantized.onnx_data",
+                        "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0",
+                        308_890_624,
+                    ),
+                    pinned(
+                        "hf:onnx-community/embeddinggemma-300m-ONNX",
+                        "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+                        "tokenizer.json",
+                        "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+                        20_323_312,
+                    ),
+                ],
+            },
+            // B73: Qwen3-Embedding-0.6B int8 stays the configured ALTERNATIVE
+            // (role text-embedder-alt, offered at tier 2 only — the llm-alt
+            // precedent). Apache-2.0: display notice, no acceptance gate.
+            ModelEntry {
+                id: "qwen3-embedding-0.6b-int8".into(),
+                role: "text-embedder-alt".into(),
+                tiers: vec![2],
                 license: License {
                     name: "Apache-2.0".into(),
                     url: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B".into(),
                     acceptance_required: false,
                 },
-                total_bytes: 600_000_000,
-                files: vec![f("hf:Qwen/Qwen3-Embedding-0.6B", "model.int8.onnx", 600_000_000)],
+                total_bytes: 624_951_244,
+                files: vec![
+                    pinned(
+                        "hf:onnx-community/Qwen3-Embedding-0.6B-ONNX",
+                        "c25a394dd583836952667c12f008335071b3f43d",
+                        "onnx/model_int8.onnx",
+                        "6d0ea863f78b4a84afa3c7fcba1ec341572b5e28121aef77b7092b1dfdf679c7",
+                        613_527_539,
+                    ),
+                    pinned(
+                        "hf:onnx-community/Qwen3-Embedding-0.6B-ONNX",
+                        "c25a394dd583836952667c12f008335071b3f43d",
+                        "tokenizer.json",
+                        "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+                        11_423_705,
+                    ),
+                ],
             },
         ],
     }
@@ -358,12 +428,69 @@ mod tests {
                 assert!(!f.revision.is_empty(), "immutable revision pin");
             }
         }
-        // Tier-1 bundle after the P6.3 pins: E2B (3.9 GB) + ASR (0.66 GB)
-        // + the still-unpinned embedder estimates (≈3.2 GB) ≈ 7.8 GB —
-        // the B68 default halved the LLM share of the §5.4 estimate.
-        let total = m.total_bytes_at(1);
-        assert!(total > 7_000_000_000 && total < 9_000_000_000, "{total}");
+        // Tier-1 bundle with the B73 embedder pins REAL: E2B (3.91 GB) + ASR
+        // (0.66 GB) + DFN5B (3.95 GB, graph + ~400 external-data files) +
+        // EmbeddingGemma-300m q8 (0.33 GB, the text-embedder default) =
+        // 8_852_035_496 bytes. Qwen3-alt is tier-2-only, so it is NOT counted
+        // here. Exact, not a range — every byte traces to a pinned file.
+        assert_eq!(m.total_bytes_at(1), 8_852_035_496, "tier-1 pinned sum");
         assert_eq!(m.total_bytes_at(0), 0, "tier 0 offers NOTHING");
+    }
+
+    #[test]
+    fn b73_embedders_are_pinned_offered_and_downloadable() {
+        let m = compiled_manifest();
+        // The plan flips the P6.3-era unpinned embedder estimates to REAL
+        // pins: every embedder model now resolves and is fully pinned (no
+        // all-zero sha, no UNPINNED-P6.3 revision), so consent offers them
+        // and the downloader will fetch them (B55 stops refusing).
+        for id in [
+            "ViT-H-14-378-quickgelu__dfn5b",
+            "embeddinggemma-300m-q8",
+            "qwen3-embedding-0.6b-int8",
+        ] {
+            let model = m.model(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(model.is_pinned(), "{id} fully pinned");
+        }
+
+        // EmbeddingGemma is the text-embedder DEFAULT — offered at tier 1.
+        let gemma = m.model("embeddinggemma-300m-q8").unwrap();
+        assert_eq!(gemma.role, "text-embedder");
+        assert!(
+            gemma.tiers.contains(&1),
+            "default offered at the tier-1 floor"
+        );
+        assert!(gemma.license.acceptance_required, "Gemma terms gate");
+
+        // Qwen3 is the configured ALTERNATIVE — tier-2-only, no gate.
+        let qwen = m.model("qwen3-embedding-0.6b-int8").unwrap();
+        assert_eq!(qwen.role, "text-embedder-alt");
+        assert_eq!(
+            qwen.tiers,
+            vec![2],
+            "alt follows the llm-alt tier precedent"
+        );
+        assert!(!qwen.license.acceptance_required, "Apache-2.0: notice only");
+
+        // DFN5B is enumerated in full: graph onnx + ~400 external-data files,
+        // and total_bytes is the exact sum of every enumerated file.
+        let dfn = m.model("ViT-H-14-378-quickgelu__dfn5b").unwrap();
+        assert_eq!(dfn.files.len(), 400, "visual/ + textual/ enumerated whole");
+        assert!(
+            dfn.files.iter().any(|f| f.path == "visual/model.onnx"),
+            "the visual graph onnx is present"
+        );
+        assert!(
+            dfn.files
+                .iter()
+                .any(|f| f.path.starts_with("visual/visual.transformer.")),
+            "external-data weights are pinned, not just the graph"
+        );
+        assert_eq!(
+            dfn.total_bytes,
+            dfn.files.iter().map(|f| f.bytes).sum::<u64>(),
+            "total_bytes is the live file sum, never an estimate"
+        );
     }
 
     #[test]

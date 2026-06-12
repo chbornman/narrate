@@ -47,8 +47,8 @@ device = "auto"              # "auto" | "cpu" | "gpu"
 
 [embedder.text]              # the text-embedding model (§3.3): annotation
 backend = "local-ort"        # chunks & summaries. "local-ort" |
-model = "qwen3-embedding-0.6b-int8"  # "local-llamacpp" (/v1/embeddings) |
-device = "cpu"               # "openai-compatible"
+model = "embeddinggemma-300m-q8"  # "local-llamacpp" (/v1/embeddings) |
+device = "cpu"               # "openai-compatible" (B73: Qwen3-0.6B alt)
 "#;
 
 #[test]
@@ -85,7 +85,7 @@ fn spec_literal_block_parses_with_no_warnings() {
     assert_eq!(c.embedder.model, "ViT-H-14-378-quickgelu__dfn5b");
     assert_eq!(c.embedder.device, EmbedDevice::Auto);
     assert_eq!(c.embedder.text.backend, TextEmbedderBackend::LocalOrt);
-    assert_eq!(c.embedder.text.model, "qwen3-embedding-0.6b-int8");
+    assert_eq!(c.embedder.text.model, "embeddinggemma-300m-q8");
     assert_eq!(c.embedder.text.device, EmbedDevice::Cpu);
 }
 

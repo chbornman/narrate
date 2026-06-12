@@ -396,7 +396,10 @@ impl Default for TextEmbedderConfig {
     fn default() -> Self {
         Self {
             backend: TextEmbedderBackend::LocalOrt,
-            model: "qwen3-embedding-0.6b-int8".into(),
+            // B73: EmbeddingGemma-300m q8 is the bake-off winner and the
+            // shipped default; Qwen3-Embedding-0.6B is the configured
+            // alternative (manifest role text-embedder-alt).
+            model: "embeddinggemma-300m-q8".into(),
             device: EmbedDevice::Cpu,
         }
     }

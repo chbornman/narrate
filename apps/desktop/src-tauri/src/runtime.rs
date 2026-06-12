@@ -457,8 +457,9 @@ impl RuntimeHost {
         if !model.is_pinned() {
             // B55: the worker would only fail closed; refuse at the seam
             // (settings shows no Download button for unpinned rows — this
-            // guards the raw command).
-            return Err(format!("{model_id} is not pinned yet (spike session 2)"));
+            // guards the raw command). Every shipped model is pinned post-B73;
+            // this guard stays for any future entry awaiting a spike pin.
+            return Err(format!("{model_id} is not pinned yet"));
         }
         self.enqueue_downloads(vec![model]);
         Ok(())
@@ -471,10 +472,10 @@ impl RuntimeHost {
             .expect("runtime state")
             .tier
             .effective_tier;
-        // Unpinned entries (B55 fail-closed; the embedders until spike
-        // session 2) never enqueue: the worker would only mint a "failed"
-        // row for a download that cannot exist yet. Settings shows them
-        // as pending instead.
+        // Unpinned entries (B55 fail-closed) never enqueue: the worker would
+        // only mint a "failed" row for a download that cannot exist yet, and
+        // settings shows them as pending instead. Every shipped model is
+        // pinned post-B73; the filter stays for any future unpinned entry.
         let offered: Vec<_> = self
             .manifest
             .offered_at(tier)
@@ -784,11 +785,11 @@ mod tests {
     /// §5.2: "one file at a time" is manager-wide, not per-model —
     /// consent at Tier 1 drains every PINNED offered model through ONE
     /// worker thread, strictly in order; nothing transfers concurrently;
-    /// unpinned entries (B55: the embedders until spike session 2) never
-    /// enqueue and surface as "unpinned", not "failed". (Every transfer
-    /// fails fast here — no network in tests — which is exactly why
-    /// thread identity is the observable: the old fan-out ran four
-    /// threads regardless.)
+    /// any unpinned entry (B55 fail-closed) would never enqueue and would
+    /// surface as "unpinned", not "failed" (none ships unpinned post-B73).
+    /// (Every transfer fails fast here — no network in tests — which is
+    /// exactly why thread identity is the observable: the old fan-out ran
+    /// four threads regardless.)
     #[test]
     fn consent_download_drains_all_offered_models_on_one_worker_thread() {
         let dir = tempfile::tempdir().unwrap();
@@ -841,35 +842,41 @@ mod tests {
         );
     }
 
-    /// B55 surfaced honestly (founder dogfood, June 2026): an unpinned
-    /// entry is PENDING, not a failure — consent skips it (no error row
-    /// minted, asserted via the thread-log test above), status names the
-    /// distinct state, and the explicit download command refuses at the
-    /// seam instead of letting the worker mint "failed".
+    /// B73 (June 2026): the embedders ship PINNED. Every manifest entry now
+    /// resolves to a real revision + SHA, so none surfaces as "unpinned";
+    /// the tier-1 embedders (DFN5B + EmbeddingGemma default) are offered,
+    /// render as downloadable, and the explicit download command accepts
+    /// them at the seam instead of refusing. (The Qwen3 alternative is
+    /// tier-2-only, so it reads "not-offered" at this tier — also a valid,
+    /// non-failure state.) The B55 fail-closed path is exercised separately
+    /// by the core download tests; nothing ships unpinned to drive it here.
     #[test]
-    fn unpinned_models_surface_as_pending_and_refuse_explicit_download() {
+    fn b73_embedders_are_pinned_offered_and_downloadable() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), "[runtime]\ntier = 1\n").unwrap();
         let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
-        let unpinned: Vec<String> = host
-            .manifest
-            .models
-            .iter()
-            .filter(|m| !m.is_pinned())
-            .map(|m| m.id.clone())
-            .collect();
         assert!(
-            !unpinned.is_empty(),
-            "the embedders ship unpinned until spike session 2"
+            host.manifest.models.iter().all(|m| m.is_pinned()),
+            "post-B73 every shipped model is pinned — none reads 'unpinned'"
         );
         let status = host.status();
-        for id in &unpinned {
-            let row = status.models.iter().find(|m| &m.id == id).unwrap();
-            assert_eq!(row.state, "unpinned", "{id} is pending, never failed");
+        assert!(
+            status.models.iter().all(|m| m.state != "unpinned"),
+            "no row surfaces the pending-unpinned state"
+        );
+
+        // The text-embedder default + the CLIP embedder are offered at the
+        // tier-1 floor: downloadable now, not pending.
+        for id in ["ViT-H-14-378-quickgelu__dfn5b", "embeddinggemma-300m-q8"] {
+            let row = status.models.iter().find(|m| m.id == id).unwrap();
+            assert_eq!(
+                row.state, "not-downloaded",
+                "{id} is offered + downloadable"
+            );
             assert!(row.error.is_none());
             assert!(
-                host.download_model(id).is_err(),
-                "{id}: explicit download refuses at the seam"
+                host.download_model(id).is_ok(),
+                "{id}: explicit download is accepted at the seam"
             );
         }
     }
