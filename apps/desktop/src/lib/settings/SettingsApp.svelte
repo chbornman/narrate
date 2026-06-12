@@ -18,6 +18,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import * as ipc from "../ipc/commands";
   import { isMac } from "../logic/platform";
+  import AckButton from "../primitives/AckButton.svelte";
   import type { AppSettings, RootDto, RuntimeStatus } from "../types/dto";
 
   /** Same chrome split as Titlebar.svelte (UI §2.3): on macOS this window
@@ -265,9 +266,22 @@
           {#if m.error !== null}<span class="dim">— {m.error}</span>{/if}
         </div>
       {/each}
+      <!-- Both verbs complete invisibly when the status text happens not
+           to change (founder dogfood, June 2026) — the AckButton makes the
+           button itself say it landed. -->
       <div class="row">
-        <button class="quiet" onclick={() => void restartRuntime()}>Restart runtime</button>
-        <button class="quiet" onclick={() => void redetect()}>Re-detect hardware</button>
+        <AckButton
+          quiet
+          label="Restart runtime"
+          doneLabel="Restarted"
+          verb={restartRuntime}
+        />
+        <AckButton
+          quiet
+          label="Re-detect hardware"
+          doneLabel="Re-detected"
+          verb={redetect}
+        />
       </div>
     {/if}
   </section>
