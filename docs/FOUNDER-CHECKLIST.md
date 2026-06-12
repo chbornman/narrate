@@ -118,9 +118,11 @@ since `e60cb15` (optimized deps).
 - [ ] **HEIC count check**: previews for HEIC/HEIF wait for the M1.5
   full-decode backfill (B-deferred; journal works day one). Count HEICs in
   your library to decide whether that gap matters for your dogfood.
-- [ ] **P6.3 model spike** (Phase 6, yours by design): real llama.cpp +
-  sherpa-onnx + silero-vad recipes, token-timestamp/VAD-onset measurement,
-  VRAM tier numbers. Until then voice ships mock-verified.
+- [ ] **P6.3 model spike, session 2** (RTX 5080 half): Tier-2
+  VRAM/throughput calibration, CUDA posture, the RUNTIME 12.4 concurrency
+  matrix, and the embedder bake-off that pins the manifest entries
+  (semantic search stays dormant until then). Session 1 (Apple Silicon)
+  is DONE — docs/SPIKE-P6.3.md — and voice is verified live (P6.4).
 - [ ] **Retrieval quality** (post-M3): golden-query eval set (~50–100 pairs
   from your real annotations), reranker go/no-go (P8).
 
