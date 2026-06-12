@@ -7,7 +7,10 @@
 //! the `pending` rows; `running -> pending` on startup; versioned re-runs
 //! by `pass_version`. Staleness is `vectors.inputs_hash` (§1.2): the pass
 //! recomputes each unit's hash and skips fresh rows, so a re-pended pass
-//! after re-annotation re-embeds exactly what changed.
+//! after re-annotation re-embeds exactly what changed. Session-level
+//! remarks (zero image targets — outside any image's queue row) are swept
+//! directly at the top of each drain, so the §1.1 indexable set is fully
+//! covered.
 //!
 //! Degraded posture: with no embedder configured the drain claims nothing
 //! and the rows sit pending — idle, NotConfigured-style, never errors —
@@ -23,7 +26,7 @@ use std::path::Path;
 
 use photoproof_connectors::embedder::{DecodedImage, Embedder};
 use photoproof_connectors::vector_store::{VecKey, VecKind, VecSpace, VecUnit};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use super::{ArtifactKind, Library, LibraryError, QueueOptions, QueueReport, ingest};
 use crate::retrieval::{ChunkContext, PpvecStore, VecMeta, chunk_folded_text, inputs_hash};
@@ -92,8 +95,10 @@ impl Library {
         self.enqueue_embedding_backfill(rig.text.is_some(), rig.clip.is_some())?;
         // Physical hygiene first: rows the events engine marked deleted
         // (revision/retraction/redaction — RETRIEVAL §1.1) get their flat
-        // file bytes zeroed before any new work, so a redaction never
-        // outlives the next drain.
+        // file bytes zeroed and their metadata reclaimed before any new
+        // work. Redactions were already zeroed synchronously at redact
+        // time (§13.5); this sweep is the idempotent backstop and the
+        // reclaim path.
         rig.vectors.sweep_dead()?;
 
         let mut allowed = Vec::new();
@@ -106,6 +111,16 @@ impl Library {
         if allowed.is_empty() {
             // NotConfigured: rows sit pending, no errors, nothing claimed.
             return Ok(report);
+        }
+
+        // Session-level remarks (zero image targets) ARE indexable (§1.1;
+        // they surface via the §5.4 session_hits list) but the queue is
+        // keyed per image, so no ingest_passes row can ever reach them.
+        // Sweep them directly each drain instead — cheap when fresh, since
+        // the §1.2 inputs_hash check skips unchanged chunks without
+        // touching the embedder.
+        if let Some(embedder) = rig.text {
+            self.embed_sessionlevel_text(embedder, rig.vectors, &mut report)?;
         }
 
         loop {
@@ -174,9 +189,10 @@ impl Library {
             model_id: embedder.model_id().to_string(),
         };
         // The folded text of live, unscrubbed remark roots IS the
-        // event_fts body (EVENTS §5.4/§6.3) — the indexable set for FTS
-        // and vectors is identical by construction (§1.1), so reading it
-        // back from FTS guarantees the two indexes can never disagree.
+        // event_fts body (EVENTS §5.4/§6.3): reading it back from FTS
+        // keeps the two indexes on one indexable set (§1.1). The
+        // session-level complement (zero targets, unreachable from any
+        // image's queue row) is swept by `embed_sessionlevel_text`.
         let roots: Vec<(String, String, String)> = {
             let conn = self.db.lock().expect("poisoned");
             let mut stmt = conn.prepare_cached(
@@ -193,69 +209,141 @@ impl Library {
             })?;
             rows.collect::<Result<_, _>>()?
         };
-        let folder = {
-            let conn = self.db.lock().expect("poisoned");
-            folder_name(&conn, item.image_hash.as_str())?
-        };
 
         for (event_id, body, annotated_date) in roots {
+            let folder = {
+                let conn = self.db.lock().expect("poisoned");
+                folder_for_event(&conn, &event_id)?
+            };
             let ctx = ChunkContext {
                 date: Some(annotated_date),
-                folder: folder.clone(),
+                folder,
                 // Collections store lands in P7.3.
                 collection: None,
             };
-            let chunks = chunk_folded_text(&body, &ctx);
-            for chunk in &chunks {
-                let key = VecKey {
-                    space: space.clone(),
-                    unit: VecUnit::AnnotationChunk {
-                        event_id: event_id.clone(),
-                        chunk_index: chunk.index,
-                    },
-                };
-                let hash = inputs_hash(chunk.embed_text.as_bytes());
-                if let Some((existing, deleted)) = vectors.row_inputs_hash(&key)?
-                    && !deleted
-                    && existing == hash
-                {
-                    continue; // fresh — the staleness check (§1.2)
-                }
-                let embedding = match pollster::block_on(embedder.embed_text(&chunk.embed_text)) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        // Model IO failures are transient by default
-                        // (§10.5): backoff then error after 3 attempts.
-                        let conn = self.db.lock().expect("poisoned");
-                        ingest::mark_failed(
-                            &conn,
-                            item,
-                            &format!("embedder: {e}"),
-                            true,
-                            self.now(),
-                        )?;
-                        report.transient_retries += 1;
-                        return Ok(());
-                    }
-                };
-                vectors.upsert_with_meta(
-                    &key,
-                    &embedding,
-                    &VecMeta {
-                        inputs_hash: hash,
-                        char_start: Some(chunk.char_start),
-                        char_end: Some(chunk.char_end),
-                    },
-                )?;
+            if let Some(err) =
+                self.embed_event_chunks(embedder, vectors, &space, &event_id, &body, &ctx)?
+            {
+                // Transient (§10.5): backoff then error after 3 attempts.
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, &err, true, self.now())?;
+                report.transient_retries += 1;
+                return Ok(());
             }
-            // Re-chunking tail: a shorter folded text leaves stale
-            // higher-index chunk rows behind; zero + drop them.
-            vectors.drop_chunks_from(&space, &event_id, chunks.len() as u32)?;
         }
 
         let conn = self.db.lock().expect("poisoned");
         ingest::mark_done(&conn, item, self.now())?;
         report.done += 1;
+        Ok(())
+    }
+
+    /// Chunk + embed ONE event's folded text into `space`, skipping fresh
+    /// chunks (§1.2 staleness) and dropping the stale re-chunking tail.
+    /// Shared by the per-image pass and the session-level sweep.
+    /// `Ok(Some(msg))` is a transient failure (embedder or vector-store
+    /// IO): nothing was marked complete, so the next run retries; the
+    /// caller decides whether a queue row records the failure. Failures
+    /// are returned, not propagated, so one bad item can never abort the
+    /// whole drain (which would also skip every later pass AND the
+    /// end-of-drain compaction).
+    fn embed_event_chunks<TE: Embedder>(
+        &self,
+        embedder: &TE,
+        vectors: &PpvecStore,
+        space: &VecSpace,
+        event_id: &str,
+        body: &str,
+        ctx: &ChunkContext,
+    ) -> Result<Option<String>, LibraryError> {
+        let chunks = chunk_folded_text(body, ctx);
+        for chunk in &chunks {
+            let key = VecKey {
+                space: space.clone(),
+                unit: VecUnit::AnnotationChunk {
+                    event_id: event_id.to_string(),
+                    chunk_index: chunk.index,
+                },
+            };
+            let hash = inputs_hash(chunk.embed_text.as_bytes());
+            if let Some((existing, deleted)) = vectors.row_inputs_hash(&key)?
+                && !deleted
+                && existing == hash
+            {
+                continue; // fresh — the staleness check (§1.2)
+            }
+            let embedding = match pollster::block_on(embedder.embed_text(&chunk.embed_text)) {
+                Ok(e) => e,
+                Err(e) => return Ok(Some(format!("embedder: {e}"))),
+            };
+            if let Err(e) = vectors.upsert_with_meta(
+                &key,
+                &embedding,
+                &VecMeta {
+                    inputs_hash: hash,
+                    char_start: Some(chunk.char_start),
+                    char_end: Some(chunk.char_end),
+                },
+            ) {
+                return Ok(Some(format!("vector-store: {e}")));
+            }
+        }
+        // Re-chunking tail: a shorter folded text leaves stale
+        // higher-index chunk rows behind; zero + drop them.
+        if let Err(e) = vectors.drop_chunks_from(space, event_id, chunks.len() as u32) {
+            return Ok(Some(format!("vector-store: {e}")));
+        }
+        Ok(None)
+    }
+
+    /// Embed every session-level remark (zero image targets, §1.1). No
+    /// queue row drives this — the per-image queue cannot address an event
+    /// with no image — so it runs at the top of every drain; the
+    /// inputs_hash staleness check makes the steady state a no-op. A
+    /// revision marks the old rows deleted (events engine), which reads as
+    /// stale here and re-embeds; redactions are zeroed at redact time and
+    /// reclaimed by the sweep.
+    fn embed_sessionlevel_text<TE: Embedder>(
+        &self,
+        embedder: &TE,
+        vectors: &PpvecStore,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        let space = VecSpace {
+            vec_kind: VecKind::AnnotationChunk,
+            model_id: embedder.model_id().to_string(),
+        };
+        let roots: Vec<(String, String, String)> = {
+            let conn = self.db.lock().expect("poisoned");
+            let mut stmt = conn.prepare_cached(
+                "SELECT m.root_event_id, f.body, substr(e.ts, 1, 10)
+                 FROM fts_map m
+                 JOIN event_fts f ON f.rowid = m.fts_rowid
+                 JOIN annotation_events e ON e.id = m.root_event_id
+                 WHERE NOT EXISTS (SELECT 1 FROM event_targets t
+                                   WHERE t.event_id = m.root_event_id)
+                 ORDER BY m.root_event_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (event_id, body, annotated_date) in roots {
+            let ctx = ChunkContext {
+                date: Some(annotated_date),
+                // Zero targets => no folder; collections land in P7.3.
+                folder: None,
+                collection: None,
+            };
+            if self
+                .embed_event_chunks(embedder, vectors, &space, &event_id, &body, &ctx)?
+                .is_some()
+            {
+                // Transient; nothing was marked fresh, so the next drain
+                // retries. There is no queue row to record the error on.
+                report.transient_retries += 1;
+                return Ok(());
+            }
+        }
         Ok(())
     }
 
@@ -335,7 +423,7 @@ impl Library {
                 return Ok(());
             }
         };
-        vectors.upsert_with_meta(
+        if let Err(e) = vectors.upsert_with_meta(
             &key,
             &embedding,
             &VecMeta {
@@ -343,7 +431,15 @@ impl Library {
                 char_start: None,
                 char_end: None,
             },
-        )?;
+        ) {
+            // Store IO is transient (disk hiccup; torn files self-heal on
+            // the next write): one bad write must not abort the whole
+            // drain and starve every other pass plus compaction.
+            let conn = self.db.lock().expect("poisoned");
+            ingest::mark_failed(&conn, item, &format!("vector-store: {e}"), true, self.now())?;
+            report.transient_retries += 1;
+            return Ok(());
+        }
         let conn = self.db.lock().expect("poisoned");
         ingest::mark_done(&conn, item, self.now())?;
         report.done += 1;
@@ -351,22 +447,32 @@ impl Library {
     }
 }
 
-/// Folder name for the tiny-chunk context prefix (§2): the directory part
-/// of the image's active path, when one exists.
-fn folder_name(conn: &Connection, image_hash: &str) -> Result<Option<String>, LibraryError> {
-    let rel: Option<String> = conn
-        .query_row(
-            "SELECT rel_path FROM paths
-             WHERE image_hash = ?1 AND state = 'active'
-             ORDER BY path_id LIMIT 1",
-            [image_hash],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(rel.and_then(|p| {
-        Path::new(&p)
+/// Folder for the tiny-chunk context prefix (§2), resolved per EVENT: the
+/// lexicographically smallest folder across all the event's targets'
+/// active paths. A multi-target event stores ONE chunk row (§1.2), so the
+/// prefix — an `inputs_hash` input — must not depend on which image's pass
+/// claims the event first: §2 requires the prefix be deterministic so
+/// rebuild byte-equality (§13.8) holds. The spec does not pick WHICH
+/// folder a multi-folder event gets; smallest-sorted is the stable,
+/// obvious rule.
+fn folder_for_event(conn: &Connection, event_id: &str) -> Result<Option<String>, LibraryError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT p.rel_path FROM event_targets t
+         JOIN paths p ON p.image_hash = t.image_hash AND p.state = 'active'
+         WHERE t.event_id = ?1",
+    )?;
+    let rows = stmt.query_map([event_id], |r| r.get::<_, String>(0))?;
+    let mut best: Option<String> = None;
+    for rel in rows {
+        let folder = Path::new(&rel?)
             .parent()
             .map(|d| d.to_string_lossy().replace('\\', "/"))
-            .filter(|d| !d.is_empty())
-    }))
+            .filter(|d| !d.is_empty());
+        if let Some(f) = folder
+            && best.as_ref().is_none_or(|b| f < *b)
+        {
+            best = Some(f);
+        }
+    }
+    Ok(best)
 }

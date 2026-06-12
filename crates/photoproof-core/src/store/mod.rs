@@ -45,6 +45,12 @@ pub enum StoreError {
          freed bytes linger in the WAL until the next successful checkpoint"
     )]
     CheckpointBlocked,
+    /// The redaction committed (text scrubbed, vectors marked dead) but
+    /// zeroing the PPVEC flat-file bytes failed (RETRIEVAL §13.5). The
+    /// deleted marks are durable, so the next embedding drain's
+    /// `sweep_dead` retries the physical zero.
+    #[error("vector flat-file zeroing failed (the drain's sweep retries it): {0}")]
+    VectorScrub(String),
 }
 
 #[derive(Debug, Error)]
@@ -278,6 +284,11 @@ pub struct EventStore {
     readers: Vec<Mutex<Connection>>,
     next_reader: AtomicUsize,
     minter: Minter,
+    /// Where the PPVEC flat files live (the §1.3 layout: `{db
+    /// parent}/vectors`). The redaction path zeroes vector bytes there
+    /// synchronously (RETRIEVAL §13.5) — the metadata rows live in this
+    /// same database, only the bytes are external.
+    vectors_dir: Option<std::path::PathBuf>,
 }
 
 impl EventStore {
@@ -297,6 +308,7 @@ impl EventStore {
             readers,
             next_reader: AtomicUsize::new(0),
             minter: Minter::new(),
+            vectors_dir: crate::retrieval::default_vectors_dir(path),
         };
         // v5 added `has_text` with a placeholder DEFAULT; databases migrated
         // from an earlier version need the real fold values (B37). Fresh
@@ -575,6 +587,7 @@ impl EventStore {
         let session_id = redaction_session(&tx, &t)?;
         // 3.–6. Record the act, registry, scrub in place, purge indexes.
         let mut out = Vec::new();
+        let mut scrubbed_ids = Vec::new();
         for c in &members {
             if c.scrubbed() {
                 continue; // idempotence
@@ -606,6 +619,7 @@ impl EventStore {
             tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                 .execute([c.id.as_str()])
                 .map_err(StoreError::from)?;
+            scrubbed_ids.push(c.id.clone());
             out.push(r.id);
         }
         // 6.–7. FTS purge + queue propagation via the scoped recompute.
@@ -619,11 +633,41 @@ impl EventStore {
         }
         recompute_derived(&tx, &roots, &dirty)?;
         tx.commit().map_err(StoreError::from)?;
+        // RETRIEVAL §13.5: the PPVEC flat-file bytes are zeroed by the time
+        // this call returns — never deferred to the next embedding drain.
+        // Zeroing AFTER the commit is deliberate: the deleted=1 marks are
+        // durable first, so a crash in this gap leaves marks the drain's
+        // sweep_dead re-zeroes, rather than zeroed bytes whose metadata
+        // still claims them live.
+        self.zero_vector_bytes(&w, &scrubbed_ids)?;
         // 8. Physical hygiene: scrubbed plaintext must not linger in the WAL.
         //    The scrub above is already committed; a CheckpointBlocked error
         //    here means hygiene is incomplete, not that the redaction failed.
         checkpoint_truncate(&w)?;
         Ok(out)
+    }
+
+    /// Zero the flat-file bytes of every dead vector row of these events
+    /// (RETRIEVAL §13.5 — redaction zeroing is synchronous). A store
+    /// without a conventional vectors directory has no flat files to
+    /// scrub; the metadata marks alone then carry the contract via the
+    /// drain's sweep.
+    fn zero_vector_bytes(
+        &self,
+        conn: &Connection,
+        event_ids: &[EventId],
+    ) -> Result<(), StoreError> {
+        let Some(dir) = self.vectors_dir.as_deref() else {
+            return Ok(());
+        };
+        if event_ids.is_empty() || !dir.exists() {
+            return Ok(());
+        }
+        for id in event_ids {
+            crate::retrieval::zero_deleted_rows_for_event(conn, dir, id.as_str())
+                .map_err(|e| StoreError::VectorScrub(e.to_string()))?;
+        }
+        Ok(())
     }
 
     // -- merge (§8) -----------------------------------------------------------
@@ -685,6 +729,7 @@ impl EventStore {
             // truncate — mandatory on every merge path that newly scrubs,
             // the ≤10k path included, or the plaintext lingers in the WAL.
             if report.newly_scrubbed > 0 {
+                self.zero_vector_bytes(&w, &scrubbed_event_ids(&touched))?;
                 checkpoint_truncate(&w)?;
             }
         } else {
@@ -699,6 +744,11 @@ impl EventStore {
             let (roots, dirty) = merge_affected(&tx, &touched)?;
             recompute_derived(&tx, &roots, &dirty)?;
             tx.commit()?;
+            // Newly learned redactions zero their flat-file vector bytes
+            // before merge returns (RETRIEVAL §13.5), same as redact().
+            if report.newly_scrubbed > 0 {
+                self.zero_vector_bytes(&w, &scrubbed_event_ids(&touched))?;
+            }
             schema::run_pragma(&w, "ANALYZE")?;
             w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
             checkpoint_truncate(&w)?;
@@ -1713,6 +1763,20 @@ fn merge_chunk(
     Ok(())
 }
 
+/// Distinct ids of the scrubbed events a merge touched — the §13.5
+/// flat-file zeroing set. Includes scrubbed-on-arrival copies (they never
+/// had vectors; zeroing finds no rows) so the set never under-covers.
+fn scrubbed_event_ids(touched: &[Event]) -> Vec<EventId> {
+    let mut ids: Vec<EventId> = touched
+        .iter()
+        .filter(|e| e.scrubbed())
+        .map(|e| e.id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// §8 step 4: affected chain roots and images for the post-union recompute.
 fn merge_affected(
     tx: &Connection,
@@ -1844,10 +1908,14 @@ fn recompute_derived(
         // mechanics — LIBRARY §10). UPDATE-only by design: pass rows are
         // created by the library's embedding backfill; the events engine
         // never invents queue rows for images the library has not ingested.
+        // 'running' is covered too: a drain mid-pass snapshotted the OLD
+        // folded text, so this change must force a re-run — pending wins
+        // over the in-flight pass (ingest::mark_done only completes rows
+        // still 'running', so the stale pass cannot clobber this re-pend).
         tx.prepare_cached(
             "UPDATE ingest_passes SET state = 'pending', not_before = NULL \
              WHERE image_hash = ?1 AND pass_name = 'text-embedding' \
-               AND state IN ('done','error','skipped')",
+               AND state IN ('running','done','error','skipped')",
         )?
         .execute([hash.as_str()])?;
     }

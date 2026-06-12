@@ -419,6 +419,24 @@ CREATE UNIQUE INDEX vectors_image
 CREATE UNIQUE INDEX vectors_row ON vectors(vec_kind, model_id, file_row);
 "#;
 
+/// Migration slot for the P7.1 review fixes (crash-atomic PPVEC
+/// compaction). Only that fix set edits this constant.
+const RETRIEVAL_FIXES_SCHEMA_SQL: &str = r#"
+-- Two-phase PPVEC compaction journal (RETRIEVAL §1.3 "remap file_row in one
+-- transaction"): the file rename cannot live inside a SQLite transaction, so
+-- compaction commits this marker WITH the remap, renames the rewritten file,
+-- then clears the marker. A marker found at open means the rename may not
+-- have happened yet; recovery completes (or discards) it before any read
+-- can pair remapped pointers with the pre-compaction file.
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test) and a pending marker must survive that re-run.
+CREATE TABLE IF NOT EXISTS ppvec_compactions (
+  vec_kind  TEXT NOT NULL,
+  model_id  TEXT NOT NULL,
+  PRIMARY KEY (vec_kind, model_id)
+) STRICT, WITHOUT ROWID;
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -467,6 +485,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     if version < 7 {
         conn.execute_batch(RETRIEVAL_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 7")?;
+    }
+    if version < 8 {
+        conn.execute_batch(RETRIEVAL_FIXES_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 8")?;
     }
     Ok(version)
 }

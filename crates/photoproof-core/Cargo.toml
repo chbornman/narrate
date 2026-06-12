@@ -40,6 +40,9 @@ ureq = "3"
 # a background thread and model IO is one call at a time (GPU concurrency 1,
 # LIBRARY §10.3), so a full async runtime would be dead weight here.
 pollster = "0.4"
+# §1.3 read path: the brute-force scan is memory-mapped, never a per-query
+# heap copy of the whole space.
+memmap2 = "0.9"
 
 [[bin]]
 # Scriptable stub child for runtime-supervision tests (RUNTIME §8 /

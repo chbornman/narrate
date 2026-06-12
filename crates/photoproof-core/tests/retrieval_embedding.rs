@@ -556,11 +556,11 @@ fn revision_invalidates_and_reembeds_folded_text() {
     );
 }
 
-/// Redaction end-to-end: the events engine marks the vectors dead in the
-/// redaction transaction; the next drain physically zeroes the flat-file
-/// row — after it, a byte-scan of the store file proves absence
-/// (§13.12 mirrored through the full stack; the trait-level scrub test
-/// lives in retrieval_ppvec.rs).
+/// Redaction end-to-end: the instant `redact()` returns, the flat-file
+/// bytes are zeroed (§13.5 — synchronous, never deferred to a drain) and a
+/// byte-scan of the store file proves absence (§13.12 mirrored through the
+/// full stack; the trait-level scrub test lives in retrieval_ppvec.rs).
+/// The next drain then reclaims the metadata rows.
 #[test]
 fn r13_12_redaction_zeroes_flat_file_bytes_through_drain() {
     let rig = Rig::new();
@@ -594,6 +594,12 @@ fn r13_12_redaction_zeroes_flat_file_bytes_through_drain() {
         1,
         "redaction marks the vector dead in the same transaction"
     );
+    // §13.5: zeroed the instant the redact call returns — NO drain ran yet.
+    let immediately = std::fs::read(&path).unwrap();
+    assert!(
+        !immediately.windows(DIMS).any(|w| w == marker_row),
+        "byte-scan: redacted vector bytes zeroed before redact() returned"
+    );
 
     rig.drain_embeddings();
     let after = std::fs::read(&path).unwrap();
@@ -615,6 +621,190 @@ fn r13_12_redaction_zeroes_flat_file_bytes_through_drain() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// §1.1: session-level remarks (zero image targets) ARE indexed. No
+/// per-image queue row can reach them, so the drain sweeps them directly;
+/// staleness still applies (a second drain rewrites nothing), and a
+/// revision re-embeds the new folded text.
+#[test]
+fn session_level_remarks_are_embedded() {
+    let rig = Rig::new();
+    let e = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark(
+                "Whole shoot felt rushed today. Reschedule the harbor set.",
+                vec![],
+            ),
+            None,
+        )
+        .unwrap();
+
+    rig.drain_embeddings();
+    let (stored_hash, created): (String, String) = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash, created_ts FROM vectors WHERE event_id = ?1 AND deleted = 0",
+            [e.id.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_hash,
+        inputs_hash("Whole shoot felt rushed today. Reschedule the harbor set.".as_bytes()),
+        "session-level remark embedded with the bare folded text"
+    );
+
+    // Fresh on the next drain: swept, not rewritten.
+    rig.drain_embeddings();
+    let still: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT created_ts FROM vectors WHERE event_id = ?1",
+            [e.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still, created);
+
+    // A revision invalidates and the sweep re-embeds the new text.
+    let revised = "Whole shoot felt unhurried, actually. Keep the harbor set.";
+    rig.env
+        .store
+        .append(&rig.env.session, d_revision(e.id.clone(), revised), None)
+        .unwrap();
+    rig.drain_embeddings();
+    let new_hash: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash FROM vectors WHERE event_id = ?1 AND deleted = 0",
+            [e.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_hash, inputs_hash(revised.as_bytes()));
+}
+
+/// A journal change landing while the image's text-embedding pass is
+/// RUNNING must not be lost: the §1.1 re-pend hook covers 'running' rows
+/// and a stale `mark_done` cannot clobber the re-pend, so the next drain
+/// re-embeds the new folded text.
+#[test]
+fn journal_change_during_running_pass_repends_and_reembeds() {
+    let rig = Rig::new();
+    let e = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark(
+                "Original mid-run wording. Keep.",
+                vec![rig.hashes[0].clone()],
+            ),
+            None,
+        )
+        .unwrap();
+    rig.drain_embeddings();
+    assert_eq!(rig.pass_state(&rig.hashes[0], "text-embedding"), "done");
+
+    // Simulate a drain that has claimed this image's pass (state =
+    // 'running') when the user revises the remark.
+    rig.env
+        .conn()
+        .execute(
+            "UPDATE ingest_passes SET state = 'running'
+             WHERE image_hash = ?1 AND pass_name = 'text-embedding'",
+            [rig.hashes[0].as_str()],
+        )
+        .unwrap();
+    let revised = "Revised while the pass was mid-flight. Still keep.";
+    rig.env
+        .store
+        .append(&rig.env.session, d_revision(e.id.clone(), revised), None)
+        .unwrap();
+    assert_eq!(
+        rig.pass_state(&rig.hashes[0], "text-embedding"),
+        "pending",
+        "the re-pend hook covers running rows"
+    );
+
+    rig.drain_embeddings();
+    assert_eq!(rig.pass_state(&rig.hashes[0], "text-embedding"), "done");
+    let stored: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash FROM vectors WHERE event_id = ?1 AND deleted = 0",
+            [e.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, inputs_hash(revised.as_bytes()));
+}
+
+/// §2/§13.8: a multi-target event's tiny-chunk prefix must not depend on
+/// which image's pass claims it — the folder is resolved per EVENT
+/// (smallest folder across targets), so the stored vector and its
+/// inputs_hash are stable across drain orders and re-drains.
+#[test]
+fn multi_target_tiny_chunk_prefix_is_claim_order_independent() {
+    let rig = Rig::new();
+    let e = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark(
+                "quiet pair",
+                vec![rig.hashes[0].clone(), rig.hashes[1].clone()],
+            ),
+            None,
+        )
+        .unwrap();
+    rig.drain_embeddings();
+
+    let date = &e.ts.to_rfc3339()[..10];
+    // Both fixture images live in the same folder; the per-event rule
+    // resolves to that folder deterministically.
+    let expected = format!("[{date} \u{b7} photos] quiet pair");
+    let (stored, created): (String, String) = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash, created_ts FROM vectors WHERE event_id = ?1",
+            [e.id.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, inputs_hash(expected.as_bytes()));
+
+    // Re-pend BOTH images and drain again: the chunk hashes fresh from
+    // either claiming image — no rewrite churn.
+    rig.env
+        .conn()
+        .execute(
+            "UPDATE ingest_passes SET state = 'pending'
+             WHERE pass_name = 'text-embedding'",
+            [],
+        )
+        .unwrap();
+    rig.drain_embeddings();
+    let still: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT created_ts FROM vectors WHERE event_id = ?1",
+            [e.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still, created, "fresh from every claim order");
 }
 
 /// Voice remarks embed identically to typed ones (the §1.1 indexable set

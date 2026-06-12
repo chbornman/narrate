@@ -3929,6 +3929,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "libc",
+ "memmap2",
  "notify",
  "photoproof-connectors",
  "pollster",

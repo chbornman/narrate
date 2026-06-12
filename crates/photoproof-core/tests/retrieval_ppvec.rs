@@ -345,6 +345,147 @@ fn compaction_drops_dead_rows_and_remaps_file_rows() {
     assert!(!store.compact_if_needed(&space()).unwrap());
 }
 
+/// A torn append (crash mid-write) leaves a partial tail row; the next
+/// append truncates it instead of wedging the space behind a permanent
+/// Corrupt error. Safe by the §1.3 write order: the metadata row commits
+/// only after the file write + fsync, so a partial row can never have a
+/// committed pointer.
+#[test]
+fn torn_append_tail_is_truncated_and_healed() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    store
+        .upsert(chunk_key("ev-a", 0), &emb(planted(1024, 1, 0.4)))
+        .unwrap();
+    let path = store.file_path(&space());
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(&[7u8; 13]).unwrap(); // the torn write
+    }
+
+    store
+        .upsert(chunk_key("ev-b", 0), &emb(planted(1024, 2, 0.8)))
+        .unwrap();
+    let hits = store
+        .search(&emb(planted(1024, 1, 0.4)), space(), 10)
+        .unwrap();
+    assert_eq!(hits.len(), 2, "space survives the torn write");
+
+    // The data region is whole rows again: torn bytes gone, both rows in.
+    let header = store.header(&space()).unwrap().unwrap();
+    let data_offset = 16 + 8 * u64::from(header.dims);
+    let len = std::fs::metadata(&path).unwrap().len();
+    assert_eq!((len - data_offset) % u64::from(header.dims), 0);
+    assert_eq!((len - data_offset) / u64::from(header.dims), 2);
+}
+
+/// A header torn by a crash during space creation (file ends inside the
+/// header/params) is recreated on the next upsert instead of failing with
+/// Corrupt forever: no row can ever have committed against a torn header.
+#[test]
+fn torn_header_is_recreated_on_next_upsert() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    let path = store.file_path(&space());
+    std::fs::write(&path, b"PPVEC\x02\x00").unwrap(); // 8 of 16 fixed bytes
+
+    store
+        .upsert(chunk_key("ev-a", 0), &emb(planted(1024, 1, 0.4)))
+        .unwrap();
+    let hits = store
+        .search(&emb(planted(1024, 1, 0.4)), space(), 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+}
+
+/// Crash window between compaction's SQL remap commit and the file rename:
+/// the marker committed with the remap lets `open` complete the rename, so
+/// remapped pointers are never paired with pre-compaction bytes (which
+/// would silently score wrong vectors and let the next sweep zero live
+/// rows).
+#[test]
+fn compaction_crash_between_remap_and_rename_heals_on_open() {
+    let fx = Fixture::new();
+    let mut q = vec![0.0f32; 1024];
+    q[0] = 1.0;
+    let expected_ids: Vec<String>;
+    {
+        let store = fx.open();
+        for j in 0..5u32 {
+            store
+                .upsert(
+                    chunk_key(&format!("ev-{j}"), 0),
+                    &emb(planted(1024, (j + 1) as usize, 0.2 * (j + 1) as f32)),
+                )
+                .unwrap();
+        }
+        store.mark_deleted(chunk_key("ev-0", 0)).unwrap();
+        store.mark_deleted(chunk_key("ev-2", 0)).unwrap();
+        store.scrub(chunk_key("ev-4", 0)).unwrap();
+
+        let path = store.file_path(&space());
+        let pre_compact = std::fs::read(&path).unwrap();
+        assert!(store.compact_if_needed(&space()).unwrap());
+        expected_ids = store
+            .search(&emb(q.clone()), space(), 10)
+            .unwrap()
+            .iter()
+            .map(|h| event_id_of(&fx, h.vector_id))
+            .collect();
+
+        // Reconstruct the crash state: the remap (and its marker) are
+        // committed, but the rename never happened — compacted bytes still
+        // in the temp file, pre-compaction bytes at the real path.
+        let tmp = path.with_extension("ppvec.compact-tmp");
+        std::fs::rename(&path, &tmp).unwrap();
+        std::fs::write(&path, &pre_compact).unwrap();
+        fx.conn()
+            .execute(
+                "INSERT INTO ppvec_compactions (vec_kind, model_id)
+                 VALUES ('annotation_chunk', ?1)",
+                [MODEL],
+            )
+            .unwrap();
+    } // "crash"
+
+    let store = fx.open(); // recovery completes the rename
+    let path = store.file_path(&space());
+    assert!(!path.with_extension("ppvec.compact-tmp").exists());
+    assert_eq!(
+        fx.conn()
+            .query_row("SELECT COUNT(*) FROM ppvec_compactions", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "marker cleared"
+    );
+    let ids: Vec<String> = store
+        .search(&emb(q), space(), 10)
+        .unwrap()
+        .iter()
+        .map(|h| event_id_of(&fx, h.vector_id))
+        .collect();
+    assert_eq!(ids, expected_ids, "post-recovery results match");
+}
+
+/// §1.3 prewarm: sequentially touches the whole space file (header +
+/// rows) so the first scan runs from the page cache.
+#[test]
+fn prewarm_touches_the_whole_space_file() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    assert_eq!(store.prewarm(&space()).unwrap(), 0, "no file yet");
+    store
+        .upsert(chunk_key("ev-a", 0), &emb(planted(1024, 1, 0.4)))
+        .unwrap();
+    let len = std::fs::metadata(store.file_path(&space())).unwrap().len();
+    assert_eq!(store.prewarm(&space()).unwrap(), len);
+}
+
 #[test]
 fn model_and_dimension_mismatches_are_errors() {
     let fx = Fixture::new();

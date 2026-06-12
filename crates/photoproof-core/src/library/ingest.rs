@@ -287,11 +287,18 @@ pub fn claim_next_of(
     }))
 }
 
+/// Complete a claimed item — guarded to `running` rows only. The events
+/// engine re-pends a RUNNING text-embedding pass when a journal change
+/// lands mid-run (the pass snapshotted the old folded text); an
+/// unconditional UPDATE here would clobber that re-pend back to 'done' and
+/// the new words would never reach the vector index. A no-op completion
+/// leaves the row 'pending' and the drain loop simply re-claims it.
 pub fn mark_done(conn: &Connection, item: &QueueItem, now: UtcMillis) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE ingest_passes
          SET state = 'done', error = NULL, completed_at = ?4, not_before = NULL
-         WHERE image_hash = ?1 AND pass_name = ?2 AND pass_version = ?3",
+         WHERE image_hash = ?1 AND pass_name = ?2 AND pass_version = ?3
+           AND state = 'running'",
         params![
             item.image_hash.as_str(),
             item.pass.as_str(),
@@ -478,4 +485,61 @@ pub fn clear_placeholder_sentinels(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> (tempfile::TempDir, Connection) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("photoproof.db");
+        // EventStore::open runs the schema migrations (mirrors Library::open).
+        drop(crate::store::EventStore::open(&db).unwrap());
+        let conn = crate::library::open_library_connection(&db).unwrap();
+        (tmp, conn)
+    }
+
+    /// The events engine re-pends a RUNNING text-embedding pass when a
+    /// journal change lands mid-run; a stale `mark_done` from the drain
+    /// must not clobber that re-pend back to 'done', or the new words
+    /// never reach the vector index (RETRIEVAL §1.1/§1.2).
+    #[test]
+    fn mark_done_only_completes_rows_still_running() {
+        let (_tmp, conn) = setup();
+        let hash = ContentHash::from_hex(&"ab".repeat(32)).unwrap();
+        let now = UtcMillis::now();
+        enqueue(
+            &conn,
+            &hash,
+            PassName::TextEmbedding,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        let item = claim_next_of(&conn, now, &[PassName::TextEmbedding])
+            .unwrap()
+            .expect("claimable");
+
+        // Simulate the mid-run re-pend (store::recompute_derived hook).
+        conn.execute("UPDATE ingest_passes SET state = 'pending'", [])
+            .unwrap();
+        mark_done(&conn, &item, now).unwrap();
+        let state: String = conn
+            .query_row("SELECT state FROM ingest_passes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "pending", "stale completion must not win");
+
+        // The unraced path still completes normally.
+        let item = claim_next_of(&conn, now, &[PassName::TextEmbedding])
+            .unwrap()
+            .expect("claimable again");
+        mark_done(&conn, &item, now).unwrap();
+        let state: String = conn
+            .query_row("SELECT state FROM ingest_passes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "done");
+    }
 }
