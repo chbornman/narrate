@@ -107,7 +107,7 @@ this file is the index of *why*.
 ## Research-pass resolutions (June 2026 best-practices review)
 
 Four cited research reports (`docs/research/`) validated the spec set;
-~30 amendments applied. Disposition table in `docs/BEST-PRACTICES-REVIEW.md`.
+~30 amendments applied. Disposition table in `docs/BEST-PRACTICES-REVIEW.md` (retired June 2026; full text in git history, reports in `docs/research/`).
 The decisions that changed:
 
 - **P1. Vector storage = int8 scalar quantization at MRL-512 dims** (PPVEC v2,
