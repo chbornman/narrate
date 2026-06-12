@@ -105,7 +105,8 @@ struct InFlight {
     snapshot: ScopeSnapshot,
     /// Id + ts fixed at onset (EVENTS §1.2).
     minted: Minted,
-    /// FIFO-associated ASR utterance id, once a segment referenced it.
+    /// Associated ASR utterance id, once a segment claimed this onset
+    /// (exact id match first, otherwise nearest onset — see `associate`).
     utterance_id: Option<u64>,
 }
 
@@ -456,7 +457,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
     }
 
     fn on_partial(&mut self, seg: &TranscriptSegment) {
-        self.associate(seg.utterance_id);
+        self.associate(seg.utterance_id, seg.onset);
         if self.mic.is_armed() {
             self.mic = MicState::ArmedSpeaking;
             self.touch_activity(); // §2.1: Partial while armed is activity
@@ -478,10 +479,19 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         ));
     }
 
-    /// FIFO association: VAD onsets and ASR utterances arrive in stream
-    /// order; the first segment naming a new utterance id claims the oldest
-    /// unclaimed onset.
-    fn associate(&mut self, utterance_id: u64) -> Option<usize> {
+    /// Association by ONSET PROXIMITY: a segment keeps its exact
+    /// utterance-id match (ids are stable from first partial through final);
+    /// otherwise it claims the unclaimed in-flight whose VAD onset is
+    /// nearest the segment's own onset (both stream ms). FIFO claiming
+    /// ("first unclaimed wins") was wrong whenever the VAD split speech into
+    /// more utterances than the ASR endpointer did — a ~0.8 s pause splits
+    /// the VAD at its 480 ms hang but merges under the ASR's 1.2 s
+    /// trailing-silence rule — so the NEXT final bound the leftover
+    /// merged-away onset instead of its own (pp_voice_bench defect, June
+    /// 2026). Proximity only changes WHICH held snapshot a segment claims;
+    /// the held VAD snapshot stays authoritative for binding (§5.1), and the
+    /// segment onset is never used to rebind a claimed snapshot.
+    fn associate(&mut self, utterance_id: u64, onset: StreamMs) -> Option<usize> {
         if let Some(i) = self
             .in_flight
             .iter()
@@ -489,11 +499,41 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         {
             return Some(i);
         }
-        if let Some(i) = self.in_flight.iter().position(|u| u.utterance_id.is_none()) {
-            self.in_flight[i].utterance_id = Some(utterance_id);
-            return Some(i);
+        let nearest = self
+            .in_flight
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| u.utterance_id.is_none())
+            .min_by_key(|(_, u)| u.onset_stream.abs_diff(onset))
+            .map(|(i, _)| i)?;
+        self.in_flight[nearest].utterance_id = Some(utterance_id);
+        Some(nearest)
+    }
+
+    /// The ASR endpointer can MERGE what the VAD split (§6.3: the ASR owns
+    /// utterance ends; its trailing-silence rule outlasts the VAD hang).
+    /// Any other unclaimed onset inside a final's span was consumed by that
+    /// final's text: retire it now — settled, nothing minted. It will never
+    /// get its own final, and leaving it in flight is what stranded the
+    /// next final on the wrong onset and counted a phantom abandon at
+    /// disarm (pp_voice_bench defect, June 2026).
+    fn retire_merged(&mut self, seg: &TranscriptSegment) {
+        let mut i = 0;
+        while i < self.in_flight.len() {
+            let u = &self.in_flight[i];
+            if u.utterance_id.is_none() && u.onset_stream >= seg.onset && u.onset_stream <= seg.end
+            {
+                let u = self.in_flight.remove(i);
+                self.note(format!(
+                    "utterance onset at stream {} ms merged into final[{}]; \
+                     settled without minting",
+                    u.onset_stream, seg.utterance_id
+                ));
+            } else {
+                i += 1;
+            }
         }
-        None
+        self.settle_speaking_state();
     }
 
     fn on_final(&mut self, store: &EventStore, seg: &TranscriptSegment) -> Option<Event> {
@@ -507,7 +547,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             .and_then(|p| p.anchor_mono)
             .unwrap_or(now_mono);
         let held = self
-            .associate(seg.utterance_id)
+            .associate(seg.utterance_id, seg.onset)
             .map(|i| self.in_flight.remove(i));
 
         // Empty/whitespace-only finals mint NOTHING (§6.5).
@@ -515,6 +555,10 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             self.settle_speaking_state();
             return None;
         }
+
+        // This final mints: any other unclaimed onset inside its span was
+        // merged into it by the ASR endpointer — settle those, mint nothing.
+        self.retire_merged(seg);
 
         let (snapshot, minted, onset_mono, end_mono) = match held {
             Some(u) => {

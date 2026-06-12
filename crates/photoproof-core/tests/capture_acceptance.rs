@@ -1594,3 +1594,125 @@ fn c6_3_trailing_silence_reaches_the_endpointer_so_finals_mint_while_armed() {
     assert_eq!(drained[0].text.as_deref(), Some("ghost"));
     assert!(!engine.stream_open());
 }
+
+// ---------------------------------------------------------------------------
+// §5.1/§6.3 — VAD/ASR segment-count disagreement: onset-proximity association
+// ---------------------------------------------------------------------------
+
+/// pp_voice_bench defect (founder, first voice dogfood, June 2026),
+/// reproduced exactly: three VAD onsets at ~0 s / 6.55 s / 14.1 s, but a
+/// 0.8 s thought-pause splits the VAD at its 480 ms hang while the ASR's
+/// 1.2 s trailing-silence rule MERGES the first two spans into final#0.
+/// Old FIFO association then bound final#1 (real onset 14.1 s) to the
+/// 6.55 s in-flight — wrong scope — and abandoned the 14.1 s in-flight at
+/// disarm. Onset proximity binds final#1 to the THIRD onset's held
+/// snapshot, and the merged-away second in-flight settles without minting
+/// and without counting abandoned. The held VAD snapshot stays
+/// authoritative for binding (§5.1); proximity only changes WHICH held
+/// snapshot a segment claims.
+#[test]
+fn c13_1_vad_split_asr_merge_binds_next_final_by_onset_proximity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![
+            SpeechSpan {
+                onset: 0,
+                end: 5750,
+            },
+            // 0.8 s pause before this span: VAD splits, ASR will not.
+            SpeechSpan {
+                onset: 6550,
+                end: 12_000,
+            },
+            SpeechSpan {
+                onset: 14_100,
+                end: 17_000,
+            },
+        ],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![
+        // final#0: the ASR endpointer merged the first two VAD spans — its
+        // onset is ~0 and its end covers the SECOND span entirely.
+        ScriptEntry {
+            at: 13_300,
+            event: ScriptedEvent::Segment(final_seg(
+                1,
+                "the gesture is lovely and the light holds it",
+                0,
+                12_000,
+            )),
+        },
+        // final#1: real onset 14.1 s — must bind the THIRD held onset.
+        ScriptEntry {
+            at: 18_300,
+            event: ScriptedEvent::Segment(final_seg(2, "this one is sharper", 14_100, 17_000)),
+        },
+    ]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(0xA)]);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+
+    let committed = drive(
+        &mut engine,
+        &clock,
+        &store,
+        18_500,
+        &[
+            (6_500, vec![hash(0xB)]),  // before the second (merged-away) onset
+            (14_050, vec![hash(0xC)]), // before the third onset
+        ],
+    );
+
+    assert_eq!(committed.len(), 2, "two finals, two events — no extra mint");
+    assert_eq!(
+        committed[0].text.as_deref(),
+        Some("the gesture is lovely and the light holds it")
+    );
+    assert_eq!(
+        committed[0].targets,
+        vec![hash(0xA)],
+        "final#0 binds the FIRST onset's held snapshot"
+    );
+    assert_eq!(committed[1].text.as_deref(), Some("this one is sharper"));
+    assert_eq!(
+        committed[1].targets,
+        vec![hash(0xC)],
+        "final#1 binds the THIRD onset's snapshot, not the stranded second"
+    );
+    assert_eq!(
+        committed[1].ts,
+        UtcMillis::from_epoch_ms(WALL0 + 14_100),
+        "final#1's ts is the third VAD onset's wall time"
+    );
+    assert_eq!(
+        engine.streaming_count(),
+        0,
+        "the merged-away second in-flight settled when final#0 minted"
+    );
+    assert_eq!(
+        engine.abandoned_count(),
+        0,
+        "settling a merged onset is not abandonment"
+    );
+    assert!(
+        engine
+            .debug_notes()
+            .iter()
+            .any(|n| n.contains("merged into final")),
+        "the retirement leaves a debug-panel note"
+    );
+
+    // Disarm: nothing left in flight, so nothing to abandon and nothing
+    // extra mints in the drain window.
+    let drained = engine.disarm(&store);
+    assert!(drained.is_empty());
+    assert_eq!(
+        engine.abandoned_count(),
+        0,
+        "no phantom abandon at disarm — the old FIFO bug's second symptom"
+    );
+    assert!(!engine.stream_open());
+}
