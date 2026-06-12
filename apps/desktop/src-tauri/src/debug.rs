@@ -85,21 +85,64 @@ pub struct DebugScopeSnapshot {
     pub captured_at: String,
 }
 
-/// Capture tab (M1 slice): the write-scope snapshot ring (CAPTURE §3.1).
-/// VAD/binding/link entries exist on the core capture engine's debug-note
-/// feed (P6.1, `CaptureEngine::debug_notes`); they render here once P6.2
-/// wires a live engine into the shell.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugCapture {
+    /// CAPTURE §6.4 mic state, straight off the live engine.
+    pub mic: &'static str,
+    /// The transcriber pipeline is open (armed and not torn down).
+    pub stream_open: bool,
+    /// Utterances with a VAD onset and no Final yet.
+    pub streaming_utterances: usize,
+    /// Utterances abandoned (fatal error / drain timeout), lifetime.
+    pub abandoned: u64,
+    /// §8.3 readiness of the supervised ASR child.
+    pub asr_ready: bool,
+    /// The engine's live note feed (P6.4): VAD onsets, partials (dev
+    /// builds carry the text), binding decisions, failure reasons.
+    /// Newest last; refresh while speaking to watch transcription move.
+    pub notes: Vec<String>,
+    /// The write-scope snapshot ring (CAPTURE §3.1).
+    pub scope_ring: Vec<DebugScopeSnapshot>,
+}
+
+/// Capture tab: the LIVE engine (mic state, stream, in-flight utterances,
+/// the debug-note feed — partials included in dev builds) plus the scope
+/// ring. This is the "is it hearing me?" window: arm, speak, refresh.
 #[tauri::command]
-pub fn debug_capture(app: S<'_>) -> Vec<DebugScopeSnapshot> {
-    let scope = app.scope.lock().expect("scope mutex");
-    scope
-        .history()
-        .map(|s| DebugScopeSnapshot {
-            kind: s.kind.as_str(),
-            targets: s.targets.iter().map(|h| h.as_str().to_owned()).collect(),
-            captured_at: s.captured_at.to_rfc3339(),
-        })
-        .collect()
+pub fn debug_capture(app: S<'_>) -> DebugCapture {
+    let scope_ring = {
+        let scope = app.scope.lock().expect("scope mutex");
+        scope
+            .history()
+            .map(|s| DebugScopeSnapshot {
+                kind: s.kind.as_str(),
+                targets: s.targets.iter().map(|h| h.as_str().to_owned()).collect(),
+                captured_at: s.captured_at.to_rfc3339(),
+            })
+            .collect()
+    };
+    let capture = app.capture.lock().expect("capture mutex");
+    match capture.as_ref() {
+        Some(engine) => DebugCapture {
+            mic: engine.mic().as_str(),
+            stream_open: engine.stream_open(),
+            streaming_utterances: engine.streaming_count(),
+            abandoned: engine.abandoned_count(),
+            asr_ready: app.runtime.supervisors.asr_ready(),
+            notes: engine.debug_notes().to_vec(),
+            scope_ring,
+        },
+        None => DebugCapture {
+            mic: "disarmed",
+            stream_open: false,
+            streaming_utterances: 0,
+            abandoned: 0,
+            asr_ready: app.runtime.supervisors.asr_ready(),
+            notes: vec!["capture engine absent: in-process VAD failed to build".into()],
+            scope_ring,
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]

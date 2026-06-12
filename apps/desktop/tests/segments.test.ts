@@ -121,9 +121,19 @@ describe("the mic segment renders CAPTURE §6.4/§11 (P6.1)", () => {
     expect(degraded?.title).toBe(
       "Voice capture unavailable — typed notes and pencil still work.",
     );
-    // No text content ever rides the indicator (§11): the segment carries
-    // a glyph and a title, nothing transcript-shaped.
-    expect(degraded?.text.length).toBeLessThan(4);
+    // No transcript content ever rides the indicator (§11): the segment
+    // carries a Lucide glyph name (no emoji, ever) + a FIXED label.
+    expect(degraded?.icon).toBe("mic-off");
+    expect(degraded?.text).toBe("mic unavailable");
+  });
+
+  it("every mic state names a Lucide glyph, never an emoji", () => {
+    for (const micState of ["disarmed", "arming", "armedIdle", "armedSpeaking"] as const) {
+      const seg = micSeg({ micState, asrReady: true });
+      expect(seg?.icon).toBe("mic");
+      // Plain ASCII labels only (the rendered glyph is the Lucide icon).
+      expect(seg?.text).toMatch(/^[ -~]+$/);
+    }
   });
 });
 

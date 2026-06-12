@@ -16,6 +16,9 @@
    * indicator is capture-state truth — modes must stay visible; future mic
    * evidence lives here).
    */
+  import Mic from "@lucide/svelte/icons/mic";
+  import MicOff from "@lucide/svelte/icons/mic-off";
+  import Pencil from "@lucide/svelte/icons/pencil";
   import { ui } from "../../state/app.svelte";
   import { segments } from "../../logic/segments";
   import { scopeTargets } from "../../logic/scope";
@@ -127,24 +130,39 @@
       </button>
     {/if}
     {#if micSeg}
-      <!-- mic glyph (CAPTURE §6.4/§11 via modes.ts): dim = off/degraded,
-           live = the quiet breathing affordance while speech is detected;
-           the title is the §7.3 one-line hover copy. Click = the M toggle
-           (P6.4) — the audit's pointer path to voice capture. -->
+      <!-- mic glyph (CAPTURE §6.4/§11 via modes.ts; Lucide, never emoji):
+           dim = off/degraded, live = the quiet breathing affordance while
+           speech is detected; the title is the §7.3 one-line hover copy.
+           Click = the M toggle (P6.4) — the audit's pointer path. -->
       <button class="zone" onclick={toggleMic} aria-label="Toggle microphone" title={micSeg.title}>
-        <span class="segment" class:dim={micSeg.tone === "dim"} class:live={micSeg.tone === "live"}
-          >{micSeg.text}</span
+        <span
+          class="segment glyph"
+          class:dim={micSeg.tone === "dim"}
+          class:live={micSeg.tone === "live"}
         >
+          {#if micSeg.icon === "mic-off"}
+            <MicOff size={12} aria-hidden="true" />
+          {:else}
+            <Mic size={12} aria-hidden="true" />
+          {/if}
+        </span>
       </button>
     {/if}
     <button class="zone note-btn" onclick={() => ui.summonNote()} aria-label="Write a note">
       {#each noteSegs as seg (seg.id)}
         <span
           class="segment"
+          class:glyph={seg.icon !== undefined}
           class:dim={seg.tone === "dim"}
           class:live={seg.tone === "live"}
-          title={seg.title}>{seg.text}</span
+          title={seg.title}
         >
+          {#if seg.icon === "pencil"}
+            <Pencil size={12} aria-hidden="true" />
+          {:else}
+            {seg.text}
+          {/if}
+        </span>
       {/each}
     </button>
   </div>
@@ -190,6 +208,17 @@
     color: var(--text-dim);
     font-size: 12px;
     white-space: nowrap;
+  }
+  /* Lucide glyph segments (mic, pencil): center the icon on the strip. */
+  .segment.glyph {
+    display: inline-flex;
+    align-items: center;
+  }
+  /* While speech is detected the mic brightens AND breathes — the
+   * armed-idle vs armed-speaking difference must be readable at a
+   * glance (founder dogfood: "can't tell if it is doing anything"). */
+  .segment.glyph.live {
+    color: var(--text);
   }
   .segment.scope {
     transition:

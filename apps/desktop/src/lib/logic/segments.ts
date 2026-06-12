@@ -11,7 +11,7 @@
  * Tab lights-out (coordinator ruling: the indicator is capture-state
  * truth; future mic evidence lives there — it never hides).
  */
-import type { ActionContext, ModeDef, SegmentTone } from "../actions/types";
+import type { ActionContext, ModeDef, SegmentIcon, SegmentTone } from "../actions/types";
 import { MODES } from "../actions/modes";
 import { scopeLabel } from "./scope";
 
@@ -43,6 +43,8 @@ export interface Segment {
   fraction?: number;
   /** Quiet rendering hint (UI §7.3): dimmed / breathing. */
   tone?: SegmentTone;
+  /** Lucide glyph rendered INSTEAD of `text` (no emoji, ever). */
+  icon?: SegmentIcon;
 }
 
 export function segments(
@@ -67,7 +69,7 @@ export function segments(
   // Scope: always present; `● 0` never renders — no selection is session
   // scope (UI §7.2). While an utterance bound to a DIFFERENT scope is
   // still streaming, the segment shows that bound scope with the tether
-  // (UI §7.3 `● 1 ⇠ 🎙`) and reverts at finalization; the indicator never
+  // (UI §7.3 `● 1 ⇠ mic`) and reverts at finalization; the indicator never
   // re-binds anything itself (§5.4 — the distinction is mandatory).
   const streaming = input.streaming ?? null;
   if (streaming !== null && streaming.differs) {

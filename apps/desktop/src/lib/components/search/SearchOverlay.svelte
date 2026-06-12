@@ -24,8 +24,8 @@
    * parser will ADD chips from natural language — the rendering is already
    * here.
    */
-  // Lucide (BACKLOG "Adopt Lucide icons"): the §5 mockup's 🔍 is
-  // illustrative, not normative — the bar uses the stroke set.
+  // Lucide (BACKLOG "Adopt Lucide icons"): the §5 mockup's magnifier
+  // glyph is illustrative, not normative — the bar uses the stroke set.
   import Search from "@lucide/svelte/icons/search";
   import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";

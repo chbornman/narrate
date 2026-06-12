@@ -6,7 +6,7 @@
    */
   // Lucide (BACKLOG "Adopt Lucide icons"): stroke chevrons for the folder
   // twist; Unplug for the offline-volume badge (Lucide ships no eject —
-  // "disconnected" is the meaning the old ⏏ carried here anyway).
+  // "disconnected" is the meaning the old eject glyph carried anyway).
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import Unplug from "@lucide/svelte/icons/unplug";

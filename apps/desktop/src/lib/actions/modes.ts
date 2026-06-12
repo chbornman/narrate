@@ -19,7 +19,9 @@ export const MODES: readonly ModeDef[] = [
     // ENTIRE mode announcement (UI §4.4 — zero added chrome)
     isOn: (ctx) => ctx.pencilMode,
     segment: (ctx) =>
-      ctx.pencilMode ? { text: "✎", title: "Pencil mode (B toggles)" } : null,
+      ctx.pencilMode
+        ? { text: "pencil", icon: "pencil", title: "Pencil mode (B toggles)" }
+        : null,
   },
   {
     id: "mic", // M2b: recording state lives HERE, never in a toast (§4).
@@ -28,35 +30,39 @@ export const MODES: readonly ModeDef[] = [
     // `live` tone = the breathing affordance while speech is detected;
     // the muted-mic degraded glyph when the ASR is down — with the §7.3
     // one-line hover copy. Never a modal, never a toast, never text
-    // content (partials are debug-panel-only).
+    // content (partials are debug-panel-only). Lucide glyphs via `icon`
+    // (no emoji, ever).
     isOn: (ctx) => ctx.micState === "armedIdle" || ctx.micState === "armedSpeaking",
     segment: (ctx) => {
       switch (ctx.micState) {
         case "armedIdle":
           return {
-            text: "🎙",
+            text: "mic on",
+            icon: "mic",
             title:
               "Listening — audio is transcribed on this device and never written to disk.",
           };
         case "armedSpeaking":
           return {
-            text: "🎙",
+            text: "mic live",
+            icon: "mic",
             title:
               "Listening — audio is transcribed on this device and never written to disk.",
             tone: "live",
           };
         case "arming":
-          return { text: "🎙", title: "Arming microphone…", tone: "dim" };
+          return { text: "arming", icon: "mic", title: "Arming microphone…", tone: "dim" };
         case "disarmedError":
           return {
-            text: "🎙⃠",
+            text: "mic unavailable",
+            icon: "mic-off",
             title: "Voice capture unavailable — typed notes and pencil still work.",
             tone: "dim",
           };
         default:
           // Disarmed: a dimmed glyph once ASR exists; absent before then.
           return ctx.asrReady
-            ? { text: "🎙", title: "Microphone off (M arms)", tone: "dim" }
+            ? { text: "mic off", icon: "mic", title: "Microphone off (M arms)", tone: "dim" }
             : null;
       }
     },

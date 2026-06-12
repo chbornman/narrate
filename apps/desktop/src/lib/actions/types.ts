@@ -140,11 +140,16 @@ export interface ActionDef {
 /** "Modes are visible" (featureset §0) — by construction: every sticky
  * state is a ModeDef whose segment renders in the indicator. `tone` is
  * the quiet rendering hint (UI §7.3): dimmed glyphs for off/degraded
- * states, the breathing affordance while speech is detected. */
+ * states, the breathing affordance while speech is detected. `icon`
+ * names a Lucide glyph the indicator renders INSTEAD of `text` (no
+ * emoji, ever — founder rule); `text` stays as the accessible label. */
 export interface ModeDef {
   id: "auto-advance" | "pencil" | "mic"; // M2a/M2b ids reserved now
   isOn(ctx: ActionContext): boolean;
-  segment(ctx: ActionContext): { text: string; title: string; tone?: SegmentTone } | null;
+  segment(
+    ctx: ActionContext,
+  ): { text: string; title: string; tone?: SegmentTone; icon?: SegmentIcon } | null;
 }
 
 export type SegmentTone = "dim" | "live";
+export type SegmentIcon = "mic" | "mic-off" | "pencil";
