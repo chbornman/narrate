@@ -722,6 +722,21 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   `captured_at`). The engine never compensates; the scripted mock
   already speaks this clock.
 
+- **B73 (embedder bake-off, MacBook half — June 12, 2026).** Text
+  embedder: **EmbeddingGemma-300m quantized (q8)** — better paraphrase
+  separation than Qwen3-Embedding-0.6B int8 (+0.310 vs +0.227 mean
+  margin, EOS-fair), half the dims (768: halves PPVEC bytes), 316 MB;
+  its 85 ms/note CPU throughput is irrelevant at journal pace. Qwen3
+  stays the configured alternative. Image embedder: **DFN5B
+  (ViT-H-14-378-quickgelu, Immich's export) confirmed by the founder**
+  — feasibility proven on M-series CPU (2.96 s/image at 4 threads,
+  4.9 GB peak; backfill is idle-hours or desktop work), zero-shot
+  structure eye-verified on real library images. Pins + integration
+  traps (zero-length KV-cache inputs; DFN5B's ~100 external-data
+  files) in docs/SPIKE-P7-EMBED.md. Wiring packet = pinned manifests +
+  a real Embedder connector; CUDA/tier-2 numbers stay with spike
+  session 2.
+
 ## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).

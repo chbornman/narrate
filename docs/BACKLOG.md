@@ -253,12 +253,11 @@ managing = off-thesis).
 
 ## Lighting up M3 (the semantic-search chain, in order)
 
-- [ ] **Embedder bake-off** (mostly runnable on the MacBook — quality
-  evaluation is hardware-independent): DFN5B CLIP (ViT-H-14-378) vs
-  alternatives for image embeddings; Qwen3-Embedding-0.6B vs
-  EmbeddingGemma for annotation text (the PRIMARY retrieval signal).
-  Output: winners + pinned SHAs for the manifest entries that today say
-  UNPINNED-P6.3.
+- [x] **Embedder bake-off (MacBook half)** — DONE June 12 2026 (B73,
+  docs/SPIKE-P7-EMBED.md): text = EmbeddingGemma-300m q8 (chosen),
+  Qwen3-Embedding-0.6B int8 alternative; image = DFN5B confirmed
+  (founder call + feasibility numbers + eye-verified zero-shot). All
+  SHAs pinned in the report; integration traps recorded.
 - [ ] **Real embedder connector + backfill packet**: implement the
   Embedder seam against the pinned models (RUNTIME process or in-process
   ort, per spike findings), let the existing P7.1 embedding passes chew
