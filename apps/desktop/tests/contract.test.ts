@@ -291,7 +291,6 @@ function genContext(rnd: () => number): ActionContext {
     contextMenuOpen: false,
     chromeHidden: bool(),
     autoAdvance: bool(),
-    lookAtFit: bool(),
     debugEnabled: bool(),
     asrReady: bool(),
     filmstrip: bool(),
@@ -341,7 +340,10 @@ describe("cheatsheet completeness over the final registry (featureset §6)", () 
       ["toggle-rail@global", "\\"],
       ["toggle-cheatsheet@global", "?"],
       ["open-look@grid", "Enter"],
-      ["look-close@look", " "],
+      // June 12 2026: Space is 100% the microphone key — the look-close
+      // row is gone (Esc closes via the escape ladder) and the mic chord
+      // is pinned here so a regression cannot silently unbind it.
+      ["mic-press@global", " "],
       ["open-inspector@global", "i"],
     ];
     for (const [id, key] of want) {

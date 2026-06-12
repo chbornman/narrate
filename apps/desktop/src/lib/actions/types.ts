@@ -65,13 +65,11 @@ export interface ActionContext {
   contextMenuOpen: boolean;
   chromeHidden: boolean;
   autoAdvance: boolean;
-  /** Look is at fit zoom (Space close vs hold-to-pan gate). */
-  lookAtFit: boolean;
   /** Compile-time debug builds only. */
   debugEnabled: boolean;
   /** ASR ready — LIVE off the runtime-status channel since P6.2
-   * (RUNTIME §8.3): the EXISTENCE gate for mic surfaces (glyph, M row).
-   * Never true before P6.3 vendors real binaries. */
+   * (RUNTIME §8.3): the EXISTENCE gate for mic surfaces (glyph, the
+   * Space mic row). Never true before P6.3 vendors real binaries. */
   asrReady: boolean;
   // radio state for menus
   sort: SortMode;

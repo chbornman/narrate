@@ -1,6 +1,7 @@
 /**
- * The M-key two-gesture mic machine (CAPTURE §6.4 — founder ruling, June
- * 2026): M is SOLELY the microphone key, two gestures on one key:
+ * The two-gesture mic machine (CAPTURE §6.4 — founder ruling, June 2026;
+ * rebound June 12 2026: SPACE is 100% the microphone key, "like a Zoom
+ * call" — M went back to the reserved pool). Two gestures on one key:
  *
  *  · TAP (released before MIC_HOLD_MS): toggle — arm when disarmed,
  *    disarm when armed;
@@ -22,7 +23,7 @@
  * arrives through the registry's mic-press row (keydown — §11 input
  * suppression and the asrReady gate apply there, on the def, like every
  * other key); release and window-blur are raw key facts handled in
- * App.svelte — the hold-E / Space-pan precedent.
+ * App.svelte — the hold-E precedent.
  *
  * Resolved intents are EXPLICIT "arm"/"disarm", never "toggle": a PTT
  * release racing a device-failure disarm (§6.6) must end DISARMED — a
@@ -35,7 +36,7 @@
 export const MIC_HOLD_MS = 250;
 
 export interface MicHoldState {
-  /** Timestamp of the M keydown; null = no gesture in flight. */
+  /** Timestamp of the mic-key (Space) keydown; null = no gesture in flight. */
   readonly pressedAt: number | null;
   /** The press found the mic disarmed and armed it (the PTT half); false
    * = the mic was already armed when the gesture began. */
@@ -48,13 +49,13 @@ export const MIC_HOLD_IDLE: MicHoldState = { pressedAt: null, armedOnPress: fals
  * module note on why never "toggle"). */
 export type MicIntent = "arm" | "disarm" | "none";
 
-/** M keydown (the registry's mic-press action). `armed` is the mic truth
- * at press time (armedIdle/armedSpeaking). */
+/** Mic-key keydown (the registry's mic-press action). `armed` is the mic
+ * truth at press time (armedIdle/armedSpeaking). */
 export function micDown(
   s: MicHoldState,
   e: { armed: boolean; now: number },
 ): { state: MicHoldState; intent: "arm" | "none" } {
-  // Auto-repeat: holding M fires repeated keydowns, and a keydown while a
+  // Auto-repeat: holding the key fires repeated keydowns, and a keydown while a
   // gesture is already in flight IS a repeat (the keyup would have
   // resolved the machine otherwise). Keep the original timestamp — a
   // restarted clock could keep a long hold forever under the threshold.
@@ -67,7 +68,7 @@ export function micDown(
   };
 }
 
-/** M keyup: resolve tap vs hold. Always returns to idle — a hold must
+/** Mic-key keyup: resolve tap vs hold. Always returns to idle — a hold must
  * never wedge — and a stray keyup (press suppressed while typing, or
  * consumed elsewhere) resolves to nothing. */
 export function micUp(

@@ -32,7 +32,6 @@ describe("open — a fresh Look session", () => {
     expect(look.index).toBe(1);
     expect(look.zoomSession).toBeNull(); // default entry = Fit
     expect(look.flips.size).toBe(0); // flips never carry across sessions
-    expect(look.atFit).toBe(true);
     expect(look.zoomCmd).toEqual({ seq: seq + 1, op: "fit" });
   });
 });

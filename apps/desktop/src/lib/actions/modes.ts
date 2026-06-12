@@ -62,7 +62,7 @@ export const MODES: readonly ModeDef[] = [
         default:
           // Disarmed: a dimmed glyph once ASR exists; absent before then.
           return ctx.asrReady
-            ? { text: "mic off", icon: "mic", title: "Microphone off (M arms)", tone: "dim" }
+            ? { text: "mic off", icon: "mic", title: "Microphone off (Space arms)", tone: "dim" }
             : null;
       }
     },

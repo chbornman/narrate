@@ -1,8 +1,10 @@
 /**
  * Stage B registry rows (actions/defs/look.ts) through the keymap
  * interpreter. The pre-existing Look block in keymap.test.ts (Z, ±,
- * Ctrl+0/1, F, Space-at-fit, reserved P/E/V/O) is never edited; this file
- * carries the NEW rows and the Stage B gating residue.
+ * Ctrl+0/1, F, reserved P/E/V/O) is never edited; this file carries the
+ * NEW rows and the Stage B gating residue. The Space-at-fit close rows
+ * are GONE (June 12 2026: Space is the microphone key; Esc is the only
+ * keyboard close) — the residue block below pins that down.
  */
 import { describe, expect, it } from "vitest";
 import { dispatch, type KeyContext, type KeyInput } from "../src/lib/logic/keymap";
@@ -58,10 +60,6 @@ describe("rail-focus gating (enabled lives on the defs, not in components)", () 
     expect(dispatch(key(k), railFocused)).toBeNull();
   });
 
-  it("Space at fit yields to the rail too (no surprise close)", () => {
-    expect(dispatch(key(" "), { ...railFocused, lookAtFit: true })).toBeNull();
-  });
-
   it("←/→ route to the rail's owner, not look-nav, while the rail has focus", () => {
     const action = dispatch(key("ArrowLeft"), railFocused);
     expect(action?.kind).not.toBe("look-nav");
@@ -80,7 +78,6 @@ describe("zoom chord residue", () => {
     const typing = { ...look, inputFocused: true };
     expect(dispatch(key("z"), typing)).toBeNull();
     expect(dispatch(key("-"), typing)).toBeNull();
-    expect(dispatch(key(" "), { ...typing, lookAtFit: true })).toBeNull();
   });
 
   it("Z does not exist on the grid surface (scope eligibility)", () => {
@@ -88,20 +85,26 @@ describe("zoom chord residue", () => {
   });
 });
 
-describe("Space triple role — the registry half (looknav.test.ts owns the machine)", () => {
-  it("at fit: Space IS the close verb", () => {
-    expect(dispatch(key(" "), { ...look, lookAtFit: true })).toEqual({
-      kind: "look-close",
+describe("Space in Look is the microphone, never close (June 12 2026 ruling)", () => {
+  // The triple-role Space (close at fit / pan zoomed / pencil pan) is
+  // retired wholesale: the look-close row and the looknav.ts hold machine
+  // are deleted, and Space belongs to the global mic-press row.
+  it("Space dispatches the mic when ASR is ready, nothing otherwise", () => {
+    expect(dispatch(key(" "), look)).toBeNull();
+    expect(dispatch(key(" "), { ...look, asrReady: true })).toEqual({
+      kind: "mic-press",
     });
   });
 
-  it("zoomed: Space dispatches NOTHING — the raw key belongs to the pan pipeline", () => {
-    expect(dispatch(key(" "), { ...look, lookAtFit: false })).toBeNull();
+  it("the mic does NOT yield to rail focus — a Zoom call's mute key works anywhere", () => {
+    // railFocused does not gate the GLOBAL mic row; only typing
+    // suppresses it (§11).
+    expect(
+      dispatch(key(" "), { ...look, asrReady: true, railOpen: true, railFocused: true }),
+    ).toEqual({ kind: "mic-press" });
   });
 
   it("Escape still closes regardless of zoom (Esc is sacred, §0)", () => {
-    expect(dispatch(key("Escape"), { ...look, lookAtFit: false })).toEqual({
-      kind: "escape",
-    });
+    expect(dispatch(key("Escape"), look)).toEqual({ kind: "escape" });
   });
 });

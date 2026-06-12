@@ -274,7 +274,10 @@ describe("P4.2 contract flows", () => {
     expect(ui.shell.railOpen).toBe(true);
   });
 
-  it("Look entry/close is symmetric: Space-at-fit (look-close) ≡ Escape", async () => {
+  // Since June 12 2026 no key produces look-close (Space is the mic; Esc
+  // routes through the escape ladder), but the Action keeps its perform
+  // semantics — pointer paths and the frozen union both rely on it.
+  it("Look entry/close is symmetric: look-close ≡ Escape", async () => {
     await ui.openLook("b", false);
     expect(ui.surface).toBe("look");
     await ui.perform({ kind: "look-close" });
@@ -283,7 +286,7 @@ describe("P4.2 contract flows", () => {
   });
 });
 
-describe("M two-gesture mic (CAPTURE §6.4 — tap toggles, hold is push-to-talk)", () => {
+describe("Space two-gesture mic (CAPTURE §6.4 — tap toggles, hold is push-to-talk)", () => {
   // michold.ts takes time as data, so hold gestures are simulated by
   // REWINDING the recorded press timestamp past the threshold — no fake
   // timers, no Date.now mocking (the confirmhold.test.ts spirit).

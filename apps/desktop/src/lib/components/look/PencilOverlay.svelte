@@ -8,10 +8,10 @@
    *
    * Thin glue only — geometry lives in logic/stroke.ts, the drawing
    * machine in logic/pencil.ts. Pointer capture engages only in pencil
-   * mode with Space up (`pointer-events: none` otherwise, so plain-drag /
-   * Space-drag panning and wheel zoom keep flowing to the stage).
-   * Pointer-cancel discards silently; Ctrl+Z mid-draw arrives over the
-   * slice's penCancelSeq channel.
+   * mode (`pointer-events: none` otherwise, so plain-drag panning and
+   * wheel zoom keep flowing to the stage; Space-pan is gone — June 12
+   * 2026, Space is the microphone key). Pointer-cancel discards silently;
+   * Ctrl+Z mid-draw arrives over the slice's penCancelSeq channel.
    */
   import { ui } from "../../state/app.svelte";
   import * as ipc from "../../ipc/commands";
@@ -197,10 +197,10 @@
 
   // ---- raw key facts ------------------------------------------------------------
   //
-  // Space and hold-E release are tracked ONCE, in LookStage (mounted for
-  // the whole Look visit), through its stageOwnsRawKeys ownership gate;
-  // this overlay only CONSUMES ui.look.spaceHeld/eraserHeld. Window loss
-  // is the overlay's own concern: the in-flight pen must discard.
+  // The hold-E release is tracked ONCE, in LookStage (mounted for the
+  // whole Look visit); this overlay only CONSUMES ui.look.eraserHeld.
+  // Window loss is the overlay's own concern: the in-flight pen must
+  // discard.
 
   function onWindowBlur() {
     ui.look.eraserHeld = false;
@@ -256,7 +256,7 @@
 
   // ---- rendering ---------------------------------------------------------------
 
-  const active = $derived(ui.look.pencilMode && !ui.look.spaceHeld);
+  const active = $derived(ui.look.pencilMode);
 
   let pencilRed = $state(""); // resolved from the token below; empty until then
   $effect(() => {

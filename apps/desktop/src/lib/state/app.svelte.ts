@@ -926,7 +926,6 @@ export class Ui {
       contextMenuOpen: this.shell.contextMenu !== null,
       chromeHidden: this.shell.chromeHidden,
       autoAdvance: this.autoAdvance,
-      lookAtFit: this.look.atFit,
       debugEnabled: this.debugEnabled,
       asrReady: this.shell.asrReady, // live from runtime-status (P6.2, §8.3)
       sort: this.grid.sort,
@@ -1333,7 +1332,7 @@ export class Ui {
         break;
       case "pencil-eraser":
         // Hold engages here (auto-repeat re-engages harmlessly); the
-        // release is PencilOverlay's raw keyup — the Space-pan precedent.
+        // release is LookStage's raw keyup (the registry is keydown-only).
         this.look.eraserHeld = true;
         break;
       case "cycle-overlay":
@@ -1345,14 +1344,14 @@ export class Ui {
       case "journal-flash-stroke":
         if (this.surface === "look") this.look.flashStroke(action.eventId);
         break;
-      // ---- voice capture (P6.4 — CAPTURE §6.4, §11; M two-gesture) -------------
+      // ---- voice capture (P6.4 — CAPTURE §6.4, §11; Space two-gesture) ---------
       case "toggle-mic":
         // The instantaneous pointer form (indicator segment click via
         // resolveAction arg "toggle"): a click IS a tap, plain toggle.
         this.shell.onIndicatorState(await ipc.toggleMic());
         break;
       case "mic-press": {
-        // M keydown — the two-gesture machine begins (logic/michold.ts):
+        // Space keydown — the two-gesture machine begins (logic/michold.ts):
         // from disarmed the mic arms NOW (both gestures want sound
         // flowing from the press; a PTT hold must not lose the utterance
         // onset), from armed nothing happens yet — the release decides.
@@ -1372,17 +1371,17 @@ export class Ui {
   }
 
   // ---------------------------------------------------------------------------
-  // M two-gesture mic — the release half (CAPTURE §6.4; machine in
+  // Space two-gesture mic — the release half (CAPTURE §6.4; machine in
   // logic/michold.ts). The registry is keydown-only, so App.svelte feeds
-  // these as raw window facts (the hold-E / Space-pan precedent).
+  // these as raw window facts (the hold-E precedent).
   // ---------------------------------------------------------------------------
 
-  /** Tap-vs-hold tracker for the M key. Plain field, not $state: nothing
-   * renders from it — the indicator follows shell.mic, which the IPC
-   * echoes drive. */
+  /** Tap-vs-hold tracker for the Space mic key. Plain field, not $state:
+   * nothing renders from it — the indicator follows shell.mic, which the
+   * IPC echoes drive. */
   micHold: MicHoldState = MIC_HOLD_IDLE;
 
-  /** Raw M keyup. Called UNCONDITIONALLY (even while typing, even after
+  /** Raw Space keyup. Called UNCONDITIONALLY (even while typing, even after
    * the mic degraded mid-hold): the machine no-ops on a stray release and
    * set_mic is idempotent, so a hold can never wedge the mic open. A tap
    * from armed disarms here; a past-threshold release ships the PTT

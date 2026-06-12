@@ -2,8 +2,11 @@
  * Grid rows — STAGE A OWNS THIS FILE. The legacy rows (selection,
  * open-look, sort, sizes) plus the two amended contract rows landed with
  * FOUNDATIONS:
- *   · Space opens Look (featureset §0 symmetric open/close; supersedes
- *     UI.md §3.4 Space-toggle) — selection-toggle moved to Ctrl+Space.
+ *   · open-look is Enter (+ double-click). It briefly carried Space too
+ *     (featureset §0 symmetric open/close), but the June 12 2026 ruling
+ *     made Space 100% the microphone key (defs/global.ts mic-press), so
+ *     the Space chord was withdrawn here. Ctrl+Space selection-toggle
+ *     survives untouched — it is a modifier chord, not plain Space.
  *   · D4 OS rows are seated on the thumb menu (bodies in os.rs).
  * Stage A adds: T cell-info, Home/End/PgUp/PgDn edge/page moves, the
  * stack verbs (per-pair toggle on the thumb seat, collapse/expand-all on
@@ -23,7 +26,7 @@ export const GRID_DEFS: ActionDef[] = [
     id: "open-look",
     verb: "Open",
     label: "Open in Look",
-    keys: [{ key: "Enter" }, { key: " " }],
+    keys: [{ key: "Enter" }],
     scope: "grid",
     group: "grid",
     seats: ["thumb"],

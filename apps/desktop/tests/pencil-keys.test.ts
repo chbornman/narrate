@@ -106,14 +106,16 @@ describe("Ctrl+Z — pencil undo (CAPTURE §8.5)", () => {
   });
 });
 
-describe("Space with the pencil on is the PAN key (UI §11), never look-close", () => {
-  it("at fit with pencil on, Space does not close Look", () => {
-    expect(dispatch(key(" "), { ...look, lookAtFit: true, pencilMode: true })).toBeNull();
-  });
-
-  it("at fit with pencil off, Space still closes (the §0 symmetry row)", () => {
-    expect(dispatch(key(" "), { ...look, lookAtFit: true })).toEqual({
-      kind: "look-close",
+describe("Space with the pencil on (June 12 2026: Space is the mic, full stop)", () => {
+  // The old pencil-pan / look-close split on Space is retired with the
+  // Space-pan pipeline; pencil mode changes nothing about the mic key.
+  it("Space dispatches the mic (or nothing) regardless of pencil mode", () => {
+    expect(dispatch(key(" "), { ...look, pencilMode: true })).toBeNull();
+    expect(dispatch(key(" "), { ...look, pencilMode: true, asrReady: true })).toEqual({
+      kind: "mic-press",
+    });
+    expect(dispatch(key(" "), { ...look, asrReady: true })).toEqual({
+      kind: "mic-press",
     });
   });
 });

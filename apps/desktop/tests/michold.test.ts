@@ -1,7 +1,9 @@
 /**
- * The M-key two-gesture mic machine (logic/michold.ts; CAPTURE §6.4 —
- * founder ruling, June 2026): tap toggles, press-and-hold is push-to-talk.
- * Time is a parameter (the confirmhold.ts pattern) — no fake timers.
+ * The two-gesture mic machine (logic/michold.ts; CAPTURE §6.4 — founder
+ * ruling, June 2026; on SPACE since June 12 2026): tap toggles,
+ * press-and-hold is push-to-talk. The machine is key-agnostic — the
+ * binding lives on the registry's mic-press row. Time is a parameter
+ * (the confirmhold.ts pattern) — no fake timers.
  */
 import { describe, expect, it } from "vitest";
 import {

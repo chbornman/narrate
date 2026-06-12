@@ -45,7 +45,7 @@
   );
   const hairline = $derived(segs.find((s) => s.id === "ingest"));
   const scopeSeg = $derived(segs.find((s) => s.id === "scope"));
-  // The mic segment is its OWN button (P6.4: click = the M toggle, via
+  // The mic segment is its OWN button (P6.4: click = the mic toggle, via
   // the registry row — the audit's pointer path); the rest stay in the
   // note zone.
   const micSeg = $derived(segs.find((s) => s.id === "mode:mic"));
@@ -62,7 +62,7 @@
 
   /** Mic segment click → the registry's mic row, resolved with arg
    * "toggle": a click IS a tap, so the pointer form keeps the plain
-   * toggle while the M KEY runs the two-gesture machine (tap toggles,
+   * toggle while the SPACE key runs the two-gesture machine (tap toggles,
    * hold is push-to-talk — logic/michold.ts). Same def, zero new verbs. */
   function toggleMic() {
     const action = resolveAction("mic-press", ui.actionContext(), "toggle");

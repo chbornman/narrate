@@ -75,7 +75,7 @@ export class ShellSlice {
   streamingUtterance = $state<IndicatorState["streamingUtterance"]>(null);
   /** THE one coherent ASR-readiness story (P6.2 reconciliation):
    * `asrReady` is the EXISTENCE gate — RUNTIME §8.3 readiness, live off
-   * the `runtime-status` channel; mic surfaces (glyph, M-key row,
+   * the `runtime-status` channel; mic surfaces (glyph, the Space mic row,
    * Settings § Microphone) exist only when true. `asrUnavailable` is the
    * DEGRADED gate — CAPTURE §11's indicator flag, live off the
    * `indicator-state` channel; it renders the muted-mic state when the
