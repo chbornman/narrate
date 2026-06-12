@@ -98,14 +98,36 @@ since `e60cb15` (optimized deps).
   than disappearing (membership outlives files). Known limit: members
   union-merged from another replica but never ingested here are skipped.
 - [ ] **Search behavior after P7.2 — confirm nothing regressed**: hybrid
-  search is ONE code path and with no models pinned it must feel exactly
+  search is ONE code path and with no embedder READY it must feel exactly
   like M1 (asserted byte-equal in tests; your fingers are the second
   check). Collection chips work fully degraded — fuzzy name match, active
   collections win ties; an unresolvable chip is now a HARD error, not a
-  silent whole-library browse. Semantic ranking (RRF fusion, voice-quote
-  provenance) stays dormant until embedders are pinned (spike session 2);
-  the debug panel shows per-signal ranks and dropped-clause reasons when
-  it wakes.
+  silent whole-library browse. As of P7.4 semantic ranking wakes up once
+  the embedder models are downloaded (item below); the debug panel shows
+  per-signal ranks and dropped-clause reasons.
+- [ ] **Semantic search live (P7.4) — the dogfood script line**: consent
+  -> download -> watch the jobs indicator -> search semantically.
+  Concretely: (1) accept the model consent (sizes below), and note the
+  EmbeddingGemma row brings a SECOND Gemma license acceptance in settings
+  — a separate model id keeps its own acceptance record, so seeing the
+  terms gate again for the embedder is correct, not a bug; (2) let the
+  downloads finish (settings model rows; embedder rows then show
+  running/idle state); (3) watch the titlebar background-jobs indicator —
+  the embedding backfill drains only while ingest is idle and the mic is
+  off, lowest priority by design; (4) search with words you never typed
+  in a note ("the foggy ones", "dog in the leaves") and check the right
+  images surface with quoted provenance. CONSENT SIZE CHANGE: tier 1 now
+  asks for ~4.3 GB more than the voice-era card — EmbeddingGemma 0.33 GB
+  + DFN5B CLIP 3.95 GB (400 pinned files; the card's byte sum is computed
+  live from the manifest). Tier 2 additionally offers the Qwen3
+  alternative (+0.62 GB, Apache-2.0, no gate). BACKFILL EXPECTATIONS:
+  image embedding measured 2.96 s/image on laptop CPU (spike; ~4.5 s in
+  the debug-build e2e) — a 50k-image library is ~41 h of background CPU,
+  so plan on idle hours on the MacBook or run the backfill on the
+  desktop; text notes are cheap (85 ms/note). The e2e proof of the whole
+  path ran 2026-06-12 (`retrieval_e2e_real_models.rs`, BUILD-LOOP P7.4
+  row); what remains here is YOUR library and YOUR queries — this
+  checklist item is the live flip for the STATUS retrieval rows.
 - [ ] **Offline-volume browsing, visual half** — unplug an ingested drive,
   confirm grid still browses cached previews and annotations queue.
 - [ ] **Visual/UX feel of the running app** (P3.2 shipped; install
@@ -120,9 +142,11 @@ since `e60cb15` (optimized deps).
   your library to decide whether that gap matters for your dogfood.
 - [ ] **P6.3 model spike, session 2** (RTX 5080 half): Tier-2
   VRAM/throughput calibration, CUDA posture, the RUNTIME 12.4 concurrency
-  matrix, and the embedder bake-off that pins the manifest entries
-  (semantic search stays dormant until then). Session 1 (Apple Silicon)
-  is DONE — docs/SPIKE-P6.3.md — and voice is verified live (P6.4).
+  matrix, and the GPU/CoreML EP numbers for the DFN5B backfill. The
+  embedder bake-off itself is DONE (docs/SPIKE-P7-EMBED.md, MacBook half)
+  and P7.4 pinned + wired the winners — what session 2 buys now is the
+  fast image-backfill path. Session 1 (Apple Silicon) is DONE —
+  docs/SPIKE-P6.3.md — and voice is verified live (P6.4).
 - [ ] **Retrieval quality** (post-M3): golden-query eval set (~50–100 pairs
   from your real annotations), reranker go/no-go (P8).
 
@@ -161,3 +185,13 @@ since `e60cb15` (optimized deps).
   (s02_2 known), clippy 0 warnings, svelte-check 0/0, vitest 610. Added
   the Collections-tab and search-behavior eyeball items; embedder pins
   wait on spike session 2, retrieval quality eval is post-dogfood.
+- 2026-06-12 (later): **P7.4 embedder wiring done — semantic search is
+  built-tested and waiting on your machine.** B73 winners pinned
+  (EmbeddingGemma default + Gemma terms gate, Qwen3 tier-2 alternative,
+  DFN5B fully enumerated), in-process ort embedders, pump-scheduled
+  backfill, hybrid rig live in the shell; real-model e2e ran on this
+  machine (BUILD-LOOP P7.4 row has the observed numbers). Added the
+  "Semantic search live" dogfood item (consent size +~4.3 GB at tier 1,
+  second Gemma acceptance, backfill pacing); reworded the session-2 spike
+  item (bake-off done, GPU EP remains). Gate: cargo 613 passed (s02_2
+  known), clippy 0, svelte-check 0/0 (359 files), vitest 624/624.
