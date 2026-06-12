@@ -31,7 +31,36 @@ managing = off-thesis).
   association + merged-onset retirement + one stream clock,
   `8c2393b`/`6739de9`); the tuning round itself remains open. (Founder,
   first voice dogfood, June 2026.)
+  TUNING ROUND 1 FINDINGS (June 12, founder-corpus-driven): cold-start
+  first-word chop FIXED (engine pre-roll PRE_ROLL_MS 400, `cec8604`,
+  verified on the corpus). Endpoint-tail truncation ("actually incred",
+  "Kee[per]") is INVARIANT to rule2 (1.2/1.5/2.0), feed pacing
+  (realtime vs fast), wire chunk size (50/160 ms), and pre-roll length
+  - while flush-minted finals (disarm/Done path) always come back
+  COMPLETE and raw ungated feeds through the SAME server emit full
+  tails. Conclusion: something in the gated stream's content around
+  the tail; NEXT FORENSIC: a --dump-shipped tee in pp_voice_bench
+  (write exactly what the engine shipped to a wav; raw-feed that wav
+  back - splits engine-content from server-behavior in one move).
+  Mumble-zone mid-word dropouts ("fogens") are invariant to exit/hang
+  knobs - likely model-level on quiet speech; quantify with the
+  audiobook WER harness (below). pp-asr-server has an endpoint-grace
+  mechanism (--endpoint-grace-ms + energy early-out) defaulted OFF:
+  the corpus showed deferred resets clip the next word's start when
+  pauses run short.
 
+- [ ] **Audiobook WER stress harness** (founder idea, June 2026): run a
+  LONG known-transcript recording through the full pipeline - a LibriVox
+  public-domain audiobook chapter (librivox.org) with its Project
+  Gutenberg text. Gives three things the cards cannot: (a) word-error
+  rate at scale, separating MODEL accuracy from PIPELINE truncation
+  (score raw feed vs gated feed against the same transcript); (b)
+  endurance - memory and drift over an hour of armed decode; (c) a
+  fixed public corpus any machine reproduces. Recipe: fetch one chapter
+  (solo reader, clean recording), afconvert to 16 kHz mono PCM16 into
+  gitignored test-corpora/voice-long/, align the Gutenberg chapter
+  text, add a WER scorer (sidecar script or a pp_voice_bench --expect
+  upgrade). (Founder, June 2026.)
 - [x] **Mid-ingest scroll stability** — landed: the scroll anchor pins
   the IMAGE (hash) across re-lists — when a re-sort moves it, the
   viewport follows it to its new offset (B64 applied to scroll); and
