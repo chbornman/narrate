@@ -94,17 +94,23 @@ fn llama_spec(
     parallel_slots: u32,
 ) -> SpawnSpec {
     let dir = model_dir(models_dir, &entry.id);
+    // Resolve against the FULL relative path (download.rs preserves layout
+    // under models_dir/<id>/<file.path>). The gguf entries are flat today
+    // (path == basename), so this is identical on disk — but joining `path`
+    // keeps the launcher correct if a future entry ever ships nested. The
+    // mmproj predicate still keys off the basename, which is what names the
+    // projector regardless of any directory prefix.
     let model = entry
         .files
         .iter()
         .find(|f| f.path.ends_with(".gguf") && !f.file_name().starts_with("mmproj"))
-        .map(|f| dir.join(f.file_name()))
+        .map(|f| dir.join(&f.path))
         .unwrap_or_else(|| dir.join("model.gguf"));
     let mmproj = entry
         .files
         .iter()
         .find(|f| f.file_name().starts_with("mmproj"))
-        .map(|f| dir.join(f.file_name()));
+        .map(|f| dir.join(&f.path));
     SpawnSpec {
         program: binary.to_path_buf(),
         args: launch::llama_server_args(&model, mmproj.as_deref(), ctx_size, parallel_slots, None),

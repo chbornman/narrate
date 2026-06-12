@@ -66,7 +66,9 @@ pub const ASR_MIN_THREADS: u32 = 4;
 /// DECODED STATE — the vendored server drops text its own partials
 /// already carried, which is disqualifying when CAPTURE mints events
 /// from finals. Model files are the four-file transducer layout exactly
-/// as the manifest pins them.
+/// as the manifest pins them — those entries are flat (path == basename),
+/// so these basenames match the path-preserving on-disk layout that
+/// download.rs writes under models_dir/<id>/<file.path>.
 pub fn asr_wrapper_args(model_dir: &Path, chunk_ms: u32, threads: u32) -> Vec<String> {
     vec![
         "--port".into(),

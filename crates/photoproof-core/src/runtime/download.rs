@@ -213,7 +213,12 @@ impl DownloadManager {
             .files
             .iter()
             .map(|f| {
-                let dest = dir.join(f.file_name());
+                // Path-preserving: join the FULL relative path, not the
+                // basename. DFN5B ships visual/model.onnx AND
+                // textual/model.onnx — basename collision would double-count
+                // one and miss the other. Flat entries (path == basename)
+                // resolve identically, so installed models are unaffected.
+                let dest = dir.join(&f.path);
                 let part = part_path(&dest);
                 std::fs::metadata(&dest)
                     .or_else(|_| std::fs::metadata(&part))
@@ -248,7 +253,18 @@ impl DownloadManager {
             bytes_fetched: 0,
         };
         for file in &model.files {
-            let dest = dir.join(file.file_name());
+            // Path-preserving dest under models_dir/<model_id>/<file.path>.
+            // The subdirectory layout is load-bearing: ort resolves the
+            // DFN5B visual tower's ~100 external-data files RELATIVE to
+            // visual/model.onnx, so the part-file, the verified rename, and
+            // the final on-disk file all live at the nested path. Flat
+            // entries keep path == basename, so their layout is unchanged.
+            let dest = dir.join(&file.path);
+            // Create the parent for nested paths before any part file is
+            // opened (flat paths join to `dir`, already created above).
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             if std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(file.bytes) {
                 continue; // verified at rename time on a previous run
             }

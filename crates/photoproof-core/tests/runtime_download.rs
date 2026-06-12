@@ -85,11 +85,13 @@ fn s13_4_cut_mid_download_resumes_from_the_byte_offset_across_relaunch() {
         matches!(err, DownloadError::Interrupted { got_bytes: 80_000 }),
         "got {err:?}"
     );
-    let part = dir.path().join("test-model/model.gguf.part");
+    // Path-preserving: the part file lives at the FULL relative path, not
+    // the flattened basename (the entry's path is weights/model.gguf).
+    let part = dir.path().join("test-model/weights/model.gguf.part");
     assert_eq!(
         std::fs::metadata(&part).unwrap().len(),
         80_000,
-        "the part file holds the progress"
+        "the part file holds the progress at the nested path"
     );
     assert!(!manager.is_installed("test-model"));
 
@@ -106,7 +108,7 @@ fn s13_4_cut_mid_download_resumes_from_the_byte_offset_across_relaunch() {
         Some("bytes=80000-"),
         "§5.2: resume from the part-file length"
     );
-    let dest = dir.path().join("test-model/model.gguf");
+    let dest = dir.path().join("test-model/weights/model.gguf");
     assert_eq!(std::fs::read(&dest).unwrap(), payload, "SHA-256 verified");
     assert!(!part.exists(), "atomic rename consumed the part file");
     assert!(manager2.is_installed("test-model"));
@@ -455,6 +457,145 @@ fn download_progress_rides_the_bus_coalesced() {
         Some(&(payload.len() as u64, payload.len() as u64)),
         "completion event closes the series"
     );
+}
+
+/// Path-preserving downloads: two files with the SAME basename in
+/// DIFFERENT directories (DFN5B's visual/model.onnx and textual/model.onnx)
+/// must NOT collide. Before the fix dest was dir.join(basename), so the
+/// second `model.onnx` overwrote the first and the model could never verify
+/// both files. Each must land at its own nested path with its own bytes.
+#[test]
+fn same_basename_in_different_dirs_do_not_collide() {
+    let server = StubHttpServer::start();
+    let visual = file_bytes(30_000, 21);
+    let textual = file_bytes(20_000, 22);
+    let model = model_with(
+        &server,
+        vec![
+            ("visual/model.onnx", &visual),
+            ("textual/model.onnx", &textual),
+        ],
+        false,
+    );
+    server.route(
+        "/visual/model.onnx",
+        StubResponse::RangedFile {
+            file: visual.clone(),
+        },
+    );
+    server.route(
+        "/textual/model.onnx",
+        StubResponse::RangedFile {
+            file: textual.clone(),
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect("both nested files install");
+
+    // Both files exist at their preserved relative paths with their OWN
+    // bytes — no overwrite, no collision.
+    let visual_dest = dir.path().join("test-model/visual/model.onnx");
+    let textual_dest = dir.path().join("test-model/textual/model.onnx");
+    assert_eq!(std::fs::read(&visual_dest).unwrap(), visual);
+    assert_eq!(std::fs::read(&textual_dest).unwrap(), textual);
+    assert!(manager.is_installed("test-model"));
+    // Each was fetched exactly once — the collision would have forced a
+    // re-fetch (or a verify failure) of the shared basename.
+    assert_eq!(server.requests_for("/visual/model.onnx").len(), 1);
+    assert_eq!(server.requests_for("/textual/model.onnx").len(), 1);
+}
+
+/// Resume across relaunch on a NESTED path: the cut, the part-file
+/// location, the Range resume, and the atomic rename all operate at
+/// dir/<file.path>, never the flattened basename.
+#[test]
+fn nested_path_resumes_from_the_byte_offset_across_relaunch() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(150_000, 33);
+    let model = model_with(&server, vec![("visual/model.onnx", &payload)], false);
+    let route = server.route(
+        "/visual/model.onnx",
+        StubResponse::CutBody {
+            status: 200,
+            body: payload.clone(),
+            cut_after: 60_000,
+            extra_headers: vec![],
+        },
+    );
+    StubHttpServer::push(
+        &route,
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    let err = manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect_err("cut interrupts the nested transfer");
+    assert!(
+        matches!(err, DownloadError::Interrupted { got_bytes: 60_000 }),
+        "got {err:?}"
+    );
+    let part = dir.path().join("test-model/visual/model.onnx.part");
+    assert_eq!(
+        std::fs::metadata(&part).unwrap().len(),
+        60_000,
+        "the nested part file holds the progress"
+    );
+
+    // Relaunch: a fresh manager resumes from the nested part's length.
+    let manager2 = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    manager2
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect("resume completes at the nested path");
+    let requests = server.requests_for("/visual/model.onnx");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("Range"), None, "first fetch from 0");
+    assert_eq!(
+        requests[1].header("Range"),
+        Some("bytes=60000-"),
+        "resume from the nested part-file length"
+    );
+    let dest = dir.path().join("test-model/visual/model.onnx");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload, "SHA-256 verified");
+    assert!(
+        !part.exists(),
+        "atomic rename consumed the nested part file"
+    );
+    assert!(manager2.is_installed("test-model"));
+}
+
+/// Flat entries (path == basename, as the ASR/LLM manifest pins ship them)
+/// land at dir/<basename> — IDENTICAL to the pre-path-preserving layout, so
+/// nothing moves for already-installed models. This asserts the
+/// invariant decision 1 promises: only nested entries gain subdirectories.
+#[test]
+fn flat_entry_layout_is_unchanged_for_installed_models() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(40_000, 44);
+    // path == basename: exactly how encoder.int8.onnx / *.gguf are pinned.
+    let model = model_with(&server, vec![("encoder.int8.onnx", &payload)], false);
+    server.route(
+        "/encoder.int8.onnx",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect("flat entry installs");
+    // Directly under models_dir/<id>/, NOT in any subdirectory.
+    let dest = dir.path().join("test-model/encoder.int8.onnx");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert!(manager.is_installed("test-model"));
 }
 
 /// REAL-NETWORK proof of the B66 transport (ignored: needs internet; run
