@@ -35,6 +35,7 @@ pub mod mock;
 pub mod openai;
 pub mod reranker;
 pub mod sherpa;
+pub mod silero;
 pub mod transcriber;
 pub mod vad;
 pub mod vector_store;
