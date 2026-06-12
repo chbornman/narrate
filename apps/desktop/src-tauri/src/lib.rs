@@ -16,6 +16,11 @@ mod dto;
 mod embedders;
 mod error;
 mod hardware;
+// Native menu bar (desktop-conventions pass): macOS only — Windows/Linux
+// run undecorated with custom DOM chrome and need no menu roles (WHY in
+// menu.rs); compiling it out is the platform guard.
+#[cfg(target_os = "macos")]
+mod menu;
 mod mic;
 mod note;
 mod protocol;
@@ -112,6 +117,11 @@ pub fn run() {
             });
         })
         .setup(|app| {
+            // Menu bar before anything shows: App/File/Edit/View/Window
+            // with standard roles + registry-id custom items (menu.rs).
+            #[cfg(target_os = "macos")]
+            menu::install(app)?;
+
             let app_data = app.path().app_data_dir()?;
             let state = Arc::new(App::init(app_data)?);
 

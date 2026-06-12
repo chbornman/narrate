@@ -40,6 +40,11 @@ export type Action =
   | { kind: "summon-note" }
   | { kind: "toggle-auto-advance" }
   | { kind: "toggle-fullscreen" }
+  // UI scale (desktop-conventions pass, June 2026): WEBVIEW zoom — the
+  // whole chrome scales. Distinct from Look's IMAGE zoom band (zoom-step
+  // et al. below): Cmd-modified chords are the UI, plain keys the image.
+  | { kind: "ui-zoom"; delta: 1 | -1 }
+  | { kind: "ui-zoom-reset" }
   | { kind: "open-settings" }
   | { kind: "quit" }
   | { kind: "toggle-debug-panel" }

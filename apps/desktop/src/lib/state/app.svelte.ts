@@ -132,6 +132,10 @@ export class Ui {
     this.shell.loadPrefs();
     this.grid.loadPrefs();
     this.look.loadPrefs();
+    // Restore the persisted UI scale before anything renders at size —
+    // fire-and-forget like the other chrome restores (a failed call just
+    // leaves the design size; the next Cmd+=/− re-applies).
+    if (this.shell.uiZoom !== 1) void this.applyUiZoom();
     this.autoAdvance = prefs.loadAutoAdvance();
     try {
       this.applySettings(await ipc.settingsGet());
@@ -159,6 +163,21 @@ export class Ui {
       /* backend unavailable (tests/dev): no collections yet */
     }
     await this.reportScope();
+  }
+
+  /** UI scale, the webview half (desktop conventions): the shell slice
+   * owns the ladder/persistence; THIS applies it. Webview zoom (Tauri
+   * set_zoom) rather than a CSS transform so layout, text rasterization,
+   * and hit-testing all scale coherently — the same mechanism browsers
+   * use for Cmd+=. Dynamic import + try/catch is the toggle-fullscreen
+   * precedent: tests and non-Tauri dev have no webview to scale. */
+  private async applyUiZoom() {
+    try {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      await getCurrentWebview().setZoom(this.shell.uiZoom);
+    } catch {
+      /* tests / non-tauri dev */
+    }
   }
 
   /** Backend settings echo (boot + the Settings window's live edits via
@@ -951,6 +970,14 @@ export class Ui {
         }
         break;
       }
+      case "ui-zoom":
+        this.shell.stepUiZoom(action.delta);
+        await this.applyUiZoom();
+        break;
+      case "ui-zoom-reset":
+        this.shell.resetUiZoom();
+        await this.applyUiZoom();
+        break;
       case "open-settings":
         await ipc.openSettingsWindow();
         break;

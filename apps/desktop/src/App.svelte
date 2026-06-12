@@ -20,6 +20,8 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { INGEST_RELIST_MS, ui } from "./lib/state/app.svelte";
   import { dispatch } from "./lib/logic/keymap";
+  import { resolveAction } from "./lib/actions/registry";
+  import type { ActionDef } from "./lib/actions/types";
   import * as ipc from "./lib/ipc/commands";
   import type {
     AppSettings,
@@ -79,6 +81,13 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // Ctrl+Cmd chords are RESERVED for the native menu/system (macOS
+    // convention: ⌃⌘F fullscreen, ⌃⌘Space etc.). KeyInput collapses both
+    // modifiers into ctrlOrMeta, so without this gate ⌃⌘F would match the
+    // ⌘F open-search row here, preventDefault, and starve the menu's
+    // accelerator. No registry chord wants both modifiers (the KeyChord
+    // shape cannot even express it) — let these through untouched.
+    if (e.ctrlKey && e.metaKey) return;
     const active = document.activeElement;
     const ctx = ui.actionContext({
       inputFocused: isTextInput(active),
@@ -96,6 +105,30 @@
       return;
     }
     e.preventDefault();
+    void ui.perform(action);
+    touchActivity();
+  }
+
+  // ---- native menu bar (menu.rs → one `menu-action` event) ------------------
+
+  /**
+   * Custom menu items carry REGISTRY ids (menu.rs); resolving them through
+   * resolveAction — the chrome-button path — keeps the native menu a fourth
+   * RENDERING of the one action table: availability/enablement gate on the
+   * def, and a menu click can never drift from what the key does. The two
+   * ui-zoom-in/out ids are the menu's spelling of the parametrized
+   * `ui-zoom` row (a native item is one fixed verb; the def carries the
+   * direction as a chord arg).
+   */
+  function onMenuAction(id: string) {
+    const ctx = ui.actionContext();
+    const action =
+      id === "ui-zoom-in"
+        ? resolveAction("ui-zoom", ctx, 1)
+        : id === "ui-zoom-out"
+          ? resolveAction("ui-zoom", ctx, -1)
+          : resolveAction(id as ActionDef["id"], ctx);
+    if (action === null) return; // unknown id or gated-off verb: inert, never an error
     void ui.perform(action);
     touchActivity();
   }
@@ -161,6 +194,9 @@
       // RUNTIME §8.3: readiness/download snapshots — features light up
       // individually and silently (mic glyph appears, nothing else moves).
       listen<RuntimeStatus>("runtime-status", (e) => ui.shell.onRuntimeStatus(e.payload)),
+      // Native menu bar (macOS, menu.rs): custom items forward their
+      // registry id here — the same perform sink the keyboard feeds.
+      listen<string>("menu-action", (e) => onMenuAction(e.payload)),
       // Drag a folder onto the window → register-root confirm (featureset
       // §6; the OS hands paths only on drop — DropConfirm renders them).
       getCurrentWebview().onDragDropEvent((e) => {
