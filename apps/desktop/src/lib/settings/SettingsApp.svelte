@@ -13,6 +13,7 @@
   import Unplug from "@lucide/svelte/icons/unplug";
   import X from "@lucide/svelte/icons/x";
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open } from "@tauri-apps/plugin-dialog";
   import * as ipc from "../ipc/commands";
@@ -38,6 +39,17 @@
   onMount(() => {
     void win.setTitle("Settings");
     void refresh();
+    // Download progress rides the `runtime-status` channel (the runtime
+    // pump emits coalesced snapshots to every webview). The load-time
+    // fetch above is a snapshot only — without this subscription the
+    // Models section froze at its initial percentages until some action
+    // returned fresh status (founder dogfood, June 2026).
+    const unlisten = listen<RuntimeStatus>("runtime-status", (e) => {
+      runtime = e.payload;
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
   });
 
   async function refresh() {
