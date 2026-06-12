@@ -8,6 +8,7 @@
 //! rebuildable from the filesystem plus the sidecar set. Identity is the
 //! BLAKE3-256 of file bytes — images are known by hash, never by path.
 
+mod embedding;
 mod exclusions;
 mod hashing;
 mod ingest;
@@ -19,6 +20,7 @@ mod scan;
 mod volumes;
 mod watcher;
 
+pub use embedding::EmbeddingRig;
 pub use exclusions::{
     ImageFormat, MAX_FILE_BYTES, classify_extension, is_excluded_dir_name, is_excluded_file_name,
 };
@@ -79,6 +81,9 @@ pub enum LibraryError {
     VolumeOffline(String),
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// PPVEC flat-file vector storage failure (P7.1 embedding passes).
+    #[error("vector store error: {0}")]
+    Vectors(#[from] photoproof_connectors::vector_store::VectorStoreError),
 }
 
 /// Cancellation for long operations (interrupt-safety tests drive this; a
@@ -2612,7 +2617,9 @@ fn root_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
 /// The §5.1 connection pragmas (EVENTS.md; operational values per DECISIONS
 /// P18), applied to the library's writer connection. Duplicated from the
 /// store-private `schema::apply_pragmas` — flagged in the packet report.
-fn open_library_connection(path: &Path) -> rusqlite::Result<Connection> {
+// pub(crate): the PPVEC store (crate::retrieval) opens its metadata
+// connection over the same database with the same pragmas.
+pub(crate) fn open_library_connection(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     for pragma in [
         "PRAGMA journal_mode = WAL",

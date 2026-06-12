@@ -599,7 +599,11 @@ impl EventStore {
             insert_event(&tx, &r)?;
             registry_upsert(&tx, &c.id, &r.id, r.ts)?;
             scrub_in_place(&tx, &c.id, &r.id)?;
-            tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+            // RETRIEVAL §1.1: mark, never DELETE — the metadata row keeps
+            // the flat-file pointer so the PPVEC scrub can physically zero
+            // the stored bytes (deleting here would orphan un-zeroed bytes
+            // in the file until compaction).
+            tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                 .execute([c.id.as_str()])
                 .map_err(StoreError::from)?;
             out.push(r.id);
@@ -983,12 +987,16 @@ impl EventStore {
             }
         }
 
-        // Vectors referencing dead roots are dropped; still-valid vectors are
-        // preserved (core cannot re-embed — RETRIEVAL owns recreation).
+        // Vectors referencing dead roots are marked deleted (never DELETEd:
+        // the metadata row keeps the flat-file pointer for the PPVEC zeroing
+        // sweep — RETRIEVAL §1.1/§1.3); still-valid vectors are preserved
+        // (core cannot re-embed — RETRIEVAL owns recreation).
         {
             let dead: Vec<String> = {
-                let mut stmt =
-                    tx.prepare("SELECT DISTINCT event_id FROM vectors WHERE event_id IS NOT NULL")?;
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT event_id FROM vectors
+                     WHERE event_id IS NOT NULL AND deleted = 0",
+                )?;
                 let ids = stmt
                     .query_map([], |r| r.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1001,7 +1009,7 @@ impl EventStore {
                     .collect()
             };
             for id in dead {
-                tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                     .execute([id])?;
             }
         }
@@ -1649,7 +1657,9 @@ fn merge_chunk(
         {
             let marker = registry_lookup(tx, &victim.id)?.expect("just upserted");
             scrub_in_place(tx, &victim.id, &marker)?;
-            tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+            // Mark, never DELETE: the row's file pointer feeds the PPVEC
+            // physical-zero sweep (RETRIEVAL §1.1).
+            tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                 .execute([victim.id.as_str()])?;
             report.newly_scrubbed += 1;
             touched.push(victim.scrubbed_form(marker));
@@ -1681,10 +1691,10 @@ fn merge_chunk(
                     }
                     touched.push(local);
                 } else if arriving.scrubbed() && !local.scrubbed() {
-                    // Learn it.
+                    // Learn it. (Mark, never DELETE — RETRIEVAL §1.1.)
                     let marker = arriving.redacted_by.clone().expect("scrubbed");
                     scrub_in_place(tx, &local.id, &marker)?;
-                    tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                    tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                         .execute([local.id.as_str()])?;
                     report.newly_scrubbed += 1;
                     touched.push(local.scrubbed_form(marker));
@@ -1805,8 +1815,11 @@ fn recompute_derived(
                         tx.prepare_cached("UPDATE event_fts SET body = ?1 WHERE rowid = ?2")?
                             .execute(params![body, rowid])?;
                         // Effective text changed: invalidate the root's
-                        // vectors for re-embedding (§6.3).
-                        tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                        // vectors for re-embedding (§6.3). Mark, never
+                        // DELETE — the metadata row keeps the flat-file
+                        // pointer for the PPVEC zeroing sweep
+                        // (RETRIEVAL §1.1/§1.3).
+                        tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                             .execute([rid.as_str()])?;
                     }
                     _ => {}
@@ -1816,7 +1829,7 @@ fn recompute_derived(
                     tx.prepare_cached("DELETE FROM event_fts WHERE rowid = ?1")?
                         .execute([rowid])?;
                 }
-                tx.prepare_cached("DELETE FROM vectors WHERE event_id = ?1")?
+                tx.prepare_cached("UPDATE vectors SET deleted = 1 WHERE event_id = ?1")?
                     .execute([rid.as_str()])?;
             }
         }
@@ -1826,6 +1839,17 @@ fn recompute_derived(
     for (hash, reason) in dirty {
         recompute_image(tx, hash.as_str())?;
         upsert_dirty(tx, hash, *reason, now)?;
+        // RETRIEVAL §1.1 "enqueue embed": any journal change re-pends the
+        // image's text-embedding pass so re-annotation re-embeds (L4 queue
+        // mechanics — LIBRARY §10). UPDATE-only by design: pass rows are
+        // created by the library's embedding backfill; the events engine
+        // never invents queue rows for images the library has not ingested.
+        tx.prepare_cached(
+            "UPDATE ingest_passes SET state = 'pending', not_before = NULL \
+             WHERE image_hash = ?1 AND pass_name = 'text-embedding' \
+               AND state IN ('done','error','skipped')",
+        )?
+        .execute([hash.as_str()])?;
     }
     Ok(())
 }

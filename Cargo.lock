@@ -3931,6 +3931,7 @@ dependencies = [
  "libc",
  "notify",
  "photoproof-connectors",
+ "pollster",
  "qcms",
  "rand 0.8.6",
  "rawler",

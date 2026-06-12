@@ -35,6 +35,11 @@ futures-core.workspace = true
 # image identity stays BLAKE3 — download pins follow Hugging Face convention).
 sha2 = "0.10"
 ureq = "3"
+# --- retrieval deps (owned by packet P7.1; append below this line only) ---
+# Minimal block_on for the async Embedder seam: the embedding drain runs on
+# a background thread and model IO is one call at a time (GPU concurrency 1,
+# LIBRARY §10.3), so a full async runtime would be dead weight here.
+pollster = "0.4"
 
 [[bin]]
 # Scriptable stub child for runtime-supervision tests (RUNTIME §8 /

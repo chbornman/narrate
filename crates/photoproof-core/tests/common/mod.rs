@@ -226,9 +226,13 @@ pub fn fts_roots(conn: &Connection, query: &str) -> Vec<String> {
     rows.collect::<Result<Vec<_>, _>>().unwrap()
 }
 
+/// Count of LIVE vector rows for a chain root. The events engine marks
+/// invalidated rows `deleted = 1` (never DELETEs — the metadata row keeps
+/// the flat-file pointer for the PPVEC zeroing sweep, RETRIEVAL §1.1), so
+/// "purged from vectors" means "no live row".
 pub fn vector_count_for(conn: &Connection, event_id: &str) -> i64 {
     conn.query_row(
-        "SELECT COUNT(*) FROM vectors WHERE event_id = ?1",
+        "SELECT COUNT(*) FROM vectors WHERE event_id = ?1 AND deleted = 0",
         [event_id],
         |r| r.get(0),
     )
@@ -236,11 +240,17 @@ pub fn vector_count_for(conn: &Connection, event_id: &str) -> i64 {
 }
 
 /// Insert a fake vector row referencing a chain root (RETRIEVAL normally
-/// owns this; tests use it to observe invalidation).
+/// owns this; tests use it to observe invalidation). `file_row` keys into
+/// a flat file that does not exist for these fakes; the MAX+1 subselect
+/// keeps the (vec_kind, model_id, file_row) unique index satisfied.
 pub fn insert_vector(conn: &Connection, event_id: &str) {
     conn.execute(
-        "INSERT INTO vectors (vec_kind, event_id, image_hash, chunk_idx, model_id, dims, vec, created_ts) \
-         VALUES ('annotation_chunk', ?1, NULL, 0, 'test-model', 4, x'00000000', '2026-06-09T00:00:00.000Z')",
+        "INSERT INTO vectors (vec_kind, model_id, dims, event_id, image_hash, chunk_index, \
+                              char_start, char_end, file_row, inputs_hash, created_ts, deleted) \
+         VALUES ('annotation_chunk', 'test-model', 4, ?1, NULL, 0, NULL, NULL, \
+                 (SELECT COALESCE(MAX(file_row) + 1, 0) FROM vectors \
+                  WHERE vec_kind = 'annotation_chunk' AND model_id = 'test-model'), \
+                 'test-inputs-hash', '2026-06-09T00:00:00.000Z', 0)",
         [event_id],
     )
     .unwrap();
@@ -312,8 +322,8 @@ pub fn dump_derived(conn: &Connection, with_dirty_ts: bool) -> Vec<String> {
     }
     out.extend(dump_query(
         conn,
-        "SELECT vec_kind, event_id, image_hash, chunk_idx, model_id FROM vectors \
-         ORDER BY event_id, image_hash, chunk_idx",
+        "SELECT vec_kind, event_id, image_hash, chunk_index, model_id, deleted FROM vectors \
+         ORDER BY event_id, image_hash, chunk_index",
     ));
     out
 }

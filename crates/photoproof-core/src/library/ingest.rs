@@ -11,6 +11,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::id::{ContentHash, UtcMillis};
 
 /// Pass registry (§10.1). `pass_version` starts at 1 per pass.
+/// `text-embedding` is P7.1's addition: RETRIEVAL §3 makes annotation-chunk
+/// embedding "a versioned backfill pass (LIBRARY.md mechanics)", and the
+/// queue is per-image, so the pass unit is "(re)embed every live chunk of
+/// the events targeting this image".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PassName {
     Hash,
@@ -18,6 +22,7 @@ pub enum PassName {
     Preview,
     FullRawDecode,
     ImageEmbedding,
+    TextEmbedding,
     Caption,
 }
 
@@ -29,6 +34,7 @@ impl PassName {
             PassName::Preview => "preview",
             PassName::FullRawDecode => "full-raw-decode",
             PassName::ImageEmbedding => "image-embedding",
+            PassName::TextEmbedding => "text-embedding",
             PassName::Caption => "caption",
         }
     }
@@ -40,6 +46,7 @@ impl PassName {
             "preview" => PassName::Preview,
             "full-raw-decode" => PassName::FullRawDecode,
             "image-embedding" => PassName::ImageEmbedding,
+            "text-embedding" => PassName::TextEmbedding,
             "caption" => PassName::Caption,
             _ => return None,
         })
@@ -133,6 +140,19 @@ pub fn retry_errors(conn: &Connection) -> rusqlite::Result<usize> {
 /// merely unplugged. (The volume's online transition clears `not_before`
 /// and re-pends ahead of the backoff anyway.)
 pub fn defer_offline(conn: &Connection, item: &QueueItem, now: UtcMillis) -> rusqlite::Result<()> {
+    defer(conn, item, "volume-offline: no online active path", now)
+}
+
+/// Re-pend with the long transient backoff, giving the attempt back: for
+/// blockers that say nothing about the work unit itself (offline volume,
+/// a prerequisite pass not finished yet). The error code is recorded for
+/// debug-panel visibility.
+pub fn defer(
+    conn: &Connection,
+    item: &QueueItem,
+    error_code: &str,
+    now: UtcMillis,
+) -> rusqlite::Result<()> {
     let backoff = TRANSIENT_BACKOFF_MS[TRANSIENT_BACKOFF_MS.len() - 1];
     let not_before = UtcMillis::from_epoch_ms(now.epoch_ms() + backoff);
     conn.execute(
@@ -144,7 +164,7 @@ pub fn defer_offline(conn: &Connection, item: &QueueItem, now: UtcMillis) -> rus
             item.image_hash.as_str(),
             item.pass.as_str(),
             item.pass_version,
-            "volume-offline: no online active path",
+            error_code,
             not_before.to_rfc3339()
         ],
     )?;
@@ -205,16 +225,40 @@ pub fn promote(
 /// worker are claimed — `full-raw-decode` (M1.5) and the model passes stay
 /// pending in the queue by design.
 pub fn claim_next(conn: &Connection, now: UtcMillis) -> rusqlite::Result<Option<QueueItem>> {
+    claim_next_of(conn, now, &[PassName::Exif, PassName::Preview])
+}
+
+/// Claim the next runnable pending row among `allowed` passes. The
+/// embedding drain claims only the passes whose embedder is configured —
+/// unconfigured model passes sit pending (idle, NotConfigured-style; never
+/// errors), exactly like the rest of the degraded posture.
+pub fn claim_next_of(
+    conn: &Connection,
+    now: UtcMillis,
+    allowed: &[PassName],
+) -> rusqlite::Result<Option<QueueItem>> {
+    if allowed.is_empty() {
+        return Ok(None);
+    }
     let now_s = now.to_rfc3339();
+    // Pass names are registry constants, never user input; the IN list is
+    // assembled from quoted static strings.
+    let in_list = allowed
+        .iter()
+        .map(|p| format!("'{}'", p.as_str()))
+        .collect::<Vec<_>>()
+        .join(",");
     let row = conn
         .query_row(
-            "SELECT image_hash, pass_name, pass_version, attempts
-             FROM ingest_passes
-             WHERE state = 'pending'
-               AND pass_name IN ('exif','preview')
-               AND (not_before IS NULL OR not_before <= ?1)
-             ORDER BY priority, enqueued_at
-             LIMIT 1",
+            &format!(
+                "SELECT image_hash, pass_name, pass_version, attempts
+                 FROM ingest_passes
+                 WHERE state = 'pending'
+                   AND pass_name IN ({in_list})
+                   AND (not_before IS NULL OR not_before <= ?1)
+                 ORDER BY priority, enqueued_at
+                 LIMIT 1"
+            ),
             params![now_s],
             |r| {
                 Ok((

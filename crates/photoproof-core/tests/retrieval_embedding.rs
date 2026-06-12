@@ -1,0 +1,649 @@
+//! P7.1 acceptance — §2 chunking and the embedding ingest passes
+//! (spec/RETRIEVAL.md §1.1 maintenance, §2, §3; LIBRARY §10 queue
+//! mechanics / DECISIONS L4), mock-verified against the deterministic
+//! `MockEmbedder`.
+//!
+//! Covered here: chunk boundaries/offsets/tiny-chunk prefix; the
+//! NotConfigured-idle posture (no embedder => rows sit pending, zero
+//! errors); inputs_hash staleness (re-annotation re-pends and re-embeds
+//! only what changed); revision/redaction invalidation propagating into
+//! zeroed flat-file bytes on the next drain (the §13.12 byte-scan,
+//! end-to-end through the events engine).
+
+mod common;
+
+use photoproof_connectors::embedder::Embedder;
+use photoproof_connectors::mock::MockEmbedder;
+use photoproof_connectors::vector_store::{VecKind, VecSpace, VectorStore};
+use photoproof_core::library::{EmbeddingRig, QueueOptions};
+use photoproof_core::retrieval::{ChunkContext, PpvecStore, chunk_folded_text, inputs_hash};
+use photoproof_core::{ContentHash, EventDraft, RemarkSource};
+
+use common::m1env::M1Env;
+use common::{d_remark, d_revision};
+
+const TEXT_MODEL: &str = "mock-qwen3-embedding";
+const CLIP_MODEL: &str = "mock-dfn5b-clip";
+const DIMS: usize = 512;
+
+// ---------------------------------------------------------------------------
+// §2 chunking
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s2_short_text_is_one_chunk_spanning_the_whole_text() {
+    let text = "Fog swallowing the barn, keep this one.";
+    let chunks = chunk_folded_text(text, &ChunkContext::default());
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].index, 0);
+    assert_eq!(chunks[0].char_start, 0);
+    assert_eq!(chunks[0].char_end, text.chars().count() as u32);
+    assert_eq!(chunks[0].text, text);
+    // No context metadata => no prefix even for a tiny chunk.
+    assert_eq!(chunks[0].embed_text, text);
+}
+
+#[test]
+fn s2_offsets_are_unicode_scalars_not_bytes() {
+    let text = "Sebasti\u{e3}o \u{e0} caf\u{e9} \u{2014} \u{fc}ber alles";
+    let chunks = chunk_folded_text(text, &ChunkContext::default());
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].char_end as usize, text.chars().count());
+    assert!(text.len() > text.chars().count(), "fixture is multi-byte");
+}
+
+#[test]
+fn s2_long_monologue_chunks_with_overlap_and_sentence_snap() {
+    // ~1200 words, a sentence every 12 words: far past the 512-token
+    // single-chunk threshold, with sentence ends available inside every
+    // snap window.
+    let mut text = String::new();
+    for i in 0..1200 {
+        text.push_str(&format!("word{i:04}"));
+        text.push_str(if i % 12 == 11 { ". " } else { " " });
+    }
+    let text = text.trim_end().to_string();
+    let chars: Vec<char> = text.chars().collect();
+    let chunks = chunk_folded_text(&text, &ChunkContext::default());
+    assert!(chunks.len() >= 3, "got {} chunks", chunks.len());
+
+    for (i, c) in chunks.iter().enumerate() {
+        assert_eq!(c.index as usize, i);
+        // Offsets address the folded text exactly.
+        let span: String = chars[c.char_start as usize..c.char_end as usize]
+            .iter()
+            .collect();
+        assert_eq!(span, c.text);
+        // Non-final boundaries snapped backward to a sentence end.
+        if i + 1 < chunks.len() {
+            assert!(
+                c.text.ends_with('.'),
+                "chunk {i} should end at a sentence end, got ...{:?}",
+                &c.text[c.text.len().saturating_sub(12)..]
+            );
+            // 64-token overlap: the next chunk starts before this one ends.
+            assert!(chunks[i + 1].char_start < c.char_end);
+        }
+        // Long chunks are not "tiny": never prefixed.
+        assert_eq!(c.embed_text, c.text);
+    }
+    assert_eq!(chunks[0].char_start, 0);
+    assert_eq!(
+        chunks.last().unwrap().char_end as usize,
+        chars.len(),
+        "chunks cover the whole text"
+    );
+}
+
+#[test]
+fn s2_tiny_chunk_prefix_is_embed_time_only_and_deterministic() {
+    let ctx = ChunkContext {
+        date: Some("2026-01-14".into()),
+        folder: Some("2026/iceland".into()),
+        collection: Some("Quiet Hours".into()),
+    };
+    // One sentence: under ~2 sentences => prefixed at embed time.
+    let one = chunk_folded_text("love this one", &ctx);
+    assert_eq!(one[0].text, "love this one");
+    assert_eq!(
+        one[0].embed_text,
+        "[2026-01-14 \u{b7} 2026/iceland \u{b7} Quiet Hours] love this one"
+    );
+    // Deterministic: same inputs, same bytes.
+    assert_eq!(chunk_folded_text("love this one", &ctx), one);
+
+    // Two sentences: no prefix.
+    let two = chunk_folded_text("Love this one. Keep it.", &ctx);
+    assert_eq!(two[0].embed_text, "Love this one. Keep it.");
+}
+
+// ---------------------------------------------------------------------------
+// Embedding ingest passes (mock-verified)
+// ---------------------------------------------------------------------------
+
+struct Rig {
+    env: M1Env,
+    store: PpvecStore,
+    text: MockEmbedder,
+    clip: MockEmbedder,
+    hashes: Vec<ContentHash>,
+}
+
+impl Rig {
+    /// Full M1 stack + three ingested JPEGs + the PPVEC store.
+    fn new() -> Self {
+        let env = M1Env::new();
+        let root = env.register("photos");
+        let dir = env.mount.join("photos");
+        for seed in 0..3u32 {
+            let img = unique_jpeg(seed);
+            std::fs::write(dir.join(format!("img{seed}.jpg")), img).unwrap();
+        }
+        env.scan(&root);
+        env.drain();
+        let mut hashes = env.lib.image_hashes().unwrap();
+        hashes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(hashes.len(), 3);
+        let store = PpvecStore::open(&env.db, env.app_data.join("vectors")).unwrap();
+        Self {
+            env,
+            store,
+            text: MockEmbedder::text(TEXT_MODEL, DIMS),
+            clip: MockEmbedder::clip(CLIP_MODEL, DIMS),
+            hashes,
+        }
+    }
+
+    fn drain_embeddings(&self) -> photoproof_core::library::QueueReport {
+        let rig = EmbeddingRig {
+            text: Some(&self.text),
+            clip: Some(&self.clip),
+            vectors: &self.store,
+        };
+        self.env
+            .lib
+            .process_embedding_queue(&rig, &QueueOptions::default())
+            .unwrap()
+    }
+
+    fn text_space(&self) -> VecSpace {
+        VecSpace {
+            vec_kind: VecKind::AnnotationChunk,
+            model_id: TEXT_MODEL.into(),
+        }
+    }
+
+    fn pass_state(&self, hash: &ContentHash, pass: &str) -> String {
+        self.env
+            .conn()
+            .query_row(
+                "SELECT state FROM ingest_passes
+                 WHERE image_hash = ?1 AND pass_name = ?2",
+                [hash.as_str(), pass],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn count(&self, sql: &str) -> i64 {
+        self.env.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+}
+
+/// A small decodable JPEG whose bytes are unique per seed.
+fn unique_jpeg(seed: u32) -> Vec<u8> {
+    let mut img = image::RgbImage::new(16, 16);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        let v = seed
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(x * 31 + y * 7);
+        *p = image::Rgb([
+            (v & 0xff) as u8,
+            ((v >> 8) & 0xff) as u8,
+            ((v >> 16) & 0xff) as u8,
+        ]);
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut std::io::Cursor::new(&mut out), 95)
+        .encode_image(&image::DynamicImage::ImageRgb8(img))
+        .unwrap();
+    out
+}
+
+/// No embedder configured: nothing is claimed, nothing errors — the rows
+/// (once backfilled) sit pending, NotConfigured-style, exactly like the
+/// rest of the degraded posture.
+#[test]
+fn passes_sit_idle_when_no_embedder_is_configured() {
+    let rig = Rig::new();
+    rig.env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark("quiet light", vec![rig.hashes[0].clone()]),
+            None,
+        )
+        .unwrap();
+
+    // Wholly unconfigured: no rows are even created.
+    let none: EmbeddingRig<'_, MockEmbedder, MockEmbedder> = EmbeddingRig {
+        text: None,
+        clip: None,
+        vectors: &rig.store,
+    };
+    let report = rig
+        .env
+        .lib
+        .process_embedding_queue(&none, &QueueOptions::default())
+        .unwrap();
+    assert_eq!((report.processed, report.errors), (0, 0));
+    assert_eq!(
+        rig.count(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name IN ('text-embedding','image-embedding')"
+        ),
+        0
+    );
+
+    // Rows backfilled, embedder gone again: rows stay pending, no errors.
+    rig.env.lib.enqueue_embedding_backfill(true, true).unwrap();
+    let report = rig
+        .env
+        .lib
+        .process_embedding_queue(&none, &QueueOptions::default())
+        .unwrap();
+    assert_eq!((report.processed, report.errors), (0, 0));
+    assert_eq!(
+        rig.count(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name IN ('text-embedding','image-embedding')
+               AND state = 'pending'"
+        ),
+        6
+    );
+    assert_eq!(
+        rig.count(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name IN ('text-embedding','image-embedding')
+               AND state = 'error'"
+        ),
+        0
+    );
+}
+
+/// Partial configuration drains only the configured kind; configuring the
+/// second embedder later picks the rest up. B69: the clip signal is built
+/// for every image regardless of journal coverage — additive, never
+/// retired.
+#[test]
+fn passes_drain_per_configured_embedder() {
+    let rig = Rig::new();
+    let text_only: EmbeddingRig<'_, MockEmbedder, MockEmbedder> = EmbeddingRig {
+        text: Some(&rig.text),
+        clip: None,
+        vectors: &rig.store,
+    };
+    let report = rig
+        .env
+        .lib
+        .process_embedding_queue(&text_only, &QueueOptions::default())
+        .unwrap();
+    assert_eq!(report.done, 3, "text passes drained for all images");
+    assert_eq!(
+        rig.count("SELECT COUNT(*) FROM ingest_passes WHERE pass_name = 'image-embedding'"),
+        0,
+        "unconfigured kind not even backfilled yet"
+    );
+
+    let report = rig.drain_embeddings();
+    assert_eq!(report.done, 3, "clip passes drained once configured");
+    for h in &rig.hashes {
+        assert_eq!(rig.pass_state(h, "image-embedding"), "done");
+    }
+    // One image_clip vector per image, regardless of journal coverage.
+    assert_eq!(
+        rig.count("SELECT COUNT(*) FROM vectors WHERE vec_kind = 'image_clip' AND deleted = 0"),
+        3
+    );
+}
+
+/// The end-to-end happy path: chunks + clip vectors with §1.2 metadata,
+/// multi-target events stored once, searches resolving back to events.
+#[test]
+fn text_and_image_passes_embed_with_metadata() {
+    let rig = Rig::new();
+    // Two sentences => no tiny-chunk prefix; the embed text IS the folded
+    // text, so the search side can reproduce it.
+    let shared = "Fog swallowing the barn. Keep this one.";
+    let multi = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark(shared, vec![rig.hashes[0].clone(), rig.hashes[1].clone()]),
+            None,
+        )
+        .unwrap();
+    rig.env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark(
+                "Harsh noon shadows. Probably a reject.",
+                vec![rig.hashes[0].clone()],
+            ),
+            None,
+        )
+        .unwrap();
+
+    let report = rig.drain_embeddings();
+    assert_eq!(report.errors, 0);
+    assert_eq!(report.done, 6, "3 text + 3 image passes");
+
+    // One annotation_chunk row per (event, chunk) — the multi-target event
+    // stores ONE vector; image association resolves through event_targets
+    // at query time (§1.2).
+    assert_eq!(
+        rig.count(
+            "SELECT COUNT(*) FROM vectors WHERE vec_kind = 'annotation_chunk' AND deleted = 0"
+        ),
+        2
+    );
+    let (chars_start, chars_end): (i64, i64) = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT char_start, char_end FROM vectors WHERE event_id = ?1",
+            [multi.id.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(chars_start, 0);
+    assert_eq!(chars_end, shared.chars().count() as i64);
+
+    // The §1.2 inputs_hash recipe over the embed text.
+    let stored_hash: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash FROM vectors WHERE event_id = ?1",
+            [multi.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_hash, inputs_hash(shared.as_bytes()));
+
+    // Vector search finds the chunk from its own text.
+    let query = pollster::block_on(rig.text.embed_text(shared)).unwrap();
+    let hits = rig.store.search(&query, rig.text_space(), 5).unwrap();
+    assert_eq!(hits.len(), 2);
+    let top_event: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT event_id FROM vectors WHERE id = ?1",
+            [hits[0].vector_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(top_event, multi.id.to_string());
+    assert!(
+        hits[0].score > 0.98,
+        "self-similarity, got {}",
+        hits[0].score
+    );
+}
+
+/// Tiny chunks embed with the deterministic metadata prefix — date and
+/// folder — which never appears in the stored span (§2: embed time only).
+#[test]
+fn s2_tiny_chunk_prefix_uses_annotation_date_and_folder() {
+    let rig = Rig::new();
+    let e = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark("quiet light", vec![rig.hashes[0].clone()]),
+            None,
+        )
+        .unwrap();
+    rig.drain_embeddings();
+
+    let date = &e.ts.to_rfc3339()[..10];
+    let folder: String = {
+        let rel: String = rig
+            .env
+            .conn()
+            .query_row(
+                "SELECT rel_path FROM paths WHERE image_hash = ?1 AND state = 'active'",
+                [rig.hashes[0].as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        std::path::Path::new(&rel)
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    let expected_embed_text = format!("[{date} \u{b7} {folder}] quiet light");
+
+    let stored: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash FROM vectors WHERE event_id = ?1",
+            [e.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, inputs_hash(expected_embed_text.as_bytes()));
+
+    // The prefixed text is what the embedder saw: querying with it scores
+    // ~1 against the stored vector (deterministic mock).
+    let q = pollster::block_on(rig.text.embed_text(&expected_embed_text)).unwrap();
+    let hits = rig.store.search(&q, rig.text_space(), 1).unwrap();
+    assert!(hits[0].score > 0.98);
+}
+
+/// inputs_hash staleness: a new annotation re-pends the image's
+/// text-embedding pass (the §1.1 "enqueue embed" hook) and the re-run
+/// embeds only the new chunk — fresh rows are skipped untouched.
+#[test]
+fn reannotation_repends_and_reembeds_only_what_changed() {
+    let rig = Rig::new();
+    rig.env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark("First note. Keep.", vec![rig.hashes[0].clone()]),
+            None,
+        )
+        .unwrap();
+    rig.drain_embeddings();
+    assert_eq!(rig.pass_state(&rig.hashes[0], "text-embedding"), "done");
+    let first_created: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT created_ts FROM vectors WHERE vec_kind = 'annotation_chunk'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Re-annotation re-pends exactly the touched image.
+    rig.env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark("Second thought. Reject.", vec![rig.hashes[0].clone()]),
+            None,
+        )
+        .unwrap();
+    assert_eq!(rig.pass_state(&rig.hashes[0], "text-embedding"), "pending");
+    assert_eq!(rig.pass_state(&rig.hashes[1], "text-embedding"), "done");
+
+    let report = rig.drain_embeddings();
+    assert_eq!(report.errors, 0);
+    assert_eq!(
+        rig.count(
+            "SELECT COUNT(*) FROM vectors WHERE vec_kind = 'annotation_chunk' AND deleted = 0"
+        ),
+        2
+    );
+    // The fresh chunk was skipped, not rewritten: created_ts unchanged.
+    let still: String = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT created_ts FROM vectors
+             WHERE vec_kind = 'annotation_chunk' ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still, first_created);
+}
+
+/// A revision invalidates the root's vectors (deleted=1, §1.1) and the
+/// next drain re-embeds the new folded text with fresh offsets.
+#[test]
+fn revision_invalidates_and_reembeds_folded_text() {
+    let rig = Rig::new();
+    let e = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark("Original wording here.", vec![rig.hashes[0].clone()]),
+            None,
+        )
+        .unwrap();
+    rig.drain_embeddings();
+
+    let revised = "Corrected wording, rather different. Keep it.";
+    rig.env
+        .store
+        .append(&rig.env.session, d_revision(e.id.clone(), revised), None)
+        .unwrap();
+    // The events engine marked the chunk rows dead in the same
+    // transaction (RETRIEVAL §1.1).
+    assert_eq!(
+        rig.count("SELECT COUNT(*) FROM vectors WHERE deleted = 1"),
+        1
+    );
+    assert_eq!(rig.pass_state(&rig.hashes[0], "text-embedding"), "pending");
+
+    rig.drain_embeddings();
+    let (hash_stored, char_end): (String, i64) = rig
+        .env
+        .conn()
+        .query_row(
+            "SELECT inputs_hash, char_end FROM vectors WHERE event_id = ?1 AND deleted = 0",
+            [e.id.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(hash_stored, inputs_hash(revised.as_bytes()));
+    assert_eq!(char_end, revised.chars().count() as i64);
+    assert_eq!(
+        rig.count("SELECT COUNT(*) FROM vectors WHERE deleted = 1"),
+        0,
+        "dead rows swept by the drain"
+    );
+}
+
+/// Redaction end-to-end: the events engine marks the vectors dead in the
+/// redaction transaction; the next drain physically zeroes the flat-file
+/// row — after it, a byte-scan of the store file proves absence
+/// (§13.12 mirrored through the full stack; the trait-level scrub test
+/// lives in retrieval_ppvec.rs).
+#[test]
+fn r13_12_redaction_zeroes_flat_file_bytes_through_drain() {
+    let rig = Rig::new();
+    let secret = "Secret harbor location. Never share this.";
+    // Pin a distinctive embedding: all-equal components quantize to a
+    // recognizable nonzero byte run (1/sqrt(512) * 127 rounds to 6).
+    rig.text.set_text_embedding(secret, vec![1.0; DIMS]);
+    let marker_row = vec![6u8; DIMS];
+
+    let e = rig
+        .env
+        .store
+        .append(
+            &rig.env.session,
+            d_remark(secret, vec![rig.hashes[0].clone()]),
+            None,
+        )
+        .unwrap();
+    rig.drain_embeddings();
+
+    let path = rig.store.file_path(&rig.text_space());
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        before.windows(DIMS).any(|w| w == marker_row),
+        "marker bytes present before redaction"
+    );
+
+    rig.env.store.redact(&e.id).unwrap();
+    assert_eq!(
+        rig.count("SELECT COUNT(*) FROM vectors WHERE deleted = 1"),
+        1,
+        "redaction marks the vector dead in the same transaction"
+    );
+
+    rig.drain_embeddings();
+    let after = std::fs::read(&path).unwrap();
+    assert!(
+        !after.windows(DIMS).any(|w| w == marker_row),
+        "byte-scan: redacted vector bytes absent from the entire file"
+    );
+    assert_eq!(
+        rig.count("SELECT COUNT(*) FROM vectors WHERE vec_kind = 'annotation_chunk'"),
+        0,
+        "no metadata row survives either"
+    );
+
+    // And the redacted text never comes back through search.
+    let q = pollster::block_on(rig.text.embed_text(secret)).unwrap();
+    assert!(
+        rig.store
+            .search(&q, rig.text_space(), 5)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Voice remarks embed identically to typed ones (the §1.1 indexable set
+/// is source-agnostic for remark text).
+#[test]
+fn voice_remarks_are_embedded_too() {
+    let rig = Rig::new();
+    rig.env
+        .store
+        .append(
+            &rig.env.session,
+            EventDraft::Remark {
+                source: RemarkSource::Voice {
+                    conf_pm: Some(912),
+                    dur_ms: 1800,
+                    linked_event: None,
+                },
+                text: "something quieter in these three".into(),
+                targets: vec![rig.hashes[2].clone()],
+            },
+            None,
+        )
+        .unwrap();
+    let report = rig.drain_embeddings();
+    assert_eq!(report.errors, 0);
+    assert_eq!(
+        rig.count(
+            "SELECT COUNT(*) FROM vectors WHERE vec_kind = 'annotation_chunk' AND deleted = 0"
+        ),
+        1
+    );
+}

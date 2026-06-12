@@ -86,6 +86,12 @@ pub enum VectorStoreError {
     /// On-disk state failed validation (bad header, truncated file …).
     #[error("vector store corrupt: {0}")]
     Corrupt(String),
+    /// Metadata-side failure (the SQLite `vectors` table behind the flat
+    /// files). A separate variant so storage backends need no database
+    /// dependency in this crate; the concrete store maps its driver errors
+    /// here (added by P7.1 — the trait sketch left the error type open).
+    #[error("vector store metadata error: {0}")]
+    Metadata(String),
 }
 
 pub type VectorStoreResult<T> = Result<T, VectorStoreError>;

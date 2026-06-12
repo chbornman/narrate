@@ -10,6 +10,7 @@
 //! - `store`: SQLite schema + EventStore (append/fold/redact/merge) (EVENTS §5–10)
 //! - `capture`: sessions, write scope, the voice pipeline (CAPTURE, P6.1)
 //! - `runtime`: supervision, weights, tiers, scheduling (RUNTIME, P6.2)
+//! - `retrieval`: PPVEC vector storage + chunking (RETRIEVAL, P7.1)
 
 pub mod canonical;
 pub mod capture;
@@ -17,6 +18,7 @@ pub mod event;
 pub mod id;
 pub mod library;
 pub mod metrics;
+pub mod retrieval;
 pub mod runtime;
 pub mod search;
 pub mod sidecar;

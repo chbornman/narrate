@@ -381,6 +381,44 @@ CREATE TABLE IF NOT EXISTS capture_session_state (
 ) STRICT, WITHOUT ROWID;
 "#;
 
+/// Migration slot pre-allocated to packet P7.1 (spec/RETRIEVAL.md §1.2
+/// `vectors` DDL). Only P7.1 edits this constant.
+const RETRIEVAL_SCHEMA_SQL: &str = r#"
+-- RETRIEVAL §1.2 supersedes the v1 reference-design `vectors` table (EVENTS
+-- marked it "REFERENCE DESIGN ONLY — RETRIEVAL owns details"). Vector bytes
+-- move out of SQLite into the PPVEC flat files (§1.3); this table keeps the
+-- metadata: keys, file_row pointer, inputs_hash staleness, deleted flag.
+-- Dropping is safe: vectors are derived, disposable, and rebuildable from
+-- the event log + previews; nothing wrote rows before this packet.
+DROP INDEX IF EXISTS idx_vectors_event;
+DROP INDEX IF EXISTS idx_vectors_image;
+DROP TABLE IF EXISTS vectors;
+CREATE TABLE vectors (
+  id           INTEGER PRIMARY KEY,                -- rowid
+  vec_kind     TEXT    NOT NULL
+               CHECK (vec_kind IN ('annotation_chunk','image_summary','image_clip')),
+  model_id     TEXT    NOT NULL,                   -- Embedder::model_id()
+  dims         INTEGER NOT NULL,                   -- Embedder::dimensions()
+  event_id     TEXT,                               -- ULID; set iff annotation_chunk
+  image_hash   TEXT,                               -- blake3 hex; set iff image_summary/image_clip
+  chunk_index  INTEGER NOT NULL DEFAULT 0,         -- 0..n within one event's text
+  char_start   INTEGER,                            -- char offsets (Unicode scalars) into the
+  char_end     INTEGER,                            --   folded text, for quote extraction
+  file_row     INTEGER NOT NULL,                   -- row index in the flat file for (vec_kind, model_id)
+  inputs_hash  TEXT    NOT NULL,                   -- blake3 of embedded text (or preview bytes) +
+                                                   --   prefix scheme version + instruct template
+                                                   --   version (RETRIEVAL §1.2); staleness check
+  created_ts   TEXT    NOT NULL,                   -- RFC 3339 UTC
+  deleted      INTEGER NOT NULL DEFAULT 0,         -- awaiting compaction; search skips
+  CHECK ((event_id IS NULL) <> (image_hash IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX vectors_chunk
+  ON vectors(vec_kind, model_id, event_id, chunk_index) WHERE event_id IS NOT NULL;
+CREATE UNIQUE INDEX vectors_image
+  ON vectors(vec_kind, model_id, image_hash) WHERE image_hash IS NOT NULL;
+CREATE UNIQUE INDEX vectors_row ON vectors(vec_kind, model_id, file_row);
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -425,6 +463,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     if version < 6 {
         conn.execute_batch(CAPTURE_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 6")?;
+    }
+    if version < 7 {
+        conn.execute_batch(RETRIEVAL_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 7")?;
     }
     Ok(version)
 }
