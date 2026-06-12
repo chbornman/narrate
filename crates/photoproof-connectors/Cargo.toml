@@ -13,7 +13,17 @@ serde_json.workspace = true
 thiserror.workspace = true
 serde_ignored = "0.1"
 toml = "0.8"
-ort = "2.0.0-rc.12"
+# `half` enables zero-length f16 past_key_values caches shaped from session
+# metadata — the onnx-community causal-LM exports demand them (the spike's
+# verified KV trap; docs/SPIKE-P7-EMBED.md). The pinned exports are f32, but
+# shaping from metadata stays dtype-honest for either.
+ort = { version = "2.0.0-rc.12", features = ["half"] }
+half = "2"
+# tokenizer.json loading for the in-process ort embedders (EmbeddingGemma /
+# Qwen3 / DFN5B textual). default-features off: we only deserialize a
+# pretrained tokenizer.json, never train, so the heavy training/http deps
+# stay out of the build.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 [dev-dependencies]
 pollster = "0.4"
