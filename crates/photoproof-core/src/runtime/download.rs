@@ -84,6 +84,17 @@ pub enum DownloadError {
     /// spike session 2 pins them.
     #[error("manifest entry for {file} is unpinned (UNPINNED-P6.3); refusing to fetch")]
     Unpinned { file: String },
+    /// Path-preserving downloads (decision 1) join `file.path` verbatim
+    /// under `models_dir/<id>/`. Before this lane, basename-only joins made
+    /// escape structurally impossible; now an absolute, `..`-bearing, or
+    /// empty path would write OUTSIDE the model dir and corrupt a sibling
+    /// model (which remove_model/GC could never reclaim, since both delete
+    /// only models_dir/<id>). Manifest is compiled-in, so this is a
+    /// pre-flight hardening of the L2-generated DFN5B enumeration against a
+    /// generator bug, not a live hole — but the containment invariant is
+    /// now enforced here, not by construction.
+    #[error("manifest entry path {file} is not a relative in-dir path; refusing to fetch")]
+    UnsafePath { file: String },
     #[error("backend answered {status} for {url}")]
     Http { status: u16, url: String },
     #[error("io: {0}")]
@@ -246,6 +257,18 @@ impl DownloadManager {
                 model_id: model.id.clone(),
             });
         }
+        // Containment pre-flight (decision 1 made dest = dir.join(path),
+        // which Path::join lets escape via an absolute or `..` component).
+        // Reject the whole model before creating a directory or moving a
+        // byte: one bad path would corrupt a sibling install. Checked here,
+        // once, ahead of any side effect.
+        for file in &model.files {
+            if !is_contained_relative_path(&file.path) {
+                return Err(DownloadError::UnsafePath {
+                    file: file.path.clone(),
+                });
+            }
+        }
         let dir = self.models_dir.join(&model.id);
         std::fs::create_dir_all(&dir)?;
         let mut outcome = DownloadOutcome {
@@ -305,8 +328,13 @@ impl DownloadManager {
         // network — not even a HEAD. (The embedder entries ship this way
         // until spike session 2 pins them.)
         if !file.is_pinned() {
+            // Identify by the full relative path, not the basename: DFN5B
+            // ships visual/model.onnx AND textual/model.onnx (and L2 pins
+            // ~100 same-basename external-data shards across the two
+            // towers), so the basename alone cannot tell the founder which
+            // file is unpinned in the debug panel / download_errors.
             return Err(DownloadError::Unpinned {
-                file: file.file_name().to_owned(),
+                file: file.path.clone(),
             });
         }
         let part = part_path(dest);
@@ -502,8 +530,11 @@ impl DownloadManager {
             // (resume Ranges past them, or the complete-part fast path
             // re-verifies the same corruption). Restart clean.
             let _ = std::fs::remove_file(part);
+            // Full relative path, not basename — same-basename files (DFN5B
+            // visual/ vs textual/, L2 external-data shards) would otherwise
+            // surface an ambiguous "checksum mismatch for model.onnx".
             return Err(DownloadError::ChecksumFailed {
-                file: file.file_name().to_owned(),
+                file: file.path.clone(),
             });
         }
         std::fs::rename(part, dest)?;
@@ -520,6 +551,26 @@ fn part_path(dest: &Path) -> PathBuf {
     let mut p = dest.as_os_str().to_owned();
     p.push(".part");
     PathBuf::from(p)
+}
+
+/// True only when joining `rel` to a model dir stays inside it: every
+/// component must be a plain name. We reject empties and absolutes (which
+/// Path::join would let REPLACE the base), `..` (traversal up and out),
+/// `.` and a root/prefix (Windows drive) — anything that is not a normal
+/// in-directory segment. Manifest entries are flat names or forward-slash
+/// nested paths (`visual/model.onnx`), so this passes the real pins and
+/// fails only a malformed path. Used as a download pre-flight to keep the
+/// containment invariant the basename-only join used to give for free.
+fn is_contained_relative_path(rel: &str) -> bool {
+    if rel.is_empty() {
+        return false;
+    }
+    // Treat backslashes as separators too: a `..\x` smuggled past a
+    // forward-slash-only check must not reach Path::join on Windows.
+    let p = Path::new(rel);
+    p.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        && !rel.contains('\\')
 }
 
 fn parse_http_url(url: &str) -> Result<(SocketAddr, String), DownloadError> {

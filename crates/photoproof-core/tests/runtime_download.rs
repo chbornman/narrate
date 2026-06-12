@@ -509,6 +509,54 @@ fn same_basename_in_different_dirs_do_not_collide() {
     assert_eq!(server.requests_for("/textual/model.onnx").len(), 1);
 }
 
+/// Containment pre-flight: a manifest entry whose path escapes the model
+/// dir (a `..` traversal, here aimed at a sibling install) is rejected
+/// BEFORE any directory is created or any byte moves. Path-preserving
+/// downloads join file.path verbatim, so without this guard the bytes
+/// would land outside models_dir/<id> — corrupting a sibling model that
+/// remove_model/GC could never reclaim. Guards the L2-generated DFN5B
+/// enumeration against a generator emitting paths relative to the wrong
+/// root.
+#[test]
+fn path_escaping_the_model_dir_is_rejected_with_zero_side_effects() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(10_000, 33);
+    let model = model_with(
+        &server,
+        vec![("../sibling-model/model.onnx", &payload)],
+        false,
+    );
+    // The route exists; the point is that the pre-flight refuses before any
+    // request is issued.
+    server.route(
+        "/../sibling-model/model.onnx",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    let err = manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .expect_err("the escaping path is refused");
+    assert!(
+        matches!(err, DownloadError::UnsafePath { ref file } if file == "../sibling-model/model.onnx"),
+        "{err:?}"
+    );
+
+    // Nothing was created or written: not the model dir, not the sibling
+    // target, and no socket was opened.
+    assert!(!dir.path().join("test-model").exists());
+    assert!(!dir.path().join("sibling-model").exists());
+    assert!(!manager.is_installed("test-model"));
+    assert!(
+        server
+            .requests_for("/../sibling-model/model.onnx")
+            .is_empty()
+    );
+}
+
 /// Resume across relaunch on a NESTED path: the cut, the part-file
 /// location, the Range resume, and the atomic rename all operate at
 /// dir/<file.path>, never the flattened basename.
