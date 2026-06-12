@@ -36,12 +36,6 @@ use super::writer::{Debouncer, WriteOutcome, clean_orphan_temps, write_atomic};
 /// original is unrecoverable; 32 zero-hex marks "unknown device".
 pub const UNKNOWN_DEVICE_ID: &str = "00000000000000000000000000000000";
 
-/// SQLite busy_timeout on the engine's connection: how long a sidecar
-/// write waits on a locked database before erroring. 5 s rides out a
-/// checkpoint or a competing writer; on expiry the failure surfaces as a
-/// §9.4 transient and enters the backoff ladder instead of being lost.
-const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
-
 /// §9.3: orphaned `*.tmp-*` files "older than one hour" are deleted by
 /// the reconciliation scan. An hour comfortably outlasts any legitimate
 /// in-flight atomic write — even on a slow NAS — while still cleaning up
@@ -325,7 +319,13 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
         locator: L,
     ) -> Result<Self, SidecarError> {
         let conn = Connection::open(db_path.as_ref())?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
+        // EVENTS.md §5.1 pins busy_timeout for every connection to the
+        // events DB; this sibling connection must keep the same posture as
+        // the store's writer and read pool, so it shares the store's
+        // constant rather than carrying a local value. On expiry the
+        // failure surfaces as a §9.4 transient and enters the backoff
+        // ladder instead of being lost.
+        conn.busy_timeout(Duration::from_millis(crate::store::schema::BUSY_TIMEOUT_MS))?;
         Ok(Self {
             store,
             conn: Mutex::new(conn),

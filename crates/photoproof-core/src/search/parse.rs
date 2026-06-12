@@ -25,11 +25,16 @@ use super::{
 /// §10.3 normative threshold for fuzzy collection-name resolution.
 pub(crate) const COLLECTION_MATCH_THRESHOLD: f64 = 0.80;
 
-/// Token budget for the §5.1 query-parse request. The output is one small
-/// JSON object; the cap exists to bound worst-case generation latency so
-/// the parse stays inside the 1.5 s budget. Deliberately NOT the
-/// scheduler's BACKGROUND_MAX_TOKENS — same number today, but a different
-/// lane with a different reason, and they must be free to diverge.
+/// Token cap for the §5.1 query-parse request. The output is one small
+/// JSON object, so a healthy parse never approaches this; the cap is a
+/// runaway-generation bound that stops a looping model from burning the
+/// local LLM indefinitely. It does NOT enforce the §5.1 latency budget —
+/// that is `hybrid`'s independent `PARSE_BUDGET` timeout (1.5 s, then
+/// keyword fallback), and shrinking this cap cannot make a slow parse fit
+/// the budget; it can only truncate valid JSON mid-object. Deliberately
+/// NOT the scheduler's BACKGROUND_MAX_TOKENS either — same number today,
+/// but a different lane with a different reason, and they must be free to
+/// diverge.
 const PARSE_MAX_TOKENS: u32 = 512;
 
 // ---------------------------------------------------------------------------

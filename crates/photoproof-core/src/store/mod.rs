@@ -1201,7 +1201,10 @@ fn checkpoint_truncate(w: &Connection) -> Result<(), StoreError> {
         }
         Ok(false)
     })();
-    let restore = schema::run_pragma(w, "PRAGMA busy_timeout = 5000");
+    let restore = schema::run_pragma(
+        w,
+        &format!("PRAGMA busy_timeout = {}", schema::BUSY_TIMEOUT_MS),
+    );
     let truncated = result.map_err(StoreError::Sqlite)?;
     restore.map_err(StoreError::Sqlite)?;
     if truncated {

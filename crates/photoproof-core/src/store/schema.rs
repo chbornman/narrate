@@ -164,6 +164,14 @@ CREATE TRIGGER trg_targets_no_delete BEFORE DELETE ON event_targets
 BEGIN SELECT RAISE(ABORT, 'event_targets is append-only'); END;
 "#;
 
+/// EVENTS.md §5.1 normative `busy_timeout` (ms): "writer + read pool share
+/// one file". Spec-pinned, not a tuning knob — every connection to the
+/// events database (the store's writer and read pool, the sidecar engine's
+/// sibling connection, the checkpoint restore path) must keep this same
+/// posture, so all of them name this constant. The library writer reuses it
+/// too: its pragmas deliberately mirror §5.1 (DECISIONS P18).
+pub(crate) const BUSY_TIMEOUT_MS: u64 = 5000;
+
 /// Run a pragma statement, consuming an optional returned row (pragmas are
 /// inconsistent about returning their new value).
 pub(crate) fn run_pragma(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
@@ -192,7 +200,7 @@ pub(crate) fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     run_pragma(conn, "PRAGMA cache_size = -65536")?;
     run_pragma(conn, "PRAGMA mmap_size = 268435456")?;
     run_pragma(conn, "PRAGMA temp_store = MEMORY")?;
-    run_pragma(conn, "PRAGMA busy_timeout = 5000")?;
+    run_pragma(conn, &format!("PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}"))?;
     Ok(())
 }
 

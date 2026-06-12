@@ -2727,6 +2727,13 @@ fn root_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
 // connection over the same database with the same pragmas.
 pub(crate) fn open_library_connection(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
+    // busy_timeout shares the store's §5.1 constant: the value is
+    // spec-pinned, and naming it keeps this duplicate list from silently
+    // diverging on the one pragma that is normative rather than P18-tuned.
+    let busy_timeout = format!(
+        "PRAGMA busy_timeout = {}",
+        crate::store::schema::BUSY_TIMEOUT_MS
+    );
     for pragma in [
         "PRAGMA journal_mode = WAL",
         "PRAGMA synchronous = NORMAL",
@@ -2735,7 +2742,7 @@ pub(crate) fn open_library_connection(path: &Path) -> rusqlite::Result<Connectio
         "PRAGMA cache_size = -65536",
         "PRAGMA mmap_size = 268435456",
         "PRAGMA temp_store = MEMORY",
-        "PRAGMA busy_timeout = 5000",
+        busy_timeout.as_str(),
     ] {
         let mut stmt = conn.prepare(pragma)?;
         let mut rows = stmt.query([])?;
