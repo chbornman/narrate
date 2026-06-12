@@ -9,6 +9,7 @@
   // Lucide chevron for the submenu marker (BACKLOG "Adopt Lucide icons").
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import Check from "@lucide/svelte/icons/check";
+  import { onDestroy } from "svelte";
   import type { Action } from "../logic/keymap";
   import type { MenuModel, MenuRow } from "../actions/menus";
   import { navInit, navKey, rowsAt, type MenuNav } from "./menu";
@@ -35,7 +36,19 @@
    * closing INTO the flash reads as "done", lingering past it as lag). */
   const COPY_CONFIRM_CLOSE_MS = 900;
 
+  /** The armed deferred close, if any. WHY it must be cancelable: onclose
+   * nulls the host's ONE shared contextMenu slot, so a timer outliving
+   * THIS menu (Esc / outside-click dismissed it early) would fire into
+   * whatever menu the user opened next and close it mid-read. */
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  let closePending = false;
+  onDestroy(() => clearTimeout(closeTimer));
+
   function activate(row: MenuRow) {
+    // While the deferred close is pending the menu is a dead seat showing
+    // its confirmation: a second activation would re-copy and stack a
+    // second close timer (double-click on the copy row does exactly this).
+    if (closePending) return;
     if (row.disabled === true) return;
     if (row.action !== undefined) {
       onaction(row.action);
@@ -45,7 +58,8 @@
         // the check can flash on, so the close waits out the flash. The
         // check itself renders only when the register reports the write
         // landed — a failed copy shows nothing and the menu just closes.
-        setTimeout(onclose, COPY_CONFIRM_CLOSE_MS);
+        closePending = true;
+        closeTimer = setTimeout(onclose, COPY_CONFIRM_CLOSE_MS);
         return;
       }
       onclose();
@@ -53,6 +67,10 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // Dead seat during the confirmation hold: stop trapping the keyboard
+    // (no preventDefault) so Enter cannot re-activate a row and the next
+    // keystroke is the app's to route, not dead menu focus.
+    if (closePending) return;
     if (e.key === "Escape") return; // escape layer 2 closes (host routes)
     const r = navKey(model.rows, nav, e.key, e.timeStamp);
     nav = r.nav;

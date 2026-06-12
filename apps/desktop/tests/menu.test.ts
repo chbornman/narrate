@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { navInit, navKey, rowsAt, type NavRow } from "../src/lib/primitives/menu";
 import { menuModel } from "../src/lib/actions/menus";
+import { copyKey } from "../src/lib/primitives/copyflash.svelte";
 import { withDefaults } from "../src/lib/logic/keymap";
 
 const rows: NavRow[] = [
@@ -203,10 +204,16 @@ describe("menus.ts — seat models over the registry", () => {
   it("copy verbs carry the shared confirmation key; other verbs do not", () => {
     // BACKLOG "Copy actions confirm themselves": the def-level flag keys
     // the row into the copy register — any future copy verb joins by
-    // setting copyConfirm, never by touching the menu renderer.
+    // setting copyConfirm, never by touching the menu renderer. The key
+    // carries the active hash so a residual check cannot vouch for a
+    // different image after a selection change.
     const model = menuModel("thumb", ctx);
     const copy = model.rows.find((r) => r.verb === "Copy file path");
-    expect(copy?.flashKey).toBe("copy-file-path");
+    expect(copy?.flashKey).toBe(copyKey("copy-file-path", ctx.activeHash!));
+    // The contract the perform sink relies on: it sees only the Action,
+    // so it must be able to rebuild the row's key from the action kind.
+    // If a def-id rename ever splits the two, this catches it.
+    expect(copy?.flashKey).toBe(copyKey(copy!.action!.kind, ctx.activeHash!));
     const reveal = model.rows.find((r) => r.verb === "Show in file manager");
     expect(reveal?.flashKey).toBeUndefined();
   });

@@ -37,7 +37,7 @@ import type {
 } from "../types/dto";
 import type { LookEntry } from "../types/display";
 import type { Filter, SearchResults } from "../types/search";
-import { copyToClipboard } from "../primitives/copyflash.svelte";
+import { copyKey, copyToClipboard } from "../primitives/copyflash.svelte";
 import * as prefs from "./prefs";
 import { ShellSlice } from "./shell.svelte";
 import { GridSlice } from "./grid.svelte";
@@ -1214,9 +1214,12 @@ export class Ui {
             const paths = await ipc.imageAbsPath(hash);
             // The shared register confirms the write (the menu row's
             // check flashes off this key — BACKLOG "Copy actions
-            // confirm themselves").
+            // confirm themselves"). The key is rebuilt from the action
+            // kind (the def id) + the hash so it matches the row's
+            // flashKey by construction, and a selection change inside
+            // the flash window cannot relight the check on another image.
             if (paths.absPath !== null)
-              await copyToClipboard("copy-file-path", paths.absPath);
+              await copyToClipboard(copyKey(action.kind, hash), paths.absPath);
           } catch {
             /* offline volume / unreachable backend: quiet no-op */
           }

@@ -26,19 +26,29 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
 const SIDECAR_TICK: Duration = Duration::from_millis(500);
 
 pub fn ingest_status(app: &App) -> IngestStatus {
-    let counters = match app.library.pass_counters() {
-        Ok(c) => c,
-        Err(_) => return IngestStatus::default(),
-    };
+    match app.library.pass_counters() {
+        Ok(c) => status_from_counters(&c),
+        Err(_) => IngestStatus::default(),
+    }
+}
+
+/// Pure fold from the queue's pass counters to the wire status — split
+/// from `ingest_status` so the aggregation is unit-testable without an
+/// `App` (the same pure-controller shape as logic/jobs.ts on the TS side).
+fn status_from_counters(
+    counters: &std::collections::BTreeMap<(String, i64), photoproof_core::library::PassCounters>,
+) -> IngestStatus {
     let mut s = IngestStatus::default();
     // Per-KIND remaining work, versions summed (the header pill names
     // kinds; a version bump re-running a pass is the same kind of work).
     // BTreeMap keeps the breakdown order deterministic for `!=` below.
     let mut remaining = std::collections::BTreeMap::<&str, u64>::new();
-    for ((name, _version), c) in &counters {
+    for ((name, _version), c) in counters {
         s.done += c.done + c.skipped;
         s.total += c.pending + c.running + c.done + c.error + c.skipped;
         s.errors += c.error;
+        // Errored rows are NOT remaining work: counting them would keep
+        // the "digesting" pill lit forever on a library with failed passes.
         let queued = c.pending + c.running;
         if queued > 0 {
             *remaining.entry(name.as_str()).or_default() += queued;
@@ -226,6 +236,102 @@ pub fn drain_capture_at_quit<C: photoproof_core::capture::Clock>(
         minted += engine.pump(store).len();
     }
     minted
+}
+
+#[cfg(test)]
+mod status_tests {
+    use std::collections::BTreeMap;
+
+    use photoproof_core::library::PassCounters;
+
+    use super::status_from_counters;
+    use crate::dto::PassRemaining;
+
+    fn counters(rows: &[(&str, i64, PassCounters)]) -> BTreeMap<(String, i64), PassCounters> {
+        rows.iter()
+            .map(|(name, version, c)| (((*name).to_owned(), *version), *c))
+            .collect()
+    }
+
+    fn c(pending: u64, running: u64, done: u64, error: u64, skipped: u64) -> PassCounters {
+        PassCounters {
+            pending,
+            running,
+            done,
+            error,
+            skipped,
+        }
+    }
+
+    #[test]
+    fn empty_counters_mean_idle() {
+        let s = status_from_counters(&BTreeMap::new());
+        assert!(!s.running);
+        assert!(s.passes.is_empty());
+        assert_eq!((s.done, s.total, s.errors), (0, 0, 0));
+    }
+
+    /// remaining = pending + running; errors and done/skipped never count
+    /// as queued work — otherwise a library with failed passes would show
+    /// a permanent "digesting" pill.
+    #[test]
+    fn errors_and_finished_rows_are_not_remaining_work() {
+        let s = status_from_counters(&counters(&[
+            ("hash", 1, c(0, 0, 90, 7, 3)),
+            ("preview", 1, c(11, 1, 5, 2, 0)),
+        ]));
+        assert_eq!(
+            s.passes,
+            vec![PassRemaining {
+                name: "preview".into(),
+                remaining: 12,
+            }],
+            "hash finished (errors included): only preview is still queued"
+        );
+        assert_eq!(s.done, 98); // done + skipped, both kinds
+        assert_eq!(s.errors, 9);
+        assert_eq!(s.total, 119);
+        assert!(s.running, "queued preview work keeps running true");
+    }
+
+    /// A fully-errored library is NOT running: running compares total
+    /// against done + errors, so failed rows cannot wedge the pill on.
+    #[test]
+    fn all_errored_is_not_running() {
+        let s = status_from_counters(&counters(&[("exif", 2, c(0, 0, 0, 4, 0))]));
+        assert!(!s.running);
+        assert!(s.passes.is_empty());
+    }
+
+    /// Versions of the same pass sum under ONE kind: a version bump
+    /// re-running a pass must not double-list it in the hover breakdown.
+    #[test]
+    fn versions_of_a_kind_sum_into_one_entry() {
+        let s = status_from_counters(&counters(&[
+            ("preview", 1, c(3, 0, 10, 0, 0)),
+            ("preview", 2, c(5, 1, 0, 0, 0)),
+        ]));
+        assert_eq!(
+            s.passes,
+            vec![PassRemaining {
+                name: "preview".into(),
+                remaining: 9,
+            }]
+        );
+    }
+
+    /// The breakdown order is deterministic (name-sorted): the pump's `!=`
+    /// change detection must never see a phantom reorder between emits.
+    #[test]
+    fn breakdown_order_is_name_sorted() {
+        let s = status_from_counters(&counters(&[
+            ("preview", 1, c(1, 0, 0, 0, 0)),
+            ("exif", 1, c(2, 0, 0, 0, 0)),
+            ("hash", 1, c(3, 0, 0, 0, 0)),
+        ]));
+        let names: Vec<&str> = s.passes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["exif", "hash", "preview"]);
+    }
 }
 
 #[cfg(test)]

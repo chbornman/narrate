@@ -13,6 +13,7 @@ import type { Action } from "../logic/keymap";
 import type { ActionContext, ActionDef, KeyChord, MenuSeat } from "./types";
 import { REGISTRY } from "./registry";
 import type { NavRow } from "../primitives/menu";
+import { copyKey } from "../primitives/copyflash.svelte";
 
 export interface MenuRow extends NavRow {
   kind: "item" | "radio" | "submenu" | "separator";
@@ -149,9 +150,15 @@ function rowForDef(def: ActionDef, ctx: ActionContext, arg?: unknown): MenuRow |
     action,
     // Toggle rows render their ON state (predicate on the def, never here).
     checked: def.checked?.(ctx),
-    // Copy verbs key into the shared confirmation register by def id —
-    // the perform sink flashes the same key when the write lands.
-    flashKey: def.copyConfirm === true ? def.id : undefined,
+    // Copy verbs key into the shared confirmation register: def id +
+    // active hash (the perform sink rebuilds the SAME key from the
+    // action kind, which is the def id by construction). WHY the hash:
+    // scoping the check to the copied image keeps it truthful when the
+    // user moves on to another image inside the flash window.
+    flashKey:
+      def.copyConfirm === true && ctx.activeHash !== null
+        ? copyKey(def.id, ctx.activeHash)
+        : undefined,
   };
 }
 

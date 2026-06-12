@@ -8,7 +8,7 @@
   import Check from "@lucide/svelte/icons/check";
   import { ui } from "../../state/app.svelte";
   import { metadataRows } from "../../logic/metadata";
-  import { copyFlash, copyToClipboard } from "../../primitives/copyflash.svelte";
+  import { copyFlash, copyKey, copyToClipboard } from "../../primitives/copyflash.svelte";
   import EmptyState from "../../primitives/EmptyState.svelte";
 
   const rows = $derived(
@@ -18,8 +18,11 @@
   // The shared copy register (BACKLOG "Copy actions confirm themselves"):
   // the glyph flashes to a check while copyFlash carries this row's key.
   // A failed write (permissions/tests) flashes nothing — the value stays
-  // selectable as the fallback affordance.
-  const flashKey = (label: string) => `metadata:${label}`;
+  // selectable as the fallback affordance. The key carries the image hash
+  // so arrow-advancing to another image inside the flash window cannot
+  // light the check next to a value that was never copied.
+  const flashKey = (label: string) =>
+    copyKey(`metadata:${label}`, ui.inspector.metadata?.hash ?? "");
 </script>
 
 <div class="tab-body">

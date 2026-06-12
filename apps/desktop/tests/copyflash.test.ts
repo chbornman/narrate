@@ -56,6 +56,18 @@ describe("copyToClipboard — the truthful flash", () => {
     expect(copyFlash.key).toBeNull();
   });
 
+  it("the fallback never leaks its offscreen textarea, even when execCommand throws", async () => {
+    // jsdom has no execCommand — exactly the engine shape the leak hit:
+    // without the finally, every failed fallback stranded one focusable
+    // textarea in document.body forever.
+    stubClipboard(async () => {
+      throw new Error("denied");
+    });
+    await copyToClipboard("copy-file-path", "x");
+    await copyToClipboard("copy-file-path", "y");
+    expect(document.querySelector(".pp-offscreen")).toBeNull();
+  });
+
   it("a second copy moves the one check (never two at once)", async () => {
     stubClipboard(async () => {});
     await copyToClipboard("metadata:Hash", "aa");
@@ -108,5 +120,50 @@ describe("Menu.svelte — copy rows confirm inline", () => {
     const { getByRole } = render(Menu, { model, onaction, onclose });
     await fireEvent.click(getByRole("menuitem", { name: /Open/ }));
     expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it("unmount during the hold cancels the deferred close (no stale timer)", async () => {
+    // The stale-timer bug: onclose nulls the host's ONE shared contextMenu
+    // slot, so a timer surviving an early dismissal (Esc, outside click)
+    // would fire into whatever menu the user opened NEXT and close it.
+    const onclose = vi.fn();
+    stubClipboard(async () => {});
+    const onaction = vi.fn(() => void copyToClipboard("copy-file-path", "/p"));
+    const { getByRole, unmount } = render(Menu, { model, onaction, onclose });
+    await fireEvent.click(getByRole("menuitem", { name: /Copy file path/ }));
+    unmount(); // the host dismissed early; a new menu may open now
+    await vi.advanceTimersByTimeAsync(COPY_FLASH_MS);
+    expect(onclose).not.toHaveBeenCalled();
+  });
+
+  it("a second activation during the hold is ignored (no re-copy, no stacked close)", async () => {
+    const onclose = vi.fn();
+    stubClipboard(async () => {});
+    const onaction = vi.fn(() => void copyToClipboard("copy-file-path", "/p"));
+    const { getByRole } = render(Menu, { model, onaction, onclose });
+    const row = getByRole("menuitem", { name: /Copy file path/ });
+    await fireEvent.click(row);
+    await fireEvent.click(row); // double-click: the second is a no-op
+    expect(onaction).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(COPY_FLASH_MS);
+    expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it("the held-open menu stops trapping the keyboard", async () => {
+    // During the hold the menu is a dead seat showing its check: Enter
+    // must not re-activate a row, and keys must not be preventDefaulted
+    // away from the rest of the app.
+    const onclose = vi.fn();
+    stubClipboard(async () => {});
+    const onaction = vi.fn(() => void copyToClipboard("copy-file-path", "/p"));
+    const { getByRole } = render(Menu, { model, onaction, onclose });
+    await fireEvent.click(getByRole("menuitem", { name: /Copy file path/ }));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
+    const arrow = new KeyboardEvent("keydown", { key: "ArrowDown", cancelable: true });
+    window.dispatchEvent(enter);
+    window.dispatchEvent(arrow);
+    expect(onaction).toHaveBeenCalledTimes(1);
+    expect(enter.defaultPrevented).toBe(false);
+    expect(arrow.defaultPrevented).toBe(false);
   });
 });
