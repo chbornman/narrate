@@ -29,6 +29,27 @@ use sherpa_onnx::{
 };
 use tungstenite::Message;
 
+/// Sample rate declared to sherpa for every inbound binary frame. WHY:
+/// the P2 wire contract (RUNTIME §3.2: 16 kHz mono f32) and the Nemotron
+/// model's required input rate; must match the connector side
+/// (photoproof-connectors sherpa.rs and silero.rs).
+const SAMPLE_RATE_HZ: i32 = 16_000;
+
+/// Minimum ONNX intra-op thread count — both the `--num-threads` default
+/// and the clamp floor. WHY: below 4 threads the Nemotron transducer
+/// decodes slower than real time (docs/SPIKE-P6.3.md), so this is a
+/// correctness floor, not a tuning default.
+const MIN_INTRA_OP_THREADS: i32 = 4;
+
+/// Default endpointing rules (CAPTURE §6.3 — endpointing authority lives
+/// in this server). WHY these values: sherpa's canonical defaults, in
+/// SECONDS — rules 1-2 are minimum trailing silence, rule 3 the minimum
+/// utterance length that forces an endpoint. Runtime-overridable via
+/// `--rule1/2/3` for the pp_voice_bench sweep; production runs these.
+const DEFAULT_RULE1_TRAILING_SILENCE_S: f32 = 2.4;
+const DEFAULT_RULE2_TRAILING_SILENCE_S: f32 = 1.2;
+const DEFAULT_RULE3_MIN_UTTERANCE_S: f32 = 20.0;
+
 struct Args {
     port: u16,
     encoder: String,
@@ -51,10 +72,10 @@ fn parse_args() -> Args {
         decoder: String::new(),
         joiner: String::new(),
         tokens: String::new(),
-        num_threads: 4,
-        rule1: 2.4,
-        rule2: 1.2,
-        rule3: 20.0,
+        num_threads: MIN_INTRA_OP_THREADS,
+        rule1: DEFAULT_RULE1_TRAILING_SILENCE_S,
+        rule2: DEFAULT_RULE2_TRAILING_SILENCE_S,
+        rule3: DEFAULT_RULE3_MIN_UTTERANCE_S,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut it = argv.iter();
@@ -81,7 +102,7 @@ fn parse_args() -> Args {
         }
     }
     // The spike's real-time floor, clamped even if the launcher changes.
-    a.num_threads = a.num_threads.max(4);
+    a.num_threads = a.num_threads.max(MIN_INTRA_OP_THREADS);
     a
 }
 
@@ -163,7 +184,7 @@ fn main() {
                 };
                 match msg {
                     Message::Binary(bytes) => {
-                        stream.accept_waveform(16_000, &samples_of(&bytes));
+                        stream.accept_waveform(SAMPLE_RATE_HZ, &samples_of(&bytes));
                         while rec.is_ready(&stream) {
                             rec.decode(&stream);
                         }
@@ -213,6 +234,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the spike-mandated posture (docs/SPIKE-P6.3.md): below 4
+    /// intra-op threads the transducer decodes slower than real time, and
+    /// 16 kHz is the P2 wire contract shared with the connector side.
+    /// These are correctness invariants, not tunables — a deliberate
+    /// change must update the spike doc and the connector together.
+    #[test]
+    fn spike_and_wire_contract_values_are_pinned() {
+        assert_eq!(MIN_INTRA_OP_THREADS, 4);
+        assert_eq!(SAMPLE_RATE_HZ, 16_000);
+    }
 
     #[test]
     fn wire_samples_decode_little_endian_f32() {
