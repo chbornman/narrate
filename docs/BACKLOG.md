@@ -242,6 +242,13 @@ managing = off-thesis).
 
 ## Collections (B71 — the M3 curation thread)
 
+- [ ] **Rail: Folders vs Collections tabs** (founder, June 2026): the
+  left navigation sidebar gets TWO main tabs — folders and collections —
+  peers, not nesting. The welcome card explains the hierarchy of
+  importance: COLLECTIONS are the point (intent, gathered context);
+  folders are just mechanical (where files happen to sit). First slice
+  ships with P7.3's store; the full encouragement UX (and autosuggest
+  below) gets its own design round.
 - [ ] **Autosuggest collections** (founder, June 2026): the app should
   NATURALLY encourage collecting — that is the point of gathering all
   this disparate context. Beyond manual creation, propose collections
