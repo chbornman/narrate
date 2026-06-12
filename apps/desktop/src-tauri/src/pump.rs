@@ -19,6 +19,13 @@ use crate::dto::{IngestStatus, PassRemaining};
 use crate::state::App;
 
 const QUEUE_BATCH: usize = 64;
+/// P7.4 decision 5: the embedding drain's bounded batch. Embeddings are the
+/// LOWEST backfill priority (L4 ordering) — a small batch keeps each idle
+/// turn short so a freshly-arriving ingest item (a new photo, a new note)
+/// preempts the embedding backfill on the next loop, and so the coalesced
+/// jobs indicator updates promptly. Embedding a batch is seconds of CPU
+/// (DFN5B image ~3 s each, spike), so this stays deliberately small.
+const EMBED_BATCH: usize = 8;
 const IDLE_SLEEP: Duration = Duration::from_millis(500);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
@@ -103,6 +110,20 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     })
                     .unwrap_or_default();
                 let processed = report.processed;
+                // P7.4 decision 5: the embedding backfill drain. Politeness
+                // rule (L4 ordering) — embeddings are the LOWEST priority, so
+                // they run ONLY when the regular ingest queue went idle this
+                // turn (`processed == 0`); a freshly-arriving photo or note
+                // preempts them on the next loop. The drain itself is a no-op
+                // (zero items) unless an embedder is ready AND the mic is not
+                // armed. Its passes land in `pass_counters`, so the coalesced
+                // jobs indicator below picks them up for free (the status is
+                // computed after this).
+                let embedded = if processed == 0 {
+                    drain_embeddings(&app)
+                } else {
+                    0
+                };
                 // Hash-aware preview completions (the journal-changed
                 // pattern): thumbs whose retry budget ran out heal off
                 // this. One event per drain batch — same low-rate wire
@@ -131,12 +152,64 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     let _ = handle.emit("ingest-progress", status.clone());
                     last_emit = Some((Instant::now(), status));
                 }
-                if processed == 0 {
+                // Sleep only when BOTH queues are drained — otherwise an
+                // embedding batch would pace at one batch per IDLE_SLEEP and
+                // never catch up. Any work this turn loops straight back.
+                if processed == 0 && embedded == 0 {
                     std::thread::sleep(IDLE_SLEEP);
                 }
             }
         })
         .expect("spawn ingest pump");
+}
+
+/// P7.4 decision 5: drain a bounded batch of the embedding backfill when
+/// the embedders are ready and the mic is not armed. Returns the number of
+/// pass rows processed (0 = nothing to do / paused / degraded).
+///
+/// PAUSE while `capture_live`: embedding batches hold while the mic owns the
+/// machine (RUNTIME §9 — "while the mic is armed … embedding batches" pause;
+/// same posture as downloads). The pause is honored at batch granularity:
+/// an in-flight batch finishes (bounded by `EMBED_BATCH`), nothing new
+/// starts.
+///
+/// DEGRADED: with no embedder ready this returns 0 and the rows sit pending
+/// — the journal is whole, the backfill is simply dark (RETRIEVAL §3 /
+/// embedding.rs degraded contract).
+fn drain_embeddings(app: &App) -> usize {
+    // The mic owns the machine: no embedding batch starts while armed.
+    if app.runtime.capture_live.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let text = app.runtime.embedders.text();
+    let clip = app.runtime.embedders.clip();
+    // Nothing ready ⇒ degraded; leave the rows pending, no claim, no error.
+    if text.is_none() && clip.is_none() {
+        return 0;
+    }
+    // `EmbeddingRig` borrows the embedders; the `Arc`s keep them alive for
+    // the call. TE == CE == OrtEmbedder (one connector type, two roles).
+    let rig = photoproof_core::library::EmbeddingRig {
+        text: text.as_deref(),
+        clip: clip.as_deref(),
+        vectors: &app.vectors,
+    };
+    match app.library.process_embedding_queue(
+        &rig,
+        &QueueOptions {
+            cancel: None,
+            max_items: Some(EMBED_BATCH),
+        },
+    ) {
+        Ok(report) => report.processed,
+        Err(e) => {
+            // A drain-level error (db/IO) is logged and the turn ends; the
+            // per-item transient path inside the drain already handles model
+            // failures without aborting. Never crashes the pump.
+            tracing::warn!(error = %e, "embedding drain failed this turn");
+            0
+        }
+    }
 }
 
 /// The sidecar debounce pump: one tick syncs the durable dirty queue into
