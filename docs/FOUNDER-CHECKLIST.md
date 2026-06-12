@@ -7,11 +7,10 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
 
 ## 1. Decisions awaiting you
 
-- [ ] **Q1 — final product name.** "Photoproof" is the working placeholder.
-  The `.photoproof.json` sidecar suffix and `.photoproof-volume` markers
-  harden into real user data the moment you dogfood M1 on your library.
-  Decide before running the M1 dogfood; rename is a clean find/replace
-  until then.
+- [x] **Q1 — product name.** DECIDED (founder, June 2026): "Photoproof"
+  stands for now (B70). The `.photoproof.json` sidecar suffix and
+  `.photoproof-volume` markers harden as the founder dogfoods; a future
+  rename becomes a sidecar-format migration, not a find/replace.
 - [ ] **B22 — append of a redaction-condemned id is rejected** (`CondemnedId`
   error) rather than silently inserted in scrubbed form. Integrity-
   conservative reading; confirm or veto.

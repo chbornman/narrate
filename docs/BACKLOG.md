@@ -224,6 +224,12 @@ managing = off-thesis).
   time, not before.) Full-canvas search stands until then.
 - **M4 (time)**: Look bottom-edge stroke scrubber (seat reserved); journal
   timeline rendering upgrade; trajectories as an alternate grid lens.
+  - **Library-wide event timeline** (founder, June 2026): a view of WHEN
+    annotation activity happened across ALL folders — every event is
+    db-stored with ts + session, so this is a query + rendering problem,
+    no new capture machinery: sessions as spans, events as marks, click
+    lands on the image/journal. Natural M4 fit (it IS the time milestone);
+    consider it the journal-timeline upgrade's library-level sibling.
 - **M5 (partner)**: right-edge dockable panel sharing the inspector slot;
   summon key reserved; obeys Tab lights-out unconditionally.
 

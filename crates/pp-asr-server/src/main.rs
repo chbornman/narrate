@@ -36,6 +36,12 @@ struct Args {
     joiner: String,
     tokens: String,
     num_threads: i32,
+    /// Endpoint rules (CAPTURE §6.3): sherpa's canonical defaults; the
+    /// chunking-tuning harness (pp_voice_bench) sweeps them. The launcher
+    /// (runtime::launch) passes none — production runs the defaults.
+    rule1: f32,
+    rule2: f32,
+    rule3: f32,
 }
 
 fn parse_args() -> Args {
@@ -46,6 +52,9 @@ fn parse_args() -> Args {
         joiner: String::new(),
         tokens: String::new(),
         num_threads: 4,
+        rule1: 2.4,
+        rule2: 1.2,
+        rule3: 20.0,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut it = argv.iter();
@@ -62,6 +71,9 @@ fn parse_args() -> Args {
                 let _ = val();
             }
             "--num-threads" => a.num_threads = val().parse().expect("--num-threads"),
+            "--rule1" => a.rule1 = val().parse().expect("--rule1"),
+            "--rule2" => a.rule2 = val().parse().expect("--rule2"),
+            "--rule3" => a.rule3 = val().parse().expect("--rule3"),
             other => {
                 eprintln!("pp-asr-server: unknown flag {other}");
                 std::process::exit(2);
@@ -87,12 +99,12 @@ fn recognizer(a: &Args) -> OnlineRecognizer {
         },
         decoding_method: Some("greedy_search".into()),
         // Endpointing authority lives HERE (CAPTURE §6.3) — sherpa's
-        // canonical rule values; the in-process VAD only gates and stamps
-        // onsets.
+        // canonical rule values by default; the in-process VAD only gates
+        // and stamps onsets.
         enable_endpoint: true,
-        rule1_min_trailing_silence: 2.4,
-        rule2_min_trailing_silence: 1.2,
-        rule3_min_utterance_length: 20.0,
+        rule1_min_trailing_silence: a.rule1,
+        rule2_min_trailing_silence: a.rule2,
+        rule3_min_utterance_length: a.rule3,
         ..Default::default()
     };
     OnlineRecognizer::create(&config).unwrap_or_else(|| {

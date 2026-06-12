@@ -660,9 +660,13 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   deliberately revisable. Annotating an image must only ever ADD ways to
   find it.
 
-## Open questions deliberately left to the founder
+- **B70 (founder, June 2026 — the name stands).** "Photoproof" is the
+  product name for now (Q1 resolved). The `.photoproof.json` sidecar
+  suffix and `.photoproof-volume` markers are sanctioned to harden into
+  real user data as dogfooding proceeds; if a rename ever comes, it is a
+  sidecar-format migration with compatibility reads, not a find/replace.
 
-- **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).
+## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).
 - **Q4.** M3 gates: sentiment quality evaluation; dedicated-text-embedder benchmark vs. alternatives during dogfooding.

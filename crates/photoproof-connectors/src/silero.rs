@@ -47,12 +47,23 @@ pub struct SileroVad {
     consumed: u64,
     in_speech: bool,
     below_exit: u32,
-    /// Stream ms of the last window that scored ≥ EXIT while in speech.
+    /// Stream ms of the last window that scored ≥ exit while in speech.
     last_speech_end: StreamMs,
+    /// Hysteresis knobs — the product defaults are the consts above; the
+    /// chunking-tuning harness (pp_voice_bench) sweeps them.
+    enter: f32,
+    exit: f32,
+    hang_windows: u32,
 }
 
 impl SileroVad {
     pub fn new() -> ConnectorResult<Self> {
+        Self::with_params(ENTER, EXIT, HANG_WINDOWS)
+    }
+
+    /// Explicit hysteresis parameters (the tuning seam; `new()` is the
+    /// product posture).
+    pub fn with_params(enter: f32, exit: f32, hang_windows: u32) -> ConnectorResult<Self> {
         let session = Session::builder()
             .and_then(|mut b| b.commit_from_memory(SILERO_ONNX))
             .map_err(|e| ConnectorError::Decode(format!("silero session: {e}")))?;
@@ -65,6 +76,9 @@ impl SileroVad {
             in_speech: false,
             below_exit: 0,
             last_speech_end: 0,
+            enter,
+            exit,
+            hang_windows,
         })
     }
 
@@ -113,19 +127,19 @@ impl VoiceActivityDetector for SileroVad {
             // (CAPTURE §6.6 disarms on STREAM failure, not VAD hiccups).
             let prob = self.window_prob(&window).unwrap_or(0.0);
             if self.in_speech {
-                if prob >= EXIT {
+                if prob >= self.exit {
                     self.below_exit = 0;
                     self.last_speech_end = self.ms_at(self.consumed);
                 } else {
                     self.below_exit += 1;
-                    if self.below_exit >= HANG_WINDOWS {
+                    if self.below_exit >= self.hang_windows {
                         self.in_speech = false;
                         events.push(VadEvent::SpeechEnd {
                             end: self.last_speech_end,
                         });
                     }
                 }
-            } else if prob >= ENTER {
+            } else if prob >= self.enter {
                 self.in_speech = true;
                 self.below_exit = 0;
                 self.last_speech_end = self.ms_at(self.consumed);
