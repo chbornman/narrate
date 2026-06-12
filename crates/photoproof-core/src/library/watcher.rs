@@ -527,6 +527,13 @@ impl WatchPipeline {
 /// Polled-mode rescan interval (§7.1).
 const POLLED_SCAN_INTERVAL: Duration = Duration::from_secs(600);
 
+/// recv_timeout tick of the pp-watcher thread loop. One value bounds
+/// three latencies: stop-flag responsiveness (drop/stop joins within a
+/// tick), debounce due-time firing, and idle wakeup cost. Must stay well
+/// under the 500 ms `debounce_ms` so due times fire near-on-time, while
+/// staying long enough that an idle watcher barely wakes.
+const WATCHER_TICK: Duration = Duration::from_millis(100);
+
 /// Handle for a running root watcher. Dropping it stops the watcher.
 pub struct RootWatcherHandle {
     stop: Arc<AtomicBool>,
@@ -620,7 +627,7 @@ pub(crate) fn start_root_watcher(
                     break;
                 }
                 let mut scan_needed = false;
-                match rx.recv_timeout(Duration::from_millis(100)) {
+                match rx.recv_timeout(WATCHER_TICK) {
                     Ok(ev) => {
                         match pipeline.push(ev, UtcMillis::now()) {
                             Ok(effects) => {

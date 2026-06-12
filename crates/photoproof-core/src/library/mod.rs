@@ -2398,13 +2398,20 @@ impl Library {
 
     /// Effective mtime tolerance for a volume (§7.3: 2 s on FAT/exFAT).
     pub(crate) fn mtime_tolerance_ns(&self, fs_type: Option<&str>) -> i64 {
-        const COARSE: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
         match fs_type {
-            Some(t) if COARSE.contains(&t.to_ascii_lowercase().as_str()) => 2_000_000_000,
+            Some(t) if volumes::COARSE_MTIME_FS.contains(&t.to_ascii_lowercase().as_str()) => {
+                COARSE_MTIME_TOLERANCE_NS
+            }
             _ => 0,
         }
     }
 }
+
+/// §7.3: FAT-family mtime stamps are 2 s granular, so equality checks on
+/// those volumes get a 2 s tolerance. Deliberately distinct from scan.rs's
+/// `CLOCK_SHIFT_TOLERANCE_NS` — same magnitude, different rule; the two
+/// must be free to diverge.
+const COARSE_MTIME_TOLERANCE_NS: i64 = 2 * 1_000_000_000;
 
 /// One grid row of [`Library::list_folder`] (UI §3.5 badge data).
 #[derive(Debug, Clone, PartialEq, Eq)]

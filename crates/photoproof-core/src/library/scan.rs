@@ -35,6 +35,10 @@ use super::{CancelFlag, Library, LibraryError, hashing, mtime_ns_of, paths, rel_
 const CLOCK_SHIFT_SAMPLE: usize = 16;
 const HOUR_NS: i64 = 3_600 * 1_000_000_000;
 const CLOCK_SHIFT_TOLERANCE_NS: i64 = 2 * 1_000_000_000;
+/// §7.3 gate: the shifted group must STRICTLY exceed 1/4 ("more than
+/// 25%") of the root's files. Encoded multiplicatively
+/// (`members * 4 <= loaded` rejects) to stay in exact integer math.
+const CLOCK_SHIFT_MIN_DENOMINATOR: usize = 4;
 /// Parallel-hash batch: hashes are computed on the §1.2 pool, results
 /// applied to the DB sequentially between batches (cancel checks ride the
 /// batch boundary).
@@ -508,7 +512,7 @@ fn detect_clock_shift(
         return Ok(None);
     };
     // "More than 25% of a root's files."
-    if members.len() * 4 <= loaded_count {
+    if members.len() * CLOCK_SHIFT_MIN_DENOMINATOR <= loaded_count {
         return Ok(None);
     }
     // Re-hash a random sample of 16 to confirm bytes are unchanged.

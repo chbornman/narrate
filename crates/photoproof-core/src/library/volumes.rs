@@ -170,8 +170,11 @@ pub fn heuristic_fingerprint(
 #[derive(Debug, Default)]
 pub struct PlatformVolumeProbe;
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-const COARSE_MTIME_FS: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
+/// The FAT family: filesystems whose mtime stamps are 2 s granular
+/// (§7.3). Single definition — the probe's `coarse_mtime` flag and the
+/// library's mtime tolerance must classify identically or a volume would
+/// flag coarse while comparisons still demand exact stamps.
+pub(crate) const COARSE_MTIME_FS: &[&str] = &["vfat", "msdos", "exfat", "fat", "fat32"];
 
 impl VolumeProbe for PlatformVolumeProbe {
     #[cfg(target_os = "linux")]

@@ -33,6 +33,12 @@ pub const THUMB_EDGE: u32 = 512;
 pub const THUMB_QUALITY: f32 = 75.0;
 pub const DISPLAY_EDGE: u32 = 2560;
 pub const DISPLAY_QUALITY: f32 = 87.0;
+/// libwebp effort level for both artifacts (see `encode_webp` for the
+/// pp-bench finding behind 2). Sits in this cluster because it is a
+/// versioned encode parameter: changing it changes artifact bytes and
+/// MUST bump [`GENERATOR_VERSION`]. Not a config knob — runtime tuning
+/// would silently fork artifact reproducibility.
+const WEBP_METHOD: i32 = 2;
 
 /// §9.3 acceptability threshold: embedded preview longest edge ≥ 2048 px.
 pub const EMBEDDED_ACCEPT_EDGE: u32 = 2048;
@@ -338,7 +344,7 @@ fn encode_webp(img: &DynamicImage, quality: f32) -> Vec<u8> {
         return encoder.encode(quality).to_vec();
     };
     config.quality = quality;
-    config.method = 2;
+    config.method = WEBP_METHOD;
     match encoder.encode_advanced(&config) {
         Ok(mem) => mem.to_vec(),
         Err(_) => encoder.encode(quality).to_vec(),
