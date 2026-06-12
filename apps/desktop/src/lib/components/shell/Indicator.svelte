@@ -60,9 +60,12 @@
     if (action !== null) void ui.perform(action);
   }
 
-  /** Mic segment click → the same toggle-mic action M dispatches. */
+  /** Mic segment click → the registry's mic row, resolved with arg
+   * "toggle": a click IS a tap, so the pointer form keeps the plain
+   * toggle while the M KEY runs the two-gesture machine (tap toggles,
+   * hold is push-to-talk — logic/michold.ts). Same def, zero new verbs. */
   function toggleMic() {
-    const action = resolveAction("toggle-mic", ui.actionContext());
+    const action = resolveAction("mic-press", ui.actionContext(), "toggle");
     if (action !== null) void ui.perform(action);
   }
 

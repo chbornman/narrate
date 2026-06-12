@@ -39,41 +39,69 @@ pub fn set_scope(app: S<'_>, handle: AppHandle, targets: Vec<String>) -> CmdResu
     Ok(view)
 }
 
-/// M-key toggle (CAPTURE §6.4). Arm opens the supervised ASR stream — an
-/// `Err` at open IS the readiness answer and lands `Disarmed(error)`
-/// quietly — then starts the `pp-mic` audio thread. Disarm stops audio,
-/// accepts trailing finals (engine-bounded, ≤ 5 s), zeroes the ring, and
-/// joins the thread. Echoes the §11 indicator either way.
+/// Mic toggle (CAPTURE §6.4): flip whatever state the mic is in. The
+/// M-key TAP gesture and the indicator segment click ride this.
 #[tauri::command]
 pub fn toggle_mic(app: S<'_>, handle: AppHandle) -> CmdResult<IndicatorState> {
-    app.touch()?; // the toggle is user activity (§2.1); may rotate first
+    apply_mic(app, handle, None)
+}
+
+/// Explicit arm/disarm intent (the M two-gesture ruling, June 2026):
+/// push-to-talk needs idempotent primitives, not a toggle. The PTT
+/// release must land DISARMED no matter what raced it (a blind toggle
+/// after a §6.6 device-failure disarm would RE-ARM a mic the user
+/// believes is off), and a PTT press over an already-armed mic must not
+/// bounce the stream. `armed` is the DESIRED state; already there, the
+/// call just echoes the indicator.
+#[tauri::command]
+pub fn set_mic(app: S<'_>, handle: AppHandle, armed: bool) -> CmdResult<IndicatorState> {
+    apply_mic(app, handle, Some(armed))
+}
+
+/// The one mic transition (`want`: None = toggle, Some = idempotent set).
+/// Arm opens the supervised ASR stream — an `Err` at open IS the
+/// readiness answer and lands `Disarmed(error)` quietly — then starts the
+/// `pp-mic` audio thread. Disarm stops audio, accepts trailing finals
+/// (engine-bounded, ≤ 5 s), zeroes the ring, and joins the thread. Echoes
+/// the §11 indicator either way.
+fn apply_mic(app: S<'_>, handle: AppHandle, want: Option<bool>) -> CmdResult<IndicatorState> {
+    app.touch()?; // the gesture is user activity (§2.1); may rotate first
     let armed_now = {
         let mut capture = app.capture.lock().expect("capture mutex");
         match capture.as_mut() {
-            // The in-process VAD never built: nothing to toggle.
+            // The in-process VAD never built: nothing to drive.
             None => false,
             Some(engine) if engine.mic().is_armed() => {
-                let events = engine.disarm(&app.store);
-                let draining = engine.stream_open();
-                drop(capture);
-                // The thread sees the disarmed engine and exits; take()
-                // joins it (MicHandle::drop) and the cpal stream closes.
-                drop(app.mic.lock().expect("mic mutex").take());
-                announce_events(&handle, &events);
-                if draining {
-                    // A trailing final is still due (§6.4): with the mic
-                    // thread gone nothing pumps — the drain thread does.
-                    crate::mic::spawn_disarm_drain(handle.clone());
+                if want == Some(true) {
+                    true // already armed: the set is a no-op by design
+                } else {
+                    let events = engine.disarm(&app.store);
+                    let draining = engine.stream_open();
+                    drop(capture);
+                    // The thread sees the disarmed engine and exits; take()
+                    // joins it (MicHandle::drop) and the cpal stream closes.
+                    drop(app.mic.lock().expect("mic mutex").take());
+                    announce_events(&handle, &events);
+                    if draining {
+                        // A trailing final is still due (§6.4): with the mic
+                        // thread gone nothing pumps — the drain thread does.
+                        crate::mic::spawn_disarm_drain(handle.clone());
+                    }
+                    false
                 }
-                false
             }
             Some(engine) => {
-                let state = engine.arm();
-                drop(capture);
-                if state.is_armed() {
-                    *app.mic.lock().expect("mic mutex") = Some(crate::mic::start(handle.clone()));
+                if want == Some(false) {
+                    false // already disarmed: nothing to tear down
+                } else {
+                    let state = engine.arm();
+                    drop(capture);
+                    if state.is_armed() {
+                        *app.mic.lock().expect("mic mutex") =
+                            Some(crate::mic::start(handle.clone()));
+                    }
+                    state.is_armed()
                 }
-                state.is_armed()
             }
         }
     };

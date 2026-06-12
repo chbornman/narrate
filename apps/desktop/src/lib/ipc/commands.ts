@@ -35,9 +35,18 @@ export const setScope = (targets: string[]) =>
 
 export const indicatorState = () => invoke<IndicatorState>("indicator_state");
 
-/** M-key toggle (CAPTURE §6.4): arm/disarm the mic; echoes the §11
- * indicator (a not-ready ASR lands `disarmedError` quietly). */
+/** Mic toggle (CAPTURE §6.4) — the TAP/pointer form: flip whatever state
+ * the mic is in; echoes the §11 indicator (a not-ready ASR lands
+ * `disarmedError` quietly). */
 export const toggleMic = () => invoke<IndicatorState>("toggle_mic");
+
+/** Explicit mic intent (the M two-gesture ruling): push-to-talk drives
+ * idempotent arm/disarm, never toggle — a PTT release racing a device-
+ * failure disarm (§6.6) must end DISARMED, where a blind toggle could
+ * re-arm. Already in the wanted state, the call just echoes the
+ * indicator. */
+export const setMic = (armed: boolean) =>
+  invoke<IndicatorState>("set_mic", { armed });
 
 /** Typed note bound to the current scope — or, `target` given, to that
  * single image (the journal-panel composer's explicit binding: the panel's

@@ -77,9 +77,12 @@ describe("global rows", () => {
     });
   });
 
-  it("M toggles the mic — but ONLY while the supervised ASR is ready (P6.4)", () => {
+  it("M begins the two-gesture mic press — but ONLY while the supervised ASR is ready", () => {
     expect(dispatch(key("m"), base)).toBeNull();
-    expect(dispatch(key("m"), { ...base, asrReady: true })).toEqual({ kind: "toggle-mic" });
+    // Keydown dispatches mic-press (tap-vs-hold resolves at the raw
+    // keyup — logic/michold.ts); the pointer toggle is the same def
+    // resolved with arg "toggle" (Indicator.svelte).
+    expect(dispatch(key("m"), { ...base, asrReady: true })).toEqual({ kind: "mic-press" });
   });
 });
 

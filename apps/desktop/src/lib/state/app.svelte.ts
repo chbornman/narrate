@@ -16,6 +16,13 @@ import * as note from "../logic/note";
 import { isMac } from "../logic/platform";
 import { escapeAction, type EscapeContext } from "../logic/escape";
 import { navigationSet } from "../logic/looknav";
+import {
+  MIC_HOLD_IDLE,
+  micBlur,
+  micDown,
+  micUp,
+  type MicHoldState,
+} from "../logic/michold";
 import { scopeTargets } from "../logic/scope";
 import { afterCommit } from "../logic/advance";
 import {
@@ -1312,11 +1319,62 @@ export class Ui {
       case "journal-flash-stroke":
         if (this.surface === "look") this.look.flashStroke(action.eventId);
         break;
-      // ---- voice capture (P6.4 — CAPTURE §6.4, §11) ----------------------------
+      // ---- voice capture (P6.4 — CAPTURE §6.4, §11; M two-gesture) -------------
       case "toggle-mic":
+        // The instantaneous pointer form (indicator segment click via
+        // resolveAction arg "toggle"): a click IS a tap, plain toggle.
         this.shell.onIndicatorState(await ipc.toggleMic());
         break;
+      case "mic-press": {
+        // M keydown — the two-gesture machine begins (logic/michold.ts):
+        // from disarmed the mic arms NOW (both gestures want sound
+        // flowing from the press; a PTT hold must not lose the utterance
+        // onset), from armed nothing happens yet — the release decides.
+        // Auto-repeat keydowns land here too and are absorbed by the
+        // machine (the press timestamp survives, so the hold threshold
+        // still measures from the FIRST press). The release half is a
+        // raw window keyup in App.svelte — the hold-E precedent.
+        const { state, intent } = micDown(this.micHold, {
+          armed: this.shell.mic === "armedIdle" || this.shell.mic === "armedSpeaking",
+          now: Date.now(),
+        });
+        this.micHold = state;
+        if (intent === "arm") this.shell.onIndicatorState(await ipc.setMic(true));
+        break;
+      }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // M two-gesture mic — the release half (CAPTURE §6.4; machine in
+  // logic/michold.ts). The registry is keydown-only, so App.svelte feeds
+  // these as raw window facts (the hold-E / Space-pan precedent).
+  // ---------------------------------------------------------------------------
+
+  /** Tap-vs-hold tracker for the M key. Plain field, not $state: nothing
+   * renders from it — the indicator follows shell.mic, which the IPC
+   * echoes drive. */
+  micHold: MicHoldState = MIC_HOLD_IDLE;
+
+  /** Raw M keyup. Called UNCONDITIONALLY (even while typing, even after
+   * the mic degraded mid-hold): the machine no-ops on a stray release and
+   * set_mic is idempotent, so a hold can never wedge the mic open. A tap
+   * from armed disarms here; a past-threshold release ships the PTT
+   * utterance by disarming (the backend's disarm drain keeps trailing
+   * finals — B52/B72 — so short bursts still land). */
+  async micRelease() {
+    const { state, intent } = micUp(this.micHold, Date.now());
+    this.micHold = state;
+    if (intent === "disarm") this.shell.onIndicatorState(await ipc.setMic(false));
+  }
+
+  /** Window blur mid-gesture: the keyup will never arrive, and a hot mic
+   * the gesture opened must never wedge open (a mic armed BEFORE the
+   * press stays armed — blur must not kill a deliberate toggle). */
+  async micWindowBlur() {
+    const { state, intent } = micBlur(this.micHold);
+    this.micHold = state;
+    if (intent === "disarm") this.shell.onIndicatorState(await ipc.setMic(false));
   }
 
   /** Rail rows over the shared roots/tree (logic/sources.ts providers). */
