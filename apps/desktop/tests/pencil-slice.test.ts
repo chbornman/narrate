@@ -108,15 +108,18 @@ describe("pencil mode lifecycle (UI §4.4)", () => {
     expect(ui.look.undoStack.length).toBe(1); // per process (§8.5)
   });
 
-  it("O off exits pencil mode (no drawing on invisible paper); B refuses while hidden", () => {
+  it("O off exits pencil mode; B while hidden shows the paper AND arms the pencil", () => {
     ui.look.togglePencil();
     ui.look.toggleOverlay();
     expect(ui.look.overlayVisible).toBe(false);
     expect(ui.look.pencilMode).toBe(false);
-    ui.look.togglePencil(); // pointer/menu path guard (the def gates keys)
-    expect(ui.look.pencilMode).toBe(false);
-    ui.look.toggleOverlay();
+    ui.look.togglePencil(); // one keystroke: show + arm (a bound key is never dead)
     expect(ui.look.overlayVisible).toBe(true);
+    expect(ui.look.pencilMode).toBe(true);
+    // With the paper visible again, B is back to the plain sticky toggle.
+    ui.look.togglePencil();
+    expect(ui.look.overlayVisible).toBe(true);
+    expect(ui.look.pencilMode).toBe(false);
   });
 
   it("the action context reports the live pencil fields", () => {
@@ -285,6 +288,11 @@ describe("perform routing for the band", () => {
     expect(ui.look.overlayVisible).toBe(false);
     expect(ui.look.pencilMode).toBe(false);
     expect(ui.look.eraserHeld).toBe(false);
+    // B with the paper hidden: one keystroke shows the overlay and
+    // re-arms the pencil (BACKLOG, founder: a bound key is never dead).
+    await ui.perform({ kind: "pencil-pen" });
+    expect(ui.look.overlayVisible).toBe(true);
+    expect(ui.look.pencilMode).toBe(true);
   });
 });
 

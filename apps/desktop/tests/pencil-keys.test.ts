@@ -3,9 +3,9 @@
  * the keymap interpreter. Keymap reconciliation: spec/UI.md §4.4/§11 wins
  * over the P4.2 reserved P/E/V seats — B = sticky toggle, hold-E = eraser,
  * O = overlay, Ctrl+Z = undo. Gating lives on the defs (never in
- * components): overlay-off makes the pencil UNAVAILABLE, the eraser needs
- * pencil mode, undo needs pencil work, and the §11 input suppression
- * holds for every row.
+ * components): B stays live with the overlay hidden (show-and-arm — a
+ * bound key must never be dead), the eraser needs pencil mode, undo needs
+ * pencil work, and the §11 input suppression holds for every row.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -40,8 +40,12 @@ describe("B — sticky pencil toggle (UI §4.4: a held key cramps the hand)", ()
     expect(dispatch(key("b"), { ...look, surface: "grid" })).toBeNull();
   });
 
-  it("is UNAVAILABLE while the overlay is hidden (no drawing on paper you cannot see)", () => {
-    expect(dispatch(key("b"), { ...look, overlayVisible: false })).toBeNull();
+  it("stays LIVE while the overlay is hidden (a bound key must never be dead)", () => {
+    // The slice's togglePencil shows the paper AND arms the pencil; the
+    // keymap's only job is to keep dispatching.
+    expect(dispatch(key("b"), { ...look, overlayVisible: false })).toEqual({
+      kind: "pencil-pen",
+    });
   });
 
   it("is suppressed while a text input is focused (§11)", () => {

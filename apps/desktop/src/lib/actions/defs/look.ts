@@ -125,9 +125,11 @@ export const LOOK_DEFS: ActionDef[] = [
     group: "capture",
     seats: ["look-backdrop"], // pointer reachability (R6 excludes only drawing)
     available: always,
-    // You cannot draw on paper you cannot see (UI §4.4): a hidden overlay
-    // makes the pencil UNAVAILABLE, not merely inert.
-    enabled: (ctx) => !ctx.railFocused && ctx.overlayVisible,
+    // A bound key must never be dead (BACKLOG, founder): with the overlay
+    // hidden, B shows the paper AND arms the pencil in one keystroke — the
+    // show-and-arm branch lives in the look slice (togglePencil), so the
+    // row stays enabled regardless of overlay visibility.
+    enabled: lookKeysFree,
     checked: (ctx) => ctx.pencilMode,
   },
   {

@@ -155,10 +155,17 @@ export class LookSlice {
 
   // ---- grease pencil (P5.1) --------------------------------------------------
 
-  /** B: sticky toggle. Refused while the overlay is hidden (the def's
-   * enabled gate is the keyboard guard; this guards pointer/menu paths). */
+  /** B: sticky toggle. With the paper hidden, one keystroke shows the
+   * overlay AND arms the pencil (BACKLOG, founder: a bound key must never
+   * be dead) — keyboard, pointer, and menu paths all land here. */
   togglePencil() {
-    if (!this.overlayVisible) return;
+    if (!this.overlayVisible) {
+      // You still cannot draw on paper you cannot see (UI §4.4), so B
+      // brings the paper WITH the pencil instead of refusing.
+      this.overlayVisible = true;
+      this.pencilMode = true;
+      return;
+    }
     this.pencilMode = !this.pencilMode;
     if (!this.pencilMode) this.eraserHeld = false;
   }
