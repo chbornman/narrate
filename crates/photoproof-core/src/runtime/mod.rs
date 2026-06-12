@@ -22,6 +22,7 @@ pub mod bus;
 pub mod children;
 pub mod download;
 pub mod gc;
+pub mod launch;
 pub mod logs;
 pub mod manifest;
 pub mod plan;

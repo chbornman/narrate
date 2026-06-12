@@ -49,18 +49,28 @@ pub struct TierRule {
     pub min_apple_unified_bytes: u64,
 }
 
-/// §6.2, top row first. Tier 0 is the fall-through: < 8 GB dedicated and
-/// < 16 GB Apple unified, or no GPU — full journal, no downloads.
+/// §6.2, top row first. Tier 0 is the fall-through: < 7.5 GB dedicated
+/// and < 16 GB Apple unified, or no GPU — full journal, no downloads.
+///
+/// VRAM gates carry a 0.5 GiB headroom tolerance (P6.3 spike +
+/// founder-checklist calibration): drivers report the LARGEST HEAP, not
+/// the marketing number — the founder's 16 GB RTX 5080 reports
+/// 15.92 GiB and sat 85 MiB under a literal 16 GiB gate. The spike's
+/// measured budgets (E2B 4.3 GB + ASR 1.1 GB + embedders ≈ 6–8 GB
+/// resident) say a 15.5 GiB card carries Tier 2 with room to spare.
+/// Apple-unified gates stay at marketing numbers: hw.memsize reports
+/// the full physical size exactly.
+const GIB: u64 = 1024 * 1024 * 1024;
 pub const DECISION_TABLE: &[TierRule] = &[
     TierRule {
         tier: 2,
-        min_vram_bytes: 16 * 1024 * 1024 * 1024,
-        min_apple_unified_bytes: 32 * 1024 * 1024 * 1024,
+        min_vram_bytes: 15 * GIB + GIB / 2,
+        min_apple_unified_bytes: 32 * GIB,
     },
     TierRule {
         tier: 1,
-        min_vram_bytes: 8 * 1024 * 1024 * 1024,
-        min_apple_unified_bytes: 16 * 1024 * 1024 * 1024,
+        min_vram_bytes: 7 * GIB + GIB / 2,
+        min_apple_unified_bytes: 16 * GIB,
     },
 ];
 
