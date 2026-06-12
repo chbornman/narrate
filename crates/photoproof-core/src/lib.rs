@@ -11,9 +11,11 @@
 //! - `capture`: sessions, write scope, the voice pipeline (CAPTURE, P6.1)
 //! - `runtime`: supervision, weights, tiers, scheduling (RUNTIME, P6.2)
 //! - `retrieval`: PPVEC vector storage + chunking (RETRIEVAL, P7.1)
+//! - `collections`: named collections + portability file (RETRIEVAL §10, P7.3)
 
 pub mod canonical;
 pub mod capture;
+pub mod collections;
 pub mod event;
 pub mod id;
 pub mod library;

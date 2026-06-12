@@ -80,6 +80,15 @@ pub fn rebuild_from_sidecars<L: ImageLocator>(
     }
     files.sort();
     files.dedup();
+    // `collections.photoproof.json` (RETRIEVAL §10.2, P7.3) sits beside the
+    // manifest in every export directory and matches the sidecar suffix,
+    // but it is not event truth: crate::collections owns its parse and
+    // union-merge. Skipping by name keeps it out of the quarantine report.
+    files.retain(|p| {
+        p.file_name()
+            .map(|n| !n.eq_ignore_ascii_case(crate::collections::COLLECTIONS_FILENAME))
+            .unwrap_or(true)
+    });
 
     // -- Step 2: parse & validate (failures quarantined, nothing aborts) ------
     let mut docs: Vec<(PathBuf, SidecarDoc, Vec<u8>)> = Vec::new();

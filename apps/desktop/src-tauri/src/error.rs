@@ -1,6 +1,7 @@
 //! Command-layer error type: every core error funnels into one serializable
 //! message for IPC. No business logic; no error is swallowed.
 
+use photoproof_core::collections::CollectionsError;
 use photoproof_core::library::LibraryError;
 use photoproof_core::sidecar::SidecarError;
 use photoproof_core::{AppendError, IdError, StoreError};
@@ -15,6 +16,8 @@ pub enum CmdError {
     Library(#[from] LibraryError),
     #[error(transparent)]
     Sidecar(#[from] SidecarError),
+    #[error(transparent)]
+    Collections(#[from] CollectionsError),
     #[error("invalid id: {0}")]
     Id(#[from] IdError),
     #[error("sqlite error: {0}")]

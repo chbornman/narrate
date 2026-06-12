@@ -56,7 +56,9 @@ impl fmt::Display for ContentHash {
 /// 26 characters, Crockford base32, uppercase (spec/EVENTS.md §1.2).
 /// The Crockford alphabet excludes I, L, O, U; the first character is
 /// `0..=7` so the value fits 128 bits.
-fn valid_ulid_str(s: &str) -> bool {
+// pub(crate): the collections store (crate::collections) validates the
+// same ULID surface for collection/note ids without minting a newtype.
+pub(crate) fn valid_ulid_str(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 26
         && (b'0'..=b'7').contains(&b[0])

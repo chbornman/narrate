@@ -437,6 +437,38 @@ CREATE TABLE IF NOT EXISTS ppvec_compactions (
 ) STRICT, WITHOUT ROWID;
 "#;
 
+/// Migration slot pre-allocated to packet P7.3 (spec/RETRIEVAL.md §10.1
+/// collections store, B71 naming). Only P7.3 edits this constant.
+const COLLECTIONS_SCHEMA_SQL: &str = r#"
+-- RETRIEVAL §10.1 verbatim. These three tables are USER TRUTH (B71), not
+-- index: they fail the "SQLite is a rebuildable index" test unless mirrored
+-- to appdata/collections.photoproof.json (§10.2), which crate::collections
+-- maintains through the SIDECARS §9 debounced-writer mechanics.
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test) and user truth must survive that re-run.
+CREATE TABLE IF NOT EXISTS collections (
+  id          TEXT PRIMARY KEY,               -- ULID
+  name        TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status      TEXT NOT NULL CHECK (status IN ('active','shelved','done')),
+  created_ts  TEXT NOT NULL,                  -- RFC 3339 UTC
+  updated_ts  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collection_notes ( -- append-only, like the event log
+  id            TEXT PRIMARY KEY,             -- ULID
+  collection_id TEXT NOT NULL REFERENCES collections(id),
+  ts            TEXT NOT NULL,
+  text          TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collection_members ( -- membership is evented, not destructive
+  collection_id TEXT NOT NULL REFERENCES collections(id),
+  image_hash    TEXT NOT NULL,
+  added_ts      TEXT NOT NULL,
+  removed_ts    TEXT,                         -- NULL = currently a member
+  PRIMARY KEY (collection_id, image_hash, added_ts)
+);
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -489,6 +521,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     if version < 8 {
         conn.execute_batch(RETRIEVAL_FIXES_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 8")?;
+    }
+    if version < 9 {
+        conn.execute_batch(COLLECTIONS_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 9")?;
     }
     Ok(version)
 }

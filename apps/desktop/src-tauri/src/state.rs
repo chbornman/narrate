@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use photoproof_connectors::SherpaOnlineTranscriber;
 use photoproof_connectors::silero::SileroVad;
 use photoproof_core::capture::{CaptureDrain, CaptureEngine, SystemClock};
+use photoproof_core::collections::Collections;
 use photoproof_core::library::{Library, RootWatcherHandle};
 use photoproof_core::search::Searcher;
 use photoproof_core::sidecar::SidecarEngine;
@@ -28,6 +29,9 @@ pub struct App {
     pub library: Arc<Library>,
     /// The library implements `ImageLocator` directly (DECISIONS B29).
     pub engine: SidecarEngine<'static, Arc<Library>>,
+    /// Collections (RETRIEVAL §10, P7.3): user truth mirrored to
+    /// `collections.photoproof.json` by the sidecar pump's tick.
+    pub collections: Arc<Collections>,
     pub app_data: PathBuf,
     pub scope: Mutex<ScopeTracker>,
     pub session: Mutex<SessionManager>,
@@ -70,6 +74,10 @@ impl App {
         let library = Arc::new(Library::open(&db_path, &cache_dir)?);
         let engine =
             SidecarEngine::new_shared(store.clone(), &db_path, &app_data, library.clone())?;
+        // Open AFTER the sidecar engine so the schema exists; the open-time
+        // reconcile union-merges an existing collections.photoproof.json
+        // into the database (the rebuild path needs no extra wiring).
+        let collections = Arc::new(Collections::open(&db_path, &app_data)?);
         let searcher = Searcher::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?;
 
         // CAPTURE §2.4 crash recovery, before opening the launch session:
@@ -144,6 +152,7 @@ impl App {
             store,
             library,
             engine,
+            collections,
             app_data,
             scope: Mutex::new(ScopeTracker::new()),
             session: Mutex::new(session),
@@ -220,6 +229,11 @@ impl App {
         }
         if let Err(e) = self.engine.flush_session(&session_id) {
             eprintln!("photoproof: session journal flush failed at shutdown: {e}");
+        }
+        // App shutdown is an immediate-flush trigger (SIDECARS §9.1); the
+        // collections file drains with the sidecars.
+        if let Err(e) = self.collections.flush(UtcMillis::now()) {
+            eprintln!("photoproof: collections flush failed at shutdown: {e}");
         }
     }
 }

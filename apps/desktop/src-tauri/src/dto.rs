@@ -314,3 +314,20 @@ pub struct ImagePathsDto {
     pub volume_label: Option<String>,
     pub online: bool,
 }
+
+/// One collection (RETRIEVAL §10, B71) as the rail tab and the Look's
+/// membership row render it. Counts cover CURRENT members (open intervals)
+/// only; history stays a core-level read until a surface needs it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// "active" | "shelved" | "done".
+    pub status: String,
+    pub created_ts: String,
+    pub updated_ts: String,
+    pub member_count: usize,
+    pub note_count: usize,
+}

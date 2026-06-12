@@ -122,6 +122,11 @@ pub async fn export_journal(app: S<'_>, dest: String) -> CmdResult<ExportReportD
             now,
             &volumes,
         )?;
+        // RETRIEVAL §10.2: collections.photoproof.json travels beside the
+        // sidecar set + manifest — "you can walk away with everything"
+        // includes your collections.
+        app.collections
+            .export_to(std::path::Path::new(&dest), now)?;
         let ts = now.to_rfc3339();
         {
             let mut s = app.settings.lock().expect("settings mutex");
