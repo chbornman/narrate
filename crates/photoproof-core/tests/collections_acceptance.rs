@@ -463,6 +463,60 @@ fn union_duplicate_open_intervals_still_read_as_one_member() {
 }
 
 #[test]
+fn two_nonnull_removals_resolve_to_the_earlier_removed_ts() {
+    // §10.2: for a matching (collection, image, added_ts) key, "two
+    // different non-null removed_ts resolve to the earlier". Two replicas
+    // share the same membership interval, then both remove it offline at
+    // different times: after exchange, both hold ONE interval closed at
+    // the EARLIER removal — regardless of which direction merged first.
+    let env_a = Env::new();
+    let env_b = Env::new();
+    let a = env_a.open();
+    let b = env_b.open();
+    let img = hash(0x5a);
+
+    let t0 = ts("2026-06-01T10:00:00.000Z");
+    let rec = a.create("Cull", "", t0).unwrap();
+    a.add_images(&rec.id, std::slice::from_ref(&img), t0)
+        .unwrap();
+    a.flush(t0).unwrap();
+    // B imports A's file, so both replicas hold the SAME interval key.
+    b.import_file(&env_a.file(), t0).unwrap();
+
+    // B removes first; A removes later (the stale, losing removal).
+    let t_early = "2026-06-02T10:00:00.000Z";
+    let t_late = "2026-06-03T10:00:00.000Z";
+    b.remove_images(&rec.id, std::slice::from_ref(&img), ts(t_early))
+        .unwrap();
+    a.remove_images(&rec.id, std::slice::from_ref(&img), ts(t_late))
+        .unwrap();
+
+    let t4 = ts("2026-06-04T10:00:00.000Z");
+    a.flush(t4).unwrap();
+    b.flush(t4).unwrap();
+    // Opposite merge directions: A learns the earlier removal from B's
+    // file; B's own removal beats the later one arriving from A's file.
+    a.import_file(&env_b.file(), t4).unwrap();
+    b.import_file(&env_a.file(), t4).unwrap();
+
+    for (label, c) in [("A", &a), ("B", &b)] {
+        let history = c.membership_history(&rec.id).unwrap();
+        assert_eq!(history.len(), 1, "{label}: one interval, not two");
+        assert_eq!(
+            history[0].removed_ts.as_deref(),
+            Some(t_early),
+            "{label}: the earlier removal wins"
+        );
+        assert_eq!(c.get(&rec.id).unwrap().member_count, 0);
+    }
+    assert_eq!(
+        a.export_doc().unwrap(),
+        b.export_doc().unwrap(),
+        "replicas converge to identical documents"
+    );
+}
+
+#[test]
 fn note_conflicts_are_reported_with_the_losing_copy() {
     let env = Env::new();
     let c = env.open();

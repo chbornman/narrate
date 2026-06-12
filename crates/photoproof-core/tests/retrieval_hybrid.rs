@@ -1172,3 +1172,196 @@ fn merge_learned_redaction_purges_dependent_summaries() {
     assert_eq!(summary_count(&conn, "image", a.as_str()), 0);
     assert_eq!(match_count(&conn, "ritual"), 0);
 }
+
+// ---------------------------------------------------------------------------
+// §11 — rebuild covers BOTH FTS tables
+// ---------------------------------------------------------------------------
+
+/// §11: "wipe both FTS tables; re-fold every live remark chain root and
+/// live summary." A rebuild after FTS drift (the §11 trigger: tokenizer or
+/// fold-rule change) must leave `summaries_fts` exactly mirroring the
+/// surviving `derived_summaries` rows — missing rows restored, orphans
+/// (rows whose summary was deleted while the index was out of sync) gone.
+#[test]
+fn s11_rebuild_derived_rebuilds_summaries_fts_from_summary_rows() {
+    let hx = Hx::new();
+    let (a, b) = (&hx.hashes[0], &hx.hashes[1]);
+    hx.append_at(
+        d_remark("the fog swallowing the barn", vec![a.clone()]),
+        "2026-02-01T10:00:00.000Z",
+    );
+    insert_image_summary(&hx, a, "keeps returning to the fog set");
+    insert_image_summary(&hx, b, "an unrelated elsewhere candidate");
+
+    // Simulate index drift: the summary index lost a row and kept an
+    // orphan whose backing summary row no longer exists.
+    let conn = hx.env.conn();
+    conn.execute(
+        "DELETE FROM summaries_fts WHERE summaries_fts MATCH 'fog'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO summaries_fts (text, summary_id) \
+         VALUES ('orphan zanzibar paraphrase', 'no-such-summary')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(match_count(&conn, "fog"), 0, "fixture starts drifted");
+    assert_eq!(match_count(&conn, "zanzibar"), 1);
+
+    hx.env.store.rebuild_derived().unwrap();
+
+    // The index again mirrors derived_summaries, row for row.
+    assert_eq!(match_count(&conn, "fog"), 1, "missing row restored");
+    assert_eq!(match_count(&conn, "elsewhere"), 1, "intact row survives");
+    assert_eq!(match_count(&conn, "zanzibar"), 0, "orphan row dropped");
+    let (rows, summaries): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM summaries_fts), \
+                    (SELECT count(*) FROM derived_summaries)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, summaries, "one FTS row per summary, no extras");
+
+    // And the live S3 path consumes the rebuilt index: the summary ranks
+    // its image again through the model-free pipeline.
+    let out = hx
+        .env
+        .searcher
+        .hybrid_search("fog", &[], &keyword_only_rig(), &HybridOptions::default())
+        .unwrap();
+    assert_eq!(out.images.len(), 1);
+    assert_eq!(out.images[0].image_hash, *a);
+}
+
+// ---------------------------------------------------------------------------
+// §5.1/§5.2 degraded-mode contract — vector signals fail, search answers
+// ---------------------------------------------------------------------------
+
+/// An embedder that is configured but broken at query time — the process
+/// died between Ready and this call. Every request fails the way a dead
+/// child fails.
+struct ErroringEmbedder;
+
+impl photoproof_connectors::embedder::Embedder for ErroringEmbedder {
+    async fn embed_text(&self, _text: &str) -> photoproof_connectors::ConnectorResult<Embedding> {
+        Err(ConnectorError::NotReady("embedder died"))
+    }
+
+    async fn embed_image(
+        &self,
+        _img: &photoproof_connectors::embedder::DecodedImage,
+    ) -> photoproof_connectors::ConnectorResult<Embedding> {
+        Err(ConnectorError::NotReady("embedder died"))
+    }
+
+    fn dimensions(&self) -> usize {
+        DIMS
+    }
+
+    fn model_id(&self) -> &str {
+        TEXT_MODEL
+    }
+}
+
+/// §5.2 (module contract: a failed vector signal "degrades to absent with
+/// a logged warning — search never errors"): an embedder that errors on
+/// every query call must leave keyword results intact and return Ok.
+#[test]
+fn erroring_embedder_at_query_time_degrades_to_keyword_results() {
+    let hx = Hx::new();
+    let (a, b) = (&hx.hashes[0], &hx.hashes[1]);
+    hx.append_at(
+        d_remark("the fog swallowing the barn", vec![a.clone()]),
+        "2026-02-01T10:00:00.000Z",
+    );
+    hx.append_at(
+        d_remark("fog bank ate the whole ridge", vec![b.clone()]),
+        "2026-02-02T10:00:00.000Z",
+    );
+    // Real vectors exist on disk — the failure is the query-side embed.
+    hx.drain_text_embeddings();
+
+    let broken = ErroringEmbedder;
+    let rig: HybridRig<'_, NoModel, ErroringEmbedder, NoModel> = HybridRig {
+        llm: None,
+        text: Some(&broken),
+        clip: None,
+        vectors: Some(&hx.vectors),
+    };
+    let out = hx
+        .env
+        .searcher
+        .hybrid_search("fog", &[], &rig, &HybridOptions::default())
+        .unwrap();
+    let keyword = hx
+        .env
+        .searcher
+        .hybrid_search("fog", &[], &keyword_only_rig(), &HybridOptions::default())
+        .unwrap();
+    assert_eq!(
+        out.images.iter().map(hash_of).collect::<Vec<_>>(),
+        keyword.images.iter().map(hash_of).collect::<Vec<_>>(),
+        "S2 alone carries the result set when every embed call fails"
+    );
+    assert_eq!(out.session_hits, keyword.session_hits);
+}
+
+/// Same contract, one layer down: the flat vector FILE is damaged or gone
+/// (disk fault, partial restore) while the `vectors` metadata still points
+/// at it. The store-level read fails or comes back empty; the search call
+/// still answers with the FTS results and never surfaces an error.
+#[test]
+fn damaged_or_missing_vector_file_degrades_to_keyword_results() {
+    let hx = Hx::new();
+    let (a, b) = (&hx.hashes[0], &hx.hashes[1]);
+    hx.append_at(
+        d_remark("the fog swallowing the barn", vec![a.clone()]),
+        "2026-02-01T10:00:00.000Z",
+    );
+    hx.append_at(
+        d_remark("fog bank ate the whole ridge", vec![b.clone()]),
+        "2026-02-02T10:00:00.000Z",
+    );
+    hx.drain_text_embeddings();
+    let path = hx.vectors.file_path(&VecSpace {
+        vec_kind: VecKind::AnnotationChunk,
+        model_id: TEXT_MODEL.into(),
+    });
+    assert!(path.exists(), "fixture wrote real vectors");
+
+    let rig: HybridRig<'_, NoModel, MockEmbedder, NoModel> = HybridRig {
+        llm: None,
+        text: Some(&hx.text),
+        clip: None,
+        vectors: Some(&hx.vectors),
+    };
+    let keyword = hx
+        .env
+        .searcher
+        .hybrid_search("fog", &[], &keyword_only_rig(), &HybridOptions::default())
+        .unwrap();
+    let expect_keyword = |label: &str| {
+        let out = hx
+            .env
+            .searcher
+            .hybrid_search("fog", &[], &rig, &HybridOptions::default())
+            .unwrap_or_else(|e| panic!("{label}: search errored: {e}"));
+        assert_eq!(
+            out.images.iter().map(hash_of).collect::<Vec<_>>(),
+            keyword.images.iter().map(hash_of).collect::<Vec<_>>(),
+            "{label}: keyword results intact"
+        );
+    };
+
+    // Damaged: the header bytes are garbage, so the store read errors.
+    std::fs::write(&path, b"torn").unwrap();
+    expect_keyword("torn file");
+
+    // Gone entirely: the store reads an empty space.
+    std::fs::remove_file(&path).unwrap();
+    expect_keyword("missing file");
+}

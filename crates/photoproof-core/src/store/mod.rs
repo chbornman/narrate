@@ -1042,6 +1042,13 @@ impl EventStore {
         tx.execute("DELETE FROM image_ratings", [])?;
         tx.execute("DELETE FROM image_journal_stats", [])?;
         tx.execute("DELETE FROM event_fts", [])?;
+        // RETRIEVAL §11: the rebuild wipes BOTH FTS tables. summaries_fts
+        // is re-derived from derived_summaries below; the summary rows
+        // themselves are kept — they were purged at redact/merge time in
+        // the same transaction as the scrub (§9.5), so what remains is
+        // live, and core cannot regenerate them (generation is a model
+        // pass).
+        tx.execute("DELETE FROM summaries_fts", [])?;
 
         // Registry = the fold of kind='redaction' events; deterministic
         // min-redaction-id per target (matches the incremental upsert rule).
@@ -1088,6 +1095,15 @@ impl EventStore {
             }
         }
 
+        // One summaries_fts row per surviving summary (RETRIEVAL §11 "re-fold
+        // every ... live summary"): like event_fts, the indexed text exists
+        // nowhere else to rebuild from except its source-of-truth row.
+        tx.execute(
+            "INSERT INTO summaries_fts(text, summary_id) \
+             SELECT text, id FROM derived_summaries",
+            [],
+        )?;
+
         // Vectors referencing dead roots are marked deleted (never DELETEd:
         // the metadata row keeps the flat-file pointer for the PPVEC zeroing
         // sweep — RETRIEVAL §1.1/§1.3); still-valid vectors are preserved
@@ -1128,9 +1144,14 @@ impl EventStore {
         }
 
         tx.commit()?;
-        // §5.1/§5.4 operational rules after rebuild.
+        // §5.1/§5.4 operational rules after rebuild — both FTS tables
+        // (RETRIEVAL §11).
         schema::run_pragma(&w, "ANALYZE")?;
         w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
+        w.execute(
+            "INSERT INTO summaries_fts(summaries_fts) VALUES('optimize')",
+            [],
+        )?;
         checkpoint_truncate(&w)?;
         Ok(())
     }
