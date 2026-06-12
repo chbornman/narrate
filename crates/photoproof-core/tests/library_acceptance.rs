@@ -2041,9 +2041,7 @@ fn l13_08_offline_volume_never_burns_attempts_and_poisoned_rows_heal() {
         direct
             .execute("UPDATE ingest_passes SET not_before = NULL", [])
             .unwrap();
-        env.lib
-            .process_queue(&QueueOptions::default())
-            .unwrap();
+        env.lib.process_queue(&QueueOptions::default()).unwrap();
     }
     let (max_attempts, errors): (i64, i64) = direct
         .query_row(

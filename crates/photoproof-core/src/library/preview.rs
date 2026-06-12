@@ -358,7 +358,9 @@ pub fn write_artifacts(
     let mut out = Vec::with_capacity(2);
     // Derive the thumb from the display-size render: one large resize, one
     // small one — and bitwise stability between the two artifacts' geometry.
-    let display = metrics.resize.time(|| resize_to_edge(display_oriented, DISPLAY_EDGE));
+    let display = metrics
+        .resize
+        .time(|| resize_to_edge(display_oriented, DISPLAY_EDGE));
     let thumb = metrics.resize.time(|| resize_to_edge(&display, THUMB_EDGE));
     for (kind, img, quality) in [
         (ArtifactKind::Display, &display, DISPLAY_QUALITY),
@@ -508,11 +510,10 @@ pub fn largest_chained_jpeg(source: &rawler::rawsource::RawSource) -> Option<Cha
             return;
         };
         // Header-only probe: dimensions without decoding megapixels.
-        let Ok((width, height)) = image::ImageReader::with_format(
-            std::io::Cursor::new(bytes),
-            image::ImageFormat::Jpeg,
-        )
-        .into_dimensions() else {
+        let Ok((width, height)) =
+            image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Jpeg)
+                .into_dimensions()
+        else {
             return;
         };
         // The preview's OWN orientation tag — only trusted off the root
@@ -805,11 +806,8 @@ mod tests {
 
     /// Decodable JPEG bytes at the requested dimensions.
     fn jpeg_blob(w: u32, h: u32) -> Vec<u8> {
-        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
-            w,
-            h,
-            image::Rgb([90, 120, 60]),
-        ));
+        let img =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([90, 120, 60])));
         encode_jpeg_native(&img).unwrap()
     }
 
@@ -894,10 +892,7 @@ mod tests {
         assert_eq!(c.own_orientation, None);
         // A bigger root beats a smaller chained JPEG (the sweep is by pixel
         // edge, not by chain position).
-        let tiff = synthetic_tiff(&[
-            (jpeg_blob(320, 200), None),
-            (jpeg_blob(160, 100), Some(8)),
-        ]);
+        let tiff = synthetic_tiff(&[(jpeg_blob(320, 200), None), (jpeg_blob(160, 100), Some(8))]);
         let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
         let c = largest_chained_jpeg(&source).expect("root JPEG found");
         assert_eq!((c.width, c.height), (320, 200));

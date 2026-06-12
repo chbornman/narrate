@@ -354,6 +354,9 @@ impl DownloadManager {
     /// the HF resolve→CDN redirect, honors Range resume. The stub-server
     /// `http://` path above stays on the localhost-grade client the §13
     /// acceptance tests drive.
+    // The argument list mirrors the transfer's full resume context; a
+    // params struct would only rename the coupling.
+    #[allow(clippy::too_many_arguments)]
     fn fetch_https(
         &self,
         model: &ModelEntry,

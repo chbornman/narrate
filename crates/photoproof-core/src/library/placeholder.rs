@@ -40,7 +40,7 @@ impl PlaceholderDetector for PlatformPlaceholderDetector {
         {
             use std::os::macos::fs::MetadataExt;
             const SF_DATALESS: u32 = 0x4000_0000;
-            return metadata.st_flags() & SF_DATALESS != 0;
+            metadata.st_flags() & SF_DATALESS != 0
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use photoproof_connectors::openai::{EndpointCell, InFlightGauge, LostReports};
 use photoproof_core::capture::SystemClock;
 use photoproof_core::runtime::launch;
 use photoproof_core::runtime::manifest::{Manifest, ModelEntry};
@@ -29,7 +30,6 @@ use photoproof_core::runtime::process::{
 };
 use photoproof_core::runtime::supervisor::{Supervisor, SupervisorConfig, WeightsGate};
 use photoproof_core::runtime::{ChildRegistry, InstanceLock, ProcessId, RuntimeBus};
-use photoproof_connectors::openai::{EndpointCell, InFlightGauge, LostReports};
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);

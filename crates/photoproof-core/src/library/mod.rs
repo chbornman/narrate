@@ -1523,19 +1523,20 @@ impl Library {
             if wave_cap == 0 {
                 break;
             }
-            let items: Vec<ingest::QueueItem> = self.metrics.queue_claim.time(
-                || -> Result<_, LibraryError> {
-                    let conn = self.db.lock().expect("poisoned");
-                    let mut claimed = Vec::with_capacity(wave_cap);
-                    while claimed.len() < wave_cap {
-                        match ingest::claim_next(&conn, self.now())? {
-                            Some(item) => claimed.push(item),
-                            None => break,
+            let items: Vec<ingest::QueueItem> =
+                self.metrics
+                    .queue_claim
+                    .time(|| -> Result<_, LibraryError> {
+                        let conn = self.db.lock().expect("poisoned");
+                        let mut claimed = Vec::with_capacity(wave_cap);
+                        while claimed.len() < wave_cap {
+                            match ingest::claim_next(&conn, self.now())? {
+                                Some(item) => claimed.push(item),
+                                None => break,
+                            }
                         }
-                    }
-                    Ok(claimed)
-                },
-            )?;
+                        Ok(claimed)
+                    })?;
             if items.is_empty() {
                 break;
             }
@@ -1751,7 +1752,11 @@ impl Library {
         abs: &Path,
         report: &mut QueueReport,
     ) -> Result<(), LibraryError> {
-        let extracted = match self.metrics.raw_extract.time(|| self.extractor.extract(abs)) {
+        let extracted = match self
+            .metrics
+            .raw_extract
+            .time(|| self.extractor.extract(abs))
+        {
             Ok(x) => x,
             Err(e) => return self.fail_preview(item, e, report),
         };

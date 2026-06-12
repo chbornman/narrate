@@ -254,7 +254,10 @@ impl VolumeProbe for PlatformVolumeProbe {
             return Err(io::Error::last_os_error());
         }
         let mounts = unsafe { std::slice::from_raw_parts(raw, n as usize) };
-        Ok(mounts.iter().filter_map(macos::probed_from_statfs).collect())
+        Ok(mounts
+            .iter()
+            .filter_map(macos::probed_from_statfs)
+            .collect())
     }
 
     /// macOS override of the default longest-prefix lookup: statfs the
@@ -395,7 +398,22 @@ mod macos {
         let u = buf.uuid;
         Some(format!(
             "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-            u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
+            u[0],
+            u[1],
+            u[2],
+            u[3],
+            u[4],
+            u[5],
+            u[6],
+            u[7],
+            u[8],
+            u[9],
+            u[10],
+            u[11],
+            u[12],
+            u[13],
+            u[14],
+            u[15]
         ))
     }
 

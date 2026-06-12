@@ -44,7 +44,9 @@ use photoproof_core::library::{
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("ingest") {
-        eprintln!("usage: pp-bench ingest [--files N] [--edge PX] [--source DIR] [--label S] [--out FILE]");
+        eprintln!(
+            "usage: pp-bench ingest [--files N] [--edge PX] [--source DIR] [--label S] [--out FILE]"
+        );
         std::process::exit(2);
     }
     let mut files: usize = 500;
@@ -113,7 +115,9 @@ fn main() {
         )
         .expect("open library"),
     );
-    let root = lib.register_root(&root_dir, Some("bench")).expect("register root");
+    let root = lib
+        .register_root(&root_dir, Some("bench"))
+        .expect("register root");
 
     // ---- the measured section -------------------------------------------------
     let t0 = Instant::now();
@@ -156,7 +160,9 @@ fn main() {
         stages.join(","),
         std::env::consts::OS,
         std::env::consts::ARCH,
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
     );
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -194,7 +200,11 @@ fn generate_corpus(dir: &Path, files: usize, edge: u32) {
                 .wrapping_mul(31)
                 .wrapping_add(y.wrapping_mul(17))
                 .wrapping_add(seed);
-            image::Rgb([(v & 0xff) as u8, ((v >> 8) & 0xff) as u8, ((v >> 4) & 0xff) as u8])
+            image::Rgb([
+                (v & 0xff) as u8,
+                ((v >> 8) & 0xff) as u8,
+                ((v >> 4) & 0xff) as u8,
+            ])
         });
         let mut bytes = Vec::new();
         JpegEncoder::new_with_quality(&mut bytes, 88)
@@ -223,11 +233,11 @@ fn rfc3339_now() -> String {
     // Days-to-civil (Howard Hinnant's algorithm) — bench metadata, not
     // journal truth; leap seconds don't matter here.
     let days = (secs / 86_400) as i64;
-    let (mut y, mut doy) = ((days + 719_468) / 146_097 * 400, 0i64);
+    let mut y = (days + 719_468) / 146_097 * 400;
     let doe = (days + 719_468) % 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     y += yoe;
-    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };

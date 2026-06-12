@@ -74,25 +74,27 @@ fn parse_args() -> Args {
 }
 
 fn recognizer(a: &Args) -> OnlineRecognizer {
-    let mut config = OnlineRecognizerConfig::default();
-    config.model_config = OnlineModelConfig {
-        transducer: OnlineTransducerModelConfig {
-            encoder: Some(a.encoder.clone()),
-            decoder: Some(a.decoder.clone()),
-            joiner: Some(a.joiner.clone()),
+    let config = OnlineRecognizerConfig {
+        model_config: OnlineModelConfig {
+            transducer: OnlineTransducerModelConfig {
+                encoder: Some(a.encoder.clone()),
+                decoder: Some(a.decoder.clone()),
+                joiner: Some(a.joiner.clone()),
+            },
+            tokens: Some(a.tokens.clone()),
+            num_threads: a.num_threads,
+            ..Default::default()
         },
-        tokens: Some(a.tokens.clone()),
-        num_threads: a.num_threads,
+        decoding_method: Some("greedy_search".into()),
+        // Endpointing authority lives HERE (CAPTURE §6.3) — sherpa's
+        // canonical rule values; the in-process VAD only gates and stamps
+        // onsets.
+        enable_endpoint: true,
+        rule1_min_trailing_silence: 2.4,
+        rule2_min_trailing_silence: 1.2,
+        rule3_min_utterance_length: 20.0,
         ..Default::default()
     };
-    config.decoding_method = Some("greedy_search".into());
-    // Endpointing authority lives HERE (CAPTURE §6.3) — sherpa's
-    // canonical rule values; the in-process VAD only gates and stamps
-    // onsets.
-    config.enable_endpoint = true;
-    config.rule1_min_trailing_silence = 2.4;
-    config.rule2_min_trailing_silence = 1.2;
-    config.rule3_min_utterance_length = 20.0;
     OnlineRecognizer::create(&config).unwrap_or_else(|| {
         eprintln!("pp-asr-server: recognizer create failed (model paths/threads?)");
         std::process::exit(1);
@@ -107,11 +109,7 @@ fn samples_of(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn result_json(
-    r: &sherpa_onnx::RecognizerResult,
-    segment: u32,
-    is_final: bool,
-) -> String {
+fn result_json(r: &sherpa_onnx::RecognizerResult, segment: u32, is_final: bool) -> String {
     serde_json::json!({
         "text": r.text,
         "tokens": r.tokens,
@@ -211,7 +209,11 @@ mod tests {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         assert_eq!(samples_of(&bytes), vec![0.0, 0.5, -1.0]);
-        assert_eq!(samples_of(&bytes[..5]), vec![0.0], "trailing partial dropped");
+        assert_eq!(
+            samples_of(&bytes[..5]),
+            vec![0.0],
+            "trailing partial dropped"
+        );
     }
 
     #[test]

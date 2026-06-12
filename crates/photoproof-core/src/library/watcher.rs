@@ -376,12 +376,8 @@ impl WatchPipeline {
             return Ok(vec![]);
         }
         let (Some(from_rel), Some(to_rel)) = (
-            self.in_root(&from)
-                .then(|| self.rel_of(&from))
-                .flatten(),
-            self.in_root(&to)
-                .then(|| self.rel_of(&to))
-                .flatten(),
+            self.in_root(&from).then(|| self.rel_of(&from)).flatten(),
+            self.in_root(&to).then(|| self.rel_of(&to)).flatten(),
         ) else {
             fallback(self);
             return Ok(vec![]);
