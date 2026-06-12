@@ -87,7 +87,7 @@ Tags: **[MVP]** P4.2 must ship it · **[nice]** ship if cheap in-packet ·
 this image, bottom = the set)
 
 - **[MVP] Left rail = generalized source list**, architected now for M3:
-  folders today; projects and saved searches join as siblings later (every
+  folders today; collections and saved searches join as siblings later (every
   reference app puts collections on the left). Resizable, persisted,
   `\` toggles, push-not-overlay.
 - **[MVP] Right inspector** (push, resizable, persisted, hidden by
@@ -175,9 +175,9 @@ destructive file verbs at all).
   cycle key reserved; wheel-zoom stays live while a tool is active.
 - Indicator mic segment + one bare key reserved for M2b (press-toggle /
   hold-momentary).
-- Rail = source list (M3 projects/saved-searches); active-query residue
+- Rail = source list (M3 collections/saved-searches); active-query residue
   shows in the indicator with one-key clear; drag-selection-to-rail files
-  into projects (enabled by marquee + drag split).
+  into collections (enabled by marquee + drag split).
 - Look bottom edge = filmstrip/scrubber alternates (M4); right edge =
   journal/partner (M5); both obey Tab.
 

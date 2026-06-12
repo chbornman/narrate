@@ -1,13 +1,13 @@
-# RETRIEVAL.md — Indexing, Search, Ranking, Context Assembly, Derived Views, Projects
+# RETRIEVAL.md — Indexing, Search, Ranking, Context Assembly, Derived Views, Collections
 
 Status: Draft 1, June 2026. Closes SPEC-GAPS E1–E4, plus the read-scope context
-model and the project/intent store.
+model and the collections store.
 
 Boundaries (normative): `EVENTS.md` owns the event log, fold rules, and the
 `event_fts`/`fts_map` DDL and construction (the single normative FTS design —
 EVENTS §5.4); this spec owns **what** gets indexed and when, the
 `vectors` table in full, query processing, ranking, the result data contract,
-context assembly, derived views, and the project store. `RUNTIME.md` owns model
+context assembly, derived views, and the collections store. `RUNTIME.md` owns model
 serving; this spec consumes the `Embedder` and `LanguageModel` traits.
 `UI.md` owns presentation; it renders the result contract in §5.4 verbatim.
 `LIBRARY.md` owns backfill-pass mechanics; this spec defines what the embedding
@@ -227,7 +227,7 @@ Per text-bearing event, over the **folded** text:
   offsets always refer to the *current* folded text.
 - **Tiny-chunk context prefix (normative):** chunks under ~2 sentences are
   embedded with a deterministic metadata prefix prepended **at embed time
-  only** — capture/annotation date, folder name, and active project name if
+  only** — capture/annotation date, folder name, and active collection name if
   any (e.g. `[2026-01-14 · 2026/iceland · Quiet Hours] `). One-sentence texts
   benefit measurably from added context at embed time
   ([One Word Is Not Enough](https://arxiv.org/html/2512.06744)). The prefix
@@ -381,7 +381,7 @@ pub enum Filter {
     Folder    (PathMatch),            // subtree of a watched root
     Root      (String),               // watched-root name
     Rating    (Comparison),           // folded current rating, 0..=5
-    Project   (ProjectRef),           // resolved against the project store, §10
+    Collection(CollectionRef),        // resolved against the collections store, §10
     Volume    (VolumeFilter),
     HasStrokes(bool),
     Source    (Vec<EventSource>),     // voice | typed | pencil | system
@@ -406,7 +406,7 @@ pub enum StringMatch { Exact(String), Contains(String) }    // case-insensitive
 pub enum PathMatch   { Subtree(String), NameContains(String) }
 pub enum Comparison  { Eq(u8), Gte(u8), Lte(u8), Between(u8, u8) }
 
-pub struct ProjectRef { pub raw: String, pub resolved: Option<Ulid> } // §10.3 fuzzy resolution
+pub struct CollectionRef { pub raw: String, pub resolved: Option<Ulid> } // §10.3 fuzzy resolution
 pub enum VolumeFilter { Online, Offline, Named(String) }
 
 pub struct DroppedClause { pub raw: serde_json::Value, pub reason: String }
@@ -429,7 +429,7 @@ response format, `temperature 0`). Top level — all three keys required:
 { "type":"lens",        "value": string }
 { "type":"folder",      "value": string }
 { "type":"rating",      "op":"eq"|"gte"|"lte", "value": 0-5 }
-{ "type":"project",     "name": string }
+{ "type":"collection",  "name": string }
 { "type":"volume",      "value": "online"|"offline" }
 { "type":"has_strokes", "value": bool }
 { "type":"source",      "values": ["voice"|"typed"|"pencil", …] }
@@ -443,16 +443,16 @@ response format, `temperature 0`). Top level — all three keys required:
   only when the query describes what is IN the picture (objects, colors,
   composition), not what the photographer said or felt about it"; "emit only
   fields you are certain of; omit, never guess."
-- Grounding lists, kept small: project names with status (§10), distinct
+- Grounding lists, kept small: collection names with status (§10), distinct
   camera/lens strings from EXIF (≤ 40 each, most-used first), root names.
-- 4–6 few-shot pairs covering: relative season date, project fuzzy name,
+- 4–6 few-shot pairs covering: relative season date, collection fuzzy name,
   rating + camera combo, pure-semantic (empty filters), explicitly visual.
 - User message: the raw query string.
 
 **Validation (hallucination firewall):** deserialize with
 `deny_unknown_fields` per variant; each filter validates independently.
 Unknown `type`, out-of-range rating, unparseable date, camera/lens matching
-nothing in the EXIF vocabulary (case-insensitive contains), project with no
+nothing in the EXIF vocabulary (case-insensitive contains), collection with no
 fuzzy match ≥ threshold (§10.3) → that clause is **dropped**, recorded in
 `ParsedQuery::dropped`, visible with its reason in the dev-build debug panel.
 A dropped clause never fails the query. If everything drops and `semantic` is
@@ -615,23 +615,23 @@ text at render time, so a stale index row cannot resurrect scrubbed bytes.
 
 ### 7.1 M3: "pull up the images I was considering for that quieter, melancholic series last winter"
 
-**Stage 1 — parse** (LLM, < 1.5 s). Project store contains
+**Stage 1 — parse** (LLM, < 1.5 s). Collections store contains
 `Quiet Hours (active)`, `Harbor Nights (shelved)`. Model emits:
 
 ```json
 { "filters": [
     { "type": "date", "field": "annotated",
       "relative": { "unit": "season", "season": "winter", "n": 1 } },
-    { "type": "project", "name": "quieter melancholic series" } ],
+    { "type": "collection", "name": "quieter melancholic series" } ],
   "semantic": "quieter, melancholic series I was considering",
   "visual": false }
 ```
 
 Validation: date OK ("last winter", `field: annotated` because the query is
 about when the *considering* happened) → resolves (run June 2026) to
-`[2025-12-01, 2026-03-01)`. Project fuzzy match: "quieter melancholic series"
+`[2025-12-01, 2026-03-01)`. Collection fuzzy match: "quieter melancholic series"
 vs. {Quiet Hours, Harbor Nights} → best similarity 0.41 < 0.80 threshold →
-clause **dropped**, `dropped: [{reason: "no project ≥ 0.80: best 'Quiet
+clause **dropped**, `dropped: [{reason: "no collection ≥ 0.80: best 'Quiet
 Hours' 0.41"}]` (debug panel). Resulting `ParsedQuery`: one Date filter,
 semantic remainder as above, `visual: false`.
 
@@ -661,7 +661,7 @@ sub-lists at 0.5 each per §5.3. Final order: **A, B, C**.
 `Quote { event_id: 01HV…Q3, ts: 2026-01-14T21:08:11Z, source: voice, text:
 "something quieter in these three… almost mournful, could anchor the slow
 series", char_start: 0, char_end: 88, … }`. Debug panel (dev build) shows the
-three per-signal ranks, the fused 0.043997, and the dropped project clause.
+three per-signal ranks, the fused 0.043997, and the dropped collection clause.
 
 ### 7.2 M1: typing `fog ba` with filter chip `rating ≥ 3`
 
@@ -688,7 +688,7 @@ concentric layers, in order:
 
 ```
 B_total = model_ctx − output_reserve(1024) − prompt_overhead(512)
-caps:  selection 40% · recency 15% · folder 10% · projects 10% · retrieval 25%
+caps:  selection 40% · recency 15% · folder 10% · collections 10% · retrieval 25%
 ```
 
 Fill order is layer 1 → 5; **unspent tokens from each layer roll forward** to
@@ -700,7 +700,7 @@ retrieval, which can always consume more pulls).
 | 1. Selection | full **folded** transcripts + stroke descriptors of selected images, via event log | verbatim, oldest→newest, per-image headers (hash short-form, filename, capture date) | cap split evenly across selected images (unused share redistributed); within an image keep **newest events verbatim**, replace the truncated older span with that image's rolling summary + an explicit `[older notes summarized]` marker |
 | 2. Recency trail | last **15** viewed images this session (session = 30-min-idle rule) | each image's rolling summary (§9.1), 1–2 sentences | drop oldest-viewed first |
 | 3. Current folder | the folder rollup (§9.2) for the folder of the primary selection | one rollup block | hard-truncate tail |
-| 4. Active projects | project store: projects with `status=active` | name + description + last 5 notes each | drop least-recently-updated projects first, then oldest notes |
+| 4. Active collections | collections store: collections with `status=active` | name + description + last 5 notes each | drop least-recently-updated collections first, then oldest notes |
 | 5. Retrieval pulls | the §5 pipeline, queried with the caller-supplied question/topic | top-K results' provenance quotes + image identifiers | take results in fused order until budget exhausted |
 
 Token counting uses the serving model's tokenizer when RUNTIME.md exposes it,
@@ -810,12 +810,14 @@ summary text may paraphrase scrubbed content. Affected summaries regenerate in
 the background afterward. `summaries_fts` and `image_summary` vectors follow
 their summary rows in the same transaction.
 
-## 10. Project / intent store
+## 10. Collections store
+
+Named collections (B71); earlier drafts said projects.
 
 ### 10.1 Tables
 
 ```sql
-CREATE TABLE projects (
+CREATE TABLE collections (
   id          TEXT PRIMARY KEY,               -- ULID
   name        TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
@@ -823,45 +825,45 @@ CREATE TABLE projects (
   created_ts  TEXT NOT NULL,                  -- RFC 3339 UTC
   updated_ts  TEXT NOT NULL
 );
-CREATE TABLE project_notes (                  -- append-only, like the event log
-  id         TEXT PRIMARY KEY,                -- ULID
-  project_id TEXT NOT NULL REFERENCES projects(id),
-  ts         TEXT NOT NULL,
-  text       TEXT NOT NULL
+CREATE TABLE collection_notes (               -- append-only, like the event log
+  id            TEXT PRIMARY KEY,             -- ULID
+  collection_id TEXT NOT NULL REFERENCES collections(id),
+  ts            TEXT NOT NULL,
+  text          TEXT NOT NULL
 );
-CREATE TABLE project_members (                -- membership is evented, not destructive
-  project_id TEXT NOT NULL REFERENCES projects(id),
-  image_hash TEXT NOT NULL,
-  added_ts   TEXT NOT NULL,
-  removed_ts TEXT,                            -- NULL = currently a member
-  PRIMARY KEY (project_id, image_hash, added_ts)
+CREATE TABLE collection_members (             -- membership is evented, not destructive
+  collection_id TEXT NOT NULL REFERENCES collections(id),
+  image_hash    TEXT NOT NULL,
+  added_ts      TEXT NOT NULL,
+  removed_ts    TEXT,                         -- NULL = currently a member
+  PRIMARY KEY (collection_id, image_hash, added_ts)
 );
 ```
 
 Removing an image sets `removed_ts` on the open interval row; re-adding
 inserts a new row with a new `added_ts`. Full membership history is therefore
 queryable ("was in the series last winter, dropped in spring") — required for
-M4 temporal questions. `project_notes` rows are never edited or deleted.
+M4 temporal questions. `collection_notes` rows are never edited or deleted.
 
-**Project notes are not FTS-indexed in v1** — they are not image events
+**Collection notes are not FTS-indexed in v1** — they are not image events
 (`event_fts` would be a category error) and not derived prose
 (`summaries_fts` would launder user truth through the fuel tier). They reach
 the model through context assembly (layer 4) and reach search through
-project-filter resolution; v1 does not full-text-rank projects as results.
-A dedicated `projects_fts` table is recorded as a candidate v1.x addition if
-dogfooding wants "find that project."
+collection-filter resolution; v1 does not full-text-rank collections as
+results. A dedicated `collections_fts` table is recorded as a candidate v1.x
+addition if dogfooding wants "find that collection."
 
-### 10.2 Portability — projects are user truth (sidecar-equivalent required)
+### 10.2 Portability — collections are user truth (sidecar-equivalent required)
 
-Projects fail the "SQLite is a rebuildable index" test unless mirrored.
+Collections fail the "SQLite is a rebuildable index" test unless mirrored.
 Normative: a single export file in app data, mirrored by the same debounced
 writer that maintains sidecars (SIDECARS.md mechanics):
 
 ```
-appdata/projects.photoproof.json
+appdata/collections.photoproof.json
 {
   "version": 1,
-  "projects": [ {
+  "collections": [ {
       "id": "01HV…", "name": "Quiet Hours", "description": "…",
       "status": "active",
       "created_ts": "2026-01-02T19:00:00Z", "updated_ts": "2026-05-30T22:10:00Z",
@@ -873,30 +875,30 @@ appdata/projects.photoproof.json
 
 - Included in the one-click full export beside the sidecar set + manifest;
   consumed by rebuild-from-sidecars. "You can walk away with everything"
-  includes your projects.
-- **Merge rules (union family, mirroring C2):** projects merge by project
+  includes your collections.
+- **Merge rules (union family, mirroring C2):** collections merge by collection
   `id`; `notes` merge by set-union on note id (append-only ⇒ conflict-free);
-  `members` merge by union on `(project_id, image_hash, added_ts)`, and for a
-  matching key a non-null `removed_ts` beats null (a recorded removal never
+  `members` merge by union on `(collection_id, image_hash, added_ts)`, and for
+  a matching key a non-null `removed_ts` beats null (a recorded removal never
   un-happens by merging a stale copy); two different non-null `removed_ts`
-  resolve to the earlier. Project metadata (name/description/status) is the
+  resolve to the earlier. Collection metadata (name/description/status) is the
   one mutable surface: **last-writer-wins by `updated_ts`** — accepted as a
   pragmatic exception to pure union, confined to three display fields.
 - Image redaction does not touch membership rows (they contain only hashes);
   if an image's events are redacted it simply has no quotable journal.
 
-### 10.3 Projects in search and context
+### 10.3 Collections in search and context
 
-- **Filter:** `Filter::Project` constrains results to current members
-  (`removed_ts IS NULL`) of the resolved project, joined through
-  `project_members`.
+- **Filter:** `Filter::Collection` constrains results to current members
+  (`removed_ts IS NULL`) of the resolved collection, joined through
+  `collection_members`.
 - **Fuzzy name resolution (parse-time):** the parser's emitted `name` is
-  matched against all project names — every status — by normalized
+  matched against all collection names — every status — by normalized
   Jaro-Winkler similarity, **threshold 0.80**; ties broken by status
   (`active` > `shelved` > `done`) then `updated_ts`. Below threshold → clause
   dropped with debug visibility (§5.1). The grounding list in the parse
   prompt makes the LLM emit near-exact names in the common case.
-- **Context assembly:** active projects are layer 4 (§8).
+- **Context assembly:** active collections are layer 4 (§8).
 
 ## 11. Reindexing & model swap
 
@@ -963,7 +965,7 @@ before/after numbers on it.
    query still returns results via whole-query FTS + vector with zero filters,
    `fallback=true` visible in the debug panel; no user-facing error.
 4. **Hallucination firewall:** a parse emitting an unknown filter type, an
-   invalid rating, or an unresolvable project/camera name drops exactly those
+   invalid rating, or an unresolvable collection/camera name drops exactly those
    clauses (visible with reasons in the debug panel) and executes the rest.
 5. **Retraction/redaction:** the instant the retraction/redaction call
    returns, the affected text is absent from FTS results, vector results,
@@ -980,8 +982,8 @@ before/after numbers on it.
 8. **Rebuildability:** dropping `vectors`, both FTS tables,
    `derived_summaries`, and `sentiment_scores`, then running the rebuild
    passes, restores search behavior byte-for-byte equal provenance output.
-9. **Projects round-trip:** delete SQLite; rebuild from sidecars +
-   `projects.photoproof.json`; projects, notes, and full membership history
+9. **Collections round-trip:** delete SQLite; rebuild from sidecars +
+   `collections.photoproof.json`; collections, notes, and full membership history
    (including closed intervals) are intact. Merging a stale copy of the file
    never un-removes a member and never loses a note.
 10. **Fuel-only invariant:** no release-build UI surface renders

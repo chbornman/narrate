@@ -23,7 +23,7 @@ Normative specs (`spec/` — where these and `docs/` disagree, `spec/` wins):
 - [spec/SIDECARS.md](spec/SIDECARS.md) — sidecar format, overflow store, export/rebuild
 - [spec/LIBRARY.md](spec/LIBRARY.md) — identity, volumes, watcher, ingest passes, previews
 - [spec/CAPTURE.md](spec/CAPTURE.md) — sessions, write-scope binding, voice, grease pencil
-- [spec/RETRIEVAL.md](spec/RETRIEVAL.md) — indexes, query pipeline, ranking, projects
+- [spec/RETRIEVAL.md](spec/RETRIEVAL.md) — indexes, query pipeline, ranking, collections
 - [spec/RUNTIME.md](spec/RUNTIME.md) — local model runtime, processes, tiers, downloads
 - [spec/UI.md](spec/UI.md) — the three surfaces, indicator, journal panel, debug panel
 - [spec/DECISIONS.md](spec/DECISIONS.md) — architecture decision log + open questions
@@ -50,6 +50,6 @@ Tauri 2 · Rust core · SQLite (WAL) + FTS5 · BLAKE3 · rawler · local ASR/LLM
 |---|---|
 | M1 — Spine | Ingest, content-addressed library, browser, typed notes → event log → sidecars, FTS5 search |
 | M2 — The Sheet | Streaming voice capture, grease-pencil markup, stroke↔utterance linking, local summaries |
-| M3 — Retrieval | Embeddings, hybrid search, project/intent memory, natural-language query |
+| M3 — Retrieval | Embeddings, hybrid search, collections (intent memory), natural-language query |
 | M4 — Time | Sentiment trajectories, "changed my mind" queries, per-image timeline, stroke scrubbing |
 | M5 — Partner | Cloud connector (Claude), two-way conversation, premium tier |

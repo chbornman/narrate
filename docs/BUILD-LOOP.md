@@ -114,7 +114,7 @@ UI journal-panel criteria.
 **P7.1 Vector store** (PPVEC v2 int8/MRL, scrub/compact) + chunking +
 embedding passes against mock Embedder · **P7.2 Hybrid search** (RRF fusion,
 filter AST validation + fallback path, provenance contract) against mock
-LanguageModel · **P7.3 Projects store** (+ portability file, union merge).
+LanguageModel · **P7.3 Collections store** (+ portability file, union merge).
 Gate: RETRIEVAL §13 acceptance incl. PPVEC round-trip + redaction byte-scan,
 worked-example walkthroughs reproduced with deterministic mock embeddings.
 Real-model retrieval *quality* (golden-query eval, reranker go/no-go) is

@@ -72,9 +72,9 @@ this file is the index of *why*.
 - **R3.** image_clip participates only when the query is explicitly visual or own-words recall is thin (< 10 images) — protects the own-words identity.
 - **R4.** Provenance ladder: chunk span → FTS snippet → re-resolved event quote; summary text is never quoted; visual matches labeled honestly; session-level hits never attributed to images.
 - **R5.** Query parse: temperature 0, grammar-constrained JSON, grounding lists, per-clause drop-don't-fail; < 1.5 s or fall back to whole-query FTS+vector.
-- **R6.** Projects: separate store, evented membership (interval rows), portable via `projects.photoproof.json` with union-merge; project metadata is the system's one named last-writer-wins exception.
+- **R6.** Collections (B71; earlier drafts said projects): separate store, evented membership (interval rows), portable via `collections.photoproof.json` with union-merge; collection metadata is the system's one named last-writer-wins exception.
 - **R7.** Sentiment stored (int −2..+2) but consumed by nothing until the M3 quality evaluation passes.
-- **R8.** Context assembler: budget caps 40/15/10/10/25 % (selection/recency/folder/projects/retrieval), unspent rolls forward; emits layer-tagged blocks, never final prompts.
+- **R8.** Context assembler: budget caps 40/15/10/10/25 % (selection/recency/folder/collections/retrieval), unspent rolls forward; emits layer-tagged blocks, never final prompts.
 
 ## RUNTIME (spec/RUNTIME.md)
 

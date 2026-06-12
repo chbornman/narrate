@@ -202,9 +202,9 @@ it is also the answer to "what happens when models improve."
 ### E1. Nobody parses the natural-language query
 M3 promises "pull up the images I was considering for that quieter,
 melancholic series" — that requires decomposing NL into structured filters
-(date, project, rating) + semantic query text. Embedding the raw sentence
+(date, collection, rating) + semantic query text. Embedding the raw sentence
 and hoping is not a plan; "that series I shelved last winter" has temporal
-and project clauses embeddings won't honor. Spec the query pipeline:
+and collection clauses embeddings won't honor. Spec the query pipeline:
 local LLM (same llama.cpp seam) parses the query into a typed filter AST +
 semantic remainder → candidate generation across the four signals → rank
 fusion (name the algorithm: RRF, k=60, it's fine) → group hits by image →
@@ -312,7 +312,7 @@ Phase 3  M2b VOICE   ASR streaming, binding rule from CAPTURE.md, audio
 
 Phase 4  M3 RETRIEVE Embedding passes (staged-ingest backfill), hybrid
                      search + query parse + quote-provenance results,
-                     project/intent store.
+                     collections store.
 
 Phase 5  M4 TIME     As scoped (trajectories, scrubbing) — gated on E4/
                      sentiment-quality evaluation from M3 dogfooding.

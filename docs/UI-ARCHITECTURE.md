@@ -79,7 +79,7 @@ src/
                                           scope · n-of-m · auto-advance · reserved mic seat ·
                                           reserved query-residue seat (M3)
       sources.ts                     NEW  rail row model extracted from Rail.svelte: SourceSection
-                                          providers (folders now; projects/saved-searches M3),
+                                          providers (folders now; collections/saved-searches M3),
                                           flatten/nav/expand-collapse
       gridlayout.ts                  NEW  integer-column snap (container ÷ N), row math, scroll
                                           anchors/restore, Home/End/Page math          [Stage A]
@@ -148,7 +148,7 @@ src/
         SourceRail.svelte            NEW   Panel(left) + SourceList + rail-folder menu; resizable,
                                      persisted, \ toggles, push; replaces Rail.svelte (dwell
                                      hot-zone and pin affordance deleted)
-        SourceList.svelte            NEW   renders SourceSection[] — folders today; projects/
+        SourceList.svelte            NEW   renders SourceSection[] — folders today; collections/
                                      saved-searches are sibling sections in M3, zero edits
       grid/
         GridSurface.svelte           NEW   header + grid + marquee + Ctrl+wheel size wiring
@@ -336,7 +336,7 @@ One Action type, one perform sink, four renderings of one table. "Context menus 
 
 - **M2a pencil toolbar**: reserved P/E/V registry rows become real; a `pencil` ModeDef lights its indicator segment (`ActionContext.pencilMode` exists); the toolbar = the reserved `"look-toolbar"` MenuSeat rendered by a thin strip over the same MenuModel; LookStage's overlay slot mounts the stroke canvas; zoom.ts is pointer-agnostic so wheel-zoom stays live; pencil-red token already in tokens.css; Space-pan already exists.
 - **M2b mic**: `mic` ModeDef fills the segment seat logic/segments.ts already orders; `M` is a reserved row gated `asrReady`; recording state lives in the segment — the toast kind-enum makes a recording toast impossible.
-- **M3 source rail + query residue**: projects/saved-searches register as SourceSection providers in logic/sources.ts (SourceList renders siblings, zero rail edits); active-query residue = the reserved segment id + one one-key-clear registry row; drag-selection-to-rail is the `"item-drag"` branch marquee.classifyDrag already distinguishes.
+- **M3 source rail + query residue**: collections/saved-searches register as SourceSection providers in logic/sources.ts (SourceList renders siblings, zero rail edits); active-query residue = the reserved segment id + one one-key-clear registry row; drag-selection-to-rail is the `"item-drag"` branch marquee.classifyDrag already distinguishes.
 - **M4 scrubber + timeline journal**: the scrubber is an alternate child of LookSurface's bottomEdge region (both obey Tab); the per-image timeline is a rendering upgrade inside JournalTab — logic/journal.ts and the surface unchanged.
 - **M5 partner panel**: one more tab in Inspector's inline tab strip on the same Panel — the right edge stays the per-image-truth seat; zero new layout machinery.
 - **Full themes (post-M1)**: a `[data-theme]` token block; no component changes.

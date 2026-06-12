@@ -81,7 +81,7 @@ The scope doc's prime directive is log integrity and portability. M1 encodes it 
 
 ## Explicitly Out of Scope for M1
 
-Voice/ASR, the grease pencil, embeddings and vector search, LLM summaries, sentiment, projects/intent store, XMP export, cloud anything. The connector traits exist; nothing implements them yet.
+Voice/ASR, the grease pencil, embeddings and vector search, LLM summaries, sentiment, collections store, XMP export, cloud anything. The connector traits exist; nothing implements them yet.
 
 ## Decisions To Make Before Coding
 

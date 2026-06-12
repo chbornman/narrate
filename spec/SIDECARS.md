@@ -502,7 +502,7 @@ Rebuild accepts either an export directory or the live world (watched roots + ov
 
 ## 14. XMP keyword export (post-M3 — design space reserved, not specified)
 
-A one-way, lossy, **derived** export for Lightroom/Capture One interop: selected journal-derived keywords (e.g. the rating fold, project names) written to standard XMP. Constraints already decided: export-only (XMP is never a rebuild input and never truth); the app never writes into image files — XMP sidecars only; and because darktable/Lightroom also own `.xmp` sidecar files, the design must resolve coexistence with foreign XMP (a separate namespace at minimum, possibly a distinct file) before implementation. Everything else — keyword vocabulary, sync cadence, collision policy — is deliberately unspecified until post-M3.
+A one-way, lossy, **derived** export for Lightroom/Capture One interop: selected journal-derived keywords (e.g. the rating fold, collection names) written to standard XMP. Constraints already decided: export-only (XMP is never a rebuild input and never truth); the app never writes into image files — XMP sidecars only; and because darktable/Lightroom also own `.xmp` sidecar files, the design must resolve coexistence with foreign XMP (a separate namespace at minimum, possibly a distinct file) before implementation. Everything else — keyword vocabulary, sync cadence, collision policy — is deliberately unspecified until post-M3.
 
 ---
 

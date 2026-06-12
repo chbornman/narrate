@@ -205,7 +205,7 @@ CAPTURE owns stroke semantics (one pen-down→pen-up = one event, normalized dis
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │   🔍  quieter melancholic series_                              │
-│       [date: last winter ×] [project: Harbor ×]   ← chips (M3) │
+│       [date: last winter ×] [collection: Harbor ×] ← chips (M3)│
 │                                                                │
 │   ┌────┐  "this one has that stillness I keep                  │
 │   │    │   coming back to"             — 12 Jan 2026           │

@@ -55,11 +55,11 @@ panel; release builds do not contain it.
 ## Search & retrieval
 
 - Instant keyword search (FTS5) over notes and transcripts, search-as-you-type `[M1]`
-- Structured filters: date, camera/lens, folder, rating `[M1]`; project membership `[M3]`
+- Structured filters: date, camera/lens, folder, rating `[M1]`; collection membership `[M3]`
 - Semantic search over the photographer's own words (annotation embeddings primary; image embeddings as fallback for the un-annotated) `[M3]`
 - Natural-language queries parsed locally into filters + semantic search `[M3]`
 - Every result shows *why* it matched: the user's own quote or mark, dated, with session context `[M3]`
-- Projects / intent memory: named collections with evolving notes and membership `[M3]`
+- Collections (B71; earlier drafts said projects): named, with evolving notes and evented membership `[M3]`
 - Temporal queries: sentiment trajectories, "images I've come around on" `[M4]`
 - Per-image timeline and stroke time-scrubbing `[M4]`
 

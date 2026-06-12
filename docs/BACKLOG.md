@@ -202,10 +202,10 @@ managing = off-thesis).
 - [x] P6.2: pin §6.4's "ArmedSpeaking holds while any utterance is in flight" with a test — a guard-removal mutant currently survives. (P6.1 review.)
 - [x] P6.2: close processors run synchronously inline on the close/quit path — fine while the registry is empty, but §2.5 says step 3 never blocks; move onto the pump before real processors register. (P6.1 review.)
 - [ ] M2b: hold-to-talk duality; journal-changed event (above) becomes load-bearing.
-- **M3 (retrieval/projects)**: rail source-list grows projects + saved
+- **M3 (retrieval/collections)**: rail source-list grows collections + saved
   searches; drag-selection-to-rail filing; query-residue indicator segment
   with one-key clear; chip-creation UI (parser-driven); select-from-note ↔
-  project filing workflow chain.
+  collection filing workflow chain.
 - **M3 north star (founder)**: ONE unified retrieval system across all
   surfaces — toggles, filters, and sorting modes power users can configure
   precisely, over an excellent zero-config default where a quick search
@@ -223,7 +223,7 @@ managing = off-thesis).
 - **M3 additions (founder, dogfood round 2)**: free-text/fuzzy matching
   over metadata fields (camera/lens/filename — typo-tolerant) as a QUIET
   TOGGLE: never default-on, never outranks exact matches, never blocks the
-  <100 ms FTS path. **M3 design decision to make**: when projects become
+  <100 ms FTS path. **M3 design decision to make**: when collections become
   browsable grids ("collection view"), does search turn contextual — e.g.
   a right sidebar scoped to the collection — instead of the full-canvas
   destination? (Tension: the right edge is reserved for journal/partner;
@@ -283,5 +283,5 @@ audio-retention opt-in; multi-machine sync as a product feature.
 
 Color labels / pick-reject flags · metadata editing · image editing ·
 import/copy/move workflows · in-app deletion (D3) · multi-window/tabs ·
-auto-hide chrome · keyword taxonomies (projects are intent groupings with
+auto-hide chrome · keyword taxonomies (collections are intent groupings with
 evented membership — "tags with time" — never hierarchical vocabularies).

@@ -337,7 +337,7 @@ automated gate, or (b) a checklist step above. Convention:
 | 8 rebuildability (M1 slice: FTS + derived) | `m1_e2e_roundtrip.rs::c1_…` (identical search results after wipe+rebuild); `store_api.rs::fts_tracks_effective_text_per_chain_root` |
 | 10 fuel-only invariant (M1 slice) | structural: no M1 command returns derived text (none exists); `apps/desktop/scripts/assert-release-clean.sh` asserts the release surface |
 | 11 M1 query plan shape | `search_plan.rs::plan_match_resolved_in_materialized_cte`, `snippet_cost_bounded_by_limited_hit_set` |
-| 3, 4, 9, 12, 13 | M3 scope (parse fallback, hallucination firewall, projects, PPVEC, eval harness) — not M1 criteria; tracked in BUILD-LOOP Phase 7 |
+| 3, 4, 9, 12, 13 | M3 scope (parse fallback, hallucination firewall, collections, PPVEC, eval harness) — not M1 criteria; tracked in BUILD-LOOP Phase 7 |
 
 ### UI §13 budgets + M1 surface
 
