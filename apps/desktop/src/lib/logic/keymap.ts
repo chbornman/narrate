@@ -119,7 +119,9 @@ export type Action =
   | { kind: "pencil-undo" }
   | { kind: "cycle-overlay" }
   // reserved rows — dispatch to nothing until M2b
-  | { kind: "toggle-mic" };
+  | { kind: "toggle-mic" }
+  // the station's info seat (pointer-only): pin the expansion open
+  | { kind: "toggle-station-detail" };
 
 /** The P3.2 KeyContext fields — still required, so existing fixtures and
  * callers compile unchanged. */

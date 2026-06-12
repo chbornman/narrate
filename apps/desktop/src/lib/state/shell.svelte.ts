@@ -6,6 +6,7 @@
  * cross-slice flows live only in the composition root (app.svelte.ts).
  */
 import * as note from "../logic/note";
+import { transitionPops } from "../logic/station";
 import type { MenuSurface } from "../actions/menus";
 import type { IndicatorState, IngestStatus, RuntimeStatus, ScopeView } from "../types/dto";
 import type { SurroundLevel } from "../theme/surround";
@@ -52,7 +53,17 @@ export class ShellSlice {
   // -- overlays / hosts --------------------------------------------------------
   cheatsheetOpen = $state(false);
   contextMenu = $state<ContextMenuState | null>(null);
-  popoverOpen = $state(false); // indicator scope popover
+  popoverOpen = $state(false); // station hover expansion (pointer-tracked)
+  /** The info seat's pin (registry row `toggle-station-detail`): holds the
+   * station expansion open until dismissed — hover keeps working when
+   * unpinned. Esc and outside-click clear BOTH flags (closeStation), so
+   * the pinned body peels on the same escape layer the popover always had. */
+  stationPinned = $state(false);
+  /** Short rising chips popping from the station (the generalized
+   * note-pop move): note shipped, mic armed/disarmed, utterance captured.
+   * Station.svelte renders and retires them on animation end — no toasts. */
+  pops = $state<{ id: number; text: string }[]>([]);
+  #popSeq = 0;
 
   // -- viewing comfort (D6) ----------------------------------------------------
   surround = $state<SurroundLevel>("black");
@@ -141,6 +152,30 @@ export class ShellSlice {
     this.cheatsheetOpen = !this.cheatsheetOpen;
   }
 
+  /** The info seat's verb (`toggle-station-detail`). */
+  toggleStationPinned() {
+    this.stationPinned = !this.stationPinned;
+  }
+
+  /** Every dismissal path for the station expansion — Esc (via the
+   * indicator-popover escape layer) and outside-click — clears hover AND
+   * pin together: a "dismissed" station that pops back open on the next
+   * reactive tick would make Esc a liar. */
+  closeStation() {
+    this.popoverOpen = false;
+    this.stationPinned = false;
+  }
+
+  /** Flash a chip from the station (the pop move). Subtle by contract:
+   * a short rising chip, no toast, no sound. */
+  stationPop(text: string) {
+    this.pops = [...this.pops, { id: ++this.#popSeq, text }];
+  }
+
+  dismissPop(id: number) {
+    this.pops = this.pops.filter((p) => p.id !== id);
+  }
+
   openContextMenu(seat: MenuSurface, anchor: { x: number; y: number } | null, arg?: unknown) {
     this.contextMenu = { seat, anchor, arg };
   }
@@ -165,12 +200,17 @@ export class ShellSlice {
   }
 
   /** The full CAPTURE §11 contract: scope + mic + streaming + degraded.
-   * No text content ever rides this channel. */
+   * No text content ever rides this channel. Mic transitions pop from the
+   * station (logic/station.ts transitionPops — pure, tested): arm,
+   * disarm, and an utterance finalizing (the push-to-talk release). */
   onIndicatorState(state: IndicatorState) {
+    const prev = { mic: this.mic, streaming: this.streamingUtterance !== null };
     this.onScopeEcho(state.currentScope);
     this.mic = state.mic;
     this.streamingUtterance = state.streamingUtterance;
     this.asrUnavailable = state.degraded.asrUnavailable;
+    const next = { mic: state.mic, streaming: state.streamingUtterance !== null };
+    for (const text of transitionPops(prev, next)) this.stationPop(text);
   }
 
   /** §5.4 tether input for logic/segments.ts: the bound scope, flagged

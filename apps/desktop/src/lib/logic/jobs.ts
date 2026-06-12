@@ -10,8 +10,10 @@
 import type { IngestStatus } from "../types/dto";
 
 /** Queue-spelled pass names → reviewer words. Unknown names pass through
- * verbatim so a future pass surfaces itself without touching this file. */
-const KIND_LABELS: Record<string, string> = {
+ * verbatim so a future pass surfaces itself without touching this file.
+ * Exported: the station's digest rows (logic/station.ts) speak the same
+ * words — one vocabulary for "still digesting", never two. */
+export const KIND_LABELS: Record<string, string> = {
   hash: "hashing",
   exif: "reading metadata",
   preview: "building previews",

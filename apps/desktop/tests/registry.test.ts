@@ -88,8 +88,14 @@ describe("registry shape", () => {
   });
 
   it("every def has ≥1 key, a seat, or sits on the pointer-only allowlist", () => {
-    // Pointer-only rows with no seat would be unreachable; none exist.
-    const POINTER_ONLY_ALLOWLIST: string[] = [];
+    // Pointer-only rows with no seat: each must name its chrome affordance
+    // in CHROME_OR_POINTER_NATIVE below or it is unreachable.
+    const POINTER_ONLY_ALLOWLIST: string[] = [
+      // The station's info seat (Station.svelte): pins the hover expansion
+      // open. A key would make a read-only status detail compete with real
+      // verbs for chord space — deliberately pointer-only.
+      "toggle-station-detail",
+    ];
     for (const def of REGISTRY) {
       const reachable =
         def.keys.length > 0 ||
@@ -159,7 +165,7 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
     escape: "every Esc layer has a pointer dismissal (outside-click, scrim, ×)",
     "toggle-rail": "titlebar rail button (Titlebar.svelte via resolveAction)",
     "open-search": "titlebar search button",
-    "summon-note": "indicator capsule click (the note zone)",
+    "summon-note": "station note-pencil seat click (Station.svelte via resolveAction)",
     quit: "titlebar × window control",
     "toggle-debug-panel": "dev builds only (F12) — not a product surface",
     "focus-move": "pointer-native: clicking a thumb moves focus",
@@ -178,7 +184,8 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
     "remove-last-chip": "chip × buttons in the search overlay",
     "pencil-eraser":
       "pointer-native: the stylus eraser end (hold-E is the keyboard form; a menu item cannot hold)",
-    "toggle-mic": "indicator mic segment click (Indicator.svelte via resolveAction)",
+    "toggle-mic": "station mic seat click (Station.svelte via resolveAction)",
+    "toggle-station-detail": "station info seat click (Station.svelte via resolveAction)",
     // pencil-undo is SEATED (look-backdrop "Undo stroke") — its keyboard-
     // only exemption was removed by the post-P5.1 polish round.
   };

@@ -167,6 +167,19 @@ export const GLOBAL_DEFS: ActionDef[] = [
     worksInInput: true,
   },
   {
+    id: "toggle-station-detail",
+    verb: "What's happening",
+    label: "Pin the station's status detail open",
+    keys: [], // pointer-only: the station's info seat (Station.svelte)
+    scope: "global",
+    group: "system",
+    // The seat itself appears only when activities exist (station model);
+    // the VERB is always available — pinning an empty detail is a no-op
+    // body, not an error, and availability gating belongs to defs, never
+    // to a component's whim about what state the shell happens to hold.
+    available: always,
+  },
+  {
     id: "toggle-mic",
     verb: "Microphone",
     keys: [{ key: "m" }],

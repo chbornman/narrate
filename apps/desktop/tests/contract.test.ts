@@ -215,7 +215,7 @@ describe("Tab lights-out hides every chrome region (rendered App)", () => {
     expect(q(".grid-header")).not.toBeNull();
     expect(q('aside[aria-label="Sources"]')).not.toBeNull();
     expect(q('aside[aria-label="Inspector"]')).not.toBeNull();
-    expect(q(".indicator")).not.toBeNull();
+    expect(q(".station")).not.toBeNull();
     expect(q(".note")).not.toBeNull();
 
     await ui.perform({ kind: "toggle-lights-out" });
@@ -225,7 +225,7 @@ describe("Tab lights-out hides every chrome region (rendered App)", () => {
     expect(q('aside[aria-label="Sources"]')).toBeNull();
     expect(q('aside[aria-label="Inspector"]')).toBeNull();
     // The exemptions (coordinator ruling): capture-state truth stays.
-    expect(q(".indicator")).not.toBeNull();
+    expect(q(".station")).not.toBeNull();
     expect(q(".note")).not.toBeNull();
 
     await ui.perform({ kind: "toggle-lights-out" });
@@ -306,13 +306,20 @@ describe("every verb is reachable over the final registry", () => {
   it("each non-reserved def dispatches from a key in SOME context, or holds a seat", () => {
     const rnd = mulberry32(7);
     const contexts = Array.from({ length: 400 }, () => genContext(rnd));
+    // Keyless, unseated rows reachable through DEDICATED CHROME instead of
+    // a menu seat — each must also name its affordance in registry.test.ts's
+    // pointer-reachability audit (the two tables stay in lockstep).
+    const CHROME_ONLY = ["toggle-station-detail"]; // the station's info seat
     for (const def of REGISTRY) {
       if (def.reserved === true) continue;
       // Seat → menu rendering is proven by registry.test.ts seat coverage;
       // here a seat counts as reachability for pointer-only rows.
       const seated = def.seats !== undefined && def.seats.length > 0;
       if (def.keys.length === 0) {
-        expect(seated, `${def.id}@${def.scope} is pointer-only but unseated`).toBe(true);
+        expect(
+          seated || CHROME_ONLY.includes(def.id),
+          `${def.id}@${def.scope} is pointer-only but unseated`,
+        ).toBe(true);
         continue;
       }
       const fires = contexts.some((ctx) =>

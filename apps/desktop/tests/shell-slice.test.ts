@@ -106,6 +106,34 @@ describe("note transient + scope echo", () => {
   });
 });
 
+describe("the station (pin + pops)", () => {
+  it("the info seat's pin holds the expansion; closeStation clears hover AND pin", () => {
+    shell.toggleStationPinned();
+    shell.popoverOpen = true;
+    expect(shell.stationPinned).toBe(true);
+    shell.closeStation(); // Esc / outside-click: one dismissal, both flags
+    expect(shell.stationPinned).toBe(false);
+    expect(shell.popoverOpen).toBe(false);
+  });
+
+  it("mic transitions pop from the station; a scope-only echo pops nothing", () => {
+    const state = (mic: "disarmed" | "armedIdle") => ({
+      currentScope: scope("session", 0),
+      mic,
+      streamingUtterance: null,
+      degraded: { asrUnavailable: false },
+    });
+    shell.onIndicatorState(state("armedIdle"));
+    expect(shell.pops.map((p) => p.text)).toEqual(["Mic armed"]);
+    shell.onIndicatorState(state("armedIdle")); // no transition: quiet
+    expect(shell.pops.length).toBe(1);
+    shell.onIndicatorState(state("disarmed"));
+    expect(shell.pops.map((p) => p.text)).toEqual(["Mic armed", "Mic off"]);
+    shell.dismissPop(shell.pops[0].id);
+    expect(shell.pops.map((p) => p.text)).toEqual(["Mic off"]);
+  });
+});
+
 describe("pulse coalescing (UI §7.4)", () => {
   it("rapid events coalesce above ~5/s", () => {
     shell.onPulse(1000);

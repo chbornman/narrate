@@ -16,7 +16,7 @@ import * as note from "../logic/note";
 import { isMac } from "../logic/platform";
 import { escapeAction, type EscapeContext } from "../logic/escape";
 import { navigationSet } from "../logic/looknav";
-import { scopeTargets } from "../logic/scope";
+import { scopeLabel, scopeTargets } from "../logic/scope";
 import { afterCommit } from "../logic/advance";
 import {
   collectionRows,
@@ -556,10 +556,15 @@ export class Ui {
   }
 
   async submitNote(text: string) {
-    const { state } = note.submit(this.shell.note);
+    const { state, scope } = note.submit(this.shell.note);
     this.shell.note = state; // vanishes immediately (UI §6)
     const committed = await ipc.addNote(text);
     if (committed) {
+      // The pop move (founder: "which is cool"): the shipped note flashes
+      // a rising chip from the station, named with its summon-time scope.
+      this.shell.stationPop(
+        `Noted — ● ${scopeLabel(scope?.kind ?? "session", scope?.count ?? 0)}`,
+      );
       await this.refreshInspectorIfTargeted();
       // A remark lights the has-journal dot (B37): refresh badges live too.
       await this.refreshItems();
@@ -784,7 +789,9 @@ export class Ui {
       journalComposerFocused: this.inspector.composerFocused,
       noteInputOpen: this.shell.note.open,
       cheatsheetOpen: this.shell.cheatsheetOpen,
-      indicatorPopoverOpen: this.shell.popoverOpen,
+      // The station's pinned detail rides the popover's escape layer: one
+      // expansion, one peel — hover-open and pin-open close on the same Esc.
+      indicatorPopoverOpen: this.shell.popoverOpen || this.shell.stationPinned,
       debugPanelOpen: this.shell.debugOpen,
       inspectorOpen: this.inspector.open !== false,
       searchOpen: this.searchOpen,
@@ -825,7 +832,7 @@ export class Ui {
         this.shell.cheatsheetOpen = false;
         break;
       case "close-indicator-popover":
-        this.shell.popoverOpen = false;
+        this.shell.closeStation(); // hover AND pin — one dismissal
         break;
       case "close-debug-panel":
         this.shell.debugOpen = false;
@@ -1288,6 +1295,10 @@ export class Ui {
       // ---- voice capture (P6.4 — CAPTURE §6.4, §11) ----------------------------
       case "toggle-mic":
         this.shell.onIndicatorState(await ipc.toggleMic());
+        break;
+      // ---- the station's info seat: pin the expansion open --------------------
+      case "toggle-station-detail":
+        this.shell.toggleStationPinned();
         break;
     }
   }

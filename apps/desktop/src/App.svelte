@@ -33,7 +33,7 @@
     RuntimeStatus,
   } from "./lib/types/dto";
   import Titlebar from "./lib/components/shell/Titlebar.svelte";
-  import Indicator from "./lib/components/shell/Indicator.svelte";
+  import Station from "./lib/components/shell/Station.svelte";
   import NoteInput from "./lib/components/shell/NoteInput.svelte";
   import FirstRun from "./lib/components/shell/FirstRun.svelte";
   import ConsentCard from "./lib/components/shell/ConsentCard.svelte";
@@ -252,9 +252,9 @@
     <Inspector />
   </div>
 
-  <!-- exempt from lights-out: transient note input + the indicator -->
+  <!-- exempt from lights-out: transient note input + the station -->
   <NoteInput />
-  <Indicator />
+  <Station />
 
   <!-- one-time quiet model consent (UI §9.1.3) — a panel, never a gate -->
   <ConsentCard />
