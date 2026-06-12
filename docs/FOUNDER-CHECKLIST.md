@@ -40,12 +40,13 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
   panel's Retract row is the pointer path). Veto any of it and it's a
   registry remap.
 
-- [ ] **Tier-gate calibration (P6.2 finding, decide at P6.3)**: your
-  RTX 5080 reports 17,094,934,528 bytes as its largest Vulkan DEVICE_LOCAL
-  heap — 15.92 GiB, ~85 MiB UNDER the §6.2 "≥ 16 GB" Tier-2 gate, so it
-  detects as **Tier 1**. Decide: gate tolerance/headroom (e.g. ≥ 15.5 GiB),
-  a marketing-GiB conversion, or leave it and rely on the always-wins
-  override. The spike's measured VRAM numbers should settle it.
+- [ ] **Tier-gate calibration (P6.2 finding; spike session 1 adds data)**:
+  your RTX 5080 reports 15.92 GiB largest Vulkan heap — 85 MiB under the
+  §6.2 "≥ 16 GB" Tier-2 gate → detects Tier 1. Spike data (M1 Pro 16 GB):
+  E4B Q4_K_M = 6.7 GB at 16k ctx + ASR 1.1 GB runs but compresses memory →
+  the model set FITS in ~8 GB; a 15.92 GiB GPU clearly carries Tier 2.
+  Recommendation: gate at ≥ 15.5 GiB (headroom tolerance). Confirm and
+  RUNTIME §6.2 gets the number; 5080-measured VRAM lands in session 2.
 
 ## 2. Founder-machine verification — **docs/DOGFOOD-M1.md is the script**
 

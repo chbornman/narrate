@@ -29,3 +29,6 @@ bench-results.jsonl
 # for git, documented by the committed README beside them
 test-corpora/*
 !test-corpora/README.md
+
+# P6.3 spike: throwaway harness + GB-scale model artifacts (report goes to docs/)
+spike-p6.3/

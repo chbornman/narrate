@@ -619,6 +619,27 @@ ledger rows, not decisions.
   in core with the ONE subscriber installed by the desktop shell
   (env-filtered; quiet info default).
 
+## P6.3 spike decisions (June 2026, session 1 — Apple Silicon Tier-1 floor)
+
+Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
+
+- **B66 (resolves B55's open item).** Download-manager TLS client:
+  **ureq + rustls**. The manager is one serialized blocking worker (B58)
+  doing resumable GETs — synchronous fits the pump model, rustls avoids
+  the platform-OpenSSL matrix, reqwest would drag a tokio runtime into a
+  crate that deliberately has none.
+- **B67 (resolves §3.2's serving-shape question).** P2 ships as a TINY
+  RUST-CRATE WRAPPER CHILD we own, not the vendored sherpa websocket
+  server: the vendored server (v1.13.2) mints finals that DROP text its
+  own partials already decoded (reproduced; --reset-encoder irrelevant) —
+  CAPTURE mints events from finals, so lost words disqualify. Same
+  process boundary (invariant 1.1), same wire contract. Allied recipe
+  facts the wrapper must honor: ONNX intra-op threads EXPLICITLY ≥4
+  (default 1 falls behind real time), ~0.8 s silence tail before flush,
+  silero v5's 64-sample context-prepend, and llama-server gets
+  `--reasoning-budget 0` (Gemma 4 E4B thinks otherwise — constrained
+  output never reaches content).
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).
