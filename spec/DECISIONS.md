@@ -666,6 +666,20 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   real user data as dogfooding proceeds; if a rename ever comes, it is a
   sidecar-format migration with compatibility reads, not a find/replace.
 
+- **B71 (founder, June 2026 — "projects" are COLLECTIONS).** The
+  RETRIEVAL §10 project/intent store is renamed **collections** before
+  anything is built (P7.3 had zero code; the rename is free now).
+  Founder framing, now canonical: collections are the "tags not folders"
+  answer to filesystem organization — evented membership over moving
+  files, the natural home for the disparate context the app gathers; the
+  app should ENCOURAGE collecting (see BACKLOG "autosuggest
+  collections"). Mechanics unchanged: evented membership with history,
+  append-only notes, status, the portability file
+  (`collections.photoproof.json`) with C2-family union merge, fuzzy name
+  resolution in search, context-assembly layer 4. Spec text, table
+  names, parser grammar (`"type":"collection"`), and file names all
+  rename with it.
+
 ## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).

@@ -240,6 +240,19 @@ managing = off-thesis).
 - **M5 (partner)**: right-edge dockable panel sharing the inspector slot;
   summon key reserved; obeys Tab lights-out unconditionally.
 
+## Collections (B71 — the M3 curation thread)
+
+- [ ] **Autosuggest collections** (founder, June 2026): the app should
+  NATURALLY encourage collecting — that is the point of gathering all
+  this disparate context. Beyond manual creation, propose collections
+  quietly from signals the app already has: images co-annotated in one
+  session, repeated phrases across voice/typed notes, time+folder
+  affinity, search queries the user runs repeatedly. Surface as a quiet
+  suggestion (never a modal); accepting one creates the collection with
+  evented membership. Needs a design round — record signals first,
+  suggest later is a legitimate v1 (the membership tables make late
+  suggestions retroactively useful).
+
 ## Decided, awaiting founder appetite
 
 - [ ] **Sidebar design pass** — both sidebars (rail/sources, inspector) deserve a deliberate future design round (layout, affordances, what lives where) once M3's source-list growth and the collection-view question land; for now only baseline functionality matters. (Founder, dogfood round 2.)
