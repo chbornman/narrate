@@ -24,6 +24,10 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
 const SIDECAR_TICK: Duration = Duration::from_millis(500);
+/// Block-for-one-event timeout in the runtime pump's recv loop. The
+/// timeout exists to re-check `app.shutdown`, not to pace events —
+/// events wake the loop immediately; this only bounds quit latency.
+const RUNTIME_PUMP_TICK: Duration = Duration::from_millis(500);
 
 pub fn ingest_status(app: &App) -> IngestStatus {
     match app.library.pass_counters() {
@@ -195,7 +199,7 @@ pub fn spawn_runtime_pump(handle: AppHandle) {
                     return;
                 }
                 // Block for one event, then drain the burst (coalesce).
-                let Ok(first) = rx.recv_timeout(Duration::from_millis(500)) else {
+                let Ok(first) = rx.recv_timeout(RUNTIME_PUMP_TICK) else {
                     continue;
                 };
                 let mut events = vec![first];

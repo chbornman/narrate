@@ -22,6 +22,27 @@ use crate::search_types;
 use crate::session::SessionManager;
 use crate::settings::{self, AppSettings};
 
+/// Cadence of the `pp-plan-converge` loop: every consent/config/download
+/// mutation is re-applied to the supervisors within this interval (the
+/// "within a couple of seconds" self-heal latency that
+/// `RuntimeHost::apply_supervisor_plan` documents — this const is the one
+/// authoritative home for that number).
+const PLAN_CONVERGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Pump-side wait between `drain_capture_at_quit` iterations while
+/// trailing voice finals land at shutdown. The loop's BOUND is the
+/// engine's own `DRAIN_WINDOW_MS` (5 s) deadline, so this only sets the
+/// iteration granularity (~50 iterations worst case): short enough that
+/// quit feels immediate when the final lands early.
+const QUIT_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// SQLite busy timeout for the debug panel's read-only sibling connection.
+/// The connection shares a WAL database with the ingest pump and sidecar
+/// engine, so the timeout must outlast their longest write transaction or
+/// debug reads error spuriously.
+#[cfg(any(feature = "debug-panel", debug_assertions))]
+const READQ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+
 pub struct App {
     /// Shared with the sidecar engine (`SidecarEngine::new_shared`); lives
     /// for the process. Shutdown flushing is explicit, not Drop-driven.
@@ -115,7 +136,7 @@ impl App {
                 .name("pp-plan-converge".into())
                 .spawn(move || {
                     loop {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        std::thread::sleep(PLAN_CONVERGE_INTERVAL);
                         runtime.apply_supervisor_plan();
                     }
                 })
@@ -210,7 +231,7 @@ impl App {
             let mut capture = self.capture.lock().expect("capture mutex");
             if let Some(engine) = capture.as_mut() {
                 crate::pump::drain_capture_at_quit(engine, &self.store, &mut || {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    std::thread::sleep(QUIT_DRAIN_WAIT);
                 });
             }
         }
@@ -296,7 +317,7 @@ fn open_read_only(db_path: &std::path::Path) -> rusqlite::Result<rusqlite::Conne
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.busy_timeout(READQ_BUSY_TIMEOUT)?;
     Ok(conn)
 }
 

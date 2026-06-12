@@ -27,6 +27,12 @@ pub const DEBUG_PANEL_MARKER: &str = "PP_DEBUG_PANEL_RUST_MARKER";
 
 type S<'a> = State<'a, Arc<App>>;
 
+/// Silent server-side clamp on the events-tail row count, whatever the
+/// panel asks for: each row can carry full note text and target lists, so
+/// the clamp bounds the IPC payload. This is why the panel never shows
+/// more than 500 rows.
+const MAX_TAIL_ROWS: u32 = 500;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugEventRow {
@@ -53,7 +59,7 @@ pub fn debug_tail_events(app: S<'_>, limit: u32) -> CmdResult<Vec<DebugEventRow>
          FROM annotation_events ORDER BY id DESC LIMIT ?1",
     )?;
     let mut rows: Vec<DebugEventRow> = stmt
-        .query_map([limit.min(500)], |r| {
+        .query_map([limit.min(MAX_TAIL_ROWS)], |r| {
             Ok(DebugEventRow {
                 id: r.get(0)?,
                 session_id: r.get(1)?,

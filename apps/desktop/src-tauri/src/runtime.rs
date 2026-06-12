@@ -56,6 +56,32 @@ impl Consent {
     }
 }
 
+// Runtime persistence paths. Load (init) and save (set_consent /
+// accept_license / redetect_tier) used to assemble these from different
+// roots with separate string literals; one drifting literal would make
+// saves keep succeeding while the next launch silently loads nothing.
+// Every site goes through these helpers so load and save are provably
+// the same file.
+
+fn runtime_dir(app_data: &std::path::Path) -> PathBuf {
+    app_data.join("runtime")
+}
+
+/// §6: the cached tier detection (`resolve_tier` reads and writes it).
+fn tier_path(app_data: &std::path::Path) -> PathBuf {
+    runtime_dir(app_data).join("tier.json")
+}
+
+/// §5.3: recorded license acceptances.
+fn acceptances_path(app_data: &std::path::Path) -> PathBuf {
+    runtime_dir(app_data).join("acceptances.json")
+}
+
+/// §10.2–10.3: the remembered consent decision.
+fn consent_path(app_data: &std::path::Path) -> PathBuf {
+    runtime_dir(app_data).join("consent")
+}
+
 struct HostState {
     config: Config,
     /// Read by the debug panel (feature-gated); kept in every build.
@@ -98,7 +124,7 @@ pub struct RuntimeHost {
 
 impl RuntimeHost {
     pub fn init(app_data: PathBuf) -> Self {
-        let runtime_dir = app_data.join("runtime");
+        let runtime_dir = runtime_dir(&app_data);
         let bus = RuntimeBus::new();
         // §8.5: the exclusive lock; supervisors refuse to spawn without
         // it. (The Tauri single-instance plugin already kept a second
@@ -149,7 +175,7 @@ impl RuntimeHost {
         let tier = resolve_tier(
             &mut LiveProbe,
             config.runtime.tier,
-            &runtime_dir.join("tier.json"),
+            &tier_path(&app_data),
             false,
         );
 
@@ -157,8 +183,8 @@ impl RuntimeHost {
         let manifest = compiled_manifest();
         let _ = manifest.write_to(&Self::models_dir_for(&app_data, &config));
 
-        let acceptances = Acceptances::load(&runtime_dir.join("acceptances.json"));
-        let consent = std::fs::read_to_string(runtime_dir.join("consent"))
+        let acceptances = Acceptances::load(&acceptances_path(&app_data));
+        let consent = std::fs::read_to_string(consent_path(&app_data))
             .map(|s| Consent::parse(s.trim()))
             .unwrap_or(Consent::Undecided);
 
@@ -399,9 +425,8 @@ impl RuntimeHost {
             let mut state = self.state.lock().expect("runtime state");
             state.consent = consent;
         }
-        let runtime_dir = self.app_data.join("runtime");
-        let _ = std::fs::create_dir_all(&runtime_dir);
-        let _ = std::fs::write(runtime_dir.join("consent"), consent.as_str());
+        let _ = std::fs::create_dir_all(runtime_dir(&self.app_data));
+        let _ = std::fs::write(consent_path(&self.app_data), consent.as_str());
         if consent == Consent::Download {
             self.download_offered();
         }
@@ -418,7 +443,7 @@ impl RuntimeHost {
             .accept(model_id, &model.license.url, &UtcMillis::now().to_rfc3339());
         state
             .acceptances
-            .save(&self.app_data.join("runtime/acceptances.json"))
+            .save(&acceptances_path(&self.app_data))
             .map_err(|e| e.to_string())
     }
 
@@ -607,7 +632,7 @@ impl RuntimeHost {
             let tier = resolve_tier(
                 &mut LiveProbe,
                 state.config.runtime.tier,
-                &self.app_data.join("runtime/tier.json"),
+                &tier_path(&self.app_data),
                 true,
             );
             state.tier = tier;

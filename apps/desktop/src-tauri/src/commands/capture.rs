@@ -2,6 +2,10 @@
 //! from the old commands.rs (FOUNDATIONS split; owned by no parallel
 //! stage). P5.1 adds `add_stroke`, the grease pencil's one new command.
 
+use photoproof_core::event::{
+    ORIENTATION_MAX, ORIENTATION_MIN, STROKE_COORD_MAX, STROKE_COORD_MIN, STROKE_MAX_POINTS,
+    STROKE_PRESSURE_MAX,
+};
 use photoproof_core::{
     ContentHash, EventDraft, EventId, EventStore, RemarkSource, SessionId, StrokePayload,
     StrokePoint, Tool,
@@ -210,40 +214,51 @@ pub fn report_activity(app: S<'_>) -> CmdResult<String> {
 // The grease pencil (P5.1 — CAPTURE §8, EVENTS §3.3, DECISIONS X1/C5)
 // ---------------------------------------------------------------------------
 
+/// `base_w` sanity envelope, command-side ONLY: core deliberately leaves
+/// the width unbounded, so unlike the spec-pinned core ranges beside it
+/// this value is shell-owned. 1..=10000 means "up to the whole long edge"
+/// (base_w is in ten-thousandths of the display-oriented long edge) — a
+/// sane ceiling for a per-stroke width.
+const MAX_BASE_W: u32 = 10_000;
+
 /// Wire payload → core `StrokePayload`, re-checking every §8.2 range at the
 /// command boundary for honest error messages (core's `append` re-validates
-/// the canonical encoding it has owned since P1.1). `base_w` sanity is
-/// command-side: core leaves it unbounded; 1..=10000 (up to the whole long
-/// edge) is the sane envelope for a per-stroke width.
+/// the canonical encoding it has owned since P1.1). The spec ranges are
+/// core's published consts (event.rs) so this boundary check provably
+/// cannot drift from the canonical re-validation; `base_w` sanity is
+/// command-side (see `MAX_BASE_W`).
 fn stroke_payload(dto: StrokePayloadDto) -> CmdResult<StrokePayload> {
     let invalid = |msg: String| CmdError::Invalid(format!("invalid stroke payload: {msg}"));
     let Some(tool) = Tool::parse(&dto.tool) else {
         return Err(invalid(format!("unknown tool {:?}", dto.tool)));
     };
-    if !(1..=8).contains(&dto.orientation) {
+    if !(ORIENTATION_MIN..=ORIENTATION_MAX).contains(&dto.orientation) {
         return Err(invalid(format!(
             "orientation {} not in 1..=8",
             dto.orientation
         )));
     }
-    if dto.base_w == 0 || dto.base_w > 10_000 {
+    if dto.base_w == 0 || dto.base_w > MAX_BASE_W {
         return Err(invalid(format!("base_w {} not in 1..=10000", dto.base_w)));
     }
-    if dto.points.is_empty() || dto.points.len() > 8192 {
+    if dto.points.is_empty() || dto.points.len() > STROKE_MAX_POINTS {
         return Err(invalid(format!(
             "{} points not in 1..=8192",
             dto.points.len()
         )));
     }
+    // The wire carries i64; the core consts are the target types — widen
+    // them once for the range checks.
+    let coords = i64::from(STROKE_COORD_MIN)..=i64::from(STROKE_COORD_MAX);
     let mut prev_t: u32 = 0;
     let mut points = Vec::with_capacity(dto.points.len());
     for (i, [x, y, p, t]) in dto.points.iter().copied().enumerate() {
-        if !(-2500..=12500).contains(&x) || !(-2500..=12500).contains(&y) {
+        if !coords.contains(&x) || !coords.contains(&y) {
             return Err(invalid(format!(
                 "point {i} coordinates out of -2500..=12500"
             )));
         }
-        if !(0..=1000).contains(&p) {
+        if !(0..=i64::from(STROKE_PRESSURE_MAX)).contains(&p) {
             return Err(invalid(format!("point {i} pressure out of 0..=1000")));
         }
         let t = u32::try_from(t).map_err(|_| invalid(format!("point {i} time negative")))?;

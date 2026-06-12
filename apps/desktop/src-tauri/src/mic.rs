@@ -30,6 +30,11 @@ const TARGET_RATE: u32 = 16_000;
 /// Poll cadence for the callback→thread channel; also bounds how fast the
 /// stop flag is observed.
 const RECV_TICK: Duration = Duration::from_millis(50);
+/// Tick of the `pp-mic-drain` thread that pumps trailing finals after a
+/// user disarm: fast enough that a trailing final lands promptly, slow
+/// enough not to thrash the capture mutex the commands also take — the
+/// loop is bounded overall by the engine's 5 s drain window.
+const DISARM_DRAIN_TICK: Duration = Duration::from_millis(150);
 
 /// The running mic thread, present in `App.mic` exactly while armed.
 /// Dropping it stops and joins the thread (and with it the cpal stream).
@@ -71,7 +76,7 @@ pub fn spawn_disarm_drain(handle: AppHandle) {
                 return;
             };
             loop {
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(DISARM_DRAIN_TICK);
                 let (events, open) = {
                     let mut capture = app.capture.lock().expect("capture mutex");
                     let Some(engine) = capture.as_mut() else {

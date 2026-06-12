@@ -11,6 +11,13 @@ use crate::dto::{ExportReportDto, RebuildReportDto, RuntimeStatus};
 use crate::error::{CmdError, CmdResult};
 use crate::settings::{AppSettings, StackDisplay};
 
+/// Initial webview background: must mirror the frontend theme's dark
+/// background (`--bg: #0e0e0e` in lib/theme/tokens.css, and the main
+/// window's `backgroundColor` in tauri.conf.json) — it suppresses the
+/// white flash before the webview paints. If the Svelte theme color
+/// changes, this changes with it.
+const WINDOW_BACKGROUND: tauri::webview::Color = tauri::webview::Color(14, 14, 14, 255);
+
 #[tauri::command]
 pub fn settings_get(app: S<'_>) -> AppSettings {
     app.settings.lock().expect("settings mutex").clone()
@@ -193,7 +200,7 @@ pub fn open_settings_window(handle: AppHandle) -> CmdResult<()> {
             .title("Settings")
             .inner_size(620.0, 700.0)
             .min_inner_size(480.0, 480.0)
-            .background_color(tauri::webview::Color(14, 14, 14, 255));
+            .background_color(WINDOW_BACKGROUND);
     // Platform chrome (UI §2.3), mirroring tauri.macos.conf.json for the
     // main window: macOS keeps native decorations — rounded corners,
     // shadow, traffic lights overlaying the drag strip (SettingsApp.svelte

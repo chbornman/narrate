@@ -33,6 +33,10 @@ use photoproof_core::runtime::{ChildRegistry, InstanceLock, ProcessId, RuntimeBu
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Tick while driving the stop phases to completion at shutdown: quit
+/// latency is user-visible, so the stop state machine runs 5x faster than
+/// the steady-state TICK — still bounded by the config grace periods.
+const SHUTDOWN_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub struct SupervisorHost {
     asr: Arc<Mutex<Option<Supervisor<SystemClock>>>>,
@@ -266,7 +270,7 @@ impl SupervisorHost {
                                 | photoproof_core::runtime::supervisor::ProcState::Stopped
                         ) {
                             sup.tick();
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            std::thread::sleep(SHUTDOWN_TICK);
                         }
                     }
                 }

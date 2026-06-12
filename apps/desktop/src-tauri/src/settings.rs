@@ -48,12 +48,16 @@ pub fn save(app_data: &Path, s: &AppSettings) -> std::io::Result<()> {
 }
 
 /// Random-per-install device id: 32 lowercase hex (EVENTS §9), persisted in
-/// app data.
+/// app data. The length check and the mint-time truncation below MUST use
+/// the same core constant: if they disagreed, freshly minted ids would
+/// fail this very validation on the next launch and silently re-mint
+/// every run.
 pub fn device_id(app_data: &Path) -> std::io::Result<String> {
+    use photoproof_core::id::DEVICE_ID_LEN;
     let path = app_data.join("device-id");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let s = s.trim().to_owned();
-        if s.len() == 32
+        if s.len() == DEVICE_ID_LEN
             && s.bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         {
@@ -62,7 +66,7 @@ pub fn device_id(app_data: &Path) -> std::io::Result<String> {
     }
     // Two fresh ULIDs hashed: 256 bits of randomness reduced to 32 hex.
     let seed = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new());
-    let id = blake3::hash(seed.as_bytes()).to_hex().to_string()[..32].to_owned();
+    let id = blake3::hash(seed.as_bytes()).to_hex().to_string()[..DEVICE_ID_LEN].to_owned();
     std::fs::write(&path, &id)?;
     Ok(id)
 }
