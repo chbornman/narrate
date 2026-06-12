@@ -21,6 +21,10 @@ use crate::id::{ContentHash, EventId, Minted, Minter, SessionId, UtcMillis, vali
 
 pub use fold::JournalEntry;
 use fold::{FoldSet, fold_entries};
+// Re-exported so out-of-crate connections to the events file (the shell's
+// debug-panel raw-tail reader) name the one spec-pinned EVENTS §5.1 value
+// instead of a same-valued local that could silently diverge.
+pub use schema::BUSY_TIMEOUT_MS;
 
 // ---------------------------------------------------------------------------
 // Errors and reports

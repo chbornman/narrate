@@ -39,9 +39,12 @@ const QUIT_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(10
 /// SQLite busy timeout for the debug panel's read-only sibling connection.
 /// The connection shares a WAL database with the ingest pump and sidecar
 /// engine, so the timeout must outlast their longest write transaction or
-/// debug reads error spuriously.
+/// debug reads error spuriously. Named from core's spec-pinned EVENTS §5.1
+/// constant so this fifth connection to the events file cannot silently
+/// diverge from the four core opens.
 #[cfg(any(feature = "debug-panel", debug_assertions))]
-const READQ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+const READQ_BUSY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(photoproof_core::store::BUSY_TIMEOUT_MS);
 
 pub struct App {
     /// Shared with the sidecar engine (`SidecarEngine::new_shared`); lives

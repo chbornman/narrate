@@ -20,13 +20,16 @@ M1 (the journal spine) and M2 (grease pencil + live voice capture) are built and
 ## Running it
 
 ```sh
+# voice prerequisite: the app discovers the ASR child only as a sibling of its
+# own executable, so build it into the shared target dir once (from repo root)
+cargo build -p pp-asr-server
+
 # dev (debug panel included automatically in dev binaries; F12 toggles it)
 cd apps/desktop && cargo tauri dev
 
-# voice needs only in-app consent: it downloads the pinned models
-# (Nemotron streaming ASR + Gemma E2B QAT) and the ASR child (pp-asr-server)
-# builds with the workspace. The LLM child additionally wants llama-server
-# on PATH in dev: brew install llama.cpp
+# after that, voice needs only in-app consent: it downloads the pinned models
+# (Nemotron streaming ASR + Gemma E2B QAT). The LLM child additionally wants
+# llama-server on PATH in dev: brew install llama.cpp
 ```
 
 ## Tests and benches

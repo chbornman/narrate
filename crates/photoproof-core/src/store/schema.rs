@@ -169,8 +169,11 @@ BEGIN SELECT RAISE(ABORT, 'event_targets is append-only'); END;
 /// events database (the store's writer and read pool, the sidecar engine's
 /// sibling connection, the checkpoint restore path) must keep this same
 /// posture, so all of them name this constant. The library writer reuses it
-/// too: its pragmas deliberately mirror §5.1 (DECISIONS P18).
-pub(crate) const BUSY_TIMEOUT_MS: u64 = 5000;
+/// too: its pragmas deliberately mirror §5.1 (DECISIONS P18). Exported
+/// (`store::BUSY_TIMEOUT_MS`) because the desktop shell's debug-panel
+/// raw-tail reader opens its own connection to the same file and must not
+/// silently diverge from the spec value.
+pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
 /// Run a pragma statement, consuming an optional returned row (pragmas are
 /// inconsistent about returning their new value).
