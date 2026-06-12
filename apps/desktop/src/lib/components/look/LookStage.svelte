@@ -194,10 +194,15 @@
 
   // ---- wheel: continuous zoom-to-cursor (featureset §2) ----------------------
 
+  // deltaMode 1 (line-scrolling legacy mice): browsers' conventional line
+  // height in px. zoom.ts's wheel rate is calibrated against PIXEL deltas,
+  // so this scale factor sets the zoom feel for line-mode devices.
+  const WHEEL_LINE_PX = 16;
+
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     if (t === null) return;
-    const deltaY = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY; // lines → px
+    const deltaY = e.deltaMode === 1 ? e.deltaY * WHEEL_LINE_PX : e.deltaY;
     const next = zoom.wheelScale(t.scale, deltaY);
     applyZoom(zoom.zoomAtPoint(t, container, image, stagePoint(e), next), "free");
   }
@@ -309,12 +314,15 @@
 
   // ---- transient zoom readout [nice] (obeys lights-out) ----------------------
 
+  // Long enough to read at a glance, gone before it reads as chrome —
+  // the same transient-duration family as COPY_FLASH_MS / TOAST_DISMISS_MS.
+  const READOUT_FLASH_MS = 900;
   let readout = $state<string | null>(null);
   let readoutTimer: ReturnType<typeof setTimeout> | undefined;
   function flashReadout(text: string) {
     readout = text;
     clearTimeout(readoutTimer);
-    readoutTimer = setTimeout(() => (readout = null), 900);
+    readoutTimer = setTimeout(() => (readout = null), READOUT_FLASH_MS);
   }
 </script>
 

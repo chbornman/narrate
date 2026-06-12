@@ -209,6 +209,17 @@
 
   // ---- journal-row flash (UI §8.2) --------------------------------------------
 
+  // How long the echo stays lit — the named-transient convention
+  // (COPY_FLASH_MS, TOAST_DISMISS_MS); unrelated to LookStage's 900 ms
+  // zoom readout.
+  const STROKE_FLASH_MS = 700;
+  // Echo geometry: wide enough (3x the stroke plus a pad) to read as a
+  // highlight at any zoom, soft enough (35% alpha) not to obscure the
+  // mark itself. Three coupled tuning values — change them together.
+  const FLASH_HALO_SCALE = 3;
+  const FLASH_HALO_PAD_PX = 6;
+  const FLASH_HALO_ALPHA = 0.35;
+
   let flashId = $state<string | null>(null);
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
@@ -217,7 +228,7 @@
     void flash.seq;
     flashId = flash.id;
     clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => (flashId = null), 700);
+    flashTimer = setTimeout(() => (flashId = null), STROKE_FLASH_MS);
   });
 
   // ---- cursors (zero chrome: the dot IS the mode announcement) ----------------
@@ -309,11 +320,11 @@
       );
       if (s.id === flashId) {
         // The journal-row flash: a soft wide echo under the stroke.
-        ctx.globalAlpha = 0.35;
+        ctx.globalAlpha = FLASH_HALO_ALPHA;
         drawPath(
           ctx,
           spec.pts,
-          spec.widths.map((wd) => wd * 3 + 6),
+          spec.widths.map((wd) => wd * FLASH_HALO_SCALE + FLASH_HALO_PAD_PX),
         );
         ctx.globalAlpha = 1;
       }

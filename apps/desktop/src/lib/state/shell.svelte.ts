@@ -17,6 +17,12 @@ export const SESSION_SCOPE: ScopeView = {
   previewHashes: [],
 };
 
+/** Pulse coalescing window: 200 ms is exactly the "~5/s" ceiling UI §7.4
+ * names — pulses landing within it merge into one render. Independent of
+ * the indicator's own pulse DURATION (Indicator.svelte), which only
+ * happens to be a nearby number. */
+const PULSE_COALESCE_MS = 200;
+
 export interface ContextMenuState {
   seat: MenuSurface;
   /** Pointer anchor; null = keyboard-summoned (host picks a default). */
@@ -191,7 +197,7 @@ export class ShellSlice {
   /** Pulse coalescing: rapid events render distinct pulses, coalesced
    * above ~5/s (UI §7.4). */
   onPulse(now: number = Date.now()) {
-    if (now - this.lastPulseAt < 200) return;
+    if (now - this.lastPulseAt < PULSE_COALESCE_MS) return;
     this.lastPulseAt = now;
     this.pulseCount += 1;
   }

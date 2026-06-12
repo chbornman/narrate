@@ -58,8 +58,14 @@ export function rowsPerPage(g: GridGeometry, viewportH: number): number {
   return Math.max(1, Math.floor(viewportH / g.rowH));
 }
 
-/** Mounted index window: visible rows + 1 screen of overscan above and
- * below (UI §3.3). */
+/** Overscan: one full screen of cells mounted above AND below the
+ * viewport (UI §3.3). visibleRange and poolSize must encode the SAME
+ * policy — poolSize's collision-free guarantee holds only while its span
+ * covers the maximal window — so the value lives in exactly one place. */
+const OVERSCAN_SCREENS = 1;
+
+/** Mounted index window: visible rows + OVERSCAN_SCREENS screens above
+ * and below (UI §3.3). */
 export function visibleRange(
   g: GridGeometry,
   scrollTop: number,
@@ -67,15 +73,26 @@ export function visibleRange(
   count: number,
 ): { start: number; end: number } {
   const rows = totalRows(g, count);
-  const startRow = Math.min(rows, Math.max(0, Math.floor((scrollTop - viewportH) / g.rowH)));
-  const endRow = Math.min(rows, Math.max(startRow, Math.ceil((scrollTop + 2 * viewportH) / g.rowH)));
+  const startRow = Math.min(
+    rows,
+    Math.max(0, Math.floor((scrollTop - OVERSCAN_SCREENS * viewportH) / g.rowH)),
+  );
+  const endRow = Math.min(
+    rows,
+    Math.max(startRow, Math.ceil((scrollTop + (1 + OVERSCAN_SCREENS) * viewportH) / g.rowH)),
+  );
   return { start: Math.min(count, startRow * g.cols), end: Math.min(count, endRow * g.cols) };
 }
 
 /** DOM-recycling pool size: always ≥ the maximal visibleRange window at
- * this geometry, so the idx → idx % poolSize ring stays collision-free. */
+ * this geometry, so the idx → idx % poolSize ring stays collision-free.
+ * The span is the window's worst case — the viewport plus overscan on
+ * both sides — with a 2-row margin for the floor/ceil rounding. */
 export function poolSize(g: GridGeometry, viewportH: number): number {
-  return Math.max(1, (Math.ceil((3 * viewportH) / g.rowH) + 2) * g.cols);
+  return Math.max(
+    1,
+    (Math.ceil(((1 + 2 * OVERSCAN_SCREENS) * viewportH) / g.rowH) + 2) * g.cols,
+  );
 }
 
 /** First visible unit + its pixel offset within the viewport — survives

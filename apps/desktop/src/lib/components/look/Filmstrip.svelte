@@ -13,8 +13,14 @@
   import { thumbUrl } from "../../ipc/urls";
   import { displayedHash } from "../../logic/looknav";
 
-  const stripStart = $derived(Math.max(0, ui.look.index - 8));
-  const stripEntries = $derived(ui.look.order.slice(stripStart, stripStart + 17));
+  // Render window: the current image roughly centered with STRIP_RADIUS
+  // neighbors each side; the window width is DERIVED (2r + 1) so the
+  // centering invariant cannot drift when the radius changes.
+  const STRIP_RADIUS = 8;
+  const stripStart = $derived(Math.max(0, ui.look.index - STRIP_RADIUS));
+  const stripEntries = $derived(
+    ui.look.order.slice(stripStart, stripStart + STRIP_RADIUS * 2 + 1),
+  );
   const gridByHash = $derived(new Map(ui.grid.items.map((i) => [i.hash, i])));
 </script>
 

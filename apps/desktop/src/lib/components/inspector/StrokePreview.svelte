@@ -11,7 +11,7 @@
    * display orientation; the row does not re-fetch metadata).
    */
   import { thumbUrl } from "../../ipc/urls";
-  import { denormalize, longEdge, svgPathFor, wireToNorm } from "../../logic/stroke";
+  import { denormalize, longEdge, QUANT, svgPathFor, wireToNorm } from "../../logic/stroke";
   import type { StrokeDto } from "../../types/dto";
 
   let {
@@ -32,8 +32,10 @@
       ? ""
       : svgPathFor(stroke.points.map((pt) => denormalize(wireToNorm(pt), dims!))),
   );
+  // baseW is stored in QUANT-ths of the image long edge (the EVENTS §3.3
+  // wire format) — the denominator is the wire constant, not a tuning.
   const width = $derived(
-    dims === null ? 1 : Math.max((stroke.baseW / 10000) * longEdge(dims), 1),
+    dims === null ? 1 : Math.max((stroke.baseW / QUANT) * longEdge(dims), 1),
   );
 </script>
 

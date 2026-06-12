@@ -34,6 +34,10 @@
   import SearchResultRow from "./SearchResultRow.svelte";
   import * as sel from "../../logic/selection";
 
+  // Keystroke debounce, sized inside the <100 ms search budget (UI §5.1)
+  // — the rest of the budget belongs to the backend round-trip.
+  const SEARCH_DEBOUNCE_MS = 50;
+
   let inputEl: HTMLInputElement | undefined = $state();
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -53,8 +57,7 @@
 
   function onInput() {
     clearTimeout(debounceTimer);
-    // ≤ 50 ms debounce inside the <100 ms budget (UI §5.1).
-    debounceTimer = setTimeout(() => void ui.runSearch(), 50);
+    debounceTimer = setTimeout(() => void ui.runSearch(), SEARCH_DEBOUNCE_MS);
   }
 
   function chipLabel(f: Filter): string {

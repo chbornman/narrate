@@ -18,7 +18,7 @@
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { ui } from "./lib/state/app.svelte";
+  import { INGEST_RELIST_MS, ui } from "./lib/state/app.svelte";
   import { dispatch } from "./lib/logic/keymap";
   import * as ipc from "./lib/ipc/commands";
   import type {
@@ -102,10 +102,14 @@
 
   // ---- activity reporting (CAPTURE §2.1), throttled -------------------------
 
+  // At most one report per minute: the throttle must stay far below the
+  // 30-minute idle boundary (CAPTURE §2.2) or a still-active user's
+  // session could rotate between reports.
+  const ACTIVITY_REPORT_THROTTLE_MS = 60_000;
   let lastActivityReport = 0;
   function touchActivity() {
     const now = Date.now();
-    if (now - lastActivityReport < 60_000) return;
+    if (now - lastActivityReport < ACTIVITY_REPORT_THROTTLE_MS) return;
     lastActivityReport = now;
     // The echo is the post-touch session id: a rotation (the 30-minute
     // idle boundary, CAPTURE §2.2) closed the session the pencil undo
@@ -163,7 +167,9 @@
         if (e.payload.type === "drop") ui.offerDrop(e.payload.paths);
       }),
     ];
-    // While ingest runs, the grid populates incrementally (UI §3.3/§9.1).
+    // While ingest runs, the grid populates incrementally (UI §3.3/§9.1)
+    // on the same cadence as the event-driven re-list throttle — one
+    // shared constant, one mid-scan refresh policy.
     const poll = setInterval(() => {
       if (ui.shell.ingest.running) {
         void ui.refreshItems();
@@ -171,7 +177,7 @@
           ui.shell.ingest = s;
         });
       }
-    }, 2000);
+    }, INGEST_RELIST_MS);
     return () => {
       clearInterval(poll);
       for (const u of unlisteners) void u.then((f) => f());

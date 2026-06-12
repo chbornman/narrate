@@ -84,6 +84,11 @@
   // bitmap, or they re-mark against stale pixels and the old image
   // flashes for a frame on fast scroll (srcHash doc in ipc/urls.ts).
   const MAX_RETRIES = 30;
+  // Backoff cadence behind MAX_RETRIES: one more second per attempt,
+  // capped — together they bound the whole retry budget (~2.5 min)
+  // before a cell settles on the placeholder for good.
+  const RETRY_BACKOFF_STEP_MS = 1000;
+  const RETRY_BACKOFF_MAX_MS = 5000;
   let el: HTMLImageElement | undefined = $state();
   let loadedHash = $state<string | null>(null);
   let retry = $state({ hash: "", n: 0 });
@@ -142,7 +147,7 @@
           retry = { hash: forHash, n: n + 1 };
         }
       },
-      Math.min(1000 * (n + 1), 5000),
+      Math.min(RETRY_BACKOFF_STEP_MS * (n + 1), RETRY_BACKOFF_MAX_MS),
     );
   }
 </script>

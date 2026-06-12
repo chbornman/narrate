@@ -48,6 +48,11 @@
 
   // ---- hold-to-confirm drive (machine is pure; the timer lives here) -------
 
+  // ~30 ticks across the 1.5 s HOLD_TO_CONFIRM_MS keeps the fill smooth;
+  // the tick must stay far below the threshold or release() ends up doing
+  // all the confirming defensively.
+  const HOLD_TICK_MS = 50;
+
   let hold: HoldState = HOLD_IDLE;
   let progress = $state(0);
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -73,7 +78,7 @@
   function holdStart() {
     settle(press(hold, Date.now()));
     if (timer === null && hold.heldSince !== null)
-      timer = setInterval(() => settle(tick(hold, Date.now())), 50);
+      timer = setInterval(() => settle(tick(hold, Date.now())), HOLD_TICK_MS);
   }
 
   function holdEnd() {

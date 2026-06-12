@@ -66,9 +66,12 @@
     if (action !== null) void ui.perform(action);
   }
 
-  // Hover popover: micro-thumbnails of the scoped images, up to 8 then
-  // "+N" (UI §7.2). Sourced from the same lists the scope derives from;
-  // the echoed scope stays authoritative for the count.
+  // Hover popover: micro-thumbnails of the scoped images, up to the cap
+  // then "+N" (UI §7.2). Sourced from the same lists the scope derives
+  // from; the echoed scope stays authoritative for the count. The slice
+  // and the +N arithmetic must subtract the SAME cap or the count lies —
+  // one constant keeps them honest.
+  const POPOVER_THUMB_MAX = 8;
   const popThumbs = $derived(
     scopeTargets({
       surface: ui.surface,
@@ -76,10 +79,14 @@
       gridSelection: ui.grid.selectionTargets,
       searchSelection: ui.searchSel.order,
       lookTargets: ui.look.currentTargets,
-    }).slice(0, 8),
+    }).slice(0, POPOVER_THUMB_MAX),
   );
-  const popMore = $derived(Math.max(0, ui.shell.scope.count - 8));
+  const popMore = $derived(Math.max(0, ui.shell.scope.count - POPOVER_THUMB_MAX));
 
+  // Pulse hold time: must outlast the 120 ms color/text-shadow
+  // transition on .segment.scope (style block below) so the brighten
+  // visibly completes before the segment relaxes.
+  const PULSE_MS = 320;
   let pulsing = $state(false);
   let pulseTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
@@ -87,7 +94,7 @@
     pulsing = false;
     clearTimeout(pulseTimer);
     requestAnimationFrame(() => (pulsing = true));
-    pulseTimer = setTimeout(() => (pulsing = false), 320);
+    pulseTimer = setTimeout(() => (pulsing = false), PULSE_MS);
   });
 </script>
 

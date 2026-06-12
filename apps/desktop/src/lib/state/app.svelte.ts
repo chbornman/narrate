@@ -44,6 +44,19 @@ import { GridSlice } from "./grid.svelte";
 import { LookSlice } from "./look.svelte";
 import { InspectorSlice } from "./inspector.svelte";
 
+/** Mid-scan grid refresh cadence — ONE policy shared by both refresh
+ * paths: the event-driven re-list throttle in onIngestProgress and
+ * App.svelte's poll interval. 2 s keeps a slow network-volume scan
+ * visibly streaming into the grid without hammering list_folder; a
+ * shared export keeps the two paths from drifting apart silently. */
+export const INGEST_RELIST_MS = 2_000;
+
+/** Minimum free-text query length before a search runs: a single
+ * character matches nearly everything and burns the <100 ms budget
+ * (UI §5.1) on a result set nobody asked for. Shorter queries with no
+ * chips clear the results instead. */
+export const MIN_QUERY_CHARS = 2;
+
 export class Ui {
   // -- slices (contracts frozen by FOUNDATIONS) -------------------------------
   shell = new ShellSlice();
@@ -368,7 +381,7 @@ export class Ui {
     if (this.grid.rootId === null) return;
     if (status.running) {
       const now = Date.now();
-      if (now - this.lastIngestRefresh < 2_000) return;
+      if (now - this.lastIngestRefresh < INGEST_RELIST_MS) return;
       this.lastIngestRefresh = now;
       await this.refreshItems();
     } else if (wasRunning) {
@@ -475,7 +488,7 @@ export class Ui {
 
   async runSearch() {
     const trimmed = this.query.trim();
-    if (this.chips.length === 0 && trimmed.length < 2) {
+    if (this.chips.length === 0 && trimmed.length < MIN_QUERY_CHARS) {
       this.results = null;
       this.searchFocus = -1;
       return;
