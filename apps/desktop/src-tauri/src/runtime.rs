@@ -81,6 +81,8 @@ struct HostState {
 
 pub struct RuntimeHost {
     pub bus: RuntimeBus,
+    /// P6.4: the real supervisors (None inside until the plan says Run).
+    pub supervisors: crate::supervisors::SupervisorHost,
     app_data: PathBuf,
     manifest: Manifest,
     lock: Option<Arc<InstanceLock>>,
@@ -111,13 +113,15 @@ impl RuntimeHost {
         // sweep looks for (alive PID + matching start-time): a lockless
         // sweep would SIGKILL the live instance's children and erase its
         // crash-net records. No lock ⇒ children.json is not touched.
-        let orphan_sweep = if lock.is_some() {
-            ChildRegistry::new(&runtime_dir)
-                .and_then(|reg| reg.kill_orphans())
-                .unwrap_or_default()
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        // The registry PERSISTS (P6.4): supervised children record
+        // themselves through it for the next launch's sweep.
+        let registry = lock
+            .as_ref()
+            .and_then(|_| ChildRegistry::new(&runtime_dir).ok().map(Arc::new));
+        let orphan_sweep = registry
+            .as_ref()
+            .and_then(|reg| reg.kill_orphans().ok())
+            .unwrap_or_default();
 
         // §4.4 config: unknown keys warn, missing sections default; a
         // parse error falls back to defaults LOUDLY in the log (the
@@ -158,11 +162,17 @@ impl RuntimeHost {
             .map(|s| Consent::parse(s.trim()))
             .unwrap_or(Consent::Undecided);
 
+        let supervisors = crate::supervisors::SupervisorHost::new(
+            bus.clone(),
+            registry,
+            lock.clone(),
+        );
         Self {
             bus,
             app_data,
             manifest,
             lock,
+            supervisors,
             capture_live: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(HostState {
                 config,
@@ -197,7 +207,6 @@ impl RuntimeHost {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // P6.3 maps plans onto supervisors
     pub fn plan(&self) -> RuntimePlan {
         let state = self.state.lock().expect("runtime state");
         let installed = self.manager_installed(&state);
@@ -207,6 +216,25 @@ impl RuntimeHost {
             &self.manifest,
             &installed,
         )
+    }
+
+    /// P6.4: converge the supervisors onto the current plan. Called at
+    /// startup and on a slow cadence (state.rs) — every consent/config/
+    /// download mutation is picked up within a couple of seconds without
+    /// each command needing to remember to call this.
+    pub fn apply_supervisor_plan(&self) {
+        let (ctx, slots, chunk, models_dir) = {
+            let state = self.state.lock().expect("runtime state");
+            (
+                state.config.llm.local_llamacpp.ctx_size,
+                state.config.llm.local_llamacpp.parallel_slots,
+                state.config.asr.chunk_ms,
+                Self::models_dir_for(&self.app_data, &state.config),
+            )
+        };
+        let plan = self.plan();
+        self.supervisors
+            .apply(&plan, &self.manifest, &models_dir, ctx, slots, chunk);
     }
 
     fn manager_installed(
@@ -266,11 +294,11 @@ impl RuntimeHost {
             })
             .collect();
         RuntimeStatus {
-            // §8.3: Ready only when a supervised child reports it — no
-            // child exists before the P6.3 spike, so these stay false and
-            // the mic glyph stays absent (UI §7.3, quietly).
-            asr_ready: false,
-            llm_ready: false,
+            // §8.3: Ready only when a supervised child reports it —
+            // live since P6.4 (the supervisors hold the truth; absent
+            // supervisors read false and the mic glyph stays away).
+            asr_ready: self.supervisors.asr_ready(),
+            llm_ready: self.supervisors.llm_ready(),
             tier_detected: state.tier.detected_tier,
             tier_effective: tier,
             tier_overridden_above: state.tier.overridden_above,

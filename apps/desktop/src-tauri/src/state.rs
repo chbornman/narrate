@@ -80,6 +80,21 @@ impl App {
         // instance lock, sweeps the §8.4 crash net, resolves config +
         // tier, writes the manifest.
         let runtime = Arc::new(RuntimeHost::init(app_data.clone()));
+        // P6.4: drive the real supervisors — apply the plan now, then a
+        // slow converge loop (every mutation path self-heals within ~2 s)
+        // and the §8.1 tick thread.
+        runtime.apply_supervisor_plan();
+        runtime.supervisors.spawn_tick_thread();
+        {
+            let runtime = Arc::clone(&runtime);
+            std::thread::Builder::new()
+                .name("pp-plan-converge".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    runtime.apply_supervisor_plan();
+                })
+                .expect("spawn plan-converge thread");
+        }
 
         Ok(Self {
             store,
@@ -129,6 +144,8 @@ impl App {
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // P6.4: children walk the §8.4 normal order before we flush.
+        self.runtime.supervisors.shutdown();
         // Stop watchers first so nothing new lands mid-flush.
         self.watchers.lock().expect("watchers mutex").clear();
         let session_id = self.session_id();

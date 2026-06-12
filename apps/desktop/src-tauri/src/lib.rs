@@ -25,6 +25,7 @@ mod search_wire;
 mod session;
 mod settings;
 mod state;
+mod supervisors;
 
 use std::sync::Arc;
 
