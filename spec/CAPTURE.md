@@ -18,7 +18,12 @@ and the moments events are minted). MUST/SHOULD/MAY are RFC 2119-normative.
   *recorded* as wall-clock timestamps.
 - **Stream clock**: ASR audio-stream position, ms from stream start; anchored
   to the capture clock at **first audio buffer submission** (`anchor_mono`);
-  segment times convert as `t_mono = anchor_mono + stream_offset_ms`.
+  segment times convert as `t_mono = anchor_mono + stream_offset_ms`. There
+  is ONE stream clock — the capture-side frame clock (`captured_at`). A
+  backend whose native clock counts only the samples it received runs behind
+  it by the silence the gate withholds (§6.2); its **connector translates
+  segment times back** to the capture positions of the frames it shipped,
+  before they reach the engine (B72).
 - **Error budget**: VAD-onset detection latency + clock conversion error MUST
   stay under **250 ms** combined; selection changes are human-paced, so this
   keeps binding correct (§13.1 enforces it).
@@ -176,6 +181,16 @@ disagrees with the VAD onset across a scope change by more than the §1
 budget, the disagreement is logged to the debug panel; binding is **never**
 silently re-decided from token times.
 
+**Which held onset a segment claims (B72, amends B49):** a segment keeps its
+exact `segment_id` match; a segment naming a NEW id claims the **unclaimed
+held onset nearest its own onset** (both on the §1 stream clock), bounded at
+**2 s** of skew — beyond the bound a final claims nothing and binds
+independently by its own onset (§5.3). B49's FIFO claiming misbound whenever
+the VAD split speech that the ASR endpointer merged (§6.3): the next final
+inherited the leftover merged-away onset. The segment onset thereby selects
+WHICH held snapshot is claimed; the held snapshot stays authoritative, and a
+claimed binding is still never re-decided from token times.
+
 ### 5.2 Grace window: none
 
 **N = 0. Onset wins; no grace window in v1.** Speech starting 50 ms after a
@@ -266,6 +281,15 @@ measurably hurts accuracy versus model endpointing
 ([NVIDIA Riva notes](https://docs.nvidia.com/nim/riva/asr/1.8.0/release-notes.html)).
 One ASR final segment = one utterance.
 
+The converse also happens: the ASR's trailing-silence rule outlasts the VAD
+hang, **merging** spans the VAD split. A final whose span covers other
+unclaimed VAD onsets consumed them — they **retire**: settled without
+minting, not counted abandoned (the third §6.5 exit, B72), debug-panel note
+only. Retirement runs for empty/whitespace finals too (a non-minting final
+consumed its merged onsets all the same). The claiming utterance's durable
+span extends over the retired onsets' VAD ends, so §9 linking still covers
+the absorbed speech.
+
 ### 6.4 Mic state machine
 
 ```
@@ -296,7 +320,12 @@ orange dot) must always agree with the app's armed state.
 ```
  SpeechStart        Partial*           Final              append
  ──────────► Streaming ──────► Streaming ───► Finalized ─────────► Committed
-                 │                                              (event exists)
+                 │                  │                           (event exists)
+                 │                  │ onset inside another final's span
+                 │                  │ (the ASR merged the spans — §6.3, B72)
+                 │                  ▼
+                 │              Retired (nothing persisted; NOT counted
+                 │                       abandoned; debug-panel note only)
                  │ fatal ASR error / 5 s drain timeout
                  ▼
              Abandoned (nothing persisted; debug-panel note only)
@@ -319,15 +348,19 @@ orange dot) must always agree with the app's armed state.
   ```
 
   The VAD span (wall clock) is durable and sidecar-visible — stroke linking
-  (§9) requires it. `confidence` is exp(mean token log-prob), **uncalibrated
-  and optional** — the field is omitted when the model exposes no token
-  log-probs (RUNTIME §4), and values are never compared across model
-  versions.
+  (§9) requires it. When the final absorbed merged VAD spans (§6.3), the
+  durable span (`speech_ended_at`, `dur_ms`) extends over the retired
+  onsets' VAD ends — the text covers that speech, so the span must too
+  (B72; §9.2 depends on it). `confidence` is exp(mean token log-prob),
+  **uncalibrated and optional** — the field is omitted when the model
+  exposes no token log-probs (RUNTIME §4), and values are never compared
+  across model versions.
 - **No merging in v1.** Consecutive finals are NOT merged, regardless of gap
   or scope equality. One final = one event: simpler, preserves per-segment
   confidence/spans, and reversible later (merging can become a fold/display
   policy; the reverse migration would be impossible).
-- Empty/whitespace-only finals mint nothing.
+- Empty/whitespace-only finals mint nothing — but still retire the merged
+  onsets their span consumed (§6.3, B72).
 
 ### 6.6 Error states
 

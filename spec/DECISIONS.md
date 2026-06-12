@@ -683,6 +683,45 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   `Project` filter) — renamed in a follow-up commit, so the §5.1
   grammar and the code that implements it stay identical.
 
+- **B72 (June 2026, amends B49 — first live-dictation binding fixes).**
+  pp_voice_bench's first real dictation exposed three coupled defects in
+  the B49 reading; all three are now CAPTURE §5.1/§6.3/§6.5 normative:
+  (1) **Association is by onset proximity, not FIFO.** The VAD can split
+  speech into MORE utterances than the ASR endpointer emits (a ~0.8 s
+  pause splits the VAD's 480 ms hang but merges under the ASR's 1.2 s
+  trailing-silence rule), so "first unclaimed onset wins" bound the next
+  final to a leftover merged-away onset — wrong scope — and abandoned the
+  real one at disarm. A segment keeps its exact utterance-id match;
+  otherwise it claims the unclaimed held onset nearest its own onset,
+  **bounded at 2 s of skew** — beyond the bound a final claims nothing
+  and falls through to §5.3 independent binding (an unbounded claim would
+  let a late ASR-split final steal a distant utterance's snapshot and
+  minted ts). This amends B49's "segment onset is the §5.1 cross-check
+  only": the segment onset now also selects WHICH held snapshot a new id
+  claims; the held snapshot stays authoritative and a claimed binding is
+  still never re-decided.
+  (2) **Merged onsets retire** — a third §6.5 lifecycle exit. Any other
+  unclaimed onset inside a final's span was consumed by that final;
+  it retires settled-without-minting, not counted abandoned, debug note
+  only. Retirement runs for empty/whitespace finals too (a non-minting
+  final consumed its merged onsets all the same; stranding them stuck the
+  mic in ArmedSpeaking and counted phantom abandons). The claiming
+  utterance's durable span (`dur_ms`, `speech_ended_at`, §9 linking)
+  extends over the retired onsets' VAD ends, so a stroke drawn during the
+  merged tail keeps the link §9.2's in-flight suppression promised.
+  (3) **One stream clock, translated at the connector.** B49 called the
+  segment onset "the VAD-onset echo"; the real adapter never satisfied
+  that — sherpa derives times from ACCEPTED SAMPLE COUNT and the wire
+  carries raw samples only, while the §6.2 gate withholds armed silence,
+  so the server's clock falls behind the capture clock by the cumulative
+  withheld time (unbounded drift; proximity would have degraded back to
+  FIFO after the first quiet stretch). The Transcriber contract is now
+  explicit: segment times arrive on the CAPTURE frame clock, and a
+  backend counting received samples translates back in its connector
+  (sherpa's `ShipClock`: per contiguous shipped run, shipped position →
+  `captured_at`). The engine never compensates; the scripted mock
+  already speaks this clock.
+
 ## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).

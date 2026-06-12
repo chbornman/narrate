@@ -109,6 +109,50 @@ fn frames_in_results_out_partials_then_final_mapped_onto_the_contract() {
     );
 }
 
+/// B72 clock translation: the engine's silence gate withholds armed
+/// silence, so the server's sample-count clock falls behind the capture
+/// clock by the withheld stretch. Results must come back on the CAPTURE
+/// clock (the `Transcriber` contract), or onset binding drifts by the
+/// cumulative armed silence — the pp_voice_bench misbinding's quiet-
+/// session variant.
+#[test]
+fn results_after_withheld_silence_translate_back_to_the_capture_clock() {
+    let server = StubWsServer::start(
+        SR,
+        vec![WsAction::SendAt {
+            // Shipped clock: 1 s of pre-gap audio + 0.5 s after the gap.
+            at_ms: 1_500,
+            json: result_json(0, "after the quiet stretch", 1.2, true),
+        }],
+    );
+    let transcriber =
+        SherpaOnlineTranscriber::new("nemotron-en-0.6b-int8", EndpointCell::fixed(server.addr()));
+    let (feed, audio) = AudioFeed::new();
+    let mut out = transcriber.stream(audio).expect("stream opens");
+
+    // 1 s ships (captured 0..1000), then a 30 s armed-silence stretch the
+    // gate withholds entirely, then 1 s more (captured 31_000..32_000).
+    for i in 0..20 {
+        feed.push(frame(i * 50, 50));
+    }
+    for i in 0..20 {
+        feed.push(frame(31_000 + i * 50, 50));
+    }
+    let fin = next_within(&mut out, Duration::from_secs(2))
+        .expect("final within bound")
+        .expect("stream open")
+        .expect("ok segment");
+    assert_eq!(
+        fin.onset, 31_200,
+        "shipped 1.2 s = 0.2 s into the post-gap run on the capture clock"
+    );
+    assert_eq!(
+        fin.end,
+        31_200 + 400,
+        "token end translates through the same run"
+    );
+}
+
 #[test]
 fn input_close_sends_done_trailing_final_arrives_then_the_stream_ends() {
     let server = StubWsServer::start(

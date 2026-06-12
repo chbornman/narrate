@@ -1716,3 +1716,213 @@ fn c13_1_vad_split_asr_merge_binds_next_final_by_onset_proximity() {
     );
     assert!(!engine.stream_open());
 }
+
+/// B72: retirement is NOT coupled to minting. A whitespace-only final
+/// (§6.5: mint nothing) that merged two VAD spans still consumed both
+/// onsets — the associated one AND the merged-away one. If the merged-away
+/// onset survived the early return, the mic would stick in ArmedSpeaking
+/// with nobody speaking, the indicator would report a phantom streaming
+/// utterance forever, and disarm would count a phantom abandon — the exact
+/// symptom pair retirement exists to eliminate.
+#[test]
+fn c13_1_whitespace_merged_final_still_retires_the_merged_onset() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![
+            SpeechSpan {
+                onset: 0,
+                end: 5750,
+            },
+            SpeechSpan {
+                onset: 6550,
+                end: 12_000,
+            },
+        ],
+    );
+    // The VAD fired twice on breath noise; the ASR endpointer merged the
+    // spans and decoded nothing: one whitespace final covering both onsets.
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 13_300,
+        event: ScriptedEvent::Segment(final_seg(1, "   \n\t ", 0, 12_000)),
+    }]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(0xA)]);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+
+    let committed = drive(&mut engine, &clock, &store, 13_500, &[]);
+    assert!(
+        committed.is_empty(),
+        "whitespace finals mint nothing (§6.5)"
+    );
+    assert_eq!(
+        engine.streaming_count(),
+        0,
+        "BOTH consumed onsets settled — the merged-away one too"
+    );
+    assert_eq!(engine.mic(), MicState::ArmedIdle, "no stuck ArmedSpeaking");
+    assert_eq!(
+        engine.indicator().streaming_utterance,
+        None,
+        "no phantom streaming indicator"
+    );
+
+    let drained = engine.disarm(&store);
+    assert!(drained.is_empty());
+    assert_eq!(
+        engine.abandoned_count(),
+        0,
+        "no phantom abandon at disarm for the merged-away onset"
+    );
+}
+
+/// B72 + §9.2: a merged final's durable span covers the speech it absorbed.
+/// The user draws a stroke at ~8 s while speaking the merged utterance's
+/// second half; in-flight suppression commits the stroke unlinked with the
+/// promise that the utterance carries the link. The utterance's effective
+/// end must therefore extend over the retired onset's VAD end (12 s) — a
+/// span stopping at the FIRST VAD end (5.75 s) would miss the stroke and
+/// drop the link forever.
+#[test]
+fn c13_8a_merged_final_span_covers_retired_onsets_so_the_link_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let image = hash(0xA);
+    let vad = MockVad::new(
+        SR,
+        vec![
+            SpeechSpan {
+                onset: 0,
+                end: 5750,
+            },
+            // 0.8 s pause: VAD splits, the ASR endpointer will not.
+            SpeechSpan {
+                onset: 6550,
+                end: 12_000,
+            },
+        ],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 13_300,
+        event: ScriptedEvent::Segment(final_seg(
+            1,
+            "the gesture is lovely and the light holds it",
+            0,
+            12_000,
+        )),
+    }]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![image.clone()]);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+
+    drive(&mut engine, &clock, &store, 8_000, &[]);
+    assert_eq!(engine.streaming_count(), 2, "both spans in the air");
+    // Pen-up at mono 8000 (stroke spans 7500..8000), during the merged
+    // utterance's second half: suppression keeps the stroke unlinked.
+    let stroke = engine
+        .commit_stroke(&store, image.clone(), stroke_payload_ending_at(500))
+        .unwrap();
+    assert_eq!(stroke.linked_event, None, "in-flight suppression (§9.2)");
+
+    let committed = drive_span(&mut engine, &clock, &store, 8_000, 13_500, &[]);
+    assert_eq!(committed.len(), 1, "one merged final, one event");
+    assert_eq!(
+        committed[0].linked_event,
+        Some(stroke.id.clone()),
+        "the merged utterance carries the link its suppression promised"
+    );
+    assert_eq!(
+        committed[0].payload,
+        Some(photoproof_core::Payload::Voice {
+            conf_pm: Some(910),
+            dur_ms: 12_000,
+        }),
+        "dur_ms spans onset through the RETIRED onset's VAD end"
+    );
+}
+
+/// B72's skew bound: an ASR-split final (§5.3) whose own onset has no
+/// unclaimed partner must NOT steal a distant utterance's held snapshot.
+/// One continuous VAD span splits into two finals; the second final's
+/// delivery lags past the NEXT utterance's VAD onset (long-utterance
+/// decode latency). Unbounded proximity would claim that onset — wrong
+/// targets, wrong minted ts, and the victim's own final falls to a fresh
+/// mint. The bound makes the laggard fall through to §5.3 independent
+/// binding by its own onset instead.
+#[test]
+fn c13_1_late_split_final_falls_through_to_independent_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![
+            SpeechSpan {
+                onset: 200,
+                end: 4_000,
+            },
+            SpeechSpan {
+                onset: 8_000,
+                end: 9_500,
+            },
+        ],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![
+        // The ASR split the first VAD span into two finals.
+        ScriptEntry {
+            at: 5_000,
+            event: ScriptedEvent::Segment(final_seg(1, "lovely gesture here", 200, 1_900)),
+        },
+        // The split's second half arrives LATE — after the second VAD
+        // onset (8 s, scope C) is already in flight and unclaimed. Its
+        // own onset (2.5 s) is 5.5 s from that onset: past the bound.
+        ScriptEntry {
+            at: 9_000,
+            event: ScriptedEvent::Segment(final_seg(2, "and the light holds it", 2_500, 4_000)),
+        },
+        ScriptEntry {
+            at: 10_500,
+            event: ScriptedEvent::Segment(final_seg(3, "this one is sharper", 8_000, 9_500)),
+        },
+    ]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(0xA)]);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+
+    let committed = drive(
+        &mut engine,
+        &clock,
+        &store,
+        11_000,
+        &[(7_900, vec![hash(0xC)])], // scope moves before the second onset
+    );
+
+    assert_eq!(committed.len(), 3, "three finals, three events");
+    assert_eq!(committed[0].targets, vec![hash(0xA)]);
+    assert_eq!(
+        committed[1].targets,
+        vec![hash(0xA)],
+        "the late split final binds by ITS OWN onset's scope (§5.3), not \
+         the distant unclaimed onset's snapshot"
+    );
+    assert_eq!(
+        committed[1].ts,
+        UtcMillis::from_epoch_ms(WALL0 + 2_500),
+        "ts minted at the split final's own onset, not a stolen one"
+    );
+    assert_eq!(
+        committed[2].targets,
+        vec![hash(0xC)],
+        "the second utterance keeps its held snapshot — nothing stole it"
+    );
+    assert_eq!(
+        committed[2].ts,
+        UtcMillis::from_epoch_ms(WALL0 + 8_000),
+        "and keeps its onset-minted ts"
+    );
+    assert_eq!(engine.streaming_count(), 0);
+    assert_eq!(engine.abandoned_count(), 0);
+}

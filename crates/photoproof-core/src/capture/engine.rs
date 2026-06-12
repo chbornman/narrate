@@ -31,6 +31,18 @@ use crate::event::StrokePayload;
 
 /// §1 error budget: VAD-onset latency + clock conversion, combined.
 pub const ONSET_ERROR_BUDGET_MS: u64 = 250;
+/// §5.1 association (B72): the largest |segment onset − VAD onset| a
+/// proximity claim may bridge. WHY a bound at all: without one, an
+/// ASR-split final (§5.3) whose own onset has no unclaimed partner would
+/// steal a DIFFERENT utterance's held snapshot — wrong targets and wrong
+/// minted ts persisted into the journal — however many seconds away it is.
+/// Beyond the bound the final falls through to §5.3 independent binding.
+/// WHY 2 s: token-derived onsets run systematically late (RNN-T emission
+/// delay, §5.1), so the SAME utterance's two onsets can disagree by high
+/// hundreds of ms (the §13.1 cross-check test pins 900 ms); 2 s clears
+/// that with margin while staying below any real between-utterance pause
+/// that could carry a scope change.
+pub const ASSOCIATION_MAX_SKEW_MS: u64 = 2_000;
 /// §2.5/§6.4: trailing-final acceptance window after disarm/end_stream.
 pub const DRAIN_WINDOW_MS: u64 = 5_000;
 /// §6.3: trailing-silence window shipped to the ASR after the VAD gate
@@ -479,17 +491,23 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         ));
     }
 
-    /// Association by ONSET PROXIMITY: a segment keeps its exact
-    /// utterance-id match (ids are stable from first partial through final);
-    /// otherwise it claims the unclaimed in-flight whose VAD onset is
-    /// nearest the segment's own onset (both stream ms). FIFO claiming
-    /// ("first unclaimed wins") was wrong whenever the VAD split speech into
-    /// more utterances than the ASR endpointer did — a ~0.8 s pause splits
-    /// the VAD at its 480 ms hang but merges under the ASR's 1.2 s
-    /// trailing-silence rule — so the NEXT final bound the leftover
-    /// merged-away onset instead of its own (pp_voice_bench defect, June
-    /// 2026). Proximity only changes WHICH held snapshot a segment claims;
-    /// the held VAD snapshot stays authoritative for binding (§5.1), and the
+    /// Association by ONSET PROXIMITY (B72, amends B49's FIFO rule): a
+    /// segment keeps its exact utterance-id match (ids are stable from
+    /// first partial through final); otherwise it claims the unclaimed
+    /// in-flight whose VAD onset is nearest the segment's own onset —
+    /// both on the CAPTURE stream clock; the Transcriber contract makes
+    /// the connector translate backend sample-count time back through
+    /// the silence gate's withheld stretches (transcriber.rs). FIFO
+    /// claiming ("first unclaimed wins") was wrong whenever the VAD split
+    /// speech into more utterances than the ASR endpointer did — a
+    /// ~0.8 s pause splits the VAD at its 480 ms hang but merges under
+    /// the ASR's 1.2 s trailing-silence rule — so the NEXT final bound
+    /// the leftover merged-away onset instead of its own (pp_voice_bench
+    /// defect, June 2026). A claim must bridge no more than
+    /// `ASSOCIATION_MAX_SKEW_MS`; farther apart, the segment gets no
+    /// claim and a final falls through to §5.3 independent binding.
+    /// Proximity only changes WHICH held snapshot a segment claims; the
+    /// held VAD snapshot stays authoritative for binding (§5.1), and the
     /// segment onset is never used to rebind a claimed snapshot.
     fn associate(&mut self, utterance_id: u64, onset: StreamMs) -> Option<usize> {
         if let Some(i) = self
@@ -504,7 +522,9 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             .iter()
             .enumerate()
             .filter(|(_, u)| u.utterance_id.is_none())
-            .min_by_key(|(_, u)| u.onset_stream.abs_diff(onset))
+            .map(|(i, u)| (i, u.onset_stream.abs_diff(onset)))
+            .filter(|&(_, skew)| skew <= ASSOCIATION_MAX_SKEW_MS)
+            .min_by_key(|&(_, skew)| skew)
             .map(|(i, _)| i)?;
         self.in_flight[nearest].utterance_id = Some(utterance_id);
         Some(nearest)
@@ -513,17 +533,30 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
     /// The ASR endpointer can MERGE what the VAD split (§6.3: the ASR owns
     /// utterance ends; its trailing-silence rule outlasts the VAD hang).
     /// Any other unclaimed onset inside a final's span was consumed by that
-    /// final's text: retire it now — settled, nothing minted. It will never
-    /// get its own final, and leaving it in flight is what stranded the
-    /// next final on the wrong onset and counted a phantom abandon at
-    /// disarm (pp_voice_bench defect, June 2026).
-    fn retire_merged(&mut self, seg: &TranscriptSegment) {
+    /// final: retire it now — settled, nothing minted, not counted
+    /// abandoned (the third §6.5 lifecycle exit, B72). It will never get
+    /// its own final, and leaving it in flight is what stranded the next
+    /// final on the wrong onset and counted a phantom abandon at disarm
+    /// (pp_voice_bench defect, June 2026). This runs for EVERY final,
+    /// minting or not: a whitespace-only final consumed its merged onsets
+    /// all the same, and stranding them keeps the mic ArmedSpeaking and
+    /// the indicator streaming forever.
+    ///
+    /// Returns the farthest stream-clock extent of the retired onsets
+    /// (their VAD ends; the segment's own end as fallback): the claiming
+    /// utterance's durable span must grow to cover the speech it absorbed,
+    /// or a stroke drawn during the merged tail loses the link that §9.2's
+    /// in-flight suppression promised the utterance would carry.
+    fn retire_merged(&mut self, seg: &TranscriptSegment) -> Option<StreamMs> {
+        let mut merged_extent: Option<StreamMs> = None;
         let mut i = 0;
         while i < self.in_flight.len() {
             let u = &self.in_flight[i];
             if u.utterance_id.is_none() && u.onset_stream >= seg.onset && u.onset_stream <= seg.end
             {
                 let u = self.in_flight.remove(i);
+                let extent = u.end_stream.unwrap_or(seg.end).max(u.onset_stream);
+                merged_extent = Some(merged_extent.map_or(extent, |m| m.max(extent)));
                 self.note(format!(
                     "utterance onset at stream {} ms merged into final[{}]; \
                      settled without minting",
@@ -534,6 +567,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             }
         }
         self.settle_speaking_state();
+        merged_extent
     }
 
     fn on_final(&mut self, store: &EventStore, seg: &TranscriptSegment) -> Option<Event> {
@@ -550,15 +584,17 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             .associate(seg.utterance_id, seg.onset)
             .map(|i| self.in_flight.remove(i));
 
+        // Any other unclaimed onset inside this final's span was merged
+        // into it by the ASR endpointer — settle those, mint nothing for
+        // them. BEFORE the empty-text return: a whitespace final consumed
+        // its merged onsets just the same (retire_merged's WHY).
+        let merged_extent = self.retire_merged(seg);
+
         // Empty/whitespace-only finals mint NOTHING (§6.5).
+        // retire_merged already settled the speaking state.
         if seg.text.trim().is_empty() {
-            self.settle_speaking_state();
             return None;
         }
-
-        // This final mints: any other unclaimed onset inside its span was
-        // merged into it by the ASR endpointer — settle those, mint nothing.
-        self.retire_merged(seg);
 
         let (snapshot, minted, onset_mono, end_mono) = match held {
             Some(u) => {
@@ -582,7 +618,14 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
                 let end_stream = u
                     .end_stream
                     .filter(|&e| e > u.onset_stream)
-                    .unwrap_or(seg.end);
+                    .unwrap_or(seg.end)
+                    // Fold the retired merged onsets' extent in: this
+                    // final's text covers their speech, so the durable
+                    // span (dur_ms, §9 linking) must too — otherwise the
+                    // interval between the held VAD end and the merged
+                    // tail belongs to no committed span and a suppressed
+                    // stroke link (§9.2) is dropped.
+                    .max(merged_extent.unwrap_or(0));
                 (u.snapshot, u.minted, u.onset_mono, anchor + end_stream)
             }
             None => {
@@ -604,7 +647,10 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
                     lookup.snapshot,
                     store.mint_at(onset_wall),
                     onset_mono,
-                    anchor + seg.end,
+                    // Same merged-extent fold as the held branch: the skew
+                    // bound can leave associate() empty-handed while a
+                    // farther unclaimed onset still sat inside this span.
+                    anchor + seg.end.max(merged_extent.unwrap_or(0)),
                 )
             }
         };

@@ -8,6 +8,15 @@ use crate::error::ConnectorResult;
 /// Milliseconds relative to the stream clock: 0 = the instant `stream()`
 /// accepted its first audio frame. CAPTURE.md maps stream time to wall
 /// time and to selection snapshots (VAD-onset binding, gap B1).
+///
+/// There is ONE stream clock: the capture-side frame clock of
+/// [`AudioFrame::captured_at`]. Segment times share it (B72). The capture
+/// gate withholds armed silence (CAPTURE §6.2), so a backend whose native
+/// clock counts only the samples it RECEIVED runs behind this clock by the
+/// cumulative withheld time; its connector must translate segment times
+/// back to the capture positions of the frames it shipped (see `sherpa`'s
+/// `ShipClock`) — the engine binds and associates on this clock and never
+/// compensates.
 pub type StreamMs = u64;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +26,10 @@ pub struct TranscriptSegment {
     pub utterance_id: u64,
     pub kind: SegmentKind,
     pub text: String,
-    /// VAD speech onset for this utterance (selection-snapshot anchor).
+    /// The backend's own (token-derived) onset for this utterance, on the
+    /// capture stream clock ([`StreamMs`]). CAPTURE §5.1 treats it as a
+    /// cross-check and an association hint (B72) — never the binding
+    /// authority; the capture-side VAD onset is.
     pub onset: StreamMs,
     /// End of speech covered by this segment so far.
     pub end: StreamMs,
@@ -65,7 +77,9 @@ pub trait Transcriber: Send + Sync {
     /// re-arms the mic only after the supervisor reports Ready again).
     ///
     /// Implementations MUST NOT re-emit or renumber segments
-    /// (CAPTURE §6.2); all segment times are stream-clock ms offsets.
+    /// (CAPTURE §6.2); all segment times are stream-clock ms offsets on
+    /// the CAPTURE frame clock — see [`StreamMs`] for the translation
+    /// obligation when the backend counts received samples.
     fn stream<'a>(
         &'a self,
         audio: BoxStream<'a, AudioFrame>,

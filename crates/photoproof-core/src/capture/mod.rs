@@ -23,8 +23,8 @@ pub mod session;
 pub use audio::AudioRing;
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use engine::{
-    CaptureEngine, DRAIN_WINDOW_MS, DegradedFlags, IndicatorState, MicState, ONSET_ERROR_BUDGET_MS,
-    StreamingView,
+    ASSOCIATION_MAX_SKEW_MS, CaptureEngine, DRAIN_WINDOW_MS, DegradedFlags, IndicatorState,
+    MicState, ONSET_ERROR_BUDGET_MS, StreamingView,
 };
 pub use link::{StrokeSpan, UtteranceSpan, resolve_stroke_link, resolve_utterance_link};
 pub use scope::{ScopeKind, ScopeLookup, ScopeRing, ScopeSnapshot, ScopeView};
