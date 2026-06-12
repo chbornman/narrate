@@ -348,21 +348,27 @@ impl Event {
 }
 
 fn validate_stroke_payload(p: &StrokePayload) -> Result<(), ValidationError> {
+    // Messages interpolate the published consts rather than repeating the
+    // literals, so the stated range can never drift from the checked one.
     if !(ORIENTATION_MIN..=ORIENTATION_MAX).contains(&p.orientation) {
-        return fail("stroke orientation must be 1..=8");
+        return fail(format!(
+            "stroke orientation must be {ORIENTATION_MIN}..={ORIENTATION_MAX}"
+        ));
     }
     if p.points.is_empty() || p.points.len() > STROKE_MAX_POINTS {
-        return fail("stroke requires 1..=8192 points");
+        return fail(format!("stroke requires 1..={STROKE_MAX_POINTS} points"));
     }
     let mut prev_t: Option<u32> = None;
     for (i, pt) in p.points.iter().enumerate() {
         if !(STROKE_COORD_MIN..=STROKE_COORD_MAX).contains(&pt.x)
             || !(STROKE_COORD_MIN..=STROKE_COORD_MAX).contains(&pt.y)
         {
-            return fail("stroke coordinates must be in -2500..=12500");
+            return fail(format!(
+                "stroke coordinates must be in {STROKE_COORD_MIN}..={STROKE_COORD_MAX}"
+            ));
         }
         if pt.p > STROKE_PRESSURE_MAX {
-            return fail("stroke pressure must be 0..=1000");
+            return fail(format!("stroke pressure must be 0..={STROKE_PRESSURE_MAX}"));
         }
         match prev_t {
             None => {

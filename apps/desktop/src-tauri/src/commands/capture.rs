@@ -232,18 +232,24 @@ fn stroke_payload(dto: StrokePayloadDto) -> CmdResult<StrokePayload> {
     let Some(tool) = Tool::parse(&dto.tool) else {
         return Err(invalid(format!("unknown tool {:?}", dto.tool)));
     };
+    // The rejection messages interpolate the same consts the predicates
+    // check, so a retuned bound (MAX_BASE_W especially, the one shell-owned
+    // knob here) can never produce an error citing a stale range.
     if !(ORIENTATION_MIN..=ORIENTATION_MAX).contains(&dto.orientation) {
         return Err(invalid(format!(
-            "orientation {} not in 1..=8",
+            "orientation {} not in {ORIENTATION_MIN}..={ORIENTATION_MAX}",
             dto.orientation
         )));
     }
     if dto.base_w == 0 || dto.base_w > MAX_BASE_W {
-        return Err(invalid(format!("base_w {} not in 1..=10000", dto.base_w)));
+        return Err(invalid(format!(
+            "base_w {} not in 1..={MAX_BASE_W}",
+            dto.base_w
+        )));
     }
     if dto.points.is_empty() || dto.points.len() > STROKE_MAX_POINTS {
         return Err(invalid(format!(
-            "{} points not in 1..=8192",
+            "{} points not in 1..={STROKE_MAX_POINTS}",
             dto.points.len()
         )));
     }
@@ -255,11 +261,13 @@ fn stroke_payload(dto: StrokePayloadDto) -> CmdResult<StrokePayload> {
     for (i, [x, y, p, t]) in dto.points.iter().copied().enumerate() {
         if !coords.contains(&x) || !coords.contains(&y) {
             return Err(invalid(format!(
-                "point {i} coordinates out of -2500..=12500"
+                "point {i} coordinates out of {STROKE_COORD_MIN}..={STROKE_COORD_MAX}"
             )));
         }
         if !(0..=i64::from(STROKE_PRESSURE_MAX)).contains(&p) {
-            return Err(invalid(format!("point {i} pressure out of 0..=1000")));
+            return Err(invalid(format!(
+                "point {i} pressure out of 0..={STROKE_PRESSURE_MAX}"
+            )));
         }
         let t = u32::try_from(t).map_err(|_| invalid(format!("point {i} time negative")))?;
         if i == 0 && t != 0 {
