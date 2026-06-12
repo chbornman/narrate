@@ -49,12 +49,14 @@ pub struct RuntimePlan {
 }
 
 impl RuntimePlan {
-    /// Tier-0-whole / §13.3: nothing spawns, nothing downloads.
+    /// Tier-0-whole / §13.3: nothing spawns, nothing downloads. Only the
+    /// LLM and ASR are external CHILDREN — the embedders run in-process
+    /// (§3.3 ort exception), so an installed embedder's `Run` (P7.4: "load
+    /// ort sessions") is never a spawned child and must not flip this. The
+    /// Tier-0 floor returns NotConfigured for every slot anyway, so the
+    /// whole-product criterion holds regardless of embedder state.
     pub fn spawns_nothing(&self) -> bool {
-        !self.llm.spawns_child()
-            && !self.asr.spawns_child()
-            && !self.clip_embedder.spawns_child()
-            && !self.text_embedder.spawns_child()
+        !self.llm.spawns_child() && !self.asr.spawns_child()
     }
 }
 
@@ -127,22 +129,28 @@ pub fn plan(
         }
         AsrBackend::Disabled => dark("asr backend disabled in config"),
     };
-    // Embedders are in-process (§3.3) — never children; the plan only
-    // gates the feature. Their `Run` means "load ort sessions" (M3/P7).
-    let embedder_plan =
-        |model: &str| match local_model_plan(model, effective_tier, manifest, installed) {
-            ProcessPlan::Run { model_id } => ProcessPlan::NotConfigured {
-                reason: format!("{model_id} installed; ort sessions land with M3 (P7)"),
-                fixable_by_download: false,
-            },
-            other => other,
-        };
+    // Embedders are in-process (§3.3) — never external children. Their
+    // `Run` means "load the ort sessions", which the shell's EmbedderHost
+    // consumes on a background thread (P7.4 decision 4); the same
+    // installed/tier/backend gating as the children applies, so reuse it
+    // verbatim. (P6.2 deferred this to a NotConfigured placeholder until
+    // the P7 ort connector existed; P7.4 is that moment.)
     RuntimePlan {
         effective_tier,
         llm,
         asr,
-        clip_embedder: embedder_plan(&config.embedder.model),
-        text_embedder: embedder_plan(&config.embedder.text.model),
+        clip_embedder: local_model_plan(
+            &config.embedder.model,
+            effective_tier,
+            manifest,
+            installed,
+        ),
+        text_embedder: local_model_plan(
+            &config.embedder.text.model,
+            effective_tier,
+            manifest,
+            installed,
+        ),
     }
 }
 
@@ -239,6 +247,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// P7.4 decision 4: an installed embedder converges on `Run` (the
+    /// signal the EmbedderHost loads ort sessions on), but it is in-process
+    /// — `spawns_nothing` (external children only) stays true. The default
+    /// config names the DFN5B CLIP embedder + EmbeddingGemma text embedder.
+    #[test]
+    fn installed_embedders_run_in_process_without_spawning_a_child() {
+        let cfg = from_toml_str("").unwrap().config;
+        let p = plan(
+            &cfg,
+            1,
+            &compiled_manifest(),
+            &installed(&["ViT-H-14-378-quickgelu__dfn5b", "embeddinggemma-300m-q8"]),
+        );
+        assert_eq!(
+            p.clip_embedder,
+            ProcessPlan::Run {
+                model_id: "ViT-H-14-378-quickgelu__dfn5b".into()
+            }
+        );
+        assert_eq!(
+            p.text_embedder,
+            ProcessPlan::Run {
+                model_id: "embeddinggemma-300m-q8".into()
+            }
+        );
+        assert!(
+            p.spawns_nothing(),
+            "in-process embedders are never external children"
+        );
     }
 
     #[test]
