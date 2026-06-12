@@ -96,11 +96,13 @@ managing = off-thesis).
   residual, June 2026.)
 - [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
   carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
-- [ ] **Search entry as overlay, results as canvas** — `/` opens a floating
-  input over the DIMMED current surface (context stays visible; honest
-  "overlay" per I1); results expand to the full canvas as they arrive
-  (results stay a contact sheet — selection/write-scope/Look behavior
-  unchanged, UI §5 stands). (Founder, dogfood round 2.)
+- [x] **Search entry as overlay, results as canvas** — landed
+  (wave2/search): `/` floats the input over a dimmed, pointer-inert
+  scrim (visual only — Esc remains the one return path, Sheet's scrim
+  contract stands); results expand to the full canvas as they arrive,
+  zero-results stays a quiet line in the panel; the contact-sheet
+  contracts (selection/write-scope/Look, return point, Esc layers) are
+  unchanged. (Founder, dogfood round 2.)
 - [x] **Adopt Lucide icons** (`@lucide/svelte`) — landed (wave2/lucide):
   ad-hoc glyphs (🔍 from the spec mockup, sort ▾, ⏏, ×, chevrons, titlebar
   buttons) replaced with the Lucide stroke set, sized per-site (12–16 px)
