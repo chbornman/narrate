@@ -42,6 +42,19 @@ button:hover {
   border-color: var(--chrome-strong);
 }
 
+/* Pressed feedback (founder dogfood, June 2026: "it doesn't even feel like
+ * I clicked the button"): EVERY button reacts on pointer-down. WHY filter +
+ * a 1px settle rather than a background shift: the quiet variants and row
+ * buttons (menu rows, rail rows, tab strips) all override background/border
+ * in component scope and would swallow a background-based press, while
+ * nothing in the app sets filter or transform on buttons — this one rule
+ * reaches every variant. The 1px translate is the same quiet register the
+ * grid's selected cell already speaks (Thumb .selected lifts -1px). */
+button:active:not(:disabled) {
+  filter: brightness(1.35);
+  transform: translateY(1px);
+}
+
 input,
 textarea,
 select {
