@@ -43,8 +43,12 @@ use crate::error::{ConnectorError, ConnectorResult};
 const INTRA_OP_THREADS: usize = 4;
 
 /// Qwen3-Embedding appends `<|endoftext|>` (id 151643) before last-token
-/// pooling — the model card's contract, and the exact id the spike used.
-/// Without it the "last token" is arbitrary trailing text.
+/// pooling — the model card's contract. Without it the "last token" is
+/// arbitrary trailing text. NOTE the deviation from the spike harness: the
+/// spike let the tokenizer's post-processor append this id AND appended it
+/// again by hand (text_embed_bench.py:133), so its last-token pool read a
+/// DOUBLE EOS. We append exactly one (and suppress the post-processor's, see
+/// `run_text`), which is the single, model-card-correct row.
 const QWEN_EOS_ID: u32 = 151643;
 
 /// CLIP BPE start/end-of-text marker ids (OpenCLIP vocab; DFN5B textual).
@@ -53,13 +57,24 @@ const CLIP_EOT_ID: i32 = 49407;
 /// DFN5B textual context length (config.json text_cfg.context_length).
 const CLIP_CONTEXT: usize = 77;
 
-/// CLIP normalization constants (OpenCLIP / DFN5B visual preprocess_cfg).
-/// WHY they live here, not in core's geometry helper: these are a property
-/// of THIS ONNX export — the mean/std the visual tower was trained with —
-/// not of how the library decodes pixels. Core hands us 378x378 sRGB bytes
-/// (see photoproof_core::library::preprocess_clip_image); we turn them into
-/// the normalized CHW f32 tensor this specific model wants. Mirrors the
-/// spike's clip_bench.py exactly.
+/// CLIP normalization constants (OpenCLIP / DFN5B visual preprocess_cfg);
+/// the mean/std are the spike's clip_bench.py values exactly.
+///
+/// DEVIATION from PLAN-P7.4 decision 3, recorded honestly (the plan said the
+/// preprocess constants "live in core where decode happens"): they live here
+/// instead. This was forced, not a free re-decision — `DecodedImage` carries
+/// interleaved sRGB `Vec<u8>`, so a "CHW normalized f32" image cannot flow
+/// through the existing shared connector type without changing the trait
+/// (out of this packet's scope). So core does GEOMETRY only (resize +
+/// center-crop to 378x378 sRGB u8, in preprocess_clip_image) and the
+/// connector does the /255 + (x-mean)/std + CHW conversion. The split is
+/// functionally equivalent (same tensor) and the duplicated 378 edge is
+/// cross-checked at runtime; the plan owner should treat this as a one-line
+/// amendment to decision 3, not a contract a later lane "fixes" by moving the
+/// constants back (which would break the size-check pairing with this file).
+/// WHY these belong on THIS side regardless: they are a property of THIS ONNX
+/// export — the mean/std the visual tower was trained with — not of how the
+/// library decodes pixels.
 const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 
@@ -351,15 +366,7 @@ fn zero_length_kv_feeds(session: &Session) -> Vec<KvFeed> {
         let concrete: Vec<i64> = shape
             .iter()
             .zip(dimension_symbols.iter())
-            .map(|(dim, sym)| {
-                if *dim >= 0 {
-                    *dim // concrete (head count, head dim): keep
-                } else if sym.contains("batch") {
-                    1 // single sequence
-                } else {
-                    0 // the empty past
-                }
-            })
+            .map(|(dim, sym)| collapse_kv_dim(*dim, sym))
             .collect();
         feeds.push(KvFeed {
             name: input.name().to_string(),
@@ -368,6 +375,22 @@ fn zero_length_kv_feeds(session: &Session) -> Vec<KvFeed> {
         });
     }
     feeds
+}
+
+/// Map ONE `past_key_values.*` dimension to its zero-length-cache value: a
+/// concrete int (head count, head dim) is kept; a dynamic axis (-1) becomes 1
+/// if its symbol names the batch, else 0 (the empty past-length). Extracted
+/// as a free function so `zero_length_kv_feeds`'s logic — which needs a real
+/// `&Session` and so can only run under the #[ignore] model tests — is
+/// exercised by a deterministic default-suite test rather than a copy of it.
+fn collapse_kv_dim(dim: i64, sym: &str) -> i64 {
+    if dim >= 0 {
+        dim // concrete (head count, head dim): keep
+    } else if sym.contains("batch") {
+        1 // single sequence
+    } else {
+        0 // the empty past
+    }
 }
 
 // --------------------------------------------------------- text encode ---
@@ -382,12 +405,35 @@ fn run_text(
     has_position_ids: bool,
     dims: usize,
 ) -> ConnectorResult<Vec<f32>> {
+    // Special-token handling is recipe-specific, and deliberately so —
+    // both choices freeze into the PPVEC space at backfill, so they follow
+    // each model's CANONICAL pipeline rather than the spike harness where
+    // the two disagree (the spike's add_special_tokens=True default produced
+    // measurably different / in two cases doubled token rows; see the WHY on
+    // each arm).
+    let add_special_tokens = match recipe {
+        // Gemma: the tokenizer.json carries a TemplateProcessing post-processor
+        // that wraps every sequence as <bos> ... <eos> (ids 2 / 1). The
+        // EmbeddingGemma sentence-transformers pipeline AND the spike's
+        // Python `tok.encode(t)` (default add_special_tokens=True) both
+        // include them in the mean pool, so the +0.310 paraphrase margin was
+        // measured WITH them. We must too, or we embed in a different space.
+        TextRecipe::MeanPooled => true,
+        // Qwen: its post-processor ALSO appends <|endoftext|>. The spike then
+        // appended a SECOND one manually (text_embed_bench.py:133) and its
+        // last-token pooling read that duplicate — a spike bug, not the model
+        // card. We append exactly one EOS ourselves (below), so we suppress
+        // the post-processor's append here to land on the single, model-card
+        // -correct row.
+        TextRecipe::LastToken => false,
+    };
     let encoding = tokenizer
-        .encode(prompted, false)
+        .encode(prompted, add_special_tokens)
         .map_err(|e| ConnectorError::Decode(format!("tokenize: {e}")))?;
     let mut ids: Vec<i64> = encoding.get_ids().iter().map(|&i| i64::from(i)).collect();
     if recipe == TextRecipe::LastToken {
-        // EOS appended so last-token pooling reads a defined position.
+        // EOS appended so last-token pooling reads a defined position. Exactly
+        // one, matching the Qwen3-Embedding model card (vs the spike's double).
         ids.push(i64::from(QWEN_EOS_ID));
     }
     let seq = ids.len();
@@ -521,7 +567,19 @@ fn extract_clip_embedding(
 }
 
 /// CLIP BPE tokenization into a fixed [77] i32 row: lowercase, SOT + the
-/// first 75 token ids + EOT, zero-padded. Mirrors clip_bench.py exactly.
+/// first 75 token ids + EOT, zero-padded — the canonical single-wrapped
+/// OpenCLIP row.
+///
+/// DEVIATION from the spike (clip_bench.py:54) recorded honestly: the DFN5B
+/// textual tokenizer.json carries a RobertaProcessing post-processor that
+/// already wraps SOT/EOT, and the spike called `tok.encode(t.lower())` with
+/// the Python default add_special_tokens=True and THEN prepended/appended
+/// SOT/EOT by hand — producing a DOUBLE-wrapped row
+/// ([49406, 49406, body, 49407, 49407]). We pass add_special_tokens=false so
+/// the post-processor does not fire, then wrap once: the single-marker form
+/// the OpenCLIP/DFN5B export was trained against. The #[ignore] real-model
+/// zero-shot check passes on this (canonical) row; it is not bit-identical to
+/// the spike's doubled one.
 fn clip_tokenize(tokenizer: &Tokenizer, text: &str) -> ConnectorResult<Vec<i32>> {
     let encoding = tokenizer
         .encode(text.to_lowercase(), false)
@@ -653,25 +711,23 @@ mod tests {
     #[test]
     fn kv_shaping_collapses_past_length_keeps_concrete_dims() {
         // Qwen3 past_key_values.*: [batch_size, 8, past_sequence_length, 128].
-        // The shaper must produce [1, 8, 0, 128].
-        let shape: Vec<i64> = vec![-1, 8, -1, 128];
+        // The shipped shaper (via collapse_kv_dim) must produce [1, 8, 0, 128].
+        let shape: [i64; 4] = [-1, 8, -1, 128];
         let symbols = ["batch_size", "", "past_sequence_length", ""];
         let concrete: Vec<i64> = shape
             .iter()
             .zip(symbols.iter())
-            .map(|(dim, sym)| {
-                if *dim >= 0 {
-                    *dim
-                } else if sym.contains("batch") {
-                    1
-                } else {
-                    0
-                }
-            })
+            .map(|(dim, sym)| collapse_kv_dim(*dim, sym))
             .collect();
         assert_eq!(concrete, vec![1, 8, 0, 128]);
         // Total element count is zero -> an empty data vec is correct.
         assert_eq!(concrete.iter().product::<i64>(), 0);
+        // Each mapping rule in isolation, so a future edit that inverts the
+        // concrete-vs-symbolic check or drops the batch branch fails HERE
+        // (the default suite) rather than only in the #[ignore] model tests.
+        assert_eq!(collapse_kv_dim(128, ""), 128, "concrete dim kept");
+        assert_eq!(collapse_kv_dim(-1, "batch_size"), 1, "batch -> 1");
+        assert_eq!(collapse_kv_dim(-1, "past_sequence_length"), 0, "past -> 0");
     }
 
     // ---- pooling math (tiny hand-built tensors) ----
