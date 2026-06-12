@@ -76,6 +76,8 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "cycle-cell-info",
     "toggle-auto-advance",
     "—",
+    // F is total (founder, June 12 2026): the Grid-side pointer seat.
+    "toggle-filmstrip",
     "toggle-lights-out",
     "toggle-fullscreen",
     "toggle-cheatsheet",

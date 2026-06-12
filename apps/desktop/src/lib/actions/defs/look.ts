@@ -1,12 +1,14 @@
 /**
  * Look rows — STAGE B OWNS THIS FILE. Prev/next, the zoom band (Z
  * anchored at pointer and the dblclick toggle are LookStage pointer facts
- * over the same Actions), R member flip (featureset §5), and the
- * filmstrip. The look-close row is GONE (June 12 2026: Space became 100%
- * the microphone key — defs/global.ts mic-press); Esc remains the close
- * path through the escape ladder (logic/escape.ts "leave-look"), exactly
- * as before. The zoomed Space-pan pipeline went with it — drag-pan is the
- * only pan. The look-backdrop seat is complete by construction:
+ * over the same Actions), and R member flip (featureset §5). The
+ * look-close row is GONE (June 12 2026: Space became 100% the microphone
+ * key — defs/global.ts mic-press); Esc remains the close path through
+ * the escape ladder (logic/escape.ts "leave-look"), exactly as before.
+ * The zoomed Space-pan pipeline went with it — drag-pan is the only pan.
+ * The filmstrip row moved to defs/global.ts the same day (founder: F is
+ * total across Grid and Look). The look-backdrop seat is complete by
+ * construction:
  * zoom-toggle/zoom-fit/zoom-100 seated here + the global set-surround row
  * fill menus.ts's frozen look-backdrop order table.
  *
@@ -76,17 +78,8 @@ export const LOOK_DEFS: ActionDef[] = [
     seats: ["look-backdrop"],
     available: always,
   },
-  {
-    id: "toggle-filmstrip",
-    verb: "Filmstrip",
-    keys: [{ key: "f" }],
-    scope: "look",
-    group: "look",
-    seats: ["look-backdrop"], // pointer reachability (dogfood round 1)
-    available: always,
-    enabled: lookKeysFree,
-    checked: (ctx) => ctx.filmstrip,
-  },
+  // toggle-filmstrip MOVED to defs/global.ts (founder, June 12 2026): F
+  // is total — the strip is a center-column bottom panel in BOTH surfaces.
   {
     id: "flip-stack-member",
     verb: "Flip RAW/JPEG",

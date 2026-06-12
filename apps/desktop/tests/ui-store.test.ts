@@ -264,11 +264,15 @@ describe("P4.2 contract flows", () => {
     expect(ui.grid.unitHashes[ui.grid.sel.focus]).toBe("c");
   });
 
-  it("lights-out hides chrome but SURVIVES open state (Tab twice restores)", async () => {
+  // AMENDED by the layout-architecture round (founder, June 12 2026):
+  // lights-out is a SNAPSHOT-RESTORE — hiding records the open-panel set
+  // and CLOSES the panels (they render from `open` alone now); Tab again
+  // restores exactly that set.
+  it("lights-out snapshots open state and Tab twice restores it", async () => {
     ui.shell.railOpen = true;
     await ui.perform({ kind: "toggle-lights-out" });
     expect(ui.shell.chromeHidden).toBe(true);
-    expect(ui.shell.railOpen).toBe(true); // open-state untouched
+    expect(ui.shell.railOpen).toBe(false); // closed; recorded in the snapshot
     await ui.perform({ kind: "toggle-lights-out" });
     expect(ui.shell.chromeHidden).toBe(false);
     expect(ui.shell.railOpen).toBe(true);
@@ -351,5 +355,55 @@ describe("Space two-gesture mic (CAPTURE §6.4 — tap toggles, hold is push-to-
     await ui.perform({ kind: "toggle-mic" });
     expect(lastCall("toggle_mic")).toBeDefined();
     expect(setMicCalls()).toHaveLength(0);
+  });
+});
+
+describe("Tab lights-out snapshot-restore (founder, June 12 2026)", () => {
+  it("restores exactly the open set: rail + inspector tab + filmstrip", async () => {
+    ui.shell.railOpen = true;
+    ui.inspector.openTab("journal");
+    ui.look.filmstrip = true;
+    await ui.perform({ kind: "toggle-lights-out" });
+    // Everything closes — panels render from their own open flags.
+    expect(ui.shell.railOpen).toBe(false);
+    expect(ui.inspector.open).toBe(false);
+    expect(ui.look.filmstrip).toBe(false);
+    await ui.perform({ kind: "toggle-lights-out" });
+    // ... and comes back exactly as it was, tab included.
+    expect(ui.shell.railOpen).toBe(true);
+    expect(ui.inspector.open).toBe("journal");
+    expect(ui.look.filmstrip).toBe(true);
+  });
+
+  it("nothing open → nothing restored (never a fixed default set)", async () => {
+    ui.shell.railOpen = false;
+    expect(ui.inspector.open).toBe(false);
+    await ui.perform({ kind: "toggle-lights-out" });
+    await ui.perform({ kind: "toggle-lights-out" });
+    expect(ui.shell.railOpen).toBe(false);
+    expect(ui.inspector.open).toBe(false);
+    expect(ui.look.filmstrip).toBe(false);
+  });
+
+  it("lights-out never rewrites the panels' standing prefs", async () => {
+    ui.shell.toggleRail(); // user intent: open (persists "1")
+    expect(localStorage.getItem("pp.railOpen")).toBe("1");
+    ui.look.toggleFilmstrip(); // user intent: shown (persists "1")
+    expect(localStorage.getItem("pp.filmstrip")).toBe("1");
+    await ui.perform({ kind: "toggle-lights-out" });
+    // The snapshot close is NOT a toggle: a quit while hidden must
+    // relaunch with the user's standing layout.
+    expect(localStorage.getItem("pp.railOpen")).toBe("1");
+    expect(localStorage.getItem("pp.filmstrip")).toBe("1");
+  });
+
+  it("hiding does not steal or grant rail keyboard focus on restore", async () => {
+    ui.shell.toggleRail(); // open + focused (the \ handoff)
+    expect(ui.shell.railFocused).toBe(true);
+    await ui.perform({ kind: "toggle-lights-out" });
+    expect(ui.shell.railFocused).toBe(false); // hidden rail can't hold keys
+    await ui.perform({ kind: "toggle-lights-out" });
+    expect(ui.shell.railOpen).toBe(true);
+    expect(ui.shell.railFocused).toBe(false); // restore is layout, not focus
   });
 });

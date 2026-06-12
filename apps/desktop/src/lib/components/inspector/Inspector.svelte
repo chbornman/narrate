@@ -19,7 +19,6 @@
    */
   import { ui } from "../../state/app.svelte";
   import { multiSelectLabel } from "../../logic/selection";
-  import { INSPECTOR_WIDTH_KEY } from "../../state/prefs";
   import Panel from "../../primitives/Panel.svelte";
   import KeyHint from "../../primitives/KeyHint.svelte";
   import MetadataTab from "./MetadataTab.svelte";
@@ -33,15 +32,8 @@
   );
 </script>
 
-<Panel
-  side="right"
-  open={ui.inspector.open !== false && !ui.shell.chromeHidden}
-  size={320}
-  minSize={260}
-  maxSize={520}
-  persistKey={INSPECTOR_WIDTH_KEY}
-  label="Inspector"
->
+<!-- lights-out hides this through the root's panel snapshot, not a gate -->
+<Panel id="inspector" edge="right" open={ui.inspector.open !== false} label="Inspector">
   <div class="tabs" role="tablist">
     <button
       role="tab"

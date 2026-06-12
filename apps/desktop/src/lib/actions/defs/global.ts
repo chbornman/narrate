@@ -56,6 +56,23 @@ export const GLOBAL_DEFS: ActionDef[] = [
     available: always,
   },
   {
+    id: "toggle-filmstrip",
+    verb: "Filmstrip",
+    label: "Filmstrip (current scope, bottom edge)",
+    keys: [{ key: "f" }],
+    // GLOBAL since the layout-architecture round (founder, June 12 2026):
+    // F is total — the filmstrip is a center-column bottom panel in BOTH
+    // surfaces (in Grid it walks the grid's own units, focused cell
+    // highlighted). Was scope "look" — the founder's "F works sometimes".
+    scope: "global",
+    group: "panels",
+    // Pointer reachability: gutter (Grid) + look-backdrop (Look).
+    seats: ["gutter", "look-backdrop"],
+    available: always,
+    enabled: (ctx) => !ctx.railFocused,
+    checked: (ctx) => ctx.filmstrip,
+  },
+  {
     id: "toggle-cheatsheet",
     verb: "Keyboard map",
     keys: [{ key: "?" }, { key: "F1" }],

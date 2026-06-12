@@ -35,6 +35,11 @@ export class LookSlice {
   order = $state<LookEntry[]>([]);
   index = $state(-1);
 
+  /** The filmstrip panel's open state (F). SHARED by Grid and Look since
+   * the layout-architecture round (founder, June 12 2026) — the strip is
+   * the center column's bottom edge panel; the open flag stays here (its
+   * historical home; ctx.filmstrip and the pref read it), the lights-out
+   * snapshot closes/restores it at the root. */
   filmstrip = $state(false);
 
   /** Display hashes flipped to their alt member (R), keyed by entry
