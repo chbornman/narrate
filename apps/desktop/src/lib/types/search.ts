@@ -106,7 +106,7 @@ export type Filter =
   | { type: "folder"; value: string }
   | { type: "root"; value: string }
   | { type: "rating"; op: "eq" | "gte" | "lte"; value: number }
-  | { type: "project"; name: string }
+  | { type: "collection"; name: string }
   | { type: "volume"; value: "online" | "offline" }
   | { type: "has_strokes"; value: boolean }
   | { type: "source"; values: ("voice" | "typed" | "pencil")[] };

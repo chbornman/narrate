@@ -241,7 +241,7 @@ pub(crate) fn compile(
                     }
                 }
             }
-            Filter::Project(_) => return Err(SearchError::UnsupportedFilter("project")),
+            Filter::Collection(_) => return Err(SearchError::UnsupportedFilter("collection")),
             Filter::Kind(_) => return Err(SearchError::UnsupportedFilter("kind")),
         }
     }

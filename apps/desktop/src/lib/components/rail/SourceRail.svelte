@@ -4,7 +4,7 @@
    * width-persisted, `\` toggles (D5). Replaces the old Rail.svelte; the
    * dwell hot-zone and pin affordance are DELETED (no auto-hide fly-outs,
    * ever). Rows render through SourceList over logic/sources.ts sections —
-   * projects/saved-searches join as sibling sections in M3 with zero
+   * collections/saved-searches join as sibling sections in M3 with zero
    * edits here. Right-click on a folder row opens the rail-folder seat.
    * The footer carries the rail's one standing affordance: "Add folder…"
    * (founder, dogfood rounds 1+2 — no Settings round-trip).

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use photoproof_core::id::{ContentHash, UtcMillis};
 use photoproof_core::search::{
-    Comparison, DateField, DateRange, EventKind, EventSource, Filter, PathMatch, ProjectRef,
+    CollectionRef, Comparison, DateField, DateRange, EventKind, EventSource, Filter, PathMatch,
     Provenance, SearchError, SearchResults, Searcher, StringMatch, VolumeFilter,
 };
 use photoproof_core::store::{
@@ -632,13 +632,13 @@ fn m3_only_filters_error_rather_than_silently_drop() {
     let err = searcher
         .search(
             "fog",
-            &[Filter::Project(ProjectRef {
+            &[Filter::Collection(CollectionRef {
                 raw: "Quiet Hours".into(),
                 resolved: None,
             })],
         )
         .unwrap_err();
-    assert!(matches!(err, SearchError::UnsupportedFilter("project")));
+    assert!(matches!(err, SearchError::UnsupportedFilter("collection")));
     let err = searcher
         .search("fog", &[Filter::Kind(vec![EventKind::Remark])])
         .unwrap_err();

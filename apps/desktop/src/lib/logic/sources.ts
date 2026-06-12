@@ -1,7 +1,7 @@
 /**
  * Source-rail row model (featureset §3), extracted from the old
  * Rail.svelte as pure functions: SourceSection providers — folders today;
- * projects and saved searches join as SIBLING SECTIONS in M3 with zero
+ * collections and saved searches join as SIBLING SECTIONS in M3 with zero
  * rail edits (SourceList renders sections generically).
  */
 import type { FolderNode, RootDto } from "../types/dto";
@@ -20,7 +20,7 @@ export interface SourceRow {
 }
 
 export interface SourceSection {
-  /** M3 widens this union: "projects" | "saved-searches". */
+  /** M3 widens this union: "collections" | "saved-searches" (B71). */
   id: "folders";
   label: string;
   rows: SourceRow[];
@@ -87,7 +87,7 @@ export function folderSection(input: SourcesInput): SourceSection {
   return { id: "folders", label: "Folders", rows };
 }
 
-/** Provider aggregation — M3 appends project/saved-search sections here. */
+/** Provider aggregation — M3 appends collection/saved-search sections here. */
 export function sections(input: SourcesInput): SourceSection[] {
   return [folderSection(input)];
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Generic source-section renderer: folders today; M3's projects and
+   * Generic source-section renderer: folders today; M3's collections and
    * saved searches arrive as sibling SourceSections with ZERO edits here
    * (the M3-proofing is the whole point of this component).
    */

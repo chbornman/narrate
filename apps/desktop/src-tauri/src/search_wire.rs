@@ -7,8 +7,8 @@
 //! error, never a silent drop (RETRIEVAL §5.1 firewall discipline).
 
 use photoproof_core::search::{
-    self as core_search, Comparison, DateField, DateRange, Filter as CoreFilter, PathMatch,
-    ProjectRef, RelativeRange as CoreRelativeRange, SearchError, Searcher, Season, StringMatch,
+    self as core_search, CollectionRef, Comparison, DateField, DateRange, Filter as CoreFilter,
+    PathMatch, RelativeRange as CoreRelativeRange, SearchError, Searcher, Season, StringMatch,
     VolumeFilter,
 };
 use photoproof_core::{Source, UtcMillis};
@@ -76,7 +76,7 @@ fn filter_to_core(f: &dto::Filter) -> CmdResult<CoreFilter> {
         }),
         // M3 filter; forwarded so the engine's UnsupportedFilter error
         // (hard-constraint discipline) reaches the UI verbatim.
-        dto::Filter::Project { name } => CoreFilter::Project(ProjectRef {
+        dto::Filter::Collection { name } => CoreFilter::Collection(CollectionRef {
             raw: name.clone(),
             resolved: None,
         }),

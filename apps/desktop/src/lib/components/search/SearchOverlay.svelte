@@ -73,8 +73,8 @@
         return `root: ${f.value}`;
       case "rating":
         return `rating ${f.op === "gte" ? "≥" : f.op === "lte" ? "≤" : "="} ${f.value}`;
-      case "project":
-        return `project: ${f.name}`;
+      case "collection":
+        return `collection: ${f.name}`;
       case "volume":
         return f.value;
       case "has_strokes":

@@ -289,9 +289,9 @@ chosen readings.
   the FTS index.
 - **B33 (P3.1).** Filter minutiae: camera/lens ASCII-case-insensitive;
   `Folder::Subtree` = volume-relative segment prefix; `NameContains` matches
-  directories only; M3-only filters (`Project`, `Kind`) hard-error rather
-  than silently drop; the core result contract carries no serde — the shell
-  maps to its own DTOs (`search_wire`).
+  directories only; M3-only filters (`Collection` — `Project` pre-B71 —
+  and `Kind`) hard-error rather than silently drop; the core result contract
+  carries no serde — the shell maps to its own DTOs (`search_wire`).
 - **B34 (P3.2).** Grid thumbnails render exactly two badges (UI §3.5);
   rating data ships in `GridItem` but is never rendered on thumbnails. The
   has-journal dot requires remark/stroke evidence — rating-only journals
@@ -678,7 +678,10 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   (`collections.photoproof.json`) with C2-family union merge, fuzzy name
   resolution in search, context-assembly layer 4. Spec text, table
   names, parser grammar (`"type":"collection"`), and file names all
-  rename with it.
+  rename with it. The one piece of shipped code that carried the old
+  name — the P3.1 filter AST and its wire/UI mirrors (B33's M3-only
+  `Project` filter) — renamed in a follow-up commit, so the §5.1
+  grammar and the code that implements it stay identical.
 
 ## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.

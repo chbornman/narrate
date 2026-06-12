@@ -137,7 +137,7 @@ pub enum Filter {
         op: String,
         value: u8,
     },
-    Project {
+    Collection {
         name: String,
     },
     Volume {
@@ -224,11 +224,23 @@ mod tests {
               {"type":"has_strokes","value":true},
               {"type":"camera","value":"X-T5"},
               {"type":"volume","value":"offline"},
+              {"type":"collection","name":"Quiet Hours"},
               {"type":"source","values":["voice","typed"]}
             ]"#,
         )
         .unwrap();
-        assert_eq!(chips.len(), 6);
+        assert_eq!(chips.len(), 7);
+        // B71 made "collection" the canonical wire tag; "project" is no
+        // longer part of the section 5.1 grammar and must not deserialize.
+        assert!(
+            serde_json::from_str::<Filter>(r#"{"type":"project","name":"Quiet Hours"}"#).is_err()
+        );
+        assert_eq!(
+            chips[5],
+            Filter::Collection {
+                name: "Quiet Hours".into()
+            }
+        );
         assert_eq!(
             chips[1],
             Filter::Rating {

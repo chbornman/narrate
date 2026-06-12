@@ -72,7 +72,7 @@ pub struct ParsedQuery {
 
 /// One typed filter (RETRIEVAL §5.1). M1 executes the chip subset: date
 /// range, camera, lens, folder/root, rating, has-strokes, source,
-/// online/offline. `Project` and `Kind` are M3 (`SearchError::UnsupportedFilter`).
+/// online/offline. `Collection` and `Kind` are M3 (`SearchError::UnsupportedFilter`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filter {
     Date {
@@ -88,8 +88,8 @@ pub enum Filter {
     /// Folded current rating, 0..=5 (reads `image_ratings`; E4: `value:0`
     /// is an explicit zero — unrated images match no rating filter).
     Rating(Comparison),
-    /// Resolved against the project store, §10 (M3).
-    Project(ProjectRef),
+    /// Resolved against the collections store, §10 (M3).
+    Collection(CollectionRef),
     Volume(VolumeFilter),
     /// Reads `image_journal_stats.has_strokes` — never a stroke-event fold
     /// at query time (§4, P5).
@@ -169,7 +169,7 @@ pub enum Comparison {
 
 /// §10.3 fuzzy resolution (M3).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectRef {
+pub struct CollectionRef {
     pub raw: String,
     pub resolved: Option<ulid::Ulid>,
 }
@@ -308,7 +308,7 @@ pub enum SearchError {
     #[error("search interrupted")]
     Interrupted,
     /// Filters are hard constraints; a filter that cannot execute in M1
-    /// (`Project`, `Kind`) errors rather than being silently dropped.
+    /// (`Collection`, `Kind`) errors rather than being silently dropped.
     #[error("filter not executable in M1: {0}")]
     UnsupportedFilter(&'static str),
     #[error("corrupt row: {0}")]
