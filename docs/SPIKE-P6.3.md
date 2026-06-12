@@ -86,6 +86,38 @@ the real constraint: with both resident (6.7 + 1.1 GB + app + OS) the
 compressor was active. **Tier-1 16 GB recommendation: `--ctx-size 8192`
 single-slot** unless measurement on the wired app shows otherwise.
 
+## LLM bake-off (founder RAM directive: "the whole program in a few GB")
+
+Same harness per candidate (spawn→Ready, RSS, tok/s, the 50-query schema
+probe), §3.1 shape, `--reasoning-budget 0`:
+
+| Model | Ready | RSS load / after 16k-ctx use | gen tok/s | schema | s/query |
+|---|---|---|---|---|---|
+| Gemma 4 **E4B** Q4_K_M + Q8 mmproj | 2.3 s | 5.3 / 6.7 GB | 34.6 | 50/50 | 2.93 |
+| Gemma 4 **E2B QAT q4_0** + Q8 mmproj | 3.5 s | **4.0 / 4.3 GB** | **71.3** | **50/50** | **1.69** |
+| Qwen3.5-2B Q4_K_M (unsloth) | — | — | — | — | — |
+
+- **E2B QAT is the v1 default (B68)**: half the footprint, 2× the speed,
+  identical schema validity, and the interactive parse lands UNDER §9's
+  2 s budget (1.69 s) where E4B missed it (2.93 s). E4B stays the
+  config-selectable Tier-2+ option pending the caption-quality eyeball
+  (captions are retrieval fuel only, K14 — the bar is modest).
+- **Qwen3.5-2B is disqualified for v1**: the GGUF crashes llama.cpp b9590
+  during model load (`common_fit_params` abort) — no official Qwen GGUF
+  exists for the 3.5 dense line, and a community export that hard-crashes
+  the pinned runtime is exactly what B55's fail-closed posture exists to
+  keep out. Revisit when ggml-org publishes a conversion.
+- **Resident-set picture with E2B** (the founder's "few GB" target):
+  LLM 4.0–4.3 GB + ASR 1.1 GB + silero ~0 + text embedder ~0.6 GB ≈
+  **5.7–6 GB peak**, and llama-server's 3.5 s spawn→Ready makes
+  LOAD-ON-DEMAND genuinely viable — the supervisor can keep P1 down
+  until a parse/caption needs it, putting the idle footprint at
+  **~1.7 GB**. The remaining fat target is the CLIP embedder preset
+  (session 2's bake-off; DFN5B ViT-H is the big one — a smaller preset
+  now matters more than the LLM).
+- E2B/mmproj pins: `3646b4c1…455e6fd` / `8a82e0fd…1aac8a8` (full values
+  in spike-p6.3/SHA256SUMS).
+
 ## Decisions taken (recorded as B66–B67 in DECISIONS.md)
 
 - **TLS client (B55 open item): `ureq` + rustls.** The download manager is

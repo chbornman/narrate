@@ -640,6 +640,15 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   `--reasoning-budget 0` (Gemma 4 E4B thinks otherwise — constrained
   output never reaches content).
 
+- **B68 (founder RAM directive).** Default P1 model: **Gemma 4 E2B QAT
+  q4_0** (official Google quant), not E4B — half the footprint
+  (4.0/4.3 GB vs 5.3/6.7), double the speed (71 vs 35 tok/s), identical
+  50/50 schema validity, and the interactive parse fits §9's 2 s budget
+  (1.69 s vs 2.93). E4B remains a config-selectable Tier-2+ option.
+  Qwen3.5-2B: no official GGUF; the community export crashes the pinned
+  llama.cpp at load — out for v1. Load-on-demand P1 (3.5 s Ready) is the
+  sanctioned idle-footprint lever: ~1.7 GB resident without the LLM.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).
