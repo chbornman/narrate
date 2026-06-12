@@ -15,6 +15,7 @@ mod debug;
 mod dto;
 mod error;
 mod hardware;
+mod mic;
 mod note;
 mod protocol;
 mod pump;
@@ -42,9 +43,8 @@ pub fn run() {
     // debug under `cargo tauri dev` — set RUST_LOG=trace for the firehose.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "info,photoproof_core=debug,photoproof_desktop=debug".into()
-            }),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,photoproof_core=debug,photoproof_desktop=debug".into()),
         )
         .compact()
         .init();
@@ -166,6 +166,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::capture::set_rating,
         commands::capture::report_activity,
         commands::capture::add_stroke,
+        commands::capture::toggle_mic,
         commands::search::search,
         commands::library::list_roots,
         commands::library::add_root,
@@ -214,6 +215,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::capture::set_rating,
         commands::capture::report_activity,
         commands::capture::add_stroke,
+        commands::capture::toggle_mic,
         commands::search::search,
         commands::library::list_roots,
         commands::library::add_root,

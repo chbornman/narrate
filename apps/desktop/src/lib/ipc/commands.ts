@@ -34,6 +34,10 @@ export const setScope = (targets: string[]) =>
 
 export const indicatorState = () => invoke<IndicatorState>("indicator_state");
 
+/** M-key toggle (CAPTURE §6.4): arm/disarm the mic; echoes the §11
+ * indicator (a not-ready ASR lands `disarmedError` quietly). */
+export const toggleMic = () => invoke<IndicatorState>("toggle_mic");
+
 /** Typed note bound to the current scope — or, `target` given, to that
  * single image (the journal-panel composer's explicit binding: the panel's
  * image, never the grid write-scope). Resolves true iff committed. */

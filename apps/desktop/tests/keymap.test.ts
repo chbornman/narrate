@@ -77,9 +77,9 @@ describe("global rows", () => {
     });
   });
 
-  it("M is a RESERVED row — dispatches to nothing in P4.2 (M2b packet)", () => {
+  it("M toggles the mic — but ONLY while the supervised ASR is ready (P6.4)", () => {
     expect(dispatch(key("m"), base)).toBeNull();
-    expect(dispatch(key("m"), { ...base, asrReady: true })).toBeNull();
+    expect(dispatch(key("m"), { ...base, asrReady: true })).toEqual({ kind: "toggle-mic" });
   });
 });
 

@@ -166,17 +166,15 @@ export const GLOBAL_DEFS: ActionDef[] = [
     available: (ctx) => ctx.debugEnabled,
     worksInInput: true,
   },
-  // ---- reserved rows (dispatch to nothing until their packets) ----------
   {
     id: "toggle-mic",
     verb: "Microphone",
     keys: [{ key: "m" }],
     scope: "global",
     group: "capture",
-    // Gated on the LIVE §8.3 readiness flag since P6.2; stays reserved
-    // (dispatches to nothing) until P6.3 wires the real mic device —
-    // arming needs cpal + the supervised sherpa client.
+    // Live since P6.4 (the cpal device + supervised sherpa client are
+    // wired). Gated on the §8.3 readiness flag: the row — and the M key —
+    // exists only while the supervised ASR child reports Ready.
     available: (ctx) => ctx.asrReady,
-    reserved: true,
   },
 ];

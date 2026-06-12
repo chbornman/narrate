@@ -192,7 +192,6 @@ pub fn spawn_runtime_pump(handle: AppHandle) {
 /// `wait` is the seam: production passes a short real sleep, tests
 /// advance a fake clock — so the loop's bound is the ENGINE's deadline,
 /// not wall-clock luck. Returns the number of trailing finals minted.
-#[allow(dead_code)] // quit-path wiring lands with P6.3's live engine; pinned by tests below
 pub fn drain_capture_at_quit<C: photoproof_core::capture::Clock>(
     engine: &mut photoproof_core::capture::CaptureEngine<'_, C>,
     store: &photoproof_core::EventStore,

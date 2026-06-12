@@ -42,12 +42,24 @@
   );
   const hairline = $derived(segs.find((s) => s.id === "ingest"));
   const scopeSeg = $derived(segs.find((s) => s.id === "scope"));
-  const restSegs = $derived(segs.filter((s) => s.id !== "ingest" && s.id !== "scope"));
+  // The mic segment is its OWN button (P6.4: click = the M toggle, via
+  // the registry row — the audit's pointer path); the rest stay in the
+  // note zone.
+  const micSeg = $derived(segs.find((s) => s.id === "mode:mic"));
+  const noteSegs = $derived(
+    segs.filter((s) => s.id !== "ingest" && s.id !== "scope" && s.id !== "mode:mic"),
+  );
 
   /** Scope segment click → the inspector's Journal tab for the active
    * image (the registry row J uses; zero new verbs). */
   function openJournal() {
     const action = resolveAction("open-inspector", ui.actionContext(), "journal");
+    if (action !== null) void ui.perform(action);
+  }
+
+  /** Mic segment click → the same toggle-mic action M dispatches. */
+  function toggleMic() {
+    const action = resolveAction("toggle-mic", ui.actionContext());
     if (action !== null) void ui.perform(action);
   }
 
@@ -114,11 +126,19 @@
         <span class="segment scope" class:pulsing>{scopeSeg.text}</span>
       </button>
     {/if}
+    {#if micSeg}
+      <!-- mic glyph (CAPTURE §6.4/§11 via modes.ts): dim = off/degraded,
+           live = the quiet breathing affordance while speech is detected;
+           the title is the §7.3 one-line hover copy. Click = the M toggle
+           (P6.4) — the audit's pointer path to voice capture. -->
+      <button class="zone" onclick={toggleMic} aria-label="Toggle microphone" title={micSeg.title}>
+        <span class="segment" class:dim={micSeg.tone === "dim"} class:live={micSeg.tone === "live"}
+          >{micSeg.text}</span
+        >
+      </button>
+    {/if}
     <button class="zone note-btn" onclick={() => ui.summonNote()} aria-label="Write a note">
-      {#each restSegs as seg (seg.id)}
-        <!-- mic glyph (CAPTURE §6.4/§11 via modes.ts): dim = off/degraded,
-             live = the quiet breathing affordance while speech is detected;
-             the title is the §7.3 one-line hover copy -->
+      {#each noteSegs as seg (seg.id)}
         <span
           class="segment"
           class:dim={seg.tone === "dim"}

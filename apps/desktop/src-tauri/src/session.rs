@@ -50,10 +50,9 @@ impl<C: Clock> SessionManager<C> {
         })
     }
 
-    /// Attach the live capture pipeline (P6.3: the engine over the
-    /// supervised sherpa client). From here on, idle rotations re-point
-    /// it at the newly opened session automatically.
-    #[allow(dead_code)] // P6.3 attaches the live engine; rotation re-pointing pinned by test
+    /// Attach the live capture pipeline (P6.4: the engine over the
+    /// supervised sherpa client — state.rs `SharedDrain`). From here on,
+    /// idle rotations re-point it at the newly opened session automatically.
     pub fn attach_capture(&mut self, drain: Box<dyn CaptureDrain + Send>) {
         self.drain = drain;
     }

@@ -54,6 +54,17 @@ Platform note: the NVIDIA+Wayland WebKit crash is handled in-app now
 (`b142477`); no env var needed. Dev builds generate previews at full speed
 since `e60cb15` (optimized deps).
 
+- [ ] **First live voice run (P6.4, MacBook)** — the whole pipeline is
+  wired; nothing has heard a real microphone yet. Steps: `brew install
+  llama.cpp` (P1 dev binary; pp-asr-server builds with the workspace),
+  restart `cargo tauri dev`, accept the consent offer in settings (≈5.3 GB
+  at Tier 1: E2B QAT + Nemotron ASR; Gemma needs its license acceptance),
+  wait for the downloads, watch the mic glyph appear in the indicator when
+  the ASR child reports Ready, press **M** (macOS will ask for mic
+  permission on first arm), speak a note over a selected image, watch the
+  pulse + journal entry land. Disarm with M; check the OS mic dot turns
+  off with it. If arming quietly fails: the debug panel (F12) shows
+  supervisor states and capture notes.
 - [ ] **Pencil feel + pressure (P5.1)** — **docs/DOGFOOD-M2.md is the
   script**: live-stroke latency, marks-zoom-with-image feel, pressure per
   platform (Wacom needs "Use Windows Ink" ON; your Linux stylus is the

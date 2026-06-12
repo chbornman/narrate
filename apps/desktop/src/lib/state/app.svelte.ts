@@ -1106,8 +1106,9 @@ export class Ui {
       case "journal-flash-stroke":
         if (this.surface === "look") this.look.flashStroke(action.eventId);
         break;
-      // ---- reserved rows: dispatch to nothing until their packets -------------
+      // ---- voice capture (P6.4 — CAPTURE §6.4, §11) ----------------------------
       case "toggle-mic":
+        this.shell.onIndicatorState(await ipc.toggleMic());
         break;
     }
   }

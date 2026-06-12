@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use photoproof_connectors::SherpaOnlineTranscriber;
+use photoproof_connectors::silero::SileroVad;
+use photoproof_core::capture::{CaptureDrain, CaptureEngine, SystemClock};
 use photoproof_core::library::{Library, RootWatcherHandle};
 use photoproof_core::search::Searcher;
 use photoproof_core::sidecar::SidecarEngine;
@@ -44,6 +47,16 @@ pub struct App {
     /// until P6.3 vendors real binaries; readiness stays false and the
     /// app IS the degraded mode that is the whole M1 product (§7).
     pub runtime: Arc<RuntimeHost>,
+    /// P6.4: the LIVE capture engine over the supervised sherpa client —
+    /// one for the process, shared between commands (toggle/scope/
+    /// indicator) and the `pp-mic` audio thread. `None` only when the
+    /// in-process VAD failed to build: the app runs, the mic stays away.
+    /// Lock order is session → capture everywhere; the mic thread takes
+    /// capture only.
+    pub capture: Arc<Mutex<Option<CaptureEngine<'static, SystemClock>>>>,
+    /// The running mic thread, present exactly while armed; dropping the
+    /// handle stops and joins it (and the cpal stream with it).
+    pub mic: Mutex<Option<crate::mic::MicHandle>>,
     pub shutdown: Arc<AtomicBool>,
 }
 
@@ -73,7 +86,7 @@ impl App {
             device_id: settings::device_id(&app_data)?,
             root_context: None,
         };
-        let session = SessionManager::open(&store, ctx)?;
+        let mut session = SessionManager::open(&store, ctx)?;
         let app_settings = settings::load(&app_data);
         // RUNTIME init AFTER the journal spine: nothing about journaling
         // ever blocks on the runtime (§7/§10.1). Acquires the §8.5
@@ -89,12 +102,43 @@ impl App {
             let runtime = Arc::clone(&runtime);
             std::thread::Builder::new()
                 .name("pp-plan-converge".into())
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    runtime.apply_supervisor_plan();
+                .spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        runtime.apply_supervisor_plan();
+                    }
                 })
                 .expect("spawn plan-converge thread");
         }
+
+        // P6.4 (6b): the live capture engine. The transcriber is
+        // process-lifetime on purpose (Box::leak): the engine borrows it
+        // for 'static and the WS client reads the supervisor's
+        // EndpointCell — restarts re-point the port in memory, never here.
+        // The VAD is compiled in (silero, §3.3 carve-out); if ONNX Runtime
+        // cannot build the session the app still launches, voice disabled.
+        let transcriber: &'static SherpaOnlineTranscriber =
+            Box::leak(Box::new(SherpaOnlineTranscriber::new(
+                runtime.asr_model_id(),
+                runtime.supervisors.asr_endpoint.clone(),
+            )));
+        let capture = Arc::new(Mutex::new(match SileroVad::new() {
+            Ok(vad) => Some(CaptureEngine::new(
+                SystemClock::new(),
+                transcriber,
+                Box::new(vad),
+                session.id().clone(),
+            )),
+            Err(e) => {
+                eprintln!(
+                    "photoproof: in-process VAD failed to build; voice capture disabled: {e}"
+                );
+                None
+            }
+        }));
+        // The §2.5/§2.2 seam: rotations and closes drain + re-point the
+        // engine through the session manager, no caller burden.
+        session.attach_capture(Box::new(SharedDrain(Arc::clone(&capture))));
 
         Ok(Self {
             store,
@@ -110,6 +154,8 @@ impl App {
             last_search: Mutex::new(None),
             searcher,
             runtime,
+            capture,
+            mic: Mutex::new(None),
             shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -144,6 +190,21 @@ impl App {
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // B52: stop the audio thread, then the bounded trailing-final
+        // drain — BEFORE the supervisors stop (the ASR child must outlive
+        // the drain to deliver finals whose onsets predate the quit).
+        drop(self.mic.lock().expect("mic mutex").take());
+        {
+            let mut capture = self.capture.lock().expect("capture mutex");
+            if let Some(engine) = capture.as_mut() {
+                crate::pump::drain_capture_at_quit(engine, &self.store, &mut || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                });
+            }
+        }
+        self.runtime
+            .capture_live
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         // P6.4: children walk the §8.4 normal order before we flush.
         self.runtime.supervisors.shutdown();
         // Stop watchers first so nothing new lands mid-flush.
@@ -159,6 +220,34 @@ impl App {
         }
         if let Err(e) = self.engine.flush_session(&session_id) {
             eprintln!("photoproof: session journal flush failed at shutdown: {e}");
+        }
+    }
+}
+
+/// The session engine's capture seam over the SHARED engine slot: every
+/// rotation/close drains and re-points whatever is armed. The session
+/// mutex is always taken before this lock (commands go session → capture;
+/// the mic thread takes capture only), so the nesting cannot deadlock.
+struct SharedDrain(Arc<Mutex<Option<CaptureEngine<'static, SystemClock>>>>);
+
+impl CaptureDrain for SharedDrain {
+    fn drain_for_close(&mut self, store: &EventStore, closing: &SessionId) {
+        if let Some(engine) = self.0.lock().expect("capture mutex").as_mut() {
+            engine.drain_for_close(store, closing);
+        }
+    }
+
+    fn last_capture_activity(&self) -> Option<(u64, UtcMillis)> {
+        self.0
+            .lock()
+            .expect("capture mutex")
+            .as_ref()
+            .and_then(CaptureDrain::last_capture_activity)
+    }
+
+    fn session_rotated(&mut self, opened: &SessionId) {
+        if let Some(engine) = self.0.lock().expect("capture mutex").as_mut() {
+            engine.session_rotated(opened);
         }
     }
 }

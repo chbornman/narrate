@@ -55,18 +55,72 @@ pub(crate) fn hashes(targets: &[ContentHash]) -> Vec<String> {
     targets.iter().map(|h| h.as_str().to_owned()).collect()
 }
 
+/// Voice events land without UI actions (CAPTURE §11): announce each like
+/// any typed commit — a pulse per event, one `journal-changed` carrying
+/// every touched hash. Session-scoped remarks have zero targets and stay
+/// silent on the journal channel by `emit_journal_changed`'s own rule.
+pub(crate) fn announce_events(handle: &AppHandle, events: &[photoproof_core::Event]) {
+    if events.is_empty() {
+        return;
+    }
+    for _ in events {
+        emit_pulse(handle, "remark");
+    }
+    let mut touched: Vec<String> = events
+        .iter()
+        .flat_map(|e| e.targets.iter().map(|h| h.as_str().to_owned()))
+        .collect();
+    touched.sort();
+    touched.dedup();
+    emit_journal_changed(handle, touched);
+}
+
+/// Core capture `ScopeView` → the wire shape (CAPTURE §11).
+fn scope_view_dto(view: photoproof_core::capture::ScopeView) -> crate::dto::ScopeView {
+    crate::dto::ScopeView {
+        kind: view.kind.as_str(),
+        count: view.count,
+        preview_hashes: view
+            .preview_hashes
+            .iter()
+            .map(|h| h.as_str().to_owned())
+            .collect(),
+    }
+}
+
 pub(crate) fn indicator(app: &App) -> IndicatorState {
-    IndicatorState {
-        current_scope: app.scope.lock().expect("scope mutex").current_view(),
-        // No live voice pipeline in the shell yet: the core capture engine
-        // (P6.1, mock-verified) reports these through its §11
-        // `IndicatorState`; the shell maps them once P6.2's supervised ASR
-        // client is wired. Until then: mic disarmed, ASR unavailable —
-        // the mic glyph stays absent (UI §7.3).
-        mic: "disarmed",
-        streaming_utterance: None,
-        degraded: DegradedFlags {
-            asr_unavailable: true,
+    // The scope tracker stays the indicator's scope truth (it is what a
+    // typed note binds to); the engine's ring receives the same updates
+    // for VOICE binding at onset time (set_scope feeds both).
+    let current_scope = app.scope.lock().expect("scope mutex").current_view();
+    let capture = app.capture.lock().expect("capture mutex");
+    match capture.as_ref() {
+        // P6.4: the LIVE engine's §11 state.
+        Some(engine) => {
+            let s = engine.indicator();
+            IndicatorState {
+                current_scope,
+                mic: s.mic.as_str(),
+                streaming_utterance: s.streaming_utterance.map(|u| crate::dto::StreamingView {
+                    bound_scope: scope_view_dto(u.bound_scope),
+                    started_at: u.started_at.to_rfc3339(),
+                }),
+                degraded: DegradedFlags {
+                    // Muted-mic renders when the engine saw a failure OR
+                    // the supervised child simply isn't ready (§8.3).
+                    asr_unavailable: s.degraded.asr_unavailable
+                        || !app.runtime.supervisors.asr_ready(),
+                },
+            }
+        }
+        // The in-process VAD never built: voice is off for this run.
+        None => IndicatorState {
+            current_scope,
+            mic: "disarmed",
+            streaming_utterance: None,
+            degraded: DegradedFlags {
+                asr_unavailable: true,
+            },
         },
     }
 }

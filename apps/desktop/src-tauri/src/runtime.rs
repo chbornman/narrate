@@ -162,11 +162,8 @@ impl RuntimeHost {
             .map(|s| Consent::parse(s.trim()))
             .unwrap_or(Consent::Undecided);
 
-        let supervisors = crate::supervisors::SupervisorHost::new(
-            bus.clone(),
-            registry,
-            lock.clone(),
-        );
+        let supervisors =
+            crate::supervisors::SupervisorHost::new(bus.clone(), registry, lock.clone());
         Self {
             bus,
             app_data,
@@ -235,6 +232,18 @@ impl RuntimeHost {
         let plan = self.plan();
         self.supervisors
             .apply(&plan, &self.manifest, &models_dir, ctx, slots, chunk);
+    }
+
+    /// The configured ASR model id — the supervised P2 child and the WS
+    /// client must agree on it; both read it from here (§4.2).
+    pub fn asr_model_id(&self) -> String {
+        self.state
+            .lock()
+            .expect("runtime state")
+            .config
+            .asr
+            .model
+            .clone()
     }
 
     fn manager_installed(

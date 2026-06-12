@@ -8,7 +8,7 @@ use photoproof_core::{
 };
 use tauri::{AppHandle, Emitter};
 
-use super::{S, emit_journal_changed, emit_pulse, hashes, indicator, parse_hash};
+use super::{S, announce_events, emit_journal_changed, emit_pulse, hashes, indicator, parse_hash};
 use crate::dto::{IndicatorState, ScopeView, StrokeCommitDto, StrokePayloadDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
@@ -23,10 +23,58 @@ pub fn set_scope(app: S<'_>, handle: AppHandle, targets: Vec<String>) -> CmdResu
     let hashes = hashes.map_err(|e| CmdError::Invalid(format!("bad target hash: {e}")))?;
     let view = {
         let mut scope = app.scope.lock().expect("scope mutex");
-        scope.set(hashes)
+        scope.set(hashes.clone())
     };
+    // P6.4: the capture engine's scope ring gets every update too — VOICE
+    // binding snapshots `scope_at(onset)` from the ring (CAPTURE §5.1), so
+    // it must be current the moment speech starts, armed or not.
+    if let Some(engine) = app.capture.lock().expect("capture mutex").as_mut() {
+        engine.set_scope(hashes);
+    }
     let _ = handle.emit("indicator-state", indicator(&app));
     Ok(view)
+}
+
+/// M-key toggle (CAPTURE §6.4). Arm opens the supervised ASR stream — an
+/// `Err` at open IS the readiness answer and lands `Disarmed(error)`
+/// quietly — then starts the `pp-mic` audio thread. Disarm stops audio,
+/// accepts trailing finals (engine-bounded, ≤ 5 s), zeroes the ring, and
+/// joins the thread. Echoes the §11 indicator either way.
+#[tauri::command]
+pub fn toggle_mic(app: S<'_>, handle: AppHandle) -> CmdResult<IndicatorState> {
+    app.touch()?; // the toggle is user activity (§2.1); may rotate first
+    let armed_now = {
+        let mut capture = app.capture.lock().expect("capture mutex");
+        match capture.as_mut() {
+            // The in-process VAD never built: nothing to toggle.
+            None => false,
+            Some(engine) if engine.mic().is_armed() => {
+                let events = engine.disarm(&app.store);
+                drop(capture);
+                // The thread sees the disarmed engine and exits; take()
+                // joins it (MicHandle::drop) and the cpal stream closes.
+                drop(app.mic.lock().expect("mic mutex").take());
+                announce_events(&handle, &events);
+                false
+            }
+            Some(engine) => {
+                let state = engine.arm();
+                drop(capture);
+                if state.is_armed() {
+                    *app.mic.lock().expect("mic mutex") = Some(crate::mic::start(handle.clone()));
+                }
+                state.is_armed()
+            }
+        }
+    };
+    // §5.2: downloads throttle while capture is live (the pacer reads
+    // this per chunk).
+    app.runtime
+        .capture_live
+        .store(armed_now, std::sync::atomic::Ordering::Relaxed);
+    let state = indicator(&app);
+    let _ = handle.emit("indicator-state", state.clone());
+    Ok(state)
 }
 
 #[tauri::command]

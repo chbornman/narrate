@@ -34,6 +34,9 @@ pollster = "0.4"
 # restore-drift risk is tracked in DOGFOOD §visual; the manual fallback
 # path (commands/app.rs) is named in lib.rs beside the registration.
 tauri-plugin-window-state = "2"
+# P6.4 (6b): the real microphone. The Stream is !Send on macOS, so the
+# device lives on the dedicated pp-mic thread (mic.rs).
+cpal = "0.18"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
