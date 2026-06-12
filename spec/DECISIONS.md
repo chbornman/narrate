@@ -649,6 +649,17 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   llama.cpp at load — out for v1. Load-on-demand P1 (3.5 s Ready) is the
   sanctioned idle-footprint lever: ~1.7 GB resident without the LLM.
 
+- **B69 (founder, June 2026 — retrieval stays additive).** Machine
+  signals are never RETIRED by journal coverage: captions/summaries (S3)
+  already always vote at w=0.5; the founder rules that **image_clip (S4)
+  participates on every semantic query too**, not only via §5.2's
+  activation gate (visual:true or <10 candidates). Own-words identity is
+  protected by WEIGHT, not exclusion — S4's always-on weight (and whether
+  the gate survives as a latency optimization only) is settled by the
+  golden-query eval at M3 build time, where §5.3 already declares ranking
+  deliberately revisable. Annotating an image must only ever ADD ways to
+  find it.
+
 ## Open questions deliberately left to the founder
 
 - **Q1.** Final product name ("Photoproof" is a placeholder; sidecar suffix hardens into user data at M1 ship — decide before then).
