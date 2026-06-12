@@ -26,7 +26,7 @@
 //! that fails leaves the journal and every other feature untouched.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use photoproof_connectors::config::{EmbedderBackend, TextEmbedderBackend};
@@ -122,8 +122,12 @@ fn clip_spec(model_id: &str) -> Option<ClipSpec> {
 /// OWN generation counter — a PER-ROLE bump so the other role's dispatch
 /// can never supersede this one's in-flight build (a single shared counter
 /// silently discarded the first role's finished session when the second
-/// dispatched). A bump discards a stale build thread's result if THIS role's
-/// plan moved on under it (config swap, drop).
+/// dispatched). EVERY transition away from the current slot bumps this role's
+/// generation — the build dispatch, shutdown, AND the converge drop-to-Idle /
+/// park-Failed paths — so a stale build thread's result is discarded whenever
+/// THIS role's plan moved on under it (config swap, drop, uninstall). A drop
+/// or fail leaves no build to redispatch, so the stale one simply never wins
+/// the `land_build` gate.
 pub struct EmbedderHost {
     text: Arc<Mutex<Slot>>,
     text_gen: Arc<AtomicU64>,
@@ -136,6 +140,15 @@ pub struct EmbedderHost {
     /// alongside. One load at a time keeps each at its measured cost; the
     /// slots still flip to Ready independently as each finishes.
     build_lock: Arc<Mutex<()>>,
+    /// Latched true by `shutdown()`. WHY: the `pp-plan-converge` loop
+    /// (state.rs) keeps calling `apply()` on its 2 s cadence during the
+    /// quit teardown — whose capture drain + sidecar/collections flushes can
+    /// exceed that interval — so without this latch a tick after `shutdown()`
+    /// would see `needs_rebuild(Idle, Some(model))` and dispatch a brand-new
+    /// multi-gigabyte ort load (legitimately passing the generation gate),
+    /// flipping a role back to Ready while the app is quitting. Once
+    /// stopped, `apply()` is a no-op; the host stays dark for good.
+    stopped: Arc<AtomicBool>,
 }
 
 impl EmbedderHost {
@@ -146,6 +159,7 @@ impl EmbedderHost {
             clip: Arc::new(Mutex::new(Slot::Idle)),
             clip_gen: Arc::new(AtomicU64::new(0)),
             build_lock: Arc::new(Mutex::new(())),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -198,6 +212,11 @@ impl EmbedderHost {
         text_backend: TextEmbedderBackend,
         models_dir: &Path,
     ) {
+        // Once shutdown() has latched the host, the converge loop must not
+        // redispatch a fresh ort build during quit teardown (see `stopped`).
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
         // CLIP role. Only local-ort builds in-process; an openai-compatible
         // embedder backend reaches a remote endpoint (not this host's job),
         // so it stays Idle here.
@@ -222,6 +241,9 @@ impl EmbedderHost {
     /// detached and each per-role generation bump makes any in-flight build
     /// a no-op when it lands.
     pub fn shutdown(&self) {
+        // Latch FIRST so any converge tick that races this teardown sees the
+        // host stopped and returns before dispatching a new build.
+        self.stopped.store(true, Ordering::SeqCst);
         self.text_gen.fetch_add(1, Ordering::SeqCst);
         self.clip_gen.fetch_add(1, Ordering::SeqCst);
         *self.text.lock().expect("text slot") = Slot::Idle;
@@ -233,6 +255,15 @@ impl EmbedderHost {
         if !needs_rebuild(&slot, target) {
             return;
         }
+        // Bump the generation on EVERY transition away from the current slot,
+        // not just the build dispatch below. WHY: `land_build` gates landing
+        // purely on generation equality, so a drop-to-Idle (target None) or a
+        // park-Failed that left the generation untouched would let a stale
+        // in-flight build land Ready over the dropped/failed slot — handing
+        // search and the embedding drain a model the plan says must be dark
+        // (decision 4: config/plan change -> drop and rebuild). Bumping here,
+        // exactly as `shutdown()` does, makes any in-flight build a no-op.
+        self.text_gen.fetch_add(1, Ordering::SeqCst);
         let Some(model_id) = target else {
             *slot = Slot::Idle;
             return;
@@ -280,6 +311,10 @@ impl EmbedderHost {
         if !needs_rebuild(&slot, target) {
             return;
         }
+        // Bump on EVERY transition (see converge_text): the Idle and Failed
+        // paths below must also discard a stale in-flight build, or a dropped
+        // plan's load lands Ready over a dark slot.
+        self.clip_gen.fetch_add(1, Ordering::SeqCst);
         let Some(model_id) = target else {
             *slot = Slot::Idle;
             return;
@@ -490,6 +525,91 @@ mod tests {
         );
         assert!(text_spec("nope").is_none());
         assert!(clip_spec("nope").is_none());
+    }
+
+    /// REGRESSION (review L4-host): a drop-to-Idle must discard a stale
+    /// in-flight build. The Idle and Failed converge transitions bump the
+    /// per-role generation, so a build dispatched before the drop fails the
+    /// `land_build` gate and never overwrites the dropped slot with Ready —
+    /// otherwise search and the embedding drain would run a model the plan
+    /// has dropped (decision 4). We model the race without a real ort load:
+    /// capture the dispatch generation, converge to a dropped plan (which
+    /// must bump), then drive `land_build` with the captured generation and
+    /// assert it is a no-op.
+    #[test]
+    fn drop_to_idle_discards_a_stale_inflight_build() {
+        let host = EmbedderHost::new();
+        let dir = std::path::Path::new("/nonexistent/models");
+
+        // Tick 1: plan wants the CLIP model. `apply` dispatches a background
+        // build and bumps clip_gen to its dispatch value. The build thread
+        // will fail (no files) and try to land — but we race a drop first.
+        let dispatch_gen = host.clip_gen.load(Ordering::SeqCst) + 1;
+        host.apply(
+            &run_plan(Some("ViT-H-14-378-quickgelu__dfn5b"), None),
+            EmbedderBackend::LocalOrt,
+            TextEmbedderBackend::LocalOrt,
+            dir,
+        );
+
+        // Tick 2: the user drops the plan (uninstall / backend swap). The
+        // converge-to-Idle path must bump clip_gen so the dispatch_gen above
+        // is now stale.
+        host.apply(
+            &run_plan(None, None),
+            EmbedderBackend::LocalOrt,
+            TextEmbedderBackend::LocalOrt,
+            dir,
+        );
+        assert!(
+            host.clip_gen.load(Ordering::SeqCst) > dispatch_gen,
+            "drop-to-Idle must bump the generation past the in-flight dispatch"
+        );
+
+        // Now simulate the stale build finishing and trying to land against
+        // the dropped slot. With the generation bumped, `land_build` returns
+        // before touching the slot — so the slot stays Idle (NOT Failed,
+        // which is what this Err would otherwise write), proving the stale
+        // result never reached the slot at all. The Ready case is identical:
+        // the gate is checked before the match on `built`.
+        land_build(
+            &host.clip,
+            &host.clip_gen,
+            dispatch_gen,
+            "ViT-H-14-378-quickgelu__dfn5b".to_owned(),
+            Err(photoproof_connectors::ConnectorError::NotReady("stale")),
+        );
+        assert!(!host.clip_ready(), "stale build must not land over a drop");
+        assert!(
+            host.debug_lines()
+                .join("\n")
+                .contains("clip-embedder: idle"),
+            "stale Err must not even land Failed; slot must stay Idle: {}",
+            host.debug_lines().join("\n")
+        );
+    }
+
+    /// REGRESSION (review L4-host): after `shutdown()` the host is latched —
+    /// a converge tick that fires during quit teardown (its flushes can
+    /// exceed the 2 s interval) must NOT redispatch a fresh ort build. Here
+    /// `apply` with a Run plan after shutdown is a no-op; the slot stays Idle.
+    #[test]
+    fn apply_after_shutdown_is_a_no_op() {
+        let host = EmbedderHost::new();
+        let dir = std::path::Path::new("/nonexistent/models");
+        host.shutdown();
+        host.apply(
+            &run_plan(
+                Some("ViT-H-14-378-quickgelu__dfn5b"),
+                Some("embeddinggemma-300m-q8"),
+            ),
+            EmbedderBackend::LocalOrt,
+            TextEmbedderBackend::LocalOrt,
+            dir,
+        );
+        let lines = host.debug_lines().join("\n");
+        assert!(lines.contains("clip-embedder: idle"), "{lines}");
+        assert!(lines.contains("text-embedder: idle"), "{lines}");
     }
 
     /// The local DFN5B/EmbeddingGemma snapshots, if present, prove the FULL
