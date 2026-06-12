@@ -1,7 +1,7 @@
 # Photoproof
 ### The digital contact sheet with a grease pencil
 *Scope & Architecture Document — Draft 4, June 2026*
-*(Working title. Formerly "Darkroom Notes," briefly "Daido." Naming remains an open question — see Open Questions & Risks.)*
+*(The name stands for now - DECISIONS B70. Formerly "Darkroom Notes," briefly "Daido"; the repo is `narrate` for historical reasons.)*
 
 > **Normative specs live in `spec/`** (EVENTS, SIDECARS, LIBRARY, CAPTURE, RETRIEVAL, RUNTIME, UI; decisions in `spec/DECISIONS.md`). This document is the vision and architecture overview; where it and a spec disagree, the spec wins.
 

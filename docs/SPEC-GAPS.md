@@ -1,5 +1,10 @@
 # Spec Gap Analysis & Spec Completion Plan
 
+> **CLOSED - historical record (June 2026).** Every gap inventoried here
+> was closed by the spec it names; the specs cite these gap ids in their
+> status banners ("Closes SPEC-GAPS E5"), which is why this file stays:
+> it is the gap-id registry, not a live plan. Nothing here is a TODO.
+
 A hole-poking pass over SCOPE.md and M1-BUILD-PLAN.md, June 2026. Verdict: the
 *architecture* is sound, but the spec is not implementation-complete. The gaps
 cluster in exactly the places that are expensive to change later — on-disk

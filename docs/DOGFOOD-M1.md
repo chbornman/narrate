@@ -73,7 +73,7 @@ Work through it top to bottom and check boxes. Every step says **what to do**,
   tag applied again).* Synthetic fixtures for both conventions pass
   (`l13_10_embedded_preview_orientation_fixtures`); real files are this
   step.
-- [ ] **Preview quality on your monitor** (M1-BUILD-PLAN decision 2): 512 px
+- [ ] **Preview quality on your monitor** (early build-plan decision 2): 512 px
   thumbs / 2560 px display WebP. Open a dozen Look views at full screen —
   sharp enough? This is the moment to veto the sizes, before the cache is
   fully built.

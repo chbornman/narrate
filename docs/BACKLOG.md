@@ -251,15 +251,34 @@ managing = off-thesis).
 - **M5 (partner)**: right-edge dockable panel sharing the inspector slot;
   summon key reserved; obeys Tab lights-out unconditionally.
 
+## Lighting up M3 (the semantic-search chain, in order)
+
+- [ ] **Embedder bake-off** (mostly runnable on the MacBook — quality
+  evaluation is hardware-independent): DFN5B CLIP (ViT-H-14-378) vs
+  alternatives for image embeddings; Qwen3-Embedding-0.6B vs
+  EmbeddingGemma for annotation text (the PRIMARY retrieval signal).
+  Output: winners + pinned SHAs for the manifest entries that today say
+  UNPINNED-P6.3.
+- [ ] **Real embedder connector + backfill packet**: implement the
+  Embedder seam against the pinned models (RUNTIME process or in-process
+  ort, per spike findings), let the existing P7.1 embedding passes chew
+  through the library, flip STATUS.md's mock-only retrieval rows live.
+- [ ] **Spike session 2, desktop half** (needs the RTX 5080 machine):
+  tier-2 throughput calibration, CUDA posture, the full RUNTIME 12.4
+  concurrency matrix.
+- [ ] **Golden-query retrieval eval** (post-dogfood, M3 quality gate):
+  founder-built query set over his real annotated library; settles S4
+  always-on weight (B69) and the reranker go/no-go.
+
 ## Collections (B71 — the M3 curation thread)
 
-- [ ] **Rail: Folders vs Collections tabs** (founder, June 2026): the
-  left navigation sidebar gets TWO main tabs — folders and collections —
-  peers, not nesting. The welcome card explains the hierarchy of
-  importance: COLLECTIONS are the point (intent, gathered context);
-  folders are just mechanical (where files happen to sit). First slice
-  ships with P7.3's store; the full encouragement UX (and autosuggest
-  below) gets its own design round.
+- [x] **Rail: Folders vs Collections tabs — first slice** — landed
+  `98e3cb5`/`d92bd29` (Phase 7): peer tabs in the rail, collection list
+  with create + click-to-view (grid shows current members), add/remove
+  membership on the image context menu, welcome copy reframed
+  (collections are the point; folders are mechanical). REMAINING for the
+  design round: the full encouragement UX and autosuggest (below).
+  (Founder, June 2026.)
 - [ ] **Autosuggest collections** (founder, June 2026): the app should
   NATURALLY encourage collecting — that is the point of gathering all
   this disparate context. Beyond manual creation, propose collections

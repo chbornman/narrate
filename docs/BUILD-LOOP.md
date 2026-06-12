@@ -172,4 +172,9 @@ Retired tracking docs (content absorbed; full text in git history):
 `docs/AUDIT-PHASE1.md` (findings → audit fix packet `b52bba6`),
 `docs/RCA-BTRFS-AND-PREVIEWS.md` + `docs/BTRFS-PREVIEW-BUGS.md`
 (duplicate RCAs of the btrfs volume/preview-404 incident, fixed
-`613ccf9`).
+`613ccf9`),
+`docs/M1-BUILD-PLAN.md` (M1 orientation; superseded by spec/ and shipped
+- M1 verified live; its open decisions live in FOUNDER-CHECKLIST),
+`docs/BEST-PRACTICES-REVIEW.md` (pre-build research executive summary;
+its ~30 amendments were dispositioned into the specs at the time; the
+full cited reports remain in `docs/research/`).

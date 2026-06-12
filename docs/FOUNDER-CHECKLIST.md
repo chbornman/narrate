@@ -17,7 +17,7 @@ decisions lives in spec/DECISIONS.md; this file is the action list.
 - [ ] **B23 — blocked WAL-hygiene checkpoint surfaces as an error**
   (`CheckpointBlocked`; the write is already durable, `maintain()` heals).
   The alternative was silent background retry. Confirm or veto.
-- [ ] **Thumbnail/preview cache sizes** (M1-BUILD-PLAN decision 2): 512 px
+- [ ] **Thumbnail/preview cache sizes** (early build-plan decision 2): 512 px
   thumb / 2560 px display WebP implemented per spec; worth a quick look at
   real previews on your monitor during dogfood before declaring final.
 - [ ] **Q4 — M3 gates** (later): sentiment quality evaluation; dedicated

@@ -6,27 +6,49 @@ Photoproof is a local-first desktop app for photographers with a serious practic
 
 It is not an editor, not a DAM, and pointedly not another AI opinion about your photographs. Every competitor's AI generates opinions about your photos; Photoproof preserves *yours*.
 
-> Working title. Previously "Darkroom Notes," briefly "Daido." This repo is `narrate` for historical reasons.
+> The repo is `narrate` for historical reasons; the product name stands for now (DECISIONS B70).
 
-## Status
+## Status (June 2026)
 
-**Spec-complete, pre-build.** The implementation contract is written; code has not started.
+M1 (the journal spine) and M2 (grease pencil + live voice capture) are built and **verified live on real libraries** — ingest of 50k-image SMB folders, typed notes, ratings, pencil strokes, and on-device streaming voice transcription minting journal entries. M3 retrieval (vector store, hybrid search, collections) is built and mock-verified; semantic search lights up once the embedder models are pinned (spike session 2).
 
-Vision & planning (`docs/`):
-- [docs/SCOPE.md](docs/SCOPE.md) — pitch, scope & architecture overview
-- [docs/FEATURES.md](docs/FEATURES.md) — milestone-tagged feature inventory
-- [docs/SPEC-GAPS.md](docs/SPEC-GAPS.md) — design review that drove the specs; revised phase order
-- [docs/M1-BUILD-PLAN.md](docs/M1-BUILD-PLAN.md) — Milestone 1 orientation
+- [docs/STATUS.md](docs/STATUS.md) — **the capability ledger**: every spec obligation, what state it is in, and the evidence
+- [docs/BUILD-LOOP.md](docs/BUILD-LOOP.md) — the packet-grain build ledger and verification rules
+- [docs/BACKLOG.md](docs/BACKLOG.md) — decided-but-not-scheduled work
+- [docs/FOUNDER-CHECKLIST.md](docs/FOUNDER-CHECKLIST.md) — decisions and founder-machine verification pending
 
-Normative specs (`spec/` — where these and `docs/` disagree, `spec/` wins):
-- [spec/EVENTS.md](spec/EVENTS.md) — the event model (foundation: log, folds, redaction, merge)
-- [spec/SIDECARS.md](spec/SIDECARS.md) — sidecar format, overflow store, export/rebuild
-- [spec/LIBRARY.md](spec/LIBRARY.md) — identity, volumes, watcher, ingest passes, previews
-- [spec/CAPTURE.md](spec/CAPTURE.md) — sessions, write-scope binding, voice, grease pencil
-- [spec/RETRIEVAL.md](spec/RETRIEVAL.md) — indexes, query pipeline, ranking, collections
-- [spec/RUNTIME.md](spec/RUNTIME.md) — local model runtime, processes, tiers, downloads
-- [spec/UI.md](spec/UI.md) — the three surfaces, indicator, journal panel, debug panel
-- [spec/DECISIONS.md](spec/DECISIONS.md) — architecture decision log + open questions
+## Running it
+
+```sh
+# dev (debug panel included automatically in dev binaries; F12 toggles it)
+cd apps/desktop && cargo tauri dev
+
+# voice needs: brew install llama.cpp (P1 dev binary), then in-app consent
+# downloads the pinned models (Gemma E2B QAT + Nemotron streaming ASR)
+```
+
+## Tests and benches
+
+```sh
+cargo test --workspace          # one known red on macOS: s02_2 (APFS case-only rename, ruling pending)
+cd apps/desktop && npm run check && npx vitest run
+
+scripts/bench.sh                # ingest/preview perf against frozen corpora (test-corpora/, gitignored)
+cargo run --bin pp_voice_bench  # voice e2e: wav in, minted journal entries out; all chunking knobs as flags
+```
+
+The standing gate for every change: `cargo fmt` + `clippy` (zero warnings) + the full test suites above.
+
+## Repo map
+
+| Path | What |
+|---|---|
+| `spec/` | The normative implementation contract (EVENTS, SIDECARS, LIBRARY, CAPTURE, RETRIEVAL, RUNTIME, UI; DECISIONS is the why-log). Where anything disagrees with a spec, the spec wins. |
+| `docs/` | Vision (SCOPE), feature inventory (FEATURES), ledgers (STATUS, BUILD-LOOP), queue (BACKLOG), dogfood scripts, spike reports |
+| `crates/photoproof-core` | Domain logic: events, sidecars, library/ingest, capture engine, search, vector store, collections, model runtime |
+| `crates/photoproof-connectors` | Model/IO seams (Transcriber, Embedder, LanguageModel, VectorStore) + deterministic mocks; silero VAD; sherpa WS client |
+| `crates/pp-asr-server` | The owned streaming-ASR wrapper child (B67: finals never know less than their partials) |
+| `apps/desktop` | Tauri 2 + Svelte 5 shell: thin commands over core, three quiet surfaces (Grid, Look, Search) |
 
 ## The core loop
 
@@ -38,18 +60,19 @@ Normative specs (`spec/` — where these and `docs/` disagree, `spec/` wins):
 - **The journal is the product.** Append-only event log; entries are never overwritten.
 - **Sidecars are the truth.** SQLite is a rebuildable index; canonical data lives in open-format `.photoproof.json` sidecars beside your images.
 - **Content-addressed identity.** Images are known by BLAKE3 hash, never by path — reorganize freely, annotations follow the pixels.
+- **Collections over folders.** Folders are mechanical; collections are intent — tags with time, never moved files.
 - **You can always walk away** with everything, in open formats.
 
-## Planned stack
+## Stack
 
-Tauri 2 · Rust core · SQLite (WAL) + FTS5 · BLAKE3 · rawler · local ASR/LLM behind swappable connector traits (llama.cpp, OpenAI-compatible seam) · optional Claude cloud connector for the paid conversational tier.
+Tauri 2 · Rust workspace · SQLite (WAL) + FTS5 · BLAKE3 · rawler · PPVEC vector store · local ASR/LLM as supervised child processes behind swappable connector traits (llama.cpp, sherpa-onnx, OpenAI-compatible seam) · optional Claude cloud connector planned for the paid conversational tier (M5).
 
 ## Roadmap
 
-| Milestone | Theme |
-|---|---|
-| M1 — Spine | Ingest, content-addressed library, browser, typed notes → event log → sidecars, FTS5 search |
-| M2 — The Sheet | Streaming voice capture, grease-pencil markup, stroke↔utterance linking, local summaries |
-| M3 — Retrieval | Embeddings, hybrid search, collections (intent memory), natural-language query |
-| M4 — Time | Sentiment trajectories, "changed my mind" queries, per-image timeline, stroke scrubbing |
-| M5 — Partner | Cloud connector (Claude), two-way conversation, premium tier |
+| Milestone | Theme | State |
+|---|---|---|
+| M1 — Spine | Ingest, content-addressed library, browser, typed notes → event log → sidecars, FTS5 search | shipped, dogfooding |
+| M2 — The Sheet | Streaming voice capture, grease-pencil markup, stroke↔utterance linking | shipped, dogfooding |
+| M3 — Retrieval | Embeddings, hybrid search, collections (intent memory), natural-language query | built mock-verified; awaits embedder pins |
+| M4 — Time | Sentiment trajectories, "changed my mind" queries, per-image timeline, stroke scrubbing | spec'd |
+| M5 — Partner | Cloud connector (Claude), two-way conversation, premium tier | spec'd |
