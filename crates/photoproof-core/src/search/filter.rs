@@ -241,7 +241,25 @@ pub(crate) fn compile(
                     }
                 }
             }
-            Filter::Collection(_) => return Err(SearchError::UnsupportedFilter("collection")),
+            Filter::Collection(cref) => match &cref.resolved {
+                // §10.3: constrain to CURRENT members (removed_ts IS NULL)
+                // of the resolved collection, joined through
+                // collection_members.
+                Some(id) => {
+                    cf.image_scoped = true;
+                    cf.wheres.push(format!(
+                        "EXISTS (SELECT 1 FROM collection_members scm \
+                         WHERE scm.collection_id = ? AND scm.image_hash = {} \
+                         AND scm.removed_ts IS NULL)",
+                        img(mode)
+                    ));
+                    cf.params.push(Value::Text(id.to_string()));
+                }
+                // Resolution happens upstream (hybrid parse/validation);
+                // executing an unresolved name would have to guess — a
+                // hard constraint never guesses (§5.1 firewall discipline).
+                None => return Err(SearchError::UnsupportedFilter("collection (unresolved)")),
+            },
             Filter::Kind(_) => return Err(SearchError::UnsupportedFilter("kind")),
         }
     }

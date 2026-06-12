@@ -23,6 +23,12 @@ impl From<SearchError> for CmdError {
 }
 
 /// Execute a search and translate the result contract for IPC.
+///
+/// Runs the §5 hybrid pipeline with the no-models rig (P7.2): with no
+/// embedders/LLM wired this is exactly the M1 keyword path — the shipping
+/// degraded posture — plus §10.3 collection-chip resolution against the
+/// collections store (no model required). Model slots wire in here once
+/// the runtime serves them.
 pub fn run_search(
     searcher: &Searcher,
     raw: String,
@@ -32,7 +38,12 @@ pub fn run_search(
         .iter()
         .map(filter_to_core)
         .collect::<CmdResult<_>>()?;
-    let results = searcher.search(&raw, &core_filters)?;
+    let results = searcher.hybrid_search(
+        &raw,
+        &core_filters,
+        &core_search::keyword_only_rig(),
+        &core_search::HybridOptions::default(),
+    )?;
     Ok(results_to_dto(results, filters))
 }
 
@@ -177,6 +188,7 @@ fn image_to_dto(i: core_search::ImageResult) -> dto::ImageResult {
                 session_id: session_id.to_string(),
                 ts: ts.to_string(),
             },
+            core_search::Provenance::VisualMatch => dto::Provenance::VisualMatch,
             core_search::Provenance::FilterOnly => dto::Provenance::FilterOnly,
         },
         last_annotated_ts: i.last_annotated_ts.map(|t| t.to_string()),
@@ -261,6 +273,60 @@ mod tests {
             other => panic!("expected Quote provenance, got {other:?}"),
         }
         assert!(out.session_hits.is_empty());
+    }
+
+    /// P7.2: a collection chip resolves against the collections store
+    /// (§10.3, no model required) and constrains to current members; an
+    /// unresolvable name drops with debug visibility instead of erroring.
+    #[test]
+    fn collection_chip_resolves_through_the_hybrid_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("journal.db");
+        let store = EventStore::open(&db).unwrap();
+        let sid = store.open_session(ctx()).unwrap();
+        let member = ContentHash::from_bytes_of(b"member-image");
+        let outsider = ContentHash::from_bytes_of(b"outsider-image");
+        for target in [&member, &outsider] {
+            store
+                .append(
+                    &sid,
+                    EventDraft::Remark {
+                        source: RemarkSource::Typed,
+                        text: "fog on the water".into(),
+                        targets: vec![target.clone()],
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let collections = photoproof_core::collections::Collections::open(&db, dir.path()).unwrap();
+        let quiet = collections
+            .create("Quiet Hours", "", photoproof_core::UtcMillis::now())
+            .unwrap();
+        collections
+            .add_images(
+                &quiet.id,
+                std::slice::from_ref(&member),
+                photoproof_core::UtcMillis::now(),
+            )
+            .unwrap();
+
+        let searcher = Searcher::open(&db).unwrap();
+        let chip = dto::Filter::Collection {
+            name: "quiet hours".into(),
+        };
+        let out = run_search(&searcher, "fog".into(), vec![chip]).unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].image_hash, member.to_string());
+        assert!(out.query.dropped.is_empty());
+
+        let bad = dto::Filter::Collection {
+            name: "zzz qqq".into(),
+        };
+        let out = run_search(&searcher, "fog".into(), vec![bad]).unwrap();
+        assert_eq!(out.images.len(), 2, "dropped clause, query still runs");
+        assert_eq!(out.query.dropped.len(), 1);
+        assert!(out.query.dropped[0].reason.contains("no collection"));
     }
 
     /// Filter DTO → core AST translation: untranslatable input errors,

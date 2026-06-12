@@ -638,7 +638,10 @@ fn m3_only_filters_error_rather_than_silently_drop() {
             })],
         )
         .unwrap_err();
-    assert!(matches!(err, SearchError::UnsupportedFilter("collection")));
+    assert!(matches!(
+        err,
+        SearchError::UnsupportedFilter("collection (unresolved)")
+    ));
     let err = searcher
         .search("fog", &[Filter::Kind(vec![EventKind::Remark])])
         .unwrap_err();

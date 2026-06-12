@@ -469,6 +469,43 @@ CREATE TABLE IF NOT EXISTS collection_members ( -- membership is evented, not de
 );
 "#;
 
+/// Migration slot pre-allocated to packet P7.2 (spec/RETRIEVAL.md §9
+/// derived-summaries storage + the §1.1 `summaries_fts` table this spec
+/// owns). Only P7.2 edits this constant.
+const SUMMARIES_SCHEMA_SQL: &str = r#"
+-- RETRIEVAL §9 common storage (the table only; the generation passes are
+-- M2b/M3 work). Derived rows are retrieval FUEL ONLY (E4): never rendered
+-- as prose in the product, disposable, rebuildable from the event log.
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test); these rows are derived and re-creatable, but
+-- the re-run must not error on existing tables.
+CREATE TABLE IF NOT EXISTS derived_summaries (
+  id           TEXT PRIMARY KEY,              -- ULID
+  scope        TEXT NOT NULL CHECK (scope IN ('image','folder','session')),
+  scope_key    TEXT NOT NULL,                 -- image_hash | folder path | session_id
+  text         TEXT NOT NULL,
+  model_id     TEXT NOT NULL,
+  prompt_ver   INTEGER NOT NULL,
+  inputs_hash  TEXT NOT NULL,                 -- blake3 over sorted input event ids +
+                                              --   folded-text hashes + prompt_ver
+  generated_ts TEXT NOT NULL,
+  UNIQUE (scope, scope_key, model_id)         -- one live row per scope+model
+) STRICT;
+
+-- RETRIEVAL §1.1: one row per derived summary; its own down-weighted ranked
+-- list in fusion (§5.3). Same tokenizer recipe as event_fts (normative).
+CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
+  text,
+  summary_id UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2',
+  prefix = '2 3'
+);
+
+-- Mirror event_fts hygiene: redaction deletes dependent summaries (§9.5),
+-- and the scrub must not leave paraphrase tokens in dead FTS segments.
+INSERT INTO summaries_fts(summaries_fts, rank) VALUES('secure-delete', 1);
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -525,6 +562,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     if version < 9 {
         conn.execute_batch(COLLECTIONS_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 9")?;
+    }
+    if version < 10 {
+        conn.execute_batch(SUMMARIES_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 10")?;
     }
     Ok(version)
 }

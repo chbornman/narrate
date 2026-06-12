@@ -43,6 +43,10 @@ pollster = "0.4"
 # §1.3 read path: the brute-force scan is memory-mapped, never a per-query
 # heap copy of the whole space.
 memmap2 = "0.9"
+# --- retrieval deps (owned by packet P7.2; append below this line only) ---
+# §10.3 collection-name resolution is normatively Jaro-Winkler at a 0.80
+# threshold; strsim is the standard tiny implementation of exactly that.
+strsim = "0.11"
 
 [[bin]]
 # Scriptable stub child for runtime-supervision tests (RUNTIME §8 /

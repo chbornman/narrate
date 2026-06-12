@@ -529,7 +529,7 @@ fn fetch_linked_strokes(
     Ok(out)
 }
 
-fn fetch_last_annotated(
+pub(crate) fn fetch_last_annotated(
     conn: &Connection,
     hashes: &[String],
 ) -> Result<HashMap<String, UtcMillis>, SearchError> {
@@ -597,6 +597,130 @@ fn fetch_best_strokes(
         },
     )?;
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Provenance helpers shared with the hybrid pipeline (P7.2)
+// ---------------------------------------------------------------------------
+
+/// Batched provenance inputs for a set of chain roots: metadata + liveness
+/// from the truth tables (§6 defense in depth), effective (folded) text,
+/// linked strokes.
+pub(crate) struct ProvenanceInputs {
+    metas: HashMap<String, RootMeta>,
+    folded: HashMap<String, String>,
+    linked: HashMap<String, EventId>,
+}
+
+pub(crate) fn provenance_inputs(
+    conn: &Connection,
+    root_ids: &[String],
+) -> Result<ProvenanceInputs, SearchError> {
+    let metas = fetch_root_meta(conn, root_ids)?;
+    let folded = fetch_effective_texts(conn, root_ids, &metas)?;
+    let linked = fetch_linked_strokes(conn, root_ids, &metas)?;
+    Ok(ProvenanceInputs {
+        metas,
+        folded,
+        linked,
+    })
+}
+
+impl ProvenanceInputs {
+    /// Quote an exact span of `root`'s folded text — the S1 vector-hit
+    /// provenance shape (§6: the span is the user's verbatim words; the
+    /// embedding only CHOSE it, so there are no FTS highlight ranges).
+    /// `None` when the root is dead or the offsets no longer address the
+    /// current folded text (a stale row — the caller consults the next
+    /// signal instead of fabricating a span).
+    pub(crate) fn quote_span(&self, root: &str, char_start: u32, char_end: u32) -> Option<Quote> {
+        let meta = self.metas.get(root)?;
+        if !meta.live {
+            return None;
+        }
+        let folded = self.folded.get(root)?;
+        let chars: Vec<char> = folded.chars().collect();
+        let (s, e) = (char_start as usize, char_end as usize);
+        if s >= e || e > chars.len() {
+            return None;
+        }
+        let event_id = EventId::from_str_strict(root).ok()?;
+        Some(Quote {
+            event_id,
+            session_id: meta.session_id.clone(),
+            ts: meta.ts,
+            source: meta.source,
+            text: chars[s..e].iter().collect(),
+            char_start,
+            char_end,
+            highlights: Vec::new(),
+            linked_stroke: self.linked.get(root).cloned(),
+        })
+    }
+}
+
+/// Best FTS quote among ONE image's own events — the §5.4 S3 provenance
+/// re-run ("re-running the query against that image's own events"). The
+/// summary text itself is never quoted (E4); when this finds nothing the
+/// caller discards the summary hit as provenance and consults the next
+/// signal.
+pub(crate) fn best_quote_for_image(
+    conn: &Connection,
+    match_q: &str,
+    raw: &str,
+    image_hash: &str,
+) -> Result<Option<Quote>, SearchError> {
+    let mut hits: Vec<RawHit> = Vec::new();
+    {
+        // Same materialize-first shape as the §4 statement: resolve the
+        // MATCH before the joins, snippet only over the LIMITed set.
+        let mut stmt = conn.prepare_cached(
+            "WITH hits AS MATERIALIZED (\n\
+             \x20 SELECT event_fts.rowid AS fts_rowid,\n\
+             \x20        bm25(event_fts) AS s,\n\
+             \x20        snippet(event_fts, 0, '⟦', '⟧', '…', 12) AS snip\n\
+             \x20 FROM event_fts\n\
+             \x20 WHERE event_fts MATCH ?1\n\
+             \x20 ORDER BY rank\n\
+             \x20 LIMIT 500\n\
+             )\n\
+             SELECT m.root_event_id, h.s, h.snip\n\
+             FROM hits h\n\
+             JOIN fts_map m       ON m.fts_rowid = h.fts_rowid\n\
+             JOIN event_targets t ON t.event_id  = m.root_event_id\n\
+             WHERE t.image_hash = ?2\n\
+             ORDER BY h.s",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![match_q, image_hash])?;
+        while let Some(row) = rows.next()? {
+            hits.push(RawHit {
+                root: row.get(0)?,
+                s: row.get(1)?,
+                snip: row.get(2)?,
+            });
+        }
+    }
+    if hits.is_empty() {
+        return Ok(None);
+    }
+    let mut root_ids: Vec<String> = hits.iter().map(|h| h.root.clone()).collect();
+    root_ids.sort();
+    root_ids.dedup();
+    let inputs = provenance_inputs(conn, &root_ids)?;
+    let (exact_terms, prefix_term) = highlight_terms(raw);
+    Ok(hits
+        .iter()
+        .find_map(|h| {
+            build_quote(
+                h,
+                &inputs.metas,
+                &inputs.folded,
+                &inputs.linked,
+                &exact_terms,
+                prefix_term.as_deref(),
+            )
+        })
+        .map(|(_, q)| q))
 }
 
 /// Build the Quote for one hit, or `None` when the root is dead (the hit is

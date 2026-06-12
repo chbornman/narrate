@@ -1,9 +1,12 @@
-//! M1 search: FTS5 query construction, structured filters, materialize-first
-//! execution, result grouping + provenance.
+//! Search: FTS5 query construction, structured filters, materialize-first
+//! execution, result grouping + provenance (M1, packet P3.1); plus the §5
+//! M3 hybrid pipeline — LLM query parse with the validation firewall,
+//! four-signal candidate generation, weighted-RRF fusion — in [`hybrid`] /
+//! [`parse`] (packet P7.2, mock-verified).
 //!
-//! Contract: spec/RETRIEVAL.md §4 (M1), §5.1 Filter AST, §5.4 result contract
-//! (M1 subset), §6 provenance, §7.2 worked example, §13 acceptance criteria.
-//! Owned by work packet P3.1.
+//! Contract: spec/RETRIEVAL.md §4 (M1), §5 (M3 pipeline), §5.1 Filter AST,
+//! §5.4 result contract, §6 provenance, §7 worked examples, §10.3
+//! collection resolution, §13 acceptance criteria.
 //!
 //! Boundaries: the `event_fts`/`fts_map` construction is EVENTS §5.4's and is
 //! maintained by the store; this module only queries it. The M1 subset of the
@@ -25,6 +28,8 @@
 
 mod exec;
 mod filter;
+mod hybrid;
+mod parse;
 mod query;
 mod snippet;
 
@@ -37,6 +42,7 @@ use thiserror::Error;
 use crate::id::{ContentHash, EventId, SessionId, UtcMillis};
 use crate::store::schema;
 
+pub use hybrid::{FusionWeights, HybridOptions, HybridRig, NoModel, RRF_K, keyword_only_rig};
 pub use query::fts_match_query;
 pub use snippet::render_with_sentinels;
 
@@ -70,9 +76,11 @@ pub struct ParsedQuery {
     pub fallback: bool,
 }
 
-/// One typed filter (RETRIEVAL §5.1). M1 executes the chip subset: date
-/// range, camera, lens, folder/root, rating, has-strokes, source,
-/// online/offline. `Collection` and `Kind` are M3 (`SearchError::UnsupportedFilter`).
+/// One typed filter (RETRIEVAL §5.1). Chips and the P7.2 parse stage emit
+/// the same AST. `Collection` executes once its name is resolved (§10.3 —
+/// [`Searcher::hybrid_search`] resolves; an unresolved ref errors rather
+/// than silently dropping). `Kind` has no executor yet
+/// (`SearchError::UnsupportedFilter`) — the §5.1 LLM grammar never emits it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filter {
     Date {
@@ -235,7 +243,7 @@ pub struct PreviewRef {
     pub image_hash: ContentHash,
 }
 
-/// Why a result matched (§5.4/§6). M1 subset: no `VisualMatch` (S4 is M3).
+/// Why a result matched (§5.4/§6).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Provenance {
     /// The BEST matching span of the user's own words.
@@ -246,6 +254,9 @@ pub enum Provenance {
         session_id: SessionId,
         ts: UtcMillis,
     },
+    /// image_clip evidence only (S4, hybrid pipeline) — labeled honestly,
+    /// NO fake quote (§6).
+    VisualMatch,
     /// Pure structured-filter query.
     FilterOnly,
 }
@@ -286,7 +297,10 @@ pub struct DebugScores {
     pub fused: f32,
 }
 
-/// Candidate-generation signals (§5.2). M1 populates only `S2EventFts`.
+/// Candidate-generation signals (§5.2). Plain [`Searcher::search`]
+/// populates only `S2EventFts`; the hybrid pipeline names, per result,
+/// every signal that ranked it (`S3Summaries` may appear twice — once per
+/// §5.3 sub-list).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalId {
     S1AnnotationChunk,
@@ -307,9 +321,12 @@ pub enum SearchError {
     /// (`sqlite3_interrupt`) — expected during search-as-you-type.
     #[error("search interrupted")]
     Interrupted,
-    /// Filters are hard constraints; a filter that cannot execute in M1
-    /// (`Collection`, `Kind`) errors rather than being silently dropped.
-    #[error("filter not executable in M1: {0}")]
+    /// Filters are hard constraints; a filter that cannot execute (`Kind`,
+    /// or a `Collection` whose name was never resolved against the
+    /// collections store) errors rather than being silently dropped. The
+    /// §5.1 validation firewall — which DOES drop, with debug visibility —
+    /// runs before execution in [`Searcher::hybrid_search`].
+    #[error("filter not executable: {0}")]
     UnsupportedFilter(&'static str),
     #[error("corrupt row: {0}")]
     Corrupt(String),
@@ -391,6 +408,38 @@ impl Searcher {
         // One read snapshot for the statement sequence (WAL).
         let tx = conn.transaction().map_err(SearchError::from)?;
         let result = exec::run_search(&tx, raw_query, filters, now, opts.include_debug);
+        drop(tx); // read-only; rollback
+        result
+    }
+
+    /// The §5 M3 query pipeline: parse → candidates → weighted-RRF fusion →
+    /// results. M1 behavior is the degenerate case, not a separate system:
+    /// with every rig slot `None` ([`keyword_only_rig`]) this returns
+    /// exactly what [`Searcher::search`] returns, plus §10.3 collection-name
+    /// resolution for `Filter::Collection` chips (the collections store
+    /// needs no model). Search never errors because a model did — parse
+    /// failures fall back (§5.1), and a failing vector signal degrades to
+    /// absent with a logged warning (B69: signals are additive).
+    pub fn hybrid_search<L, TE, CE>(
+        &self,
+        raw_query: &str,
+        chips: &[Filter],
+        rig: &HybridRig<'_, L, TE, CE>,
+        opts: &HybridOptions,
+    ) -> Result<SearchResults, SearchError>
+    where
+        L: photoproof_connectors::LanguageModel,
+        TE: photoproof_connectors::Embedder,
+        CE: photoproof_connectors::Embedder,
+    {
+        let now = opts.now.unwrap_or_else(UtcMillis::now);
+        let mut conn = self.conn.lock().expect("searcher mutex poisoned");
+        // One read snapshot for the statement sequence (WAL). The parse-LLM
+        // call happens inside the lock: the Searcher owns one connection,
+        // and the rig is model-less in the shipping shell — revisit if a
+        // wired LLM ever contends with search-as-you-type interrupts.
+        let tx = conn.transaction().map_err(SearchError::from)?;
+        let result = hybrid::run(&tx, raw_query, chips, rig, opts, now);
         drop(tx); // read-only; rollback
         result
     }
