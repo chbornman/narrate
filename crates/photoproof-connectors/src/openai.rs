@@ -37,10 +37,14 @@ use crate::llm::{ChatRequest, ChatResponse, LanguageModel, Role};
 
 /// Connect timeout for the supervised local backend. WHY: the peer is a
 /// child process we spawned on loopback, so a connect that takes anywhere
-/// near 2 s is already a liveness signal, not network latency. The sherpa
-/// transcriber uses this same constant for the same reason; tuning happens
-/// through `with_timeouts()`, the deliberate programmatic seam.
-pub(crate) const SUPERVISED_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// near 2 s is already a liveness signal, not network latency. Expiry
+/// feeds the supervisor's Busy-vs-Lost reasoning (RUNTIME §8.1). This is
+/// the LLM knob only — the ASR handshake timeout is sherpa.rs's own
+/// constant, because the two gate different contracts (§8.1 liveness here,
+/// CAPTURE §6.6 arm readiness there) and must stay independently tunable.
+/// Tuning happens through `with_timeouts()`, the deliberate programmatic
+/// seam.
+const SUPERVISED_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Connect timeout for a user-configured external OAI endpoint. WHY:
 /// deliberately looser than [`SUPERVISED_CONNECT_TIMEOUT`] — an external

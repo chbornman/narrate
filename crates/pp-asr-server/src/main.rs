@@ -43,11 +43,19 @@ const MIN_INTRA_OP_THREADS: i32 = 4;
 
 /// Default endpointing rules (CAPTURE §6.3 — endpointing authority lives
 /// in this server). WHY these values: sherpa's canonical defaults, in
-/// SECONDS — rules 1-2 are minimum trailing silence, rule 3 the minimum
-/// utterance length that forces an endpoint. Runtime-overridable via
-/// `--rule1/2/3` for the pp_voice_bench sweep; production runs these.
+/// SECONDS. Runtime-overridable via `--rule1/2/3` for the pp_voice_bench
+/// sweep; production runs these.
+///
+/// Rule 1: minimum trailing silence when NOTHING has been decoded yet —
+/// the dead-air endpoint. Tuning this does not change how fast an
+/// endpoint lands after speech; that is rule 2's job.
 const DEFAULT_RULE1_TRAILING_SILENCE_S: f32 = 2.4;
+/// Rule 2: minimum trailing silence AFTER decoded speech — the
+/// post-utterance endpoint latency a user actually feels after they stop
+/// talking. This is the knob to sweep for snappier finals.
 const DEFAULT_RULE2_TRAILING_SILENCE_S: f32 = 1.2;
+/// Rule 3: minimum utterance length that forces an endpoint regardless
+/// of silence.
 const DEFAULT_RULE3_MIN_UTTERANCE_S: f32 = 20.0;
 
 struct Args {

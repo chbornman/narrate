@@ -20,12 +20,11 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use crate::error::{ConnectorError, ConnectorResult};
-use crate::transcriber::{AudioFrame, StreamMs};
+use crate::transcriber::{AudioFrame, SAMPLE_RATE_HZ, StreamMs};
 use crate::vad::{VadEvent, VadFrameResult, VoiceActivityDetector};
 
 static SILERO_ONNX: &[u8] = include_bytes!("../assets/silero_vad.onnx");
 
-const SAMPLE_RATE: u32 = 16_000;
 const WINDOW: usize = 512; // 32 ms
 const CONTEXT: usize = 64; // v5 contract: previous window's tail, prepended
 /// Enter/exit thresholds per silero's reference hysteresis.
@@ -101,7 +100,7 @@ impl SileroVad {
             .map_err(|e| ConnectorError::Decode(format!("silero input: {e}")))?;
         let state = Tensor::from_array((STATE_DIMS, self.state.clone()))
             .map_err(|e| ConnectorError::Decode(format!("silero state: {e}")))?;
-        let sr = Tensor::from_array(([] as [usize; 0], vec![i64::from(SAMPLE_RATE)]))
+        let sr = Tensor::from_array(([] as [usize; 0], vec![i64::from(SAMPLE_RATE_HZ)]))
             .map_err(|e| ConnectorError::Decode(format!("silero sr: {e}")))?;
         let outputs = self
             .session
@@ -118,7 +117,7 @@ impl SileroVad {
     }
 
     fn ms_at(&self, samples: u64) -> StreamMs {
-        samples * 1000 / u64::from(SAMPLE_RATE)
+        samples * 1000 / u64::from(SAMPLE_RATE_HZ)
     }
 }
 
@@ -177,7 +176,7 @@ impl VoiceActivityDetector for SileroVad {
     }
 
     fn sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+        SAMPLE_RATE_HZ
     }
 }
 
@@ -230,7 +229,7 @@ mod tests {
     #[test]
     fn silence_never_fires_and_gate_stays_shut() {
         let mut vad = SileroVad::new().expect("session");
-        let silence = vec![0.0f32; SAMPLE_RATE as usize * 2];
+        let silence = vec![0.0f32; SAMPLE_RATE_HZ as usize * 2];
         let events = feed(&mut vad, &silence, 2560);
         assert!(events.is_empty(), "{events:?}");
     }
@@ -241,9 +240,9 @@ mod tests {
     #[test]
     fn onset_lands_inside_the_capture_budget() {
         let mut vad = SileroVad::new().expect("session");
-        let mut signal = vec![0.0f32; SAMPLE_RATE as usize * 2];
+        let mut signal = vec![0.0f32; SAMPLE_RATE_HZ as usize * 2];
         signal.extend(fixture_speech());
-        signal.extend(vec![0.0f32; SAMPLE_RATE as usize]); // trailing silence
+        signal.extend(vec![0.0f32; SAMPLE_RATE_HZ as usize]); // trailing silence
         let events = feed(&mut vad, &signal, 2560);
         let (onset, is_start) = *events.first().expect("an onset fired");
         assert!(is_start);

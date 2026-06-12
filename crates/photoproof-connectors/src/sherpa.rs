@@ -43,14 +43,21 @@ use futures_core::stream::{BoxStream, Stream};
 
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::http::{self, WsClient, WsMessage};
-use crate::openai::{EndpointCell, SUPERVISED_CONNECT_TIMEOUT};
-use crate::transcriber::{AudioFrame, SegmentKind, StreamMs, Transcriber, TranscriptSegment};
+use crate::openai::EndpointCell;
+use crate::transcriber::{
+    AudioFrame, SAMPLE_RATE_HZ, SegmentKind, StreamMs, Transcriber, TranscriptSegment,
+};
 
-/// Input sample rate shipped to the server. WHY: the Nemotron streaming
-/// model's contract (transcriber.rs: "Nemotron: 16_000") and the P2 wire
-/// contract (RUNTIME §3.2: 16 kHz mono f32). Must agree with
-/// silero's SAMPLE_RATE and pp-asr-server's accept_waveform argument.
-const SAMPLE_RATE: u32 = 16_000;
+/// WebSocket handshake (connect) timeout against the supervised P2 child.
+/// WHY: the peer is a child process on loopback, so a connect that takes
+/// anywhere near 2 s is already a liveness signal, not network latency.
+/// This gates the capture arm path: handshake failure surfaces as
+/// `ConnectorError::NotReady` and the engine's `arm()` fails quietly
+/// (CAPTURE §6.6) — loosening this delays every not-ready answer against
+/// a dead P2 by the same amount. Deliberately its OWN constant, not shared
+/// with the LLM client's connect timeout (openai.rs), whose expiry feeds a
+/// different contract (RUNTIME §8.1 Busy-vs-Lost).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Initial WebSocket handshake key seed, incremented per connection. WHY:
 /// the value is arbitrary (ASCII "PERRO16A") and exists only so handshakes
@@ -78,8 +85,8 @@ impl SherpaOnlineTranscriber {
         Self {
             endpoint,
             model_id: model_id.into(),
-            sample_rate: SAMPLE_RATE,
-            connect_timeout: SUPERVISED_CONNECT_TIMEOUT,
+            sample_rate: SAMPLE_RATE_HZ,
+            connect_timeout: CONNECT_TIMEOUT,
             key_seed: AtomicU64::new(INITIAL_WS_KEY_SEED),
         }
     }
@@ -420,9 +427,10 @@ mod tests {
     use super::*;
 
     /// Pin the P2 wire contract (RUNTIME §3.2: 16 kHz mono f32). The
-    /// server side (pp-asr-server) and the in-process VAD (silero) carry
-    /// the same value; a change here is a cross-crate protocol change,
-    /// not a local tweak.
+    /// in-process VAD (silero) shares `transcriber::SAMPLE_RATE_HZ`, so
+    /// this pin covers both in-crate consumers; the server side
+    /// (pp-asr-server) carries its own copy, so a change here is a
+    /// cross-crate protocol change, not a local tweak.
     #[test]
     fn sample_rate_is_the_p2_wire_contract() {
         let t = SherpaOnlineTranscriber::new("nemotron", EndpointCell::new());

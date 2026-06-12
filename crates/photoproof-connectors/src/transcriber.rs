@@ -5,6 +5,17 @@ use futures_core::stream::BoxStream;
 
 use crate::error::ConnectorResult;
 
+/// The capture-path audio sample rate: the Nemotron streaming model's
+/// required input rate and the P2 wire contract (RUNTIME §3.2: 16 kHz
+/// mono f32). WHY it lives here: both the sherpa transcriber and the
+/// silero VAD window and timestamp on this rate, and their StreamMs
+/// clocks must agree — one definition makes that agreement structural
+/// inside this crate. The one edge a constant cannot enforce: the
+/// pp-asr-server binary's `accept_waveform` sample-rate argument is a
+/// separate crate and must be changed in lockstep (a cross-crate
+/// protocol change, not a local tweak).
+pub(crate) const SAMPLE_RATE_HZ: u32 = 16_000;
+
 /// Milliseconds relative to the stream clock: 0 = the instant `stream()`
 /// accepted its first audio frame. CAPTURE.md maps stream time to wall
 /// time and to selection snapshots (VAD-onset binding, gap B1).
@@ -85,7 +96,7 @@ pub trait Transcriber: Send + Sync {
         audio: BoxStream<'a, AudioFrame>,
     ) -> ConnectorResult<BoxStream<'a, ConnectorResult<TranscriptSegment>>>;
 
-    /// Required input sample rate (Nemotron: 16_000).
+    /// Required input sample rate (Nemotron: `SAMPLE_RATE_HZ`, 16 kHz).
     fn sample_rate(&self) -> u32;
     fn model_id(&self) -> &str;
 }
