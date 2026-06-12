@@ -58,6 +58,33 @@ const DEFAULT_RULE2_TRAILING_SILENCE_S: f32 = 1.2;
 /// of silence.
 const DEFAULT_RULE3_MIN_UTTERANCE_S: f32 = 20.0;
 
+/// Endpoint grace: extra audio decoded AFTER the endpoint rules fire,
+/// BEFORE the final mints. WHY: the cache-aware Nemotron export emits
+/// tokens with up to ~0.8 s of right-context delay (docs/SPIKE-P6.3.md
+/// tail-padding finding), so at endpoint-detection time the last word's
+/// tail tokens can still be in flight - minting immediately truncates
+/// them ("actually incredible" -> "actually incred"; founder corpus,
+/// mixed-register card). The client ships >= 3 s of trailing silence
+/// (engine TRAILING_SHIP_MS), so grace audio always arrives. DEFAULT 0
+/// (= mint immediately, the pre-grace behavior): corpus runs showed the
+/// deferred reset can clip the NEXT word when a pause is shorter than
+/// the grace, and the tail-token win is better bought by raising rule2
+/// (endpointing fires later = the tail has emitted by mint time). The
+/// mechanism stays for pp_voice_bench sweeps.
+/// Override with --endpoint-grace-ms.
+const DEFAULT_ENDPOINT_GRACE_MS: u64 = 0;
+
+/// Energy cutoff that ends the grace EARLY: if the speaker resumes
+/// before the grace elapses (a short ~1.2 s pause: endpoint fires just
+/// as the next word starts), waiting out the grace would let the reset
+/// eat the new word's already-consumed features (observed: "Three
+/// keepers" -> "Keepers"). Peak amplitude above this in a grace chunk
+/// means speech resumed: mint and reset IMMEDIATELY, degrading exactly
+/// to the pre-grace behavior, never worse. The client ships true mic
+/// silence between utterances (peaks well under 0.005 even on laptop
+/// mics); speech peaks two orders above.
+const GRACE_SPEECH_PEAK: f32 = 0.02;
+
 struct Args {
     port: u16,
     encoder: String,
@@ -71,6 +98,7 @@ struct Args {
     rule1: f32,
     rule2: f32,
     rule3: f32,
+    endpoint_grace_ms: u64,
 }
 
 fn parse_args() -> Args {
@@ -84,6 +112,7 @@ fn parse_args() -> Args {
         rule1: DEFAULT_RULE1_TRAILING_SILENCE_S,
         rule2: DEFAULT_RULE2_TRAILING_SILENCE_S,
         rule3: DEFAULT_RULE3_MIN_UTTERANCE_S,
+        endpoint_grace_ms: DEFAULT_ENDPOINT_GRACE_MS,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut it = argv.iter();
@@ -103,6 +132,9 @@ fn parse_args() -> Args {
             "--rule1" => a.rule1 = val().parse().expect("--rule1"),
             "--rule2" => a.rule2 = val().parse().expect("--rule2"),
             "--rule3" => a.rule3 = val().parse().expect("--rule3"),
+            "--endpoint-grace-ms" => {
+                a.endpoint_grace_ms = val().parse().expect("--endpoint-grace-ms");
+            }
             other => {
                 eprintln!("pp-asr-server: unknown flag {other}");
                 std::process::exit(2);
@@ -179,12 +211,19 @@ fn main() {
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
         let rec = std::sync::Arc::clone(&rec);
+        let grace_samples = args.endpoint_grace_ms * SAMPLE_RATE_HZ as u64 / 1000;
         thread::spawn(move || {
             let Ok(mut ws) = tungstenite::accept(conn) else {
                 return;
             };
             let stream = rec.create_stream();
             let mut segment: u32 = 0;
+            let mut received: u64 = 0;
+            // Samples received when the endpoint rules first fired for the
+            // current utterance; the final mints `grace_samples` later so
+            // the model's delayed tail tokens (see DEFAULT_ENDPOINT_GRACE_MS)
+            // make it into the minted text.
+            let mut endpoint_at: Option<u64> = None;
             loop {
                 let msg = match ws.read() {
                     Ok(m) => m,
@@ -192,7 +231,9 @@ fn main() {
                 };
                 match msg {
                     Message::Binary(bytes) => {
-                        stream.accept_waveform(SAMPLE_RATE_HZ, &samples_of(&bytes));
+                        let samples = samples_of(&bytes);
+                        received += samples.len() as u64;
+                        stream.accept_waveform(SAMPLE_RATE_HZ, &samples);
                         while rec.is_ready(&stream) {
                             rec.decode(&stream);
                         }
@@ -201,11 +242,22 @@ fn main() {
                         {
                             let _ = ws.send(Message::text(result_json(&r, segment, false)));
                         }
-                        // B67: an endpoint mints the final FROM THE LAST
-                        // DECODED STATE — the same result the newest
-                        // partial carried — then resets for the next
-                        // segment. Nothing decoded is ever dropped.
-                        if rec.is_endpoint(&stream) {
+                        if endpoint_at.is_none() && rec.is_endpoint(&stream) {
+                            endpoint_at = Some(received);
+                        }
+                        // B67 + grace: an endpoint mints the final FROM THE
+                        // LAST DECODED STATE - but only after the grace
+                        // audio decoded, so the tail tokens the cache-aware
+                        // model emits late are part of that state. Speech
+                        // resuming inside the grace ends it immediately
+                        // (GRACE_SPEECH_PEAK's WHY). Nothing decoded is
+                        // ever dropped.
+                        let speech_resumed = endpoint_at.is_some()
+                            && samples.iter().any(|s| s.abs() > GRACE_SPEECH_PEAK);
+                        if endpoint_at
+                            .is_some_and(|at| received.saturating_sub(at) >= grace_samples)
+                            || speech_resumed
+                        {
                             if let Some(r) = rec.get_result(&stream)
                                 && !r.text.is_empty()
                             {
@@ -213,6 +265,7 @@ fn main() {
                                 segment += 1;
                             }
                             rec.reset(&stream);
+                            endpoint_at = None;
                         }
                     }
                     Message::Text(t) if t.trim() == "Done" => {

@@ -52,6 +52,7 @@ struct Args {
     rule1: Option<f32>,
     rule2: Option<f32>,
     rule3: Option<f32>,
+    endpoint_grace_ms: Option<u64>,
     enter: f32,
     exit: f32,
     hang: u32,
@@ -70,6 +71,7 @@ fn parse_args() -> Args {
         rule1: None,
         rule2: None,
         rule3: None,
+        endpoint_grace_ms: None,
         enter: 0.5,
         exit: 0.35,
         hang: 15,
@@ -95,6 +97,9 @@ fn parse_args() -> Args {
             "--rule1" => a.rule1 = Some(val().parse().expect("--rule1")),
             "--rule2" => a.rule2 = Some(val().parse().expect("--rule2")),
             "--rule3" => a.rule3 = Some(val().parse().expect("--rule3")),
+            "--endpoint-grace-ms" => {
+                a.endpoint_grace_ms = Some(val().parse().expect("--endpoint-grace-ms"));
+            }
             "--enter" => a.enter = val().parse().expect("--enter"),
             "--exit" => a.exit = val().parse().expect("--exit"),
             "--hang" => a.hang = val().parse().expect("--hang"),
@@ -261,6 +266,10 @@ fn spawn_server(a: &Args) -> (Child, SocketAddr) {
             args.push(v.to_string());
         }
     }
+    if let Some(g) = a.endpoint_grace_ms {
+        args.push("--endpoint-grace-ms".into());
+        args.push(g.to_string());
+    }
     let mut child = Command::new(&server)
         .args(&args)
         .stdout(Stdio::piped())
@@ -376,6 +385,7 @@ fn run(a: &Args) {
             "wav": wav.display().to_string(),
             "params": {
                 "rule1": a.rule1, "rule2": a.rule2, "rule3": a.rule3,
+                "endpoint_grace_ms": a.endpoint_grace_ms,
                 "enter": a.enter, "exit": a.exit, "hang": a.hang,
             },
             "segments": segs.iter().map(|s| serde_json::json!({

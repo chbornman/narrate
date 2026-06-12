@@ -1926,3 +1926,93 @@ fn c13_1_late_split_final_falls_through_to_independent_binding() {
     assert_eq!(engine.streaming_count(), 0);
     assert_eq!(engine.abandoned_count(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// §6.2 pre-roll — the gate's detection lag must not chop first words
+// ---------------------------------------------------------------------------
+
+/// Founder corpus (cold-starts card): the VAD opens its gate 100-400 ms
+/// INTO the first word, and without a pre-roll that onset audio never
+/// reached the recognizer ("Okay this contact" arrived as "This
+/// contact"). The engine now retains up to PRE_ROLL_MS of withheld
+/// frames and flushes them ahead of the first shipped frame. This test
+/// records exactly which frames the transcriber RECEIVES: silence well
+/// before the onset never ships; the pre-roll window immediately before
+/// the VAD onset does.
+#[test]
+fn c6_2_pre_roll_ships_the_audio_from_before_the_vad_onset() {
+    use photoproof_core::capture::PRE_ROLL_MS;
+
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<StreamMs>>>);
+    struct RecorderStream<'a> {
+        audio: BoxStream<'a, AudioFrame>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<StreamMs>>>,
+    }
+    impl Stream for RecorderStream<'_> {
+        type Item = ConnectorResult<TranscriptSegment>;
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            while let Poll::Ready(item) = this.audio.as_mut().poll_next(cx) {
+                match item {
+                    Some(frame) => this.seen.lock().unwrap().push(frame.captured_at),
+                    None => return Poll::Ready(None),
+                }
+            }
+            Poll::Pending
+        }
+    }
+    impl Transcriber for Recorder {
+        fn stream<'a>(
+            &'a self,
+            audio: BoxStream<'a, AudioFrame>,
+        ) -> ConnectorResult<BoxStream<'a, ConnectorResult<TranscriptSegment>>> {
+            Ok(Box::pin(RecorderStream {
+                audio,
+                seen: self.0.clone(),
+            }))
+        }
+        fn sample_rate(&self) -> u32 {
+            SR
+        }
+        fn model_id(&self) -> &str {
+            "recorder"
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    // Speech begins at 2000 ms; everything before is gate-closed silence.
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 2_000,
+            end: 3_000,
+        }],
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let transcriber = Recorder(seen.clone());
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+    drive(&mut engine, &clock, &store, 3_000, &[]);
+
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "frames shipped");
+    let first = seen[0];
+    assert!(
+        first < 2_000,
+        "pre-roll shipped audio from BEFORE the VAD onset (first shipped at {first} ms)"
+    );
+    assert!(
+        2_000 - first <= PRE_ROLL_MS + 50,
+        "pre-roll bounded: first shipped at {first} ms vs onset 2000 (cap {PRE_ROLL_MS} ms + one frame)"
+    );
+    // Long-before silence stays unshipped: nothing from the first second.
+    assert!(
+        seen.iter().all(|&t| t >= 1_000),
+        "deep silence never ships: {:?}",
+        &seen[..4.min(seen.len())]
+    );
+    // And the shipped sequence is in order (the flush precedes the live frame).
+    assert!(seen.windows(2).all(|w| w[0] < w[1]), "frames ship in order");
+}

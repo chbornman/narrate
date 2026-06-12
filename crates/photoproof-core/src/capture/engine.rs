@@ -51,6 +51,14 @@ pub const DRAIN_WINDOW_MS: u64 = 5_000;
 /// they fire on. Without it the endpointer starves and utterances only
 /// finalize at disarm.
 pub const TRAILING_SHIP_MS: u64 = 3_000;
+/// §6.2 pre-roll: silence-gated frames retained and flushed to the ASR
+/// the moment shipping resumes. WHY: the VAD only opens its gate once
+/// speech-probability crosses ENTER, which is 100-400 ms INTO the first
+/// word — without the pre-roll, that audio never reaches the recognizer
+/// and cold-start first words come back chopped ("Okay this contact" ->
+/// "This contact"; founder corpus, cold-starts card). 400 ms covers the
+/// detection lag with margin while keeping the resume burst small.
+pub const PRE_ROLL_MS: u64 = 400;
 /// Debug-panel note cap (in-memory only).
 const DEBUG_NOTE_CAP: usize = 256;
 
@@ -157,6 +165,11 @@ pub struct CaptureEngine<'t, C: Clock> {
     /// Stream-clock position of the last gate-open frame; drives the
     /// trailing-silence ship window (§6.3, `TRAILING_SHIP_MS`).
     last_voiced_at: Option<StreamMs>,
+    /// Frames withheld by the silence gate, newest last, capped at
+    /// `PRE_ROLL_MS` of audio — flushed ahead of the first shipped frame
+    /// when shipping resumes so the recognizer hears the word from its
+    /// true onset (§6.2 pre-roll).
+    pre_roll: std::collections::VecDeque<AudioFrame>,
     debug: Vec<String>,
     /// §2.1: most recent capture-side ACTIVITY — mic arm/disarm, VAD
     /// speech (gated frames and boundary events), partial/final arrival
@@ -192,6 +205,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             session,
             abandoned: 0,
             last_voiced_at: None,
+            pre_roll: std::collections::VecDeque::new(),
             debug: Vec::new(),
             last_activity: None,
         }
@@ -242,6 +256,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             Ok(out) => {
                 self.vad.reset(); // re-arm rebuilds the chain from scratch (§6.2)
                 self.last_voiced_at = None; // new stream, new clock
+                self.pre_roll.clear();
                 self.pipeline = Some(Pipeline {
                     feed,
                     stream: out,
@@ -370,8 +385,27 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             || self
                 .last_voiced_at
                 .is_some_and(|t| frame.captured_at.saturating_sub(t) <= TRAILING_SHIP_MS);
-        if ship && let Some(p) = &self.pipeline {
-            p.feed.push(frame);
+        if ship {
+            if let Some(p) = &self.pipeline {
+                // §6.2 pre-roll: the withheld frames immediately before
+                // this one carry the chopped start of the word that opened
+                // the gate — they ship FIRST, in order (their true
+                // captured_at rides along, so the B72 ship-clock mapping
+                // stays exact).
+                for held in self.pre_roll.drain(..) {
+                    p.feed.push(held);
+                }
+                p.feed.push(frame);
+            }
+        } else {
+            // Withheld: retain for the pre-roll, oldest evicted past the cap.
+            self.pre_roll.push_back(frame);
+            while let (Some(oldest), Some(newest)) = (self.pre_roll.front(), self.pre_roll.back()) {
+                if newest.captured_at.saturating_sub(oldest.captured_at) <= PRE_ROLL_MS {
+                    break;
+                }
+                self.pre_roll.pop_front();
+            }
         }
         self.pump(store)
     }
@@ -741,6 +775,8 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             p.feed.close();
         }
         self.audio.zero();
+        // The pre-roll holds raw samples: same §7/K10 hygiene as the ring.
+        self.pre_roll.clear();
     }
 
     fn note(&mut self, s: String) {
