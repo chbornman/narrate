@@ -21,9 +21,16 @@ managing = off-thesis).
   `asr.chunk_ms` config (160 ms default — latency vs throughput).
   Consider whether consecutive finals within a short gap on the SAME
   scope should merge into one journal entry (a capture-policy question,
-  not a knob). Method: a scripted dictation session against the debug
-  panel's capture notes, vary one knob at a time. (Founder, first voice
-  dogfood, June 2026.)
+  not a knob). THE TOOL EXISTS: `pp_voice_bench` (synth + run modes, all
+  knobs as flags, --json for sweeps) — first sweeps bracket rule2
+  between 0.6 (over-splits intra-sentence pauses) and 1.2 (merges 0.8 s
+  thought-pauses); real tuning needs founder dictation clips (drop wavs
+  in gitignored test-corpora/voice/). DEFECT FOUND by the harness: when
+  VAD and ASR disagree on segment count, the engine's FIFO
+  onset-association binds text to the WRONG onset and abandons the tail
+  in-flight — association should be by onset proximity (segment onset vs
+  held VAD onsets), not arrival order. (Founder, first voice dogfood,
+  June 2026.)
 
 - [x] **Mid-ingest scroll stability** — landed: the scroll anchor pins
   the IMAGE (hash) across re-lists — when a re-sort moves it, the
