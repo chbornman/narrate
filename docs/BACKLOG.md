@@ -8,6 +8,23 @@ managing = off-thesis).
 
 ## Next polish round (small, founder-requested)
 
+- [ ] **Voice chunking tuning** — first live run (June 2026) works end to
+  end ("it is making finals and saving notes"), but utterance
+  segmentation needs a deliberate tuning round against real dictation.
+  The knobs, all in one place so the round is empirical, not archaeology:
+  (a) server-side endpoint rules in `pp-asr-server` — rule2 1.2 s
+  trailing silence after decoded speech (the main "when does a sentence
+  end" feel), rule1 2.4 s, rule3 20 s max utterance; (b) the engine's
+  `TRAILING_SHIP_MS` 3 s ship window (must stay > the rules it feeds);
+  (c) silero hang `HANG_WINDOWS` 15 x 32 ms = 480 ms (gate flap vs
+  intra-sentence pauses) and ENTER/EXIT 0.5/0.35 thresholds; (d)
+  `asr.chunk_ms` config (160 ms default — latency vs throughput).
+  Consider whether consecutive finals within a short gap on the SAME
+  scope should merge into one journal entry (a capture-policy question,
+  not a knob). Method: a scripted dictation session against the debug
+  panel's capture notes, vary one knob at a time. (Founder, first voice
+  dogfood, June 2026.)
+
 - [x] **Mid-ingest scroll stability** — landed: the scroll anchor pins
   the IMAGE (hash) across re-lists — when a re-sort moves it, the
   viewport follows it to its new offset (B64 applied to scroll); and
