@@ -155,6 +155,11 @@ pub struct RuntimeStatus {
     /// Ready (never true in P6.2 — real binaries are the P6.3 spike).
     pub asr_ready: bool,
     pub llm_ready: bool,
+    /// P7.4 §3.3: the in-process embedder readiness — true once the ort
+    /// sessions are constructed (additive; settings rows show running/idle
+    /// state text). False keeps search keyword-only and the backfill dark.
+    pub clip_ready: bool,
+    pub text_embedder_ready: bool,
     pub tier_detected: u8,
     /// After the `[runtime] tier` override — it always wins (§6.2).
     pub tier_effective: u8,

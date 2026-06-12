@@ -109,6 +109,10 @@ pub struct RuntimeHost {
     pub bus: RuntimeBus,
     /// P6.4: the real supervisors (None inside until the plan says Run).
     pub supervisors: crate::supervisors::SupervisorHost,
+    /// P7.4: the in-process ort embedders (§3.3). Converges on the same
+    /// plan as the supervisors, on the same 2 s loop; readiness flows into
+    /// `RuntimeStatus` and the search rig.
+    pub embedders: crate::embedders::EmbedderHost,
     app_data: PathBuf,
     manifest: Manifest,
     lock: Option<Arc<InstanceLock>>,
@@ -196,6 +200,7 @@ impl RuntimeHost {
             manifest,
             lock,
             supervisors,
+            embedders: crate::embedders::EmbedderHost::new(),
             capture_live: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(HostState {
                 config,
@@ -241,23 +246,31 @@ impl RuntimeHost {
         )
     }
 
-    /// P6.4: converge the supervisors onto the current plan. Called at
-    /// startup and on a slow cadence (state.rs) — every consent/config/
-    /// download mutation is picked up within a couple of seconds without
-    /// each command needing to remember to call this.
+    /// P6.4/P7.4: converge BOTH the supervisors (external children) and the
+    /// in-process embedders onto the current plan. Called at startup and on
+    /// a slow cadence (state.rs) — every consent/config/download mutation is
+    /// picked up within a couple of seconds without each command needing to
+    /// remember to call this. The one plan computation drives both hosts so
+    /// they never see divergent installed/tier state.
     pub fn apply_supervisor_plan(&self) {
-        let (ctx, slots, chunk, models_dir) = {
+        let (ctx, slots, chunk, clip_backend, text_backend, models_dir) = {
             let state = self.state.lock().expect("runtime state");
             (
                 state.config.llm.local_llamacpp.ctx_size,
                 state.config.llm.local_llamacpp.parallel_slots,
                 state.config.asr.chunk_ms,
+                state.config.embedder.backend,
+                state.config.embedder.text.backend,
                 Self::models_dir_for(&self.app_data, &state.config),
             )
         };
         let plan = self.plan();
         self.supervisors
             .apply(&plan, &self.manifest, &models_dir, ctx, slots, chunk);
+        // The embedders share the plan + models_dir; the backends gate which
+        // roles build in-process (local-ort) vs. stay a remote seam.
+        self.embedders
+            .apply(&plan, clip_backend, text_backend, &models_dir);
     }
 
     /// The configured ASR model id — the supervised P2 child and the WS
@@ -339,6 +352,9 @@ impl RuntimeHost {
             // supervisors read false and the mic glyph stays away).
             asr_ready: self.supervisors.asr_ready(),
             llm_ready: self.supervisors.llm_ready(),
+            // P7.4 §3.3: in-process embedder readiness (sessions built).
+            clip_ready: self.embedders.clip_ready(),
+            text_embedder_ready: self.embedders.text_ready(),
             tier_detected: state.tier.detected_tier,
             tier_effective: tier,
             tier_overridden_above: state.tier.overridden_above,
@@ -404,6 +420,10 @@ impl RuntimeHost {
                 "orphan sweep: NOT RUN (instance lock not held, §8.5)".into()
             },
         ];
+        // P7.4: the LIVE embedder-host slot state (building/ready/failed) —
+        // the plan lines above describe the PLAN; these the actual ort
+        // sessions, including a degraded-with-error load (§3.3).
+        lines.extend(self.embedders.debug_lines());
         lines.extend(state.config_warnings.iter().cloned());
         for (id, (done, total)) in &state.downloads {
             lines.push(format!("download {id}: {done}/{total} bytes"));

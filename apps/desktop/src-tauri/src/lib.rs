@@ -13,6 +13,7 @@ mod commands;
 #[cfg(any(feature = "debug-panel", debug_assertions))]
 mod debug;
 mod dto;
+mod embedders;
 mod error;
 mod hardware;
 mod mic;

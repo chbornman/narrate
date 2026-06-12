@@ -1,0 +1,537 @@
+//! P7.4 decision 4: the EmbedderHost — the in-process counterpart to
+//! `SupervisorHost`. It owns one `Option<Arc<OrtEmbedder>>` per role (text +
+//! CLIP) and converges them on the runtime plan exactly like
+//! `apply_supervisor_plan` does, on the same 2 s converge loop
+//! (`state.rs::PLAN_CONVERGE_INTERVAL`).
+//!
+//! WHY a host and not a supervisor: the embedders run IN-PROCESS via `ort`
+//! (RUNTIME §3.3 — the defended exception), so there is no child process to
+//! spawn, no port, no health probe. "Converge" here means: when the plan
+//! says `Run` (model installed, offered at tier, backend local-ort), build
+//! the ort sessions; when the plan goes dark or the configured model
+//! changes, drop and rebuild.
+//!
+//! THREADING: building a session is seconds (the DFN5B visual tower loads
+//! ~100 external-data files). That MUST NOT happen on the command thread or
+//! the converge thread's critical section — a wedged load would freeze
+//! search and status. So `apply` spawns ONE background build thread per
+//! role transition and the slot stays `Building` until it lands. Readiness
+//! (`text_ready`/`clip_ready`) is "the session is constructed".
+//!
+//! FAILURE: a native load failure (corrupt weights, missing file, an ort
+//! shape error) marks the role `Failed(msg)` — visible in the debug panel
+//! (`debug_lines`), surfaced as idle/degraded in the settings row text —
+//! and NEVER crashes the app. RUNTIME §3.3's whole defense ("a crash inside
+//! ort crashes Photoproof") rests on this isolation being honest: a load
+//! that fails leaves the journal and every other feature untouched.
+
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use photoproof_connectors::config::{EmbedderBackend, TextEmbedderBackend};
+use photoproof_connectors::{OrtEmbedder, TextRecipe};
+use photoproof_core::runtime::plan::{ProcessPlan, RuntimePlan};
+
+/// One role's lifecycle. `Building` carries the model id whose load is in
+/// flight so a config change mid-build can tell "still the right model"
+/// from "rebuild needed"; `Ready` holds the constructed connector.
+enum Slot {
+    /// No model planned (tier 0, uninstalled, disabled backend, or an
+    /// unsupported one). The feature is dark; the journal is whole.
+    Idle,
+    /// A background build thread is loading `model_id`'s sessions.
+    Building { model_id: String },
+    /// Sessions constructed; search and the embedding drain can use it.
+    Ready {
+        model_id: String,
+        embedder: Arc<OrtEmbedder>,
+    },
+    /// The native load failed; `Failed.msg` is the debug-panel detail. The
+    /// model id is kept so a later identical plan does not retry-loop the
+    /// same doomed load every 2 s (only a model/path change re-attempts).
+    Failed { model_id: String, msg: String },
+}
+
+impl Slot {
+    fn planned_model(&self) -> Option<&str> {
+        match self {
+            Slot::Idle => None,
+            Slot::Building { model_id }
+            | Slot::Ready { model_id, .. }
+            | Slot::Failed { model_id, .. } => Some(model_id),
+        }
+    }
+}
+
+/// Which text recipe + which on-disk onnx file a model id resolves to. The
+/// three embedders are PINNED (manifest.rs), so a match on id is the simple,
+/// obvious resolution — no discovery, no heuristics. dims mirror the spike
+/// (docs/SPIKE-P7-EMBED.md): EmbeddingGemma 768, Qwen3 1024, DFN5B 1024.
+struct TextSpec {
+    recipe: TextRecipe,
+    /// Relative to `models_dir/<id>/` — the manifest's pinned file paths.
+    onnx: &'static str,
+    tokenizer: &'static str,
+    dims: usize,
+}
+
+fn text_spec(model_id: &str) -> Option<TextSpec> {
+    match model_id {
+        "embeddinggemma-300m-q8" => Some(TextSpec {
+            recipe: TextRecipe::MeanPooled,
+            onnx: "onnx/model_quantized.onnx",
+            tokenizer: "tokenizer.json",
+            dims: 768,
+        }),
+        "qwen3-embedding-0.6b-int8" => Some(TextSpec {
+            recipe: TextRecipe::LastToken,
+            onnx: "onnx/model_int8.onnx",
+            tokenizer: "tokenizer.json",
+            dims: 1024,
+        }),
+        _ => None,
+    }
+}
+
+/// The DFN5B CLIP pair's on-disk layout (manifest.rs / dfn5b_files.rs). The
+/// visual tower's external-data files load RELATIVE to `visual/model.onnx`,
+/// so the subdirectory layout the path-preserving downloads keep (L1) is
+/// load-bearing here.
+struct ClipSpec {
+    visual: &'static str,
+    textual: &'static str,
+    tokenizer: &'static str,
+    dims: usize,
+}
+
+fn clip_spec(model_id: &str) -> Option<ClipSpec> {
+    match model_id {
+        "ViT-H-14-378-quickgelu__dfn5b" => Some(ClipSpec {
+            visual: "visual/model.onnx",
+            textual: "textual/model.onnx",
+            tokenizer: "textual/tokenizer.json",
+            dims: 1024,
+        }),
+        _ => None,
+    }
+}
+
+/// The host. Both slots sit behind one mutex (transitions are cheap; only
+/// the background build does real work, off-lock). `generation` bumps on
+/// every build dispatch so a stale build thread's result is discarded if
+/// the plan moved on under it (config swap, drop).
+pub struct EmbedderHost {
+    text: Arc<Mutex<Slot>>,
+    clip: Arc<Mutex<Slot>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl EmbedderHost {
+    pub fn new() -> Self {
+        Self {
+            text: Arc::new(Mutex::new(Slot::Idle)),
+            clip: Arc::new(Mutex::new(Slot::Idle)),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// True once the text-embedder sessions are constructed (§8.3 readiness
+    /// = sessions built). Read by `RuntimeStatus` and the search rig.
+    pub fn text_ready(&self) -> bool {
+        matches!(&*self.text.lock().expect("text slot"), Slot::Ready { .. })
+    }
+
+    /// True once the CLIP sessions are constructed.
+    pub fn clip_ready(&self) -> bool {
+        matches!(&*self.clip.lock().expect("clip slot"), Slot::Ready { .. })
+    }
+
+    /// The constructed text embedder, when ready — the search rig and the
+    /// embedding drain clone this `Arc` for their pass. `None` = degraded
+    /// (keyword-only / pending), never an error.
+    pub fn text(&self) -> Option<Arc<OrtEmbedder>> {
+        match &*self.text.lock().expect("text slot") {
+            Slot::Ready { embedder, .. } => Some(embedder.clone()),
+            _ => None,
+        }
+    }
+
+    /// The constructed CLIP embedder, when ready.
+    pub fn clip(&self) -> Option<Arc<OrtEmbedder>> {
+        match &*self.clip.lock().expect("clip slot") {
+            Slot::Ready { embedder, .. } => Some(embedder.clone()),
+            _ => None,
+        }
+    }
+
+    /// Debug-panel lines (§8.6): one per role, naming the state honestly so
+    /// a degraded-with-error embedder is visible without a crash.
+    pub fn debug_lines(&self) -> Vec<String> {
+        vec![
+            describe("text-embedder", &self.text.lock().expect("text slot")),
+            describe("clip-embedder", &self.clip.lock().expect("clip slot")),
+        ]
+    }
+
+    /// Converge both roles onto the plan, building/dropping as needed. The
+    /// backends gate in-process builds: only `local-ort` loads here (a
+    /// remote/openai-compatible embedder is the runtime's HTTP seam, not
+    /// this host's). Idempotent: a no-change plan touches nothing.
+    pub fn apply(
+        &self,
+        plan: &RuntimePlan,
+        clip_backend: EmbedderBackend,
+        text_backend: TextEmbedderBackend,
+        models_dir: &Path,
+    ) {
+        // CLIP role. Only local-ort builds in-process; an openai-compatible
+        // embedder backend reaches a remote endpoint (not this host's job),
+        // so it stays Idle here.
+        let clip_target = match (&plan.clip_embedder, clip_backend) {
+            (ProcessPlan::Run { model_id }, EmbedderBackend::LocalOrt) => Some(model_id.clone()),
+            _ => None,
+        };
+        self.converge_clip(clip_target.as_deref(), models_dir);
+
+        // Text role. local-ort builds here; local-llamacpp / openai-compatible
+        // are remote seams (RUNTIME §3.3 alt backend) and stay Idle.
+        let text_target = match (&plan.text_embedder, text_backend) {
+            (ProcessPlan::Run { model_id }, TextEmbedderBackend::LocalOrt) => {
+                Some(model_id.clone())
+            }
+            _ => None,
+        };
+        self.converge_text(text_target.as_deref(), models_dir);
+    }
+
+    /// Drop both slots to Idle (shutdown / restart). The build threads are
+    /// detached and the generation bump makes any in-flight build a no-op.
+    pub fn shutdown(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *self.text.lock().expect("text slot") = Slot::Idle;
+        *self.clip.lock().expect("clip slot") = Slot::Idle;
+    }
+
+    fn converge_text(&self, target: Option<&str>, models_dir: &Path) {
+        let mut slot = self.text.lock().expect("text slot");
+        if !needs_rebuild(&slot, target) {
+            return;
+        }
+        let Some(model_id) = target else {
+            *slot = Slot::Idle;
+            return;
+        };
+        // An unknown id (no recipe) is a config/manifest mismatch — record
+        // it as Failed, dark, never a crash.
+        let Some(spec) = text_spec(model_id) else {
+            *slot = Slot::Failed {
+                model_id: model_id.to_owned(),
+                msg: format!("no ort text recipe for {model_id}"),
+            };
+            return;
+        };
+        let dir = models_dir.join(model_id);
+        let model_id = model_id.to_owned();
+        *slot = Slot::Building {
+            model_id: model_id.clone(),
+        };
+        let dispatch = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.generation.clone();
+        let target_slot = self.text.clone();
+        // Build OFF the converge thread (load is seconds). The result lands
+        // back in the slot only if no newer build superseded it.
+        let _ = std::thread::Builder::new()
+            .name("pp-embed-build-text".into())
+            .spawn(move || {
+                let built = OrtEmbedder::text(
+                    model_id.clone(),
+                    spec.recipe,
+                    &dir.join(spec.onnx),
+                    &dir.join(spec.tokenizer),
+                    spec.dims,
+                );
+                land_build(&target_slot, &generation, dispatch, model_id, built);
+            });
+    }
+
+    fn converge_clip(&self, target: Option<&str>, models_dir: &Path) {
+        let mut slot = self.clip.lock().expect("clip slot");
+        if !needs_rebuild(&slot, target) {
+            return;
+        }
+        let Some(model_id) = target else {
+            *slot = Slot::Idle;
+            return;
+        };
+        let Some(spec) = clip_spec(model_id) else {
+            *slot = Slot::Failed {
+                model_id: model_id.to_owned(),
+                msg: format!("no ort clip recipe for {model_id}"),
+            };
+            return;
+        };
+        let dir = models_dir.join(model_id);
+        let model_id = model_id.to_owned();
+        *slot = Slot::Building {
+            model_id: model_id.clone(),
+        };
+        let dispatch = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.generation.clone();
+        let target_slot = self.clip.clone();
+        let _ = std::thread::Builder::new()
+            .name("pp-embed-build-clip".into())
+            .spawn(move || {
+                let built = OrtEmbedder::clip(
+                    model_id.clone(),
+                    &dir.join(spec.visual),
+                    &dir.join(spec.textual),
+                    &dir.join(spec.tokenizer),
+                    spec.dims,
+                );
+                land_build(&target_slot, &generation, dispatch, model_id, built);
+            });
+    }
+}
+
+impl Default for EmbedderHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Whether a slot must rebuild for `target`. Rebuild iff the planned model
+/// differs from the slot's current model (None target = drop to Idle). A
+/// `Failed` slot for the SAME model does NOT rebuild — that would retry the
+/// doomed load every converge tick; only a model/path change re-attempts.
+fn needs_rebuild(slot: &Slot, target: Option<&str>) -> bool {
+    slot.planned_model() != target
+}
+
+/// Land a finished build into its slot — but only if no newer build
+/// (config swap, shutdown) superseded it; otherwise the stale connector is
+/// dropped on the floor. WHY the generation guard: two converge ticks could
+/// dispatch builds for different models; without it the slower one could
+/// clobber the newer.
+fn land_build(
+    slot: &Mutex<Slot>,
+    generation: &AtomicU64,
+    my_gen: u64,
+    model_id: String,
+    built: photoproof_connectors::ConnectorResult<OrtEmbedder>,
+) {
+    if generation.load(Ordering::SeqCst) != my_gen {
+        return; // superseded — discard quietly
+    }
+    let mut slot = slot.lock().expect("embedder slot");
+    // Re-check under the lock: a shutdown between the load above and here
+    // must win (the slot would be Idle / a different model).
+    if generation.load(Ordering::SeqCst) != my_gen {
+        return;
+    }
+    *slot = match built {
+        Ok(embedder) => Slot::Ready {
+            model_id,
+            embedder: Arc::new(embedder),
+        },
+        Err(e) => Slot::Failed {
+            // The honest degraded-with-error landing (RUNTIME §3.3): a load
+            // failure is data for the debug panel, never a crash.
+            msg: format!("ort load failed: {e}"),
+            model_id,
+        },
+    };
+}
+
+fn describe(role: &str, slot: &Slot) -> String {
+    match slot {
+        Slot::Idle => format!("{role}: idle (no model)"),
+        Slot::Building { model_id } => format!("{role}: building {model_id}"),
+        Slot::Ready { model_id, .. } => format!("{role}: ready {model_id}"),
+        Slot::Failed { model_id, msg } => format!("{role}: FAILED {model_id} — {msg}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_plan(clip: Option<&str>, text: Option<&str>) -> RuntimePlan {
+        let run = |id: Option<&str>| match id {
+            Some(id) => ProcessPlan::Run {
+                model_id: id.to_owned(),
+            },
+            None => ProcessPlan::NotConfigured {
+                reason: "test".into(),
+                fixable_by_download: false,
+            },
+        };
+        RuntimePlan {
+            effective_tier: 1,
+            llm: run(None),
+            asr: run(None),
+            clip_embedder: run(clip),
+            text_embedder: run(text),
+        }
+    }
+
+    /// A fresh host is fully degraded: neither role ready, both Idle in the
+    /// debug lines. This is the shipping posture until weights install.
+    #[test]
+    fn fresh_host_is_degraded_and_idle() {
+        let host = EmbedderHost::new();
+        assert!(!host.text_ready());
+        assert!(!host.clip_ready());
+        assert!(host.text().is_none());
+        assert!(host.clip().is_none());
+        let lines = host.debug_lines().join("\n");
+        assert!(lines.contains("text-embedder: idle"));
+        assert!(lines.contains("clip-embedder: idle"));
+    }
+
+    /// An unknown model id (no recipe) lands the slot in FAILED, not a
+    /// panic — the synchronous resolve path is exercised without any model
+    /// files. Both roles take the same firewall.
+    #[test]
+    fn unknown_model_id_fails_dark_never_panics() {
+        let host = EmbedderHost::new();
+        let dir = std::path::Path::new("/nonexistent/models");
+        let plan = run_plan(Some("not-a-clip"), Some("not-a-text"));
+        host.apply(
+            &plan,
+            EmbedderBackend::LocalOrt,
+            TextEmbedderBackend::LocalOrt,
+            dir,
+        );
+        assert!(!host.text_ready());
+        assert!(!host.clip_ready());
+        let lines = host.debug_lines().join("\n");
+        assert!(lines.contains("clip-embedder: FAILED"), "{lines}");
+        assert!(lines.contains("text-embedder: FAILED"), "{lines}");
+    }
+
+    /// A dark plan (NotConfigured everywhere) keeps both slots Idle, and a
+    /// non-local-ort backend never builds in-process even when the plan
+    /// would Run (the remote-endpoint seam stays the runtime's job).
+    #[test]
+    fn dark_plan_and_remote_backend_stay_idle() {
+        let host = EmbedderHost::new();
+        let dir = std::path::Path::new("/nonexistent/models");
+
+        host.apply(
+            &run_plan(None, None),
+            EmbedderBackend::LocalOrt,
+            TextEmbedderBackend::LocalOrt,
+            dir,
+        );
+        assert!(
+            host.debug_lines()
+                .join("\n")
+                .contains("text-embedder: idle")
+        );
+
+        // Plan says Run, but the backend is openai-compatible: no in-process
+        // build — stays Idle.
+        host.apply(
+            &run_plan(
+                Some("ViT-H-14-378-quickgelu__dfn5b"),
+                Some("embeddinggemma-300m-q8"),
+            ),
+            EmbedderBackend::OpenaiCompatible,
+            TextEmbedderBackend::OpenaiCompatible,
+            dir,
+        );
+        let lines = host.debug_lines().join("\n");
+        assert!(lines.contains("clip-embedder: idle"), "{lines}");
+        assert!(lines.contains("text-embedder: idle"), "{lines}");
+    }
+
+    /// Resolution truth (PLAN-P7.4 decision 2/3): the three pinned ids map
+    /// to the right recipe + dims; an id with no spec resolves to None.
+    #[test]
+    fn pinned_ids_resolve_to_recipes() {
+        assert_eq!(text_spec("embeddinggemma-300m-q8").unwrap().dims, 768);
+        assert_eq!(
+            text_spec("embeddinggemma-300m-q8").unwrap().recipe,
+            TextRecipe::MeanPooled
+        );
+        assert_eq!(text_spec("qwen3-embedding-0.6b-int8").unwrap().dims, 1024);
+        assert_eq!(
+            text_spec("qwen3-embedding-0.6b-int8").unwrap().recipe,
+            TextRecipe::LastToken
+        );
+        assert_eq!(
+            clip_spec("ViT-H-14-378-quickgelu__dfn5b").unwrap().dims,
+            1024
+        );
+        assert!(text_spec("nope").is_none());
+        assert!(clip_spec("nope").is_none());
+    }
+
+    /// The local DFN5B/EmbeddingGemma snapshots, if present, prove the FULL
+    /// host path end to end: `apply` dispatches a background build, the slot
+    /// transitions Building -> Ready, and `text()`/`clip()` then hand out a
+    /// usable connector. Skips cleanly when the snapshots are absent (the
+    /// gate machine has no weights). Lays out a temp `models_dir/<id>/`
+    /// pointing at each snapshot so the host's `<id>/<file.path>` joins
+    /// resolve exactly as they would post-download (L1 path layout).
+    #[test]
+    #[ignore = "needs the local EmbeddingGemma + DFN5B snapshots"]
+    fn host_builds_real_sessions_and_reaches_ready() {
+        let snaps = std::path::Path::new("/Users/bornman/spike-p7-embed/models");
+        let gemma = snaps.join("embeddinggemma");
+        let dfn = snaps.join("dfn5b");
+        if !gemma.join("onnx/model_quantized.onnx").exists()
+            || !dfn.join("visual/model.onnx").exists()
+        {
+            eprintln!("skipping: embedder snapshots absent under {}", snaps.display());
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        // Symlink the snapshot dirs under their manifest ids — the host
+        // joins `<id>/onnx/...` etc., which resolves straight through.
+        std::os::unix::fs::symlink(&gemma, models_dir.join("embeddinggemma-300m-q8")).unwrap();
+        std::os::unix::fs::symlink(&dfn, models_dir.join("ViT-H-14-378-quickgelu__dfn5b")).unwrap();
+
+        let host = EmbedderHost::new();
+        host.apply(
+            &run_plan(
+                Some("ViT-H-14-378-quickgelu__dfn5b"),
+                Some("embeddinggemma-300m-q8"),
+            ),
+            EmbedderBackend::LocalOrt,
+            TextEmbedderBackend::LocalOrt,
+            &models_dir,
+        );
+
+        // The build is on a background thread (load is seconds — the DFN5B
+        // visual tower especially: a 2.7 GB session over ~100 external-data
+        // files, slower still under the debug test profile). Poll for
+        // readiness with a generous cap.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while (!host.text_ready() || !host.clip_ready())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let lines = host.debug_lines().join("\n");
+        assert!(host.text_ready(), "text never reached Ready: {lines}");
+        assert!(host.clip_ready(), "clip never reached Ready: {lines}");
+
+        // A ready slot hands out a working connector. The trait methods
+        // (`dimensions`/`embed_text`) need `Embedder` in scope.
+        use photoproof_connectors::Embedder;
+        let te = host.text().expect("text connector");
+        assert_eq!(te.dimensions(), 768);
+        let v = pollster::block_on(te.embed_text("a quiet harbor at dusk")).expect("embed");
+        assert_eq!(v.vector.len(), 768);
+        let ce = host.clip().expect("clip connector");
+        assert_eq!(ce.dimensions(), 1024);
+
+        host.shutdown();
+        assert!(!host.text_ready(), "shutdown drops the sessions");
+        assert!(!host.clip_ready());
+    }
+}

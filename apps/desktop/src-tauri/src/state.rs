@@ -11,6 +11,7 @@ use photoproof_connectors::silero::SileroVad;
 use photoproof_core::capture::{CaptureDrain, CaptureEngine, SystemClock};
 use photoproof_core::collections::Collections;
 use photoproof_core::library::{Library, RootWatcherHandle};
+use photoproof_core::retrieval::PpvecStore;
 use photoproof_core::search::Searcher;
 use photoproof_core::sidecar::SidecarEngine;
 use photoproof_core::{EventStore, SessionContext, SessionId, UtcMillis};
@@ -70,6 +71,11 @@ pub struct App {
     /// The M1 search engine (RETRIEVAL §4, packet P3.1) on its own
     /// connection; `interrupt()` cancels in-flight queries on new keystrokes.
     pub searcher: Searcher,
+    /// P7.4: the PPVEC flat-file vector store (RETRIEVAL §1.3). Backs both
+    /// the embedding backfill drain (writes) and the hybrid search rig
+    /// (reads). One store for the process; its own SQLite metadata
+    /// connection lives inside.
+    pub vectors: Arc<PpvecStore>,
     /// The model runtime (RUNTIME, P6.2): instance lock, orphan sweep,
     /// tier, manifest, consent, downloads. No supervised child exists
     /// until P6.3 vendors real binaries; readiness stays false and the
@@ -106,6 +112,13 @@ impl App {
         // finds beside the manifest (RETRIEVAL 10.2).
         let collections = Arc::new(Collections::open(&db_path, &app_data)?);
         let searcher = Searcher::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?;
+        // PPVEC store beside the journal db (RETRIEVAL §1.3:
+        // appdata/vectors/). Opening it is cheap (it lazily mmaps spaces on
+        // first touch); the embedding drain and search rig share it.
+        let vectors = Arc::new(
+            PpvecStore::open(&db_path, app_data.join("vectors"))
+                .map_err(|e| CmdError::Invalid(e.to_string()))?,
+        );
 
         // CAPTURE §2.4 crash recovery, before opening the launch session:
         // any session left open by a dead process closes at its last event's
@@ -189,6 +202,7 @@ impl App {
             settings: Mutex::new(app_settings),
             last_search: Mutex::new(None),
             searcher,
+            vectors,
             runtime,
             capture,
             mic: Mutex::new(None),
@@ -243,6 +257,10 @@ impl App {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         // P6.4: children walk the §8.4 normal order before we flush.
         self.runtime.supervisors.shutdown();
+        // P7.4: drop the in-process ort sessions (no child to reap; this
+        // just frees the native sessions and stops any pending build from
+        // landing).
+        self.runtime.embedders.shutdown();
         // Stop watchers first so nothing new lands mid-flush.
         self.watchers.lock().expect("watchers mutex").clear();
         let session_id = self.session_id();

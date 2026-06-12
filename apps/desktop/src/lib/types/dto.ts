@@ -90,6 +90,11 @@ export interface IngestStatus {
 export interface RuntimeStatus {
   asrReady: boolean;
   llmReady: boolean;
+  /** P7.4 §3.3: in-process embedder readiness — true once the ort sessions
+   * are constructed. Additive; like asr/llm they light up silently and gate
+   * the semantic-search backfill, never blocking the journal. */
+  clipReady: boolean;
+  textEmbedderReady: boolean;
   tierDetected: number;
   /** After the always-winning user override (§6.2). */
   tierEffective: number;
