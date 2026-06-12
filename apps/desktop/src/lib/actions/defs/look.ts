@@ -1,10 +1,12 @@
 /**
- * Look rows — STAGE B OWNS THIS FILE. Prev/next, the §0 symmetry row
- * (Space closes Look at fit; the zoomed-Space hold-to-pan / clean-tap-
- * close split is a pointer-pipeline fact — logic/looknav.ts), the zoom
- * band (Z anchored at pointer and the dblclick toggle are LookStage
- * pointer facts over the same Actions), R member flip (featureset §5),
- * and the filmstrip. The look-backdrop seat is complete by construction:
+ * Look rows — STAGE B OWNS THIS FILE. Prev/next, the zoom band (Z
+ * anchored at pointer and the dblclick toggle are LookStage pointer facts
+ * over the same Actions), R member flip (featureset §5), and the
+ * filmstrip. The look-close row is GONE (June 12 2026: Space became 100%
+ * the microphone key — defs/global.ts mic-press); Esc remains the close
+ * path through the escape ladder (logic/escape.ts "leave-look"), exactly
+ * as before. The zoomed Space-pan pipeline went with it — drag-pan is the
+ * only pan. The look-backdrop seat is complete by construction:
  * zoom-toggle/zoom-fit/zoom-100 seated here + the global set-surround row
  * fill menus.ts's frozen look-backdrop order table.
  *
@@ -31,20 +33,6 @@ export const LOOK_DEFS: ActionDef[] = [
     available: always,
     enabled: lookKeysFree,
     toAction: (_ctx, arg) => ({ kind: "look-nav", delta: arg as 1 | -1 }),
-  },
-  {
-    id: "look-close",
-    verb: "Close",
-    label: "Close Look (Space at fit / Esc)",
-    keys: [{ key: " " }],
-    scope: "look",
-    group: "look",
-    available: always,
-    // While zoomed, Space is hold-to-pan (pointer pipeline, Stage B) —
-    // the §3 showcase: no special-case branch in any component. With the
-    // pencil on, Space is the PAN key at any zoom (UI §11: "Space (hold) +
-    // drag · Look (pencil on) · Pan") — it must never close Look mid-mark.
-    enabled: (ctx) => ctx.lookAtFit && !ctx.railFocused && !ctx.pencilMode,
   },
   {
     id: "zoom-toggle",
@@ -141,8 +129,9 @@ export const LOOK_DEFS: ActionDef[] = [
     group: "capture",
     available: always,
     // HOLD semantics: keydown engages through this row; the release is a
-    // raw keyup fact in PencilOverlay (the Space-pan precedent). Pointer
-    // path: the stylus eraser end (named in the reachability audit).
+    // raw keyup fact in LookStage (the registry is keydown-only — the
+    // same split the Space mic uses in App.svelte). Pointer path: the
+    // stylus eraser end (named in the reachability audit).
     enabled: (ctx) => !ctx.railFocused && ctx.pencilMode,
   },
   {

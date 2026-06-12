@@ -167,8 +167,8 @@
     void ui.applySelection(next);
   }
 
-  /** Double-click opens Look (featureset §0 — same verb as Enter/Space;
-   * the click pair has already made the cell active). */
+  /** Double-click opens Look (featureset §0 — same verb as Enter; the
+   * click pair has already made the cell active). */
   function onThumbOpen() {
     void ui.perform({ kind: "open-look" });
   }

@@ -352,7 +352,7 @@ describe("§8.3 capture reduction — jitter dedupe and the 8192 bound", () => {
 
   it("a mid-stroke PAN moves the baseline too (translation, not just scale)", () => {
     const t1: ZoomTransform = { scale: 1, tx: 0, ty: 0 };
-    const panned: ZoomTransform = { scale: 1, tx: 5, ty: 0 }; // Space-pan mid-stroke
+    const panned: ZoomTransform = { scale: 1, tx: 5, ty: 0 }; // a pan landed mid-stroke
     const state = penDown(
       { x: 100, y: 100, pressure: 0.5, pointerType: "mouse", timeMs: 0 },
       { t: t1, image: PREVIEW },

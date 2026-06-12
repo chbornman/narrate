@@ -10,10 +10,11 @@
    * Pointer pipeline (component-local, Actions only — no enablement logic
    * lives here): wheel zoom-to-cursor on CONTAINER-relative points (the
    * legacy offsetX/offsetY anchor bug class), double-click = zoom toggle
-   * at cursor, drag pans when zoomed, Space = hold-to-pan while zoomed
-   * with the clean-tap-close resolved by logic/looknav.ts (at fit the
-   * registry's look-close row consumes Space before it reaches here).
-   * `atFit` is reported back for that row's enabled gate.
+   * at cursor, drag pans when zoomed — the ONLY pan since June 12 2026:
+   * Space became 100% the microphone key (defs/global.ts mic-press), so
+   * the whole Space hold-to-pan / clean-tap-close pipeline was deleted.
+   * The one raw key fact left here is the hold-E eraser release (the
+   * registry is keydown-only; engagement is the pencil-eraser row).
    */
   import { ui } from "../../state/app.svelte";
   import { displayUrl, embeddedUrl, originalUrl } from "../../ipc/urls";
@@ -25,14 +26,6 @@
     nextSource,
     type FullresSource,
   } from "../../logic/fullres";
-  import {
-    SPACE_IDLE,
-    spaceDown,
-    spaceHeldNext,
-    spacePanned,
-    spaceUp,
-    type SpaceHoldState,
-  } from "../../logic/looknav";
   import PencilOverlay from "./PencilOverlay.svelte";
 
   let stageEl: HTMLDivElement | undefined = $state();
@@ -61,11 +54,6 @@
   const t = $derived(
     ready ? zoom.carryOver(ui.look.zoomSession, container, image) : null,
   );
-
-  // Report fit state for the Space dual-role gate (look-close enabled).
-  $effect(() => {
-    ui.look.atFit = mode === "fit";
-  });
 
   // ---- progressive full resolution (logic/fullres.ts owns predicate+ladder) ----
   //
@@ -207,13 +195,12 @@
     applyZoom(zoom.zoomAtPoint(t, container, image, stagePoint(e), next), "free");
   }
 
-  // ---- drag-pan when zoomed + Space hold-to-pan ------------------------------
+  // ---- drag-pan when zoomed ---------------------------------------------------
 
   let lastPointer = $state<zoom.Point | null>(null);
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
-  let spaceHold: SpaceHoldState = SPACE_IDLE;
 
   function onPointerDown(e: PointerEvent) {
     if (e.button !== 0) return; // right-click = the backdrop menu seat
@@ -232,7 +219,6 @@
     lastX = e.clientX;
     lastY = e.clientY;
     ui.look.zoomSession = zoom.toSession(zoom.panBy(t, dx, dy), container, image, mode);
-    spaceHold = spacePanned(spaceHold); // a pan breaks the clean tap
   }
 
   function onPointerUp() {
@@ -244,72 +230,12 @@
     lastPointer = null;
   }
 
-  // Space pipeline: raw key events (not Actions — the registry's look-close
-  // row consumed the at-fit tap before this listener sees anything useful;
-  // looknav.ts resolves the zoomed tap-vs-hold). Typing keeps typing.
-  function isTextInput(el: Element | null): boolean {
-    return (
-      el instanceof HTMLInputElement ||
-      el instanceof HTMLTextAreaElement ||
-      (el instanceof HTMLElement && el.isContentEditable)
-    );
-  }
-
-  // Raw-pipeline ownership, mirroring match.ts's suppression rules (this
-  // is pipeline routing, not enablement — that stays on the defs): while
-  // an overlay/menu/the rail owns the keys, Space neither pans nor closes.
-  function stageOwnsRawKeys(): boolean {
-    return (
-      // The registry's look-close row runs FIRST in the same keydown
-      // dispatch (App's window listener registered at app mount) and this
-      // handler stays attached until Svelte unmounts the stage — without
-      // the surface check, a Space-at-fit close re-engages spaceHeld AFTER
-      // look.close() reset it, and no tracker survives to see the keyup.
-      ui.surface === "look" &&
-      !ui.searchOpen &&
-      !ui.shell.cheatsheetOpen &&
-      ui.shell.contextMenu === null &&
-      !ui.shell.railFocused &&
-      !isTextInput(document.activeElement)
-    );
-  }
-
-  function onWindowKeydown(e: KeyboardEvent) {
-    if (e.key !== " ") return;
-    const owns = stageOwnsRawKeys();
-    // THE Space-held tracker (looknav.ts spaceHeldNext) — the overlay
-    // consumes the slice field, so its pointer yield shares this gate.
-    ui.look.spaceHeld = spaceHeldNext(ui.look.spaceHeld, "down", owns);
-    if (!owns) return;
-    spaceHold = spaceDown(spaceHold, { atFit: mode === "fit", repeat: e.repeat });
-    // While the hold is engaged, Space must not scroll or click a focused
-    // control (repeats included).
-    if (spaceHold.held) e.preventDefault();
-  }
-
   function onWindowKeyup(e: KeyboardEvent) {
     // Hold-E eraser release (P5.1): engagement is the registry's
-    // pencil-eraser row; the release is a raw key fact — the Space-pan
-    // precedent. Released unconditionally so a hold can never wedge.
+    // pencil-eraser row; the release is a raw key fact (the registry is
+    // keydown-only — the same split the Space mic uses in App.svelte).
+    // Released unconditionally so a hold can never wedge.
     if (e.key === "e" || e.key === "E") ui.look.eraserHeld = false;
-    if (e.key !== " ") return;
-    ui.look.spaceHeld = spaceHeldNext(ui.look.spaceHeld, "up", stageOwnsRawKeys());
-    // Always resolve the machine (a hold must never wedge), but a clean
-    // tap acts only if the stage still owns the keys at release. With the
-    // pencil on, Space is the pan key — never close (UI §11; the machine
-    // owns that gate so the registry and raw pipelines agree).
-    const { state, outcome } = spaceUp(spaceHold, {
-      pencilOn: ui.look.pencilMode,
-    });
-    spaceHold = state;
-    if (outcome === "close" && stageOwnsRawKeys())
-      void ui.perform({ kind: "look-close" });
-  }
-
-  // Window loss releases the shared hold (the overlay's blur handler owns
-  // the pen discard and the hold-E release).
-  function onWindowBlur() {
-    ui.look.spaceHeld = spaceHeldNext(ui.look.spaceHeld, "blur", false);
   }
 
   // ---- transient zoom readout [nice] (obeys lights-out) ----------------------
@@ -326,7 +252,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onkeyup={onWindowKeyup} onblur={onWindowBlur} />
+<svelte:window onkeyup={onWindowKeyup} />
 
 <div
   class="stage"
@@ -382,7 +308,7 @@
   {/if}
   {#if hash !== null && ready && t !== null}
     <!-- the tracing paper (P5.1): folded strokes + the live stroke; its
-         pointer-events gate keeps drag-pan/Space-pan/wheel on the stage -->
+         pointer-events gate keeps drag-pan/wheel on the stage -->
     <PencilOverlay {t} {container} {image} {hash} />
   {/if}
   {#if readout !== null && !ui.shell.chromeHidden}

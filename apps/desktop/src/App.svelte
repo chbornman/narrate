@@ -102,6 +102,14 @@
       // Tab is consumed globally in the main window even when suppressed —
       // webview focus traversal is forfeited (DECISIONS 2, a11y note).
       if (e.key === "Tab") e.preventDefault();
+      // Space is the mic key (June 12 2026) and nothing else: when the
+      // row is gated off (ASR not ready, rail focused, …) the undispatched
+      // Space must not fall through to the browser default — previously
+      // the grid's open-look row consumed it, and without this the grid
+      // scroll container would jump a page (or a focused control would
+      // "click"). EXCEPT while typing: there Space must keep typing
+      // spaces, which is the whole point of the §11 suppression.
+      if (e.key === " " && !ctx.inputFocused) e.preventDefault();
       return;
     }
     e.preventDefault();
@@ -133,19 +141,19 @@
     touchActivity();
   }
 
-  // The M two-gesture mic's release half (CAPTURE §6.4): the registry is
-  // keydown-only, so the keyup is a raw key fact — the hold-E / Space-pan
+  // The Space two-gesture mic's release half (CAPTURE §6.4): the registry
+  // is keydown-only, so the keyup is a raw key fact — the hold-E
   // precedent. UNCONDITIONAL (no suppression mirror): the press side was
   // already gated by the registry (§11 typing suppression, asrReady), so
   // with no gesture in flight the machine no-ops — and when a gesture IS
   // in flight, the release must always resolve or a hold could wedge the
   // mic open (e.g. focus landed in an input mid-hold).
   function onKeyup(e: KeyboardEvent) {
-    if (e.key === "m" || e.key === "M") void ui.micRelease();
+    if (e.key === " ") void ui.micRelease();
   }
 
   // Window loss mid-hold: the keyup will never arrive (the same reason
-  // LookStage releases Space/hold-E on blur).
+  // PencilOverlay releases hold-E on blur).
   function onWindowBlur() {
     void ui.micWindowBlur();
   }

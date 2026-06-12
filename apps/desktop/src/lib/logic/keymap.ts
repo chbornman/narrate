@@ -7,10 +7,15 @@
  *
  * The pencil band went live with P5.1 (B sticky toggle, hold-E eraser,
  * O overlay, Ctrl+Z undo — UI §4.4/§11; the P4.2 reserved P/E/V rows were
- * reconciled onto the spec's keys). The mic key (M) is live since P6.4
- * and two-gesture since the June 2026 ruling: tap toggles, hold is
- * push-to-talk (logic/michold.ts). Single-letter shortcuts are suppressed
- * while any text input is focused (UI §11; rule owned by actions/match.ts).
+ * reconciled onto the spec's keys). The mic is live since P6.4 and
+ * two-gesture since the June 2026 ruling: tap toggles, hold is
+ * push-to-talk (logic/michold.ts) — and since June 12 2026 it sits on
+ * SPACE ("like a Zoom call"); M returned to the reserved pool (unbound,
+ * like the retired P/V keys). Space's old verbs moved aside for it:
+ * open-look is Enter-only, Look closes on Esc alone, and the zoomed
+ * Space-pan pipeline was deleted outright. Typing-key shortcuts (single
+ * letters AND the space character) are suppressed while any text input is
+ * focused (UI §11; rule owned by actions/match.ts).
  */
 import { match } from "../actions/match";
 import { REGISTRY } from "../actions/registry";
@@ -70,6 +75,9 @@ export type Action =
   | { kind: "flip-stack-member" } // R: viewed member in Look, active in Grid (D1)
   // look
   | { kind: "look-nav"; delta: 1 | -1 }
+  // look-close keeps its union seat (extended, never narrowed) though its
+  // key binding is gone: Space became the mic (June 12 2026) and Esc
+  // closes Look through the escape ladder ("leave-look") instead.
   | { kind: "look-close" }
   | { kind: "zoom-toggle" }
   | { kind: "zoom-step"; delta: 1 | -1 }
@@ -124,10 +132,11 @@ export type Action =
   | { kind: "pencil-eraser" }
   | { kind: "pencil-undo" }
   | { kind: "cycle-overlay" }
-  // voice capture (M2b; two-gesture M since the June 2026 ruling):
-  // mic-press is the M KEYDOWN — it begins the tap-vs-hold machine
-  // (logic/michold.ts); toggle-mic is the instantaneous pointer form
-  // (indicator segment click — a click IS a tap, so it toggles).
+  // voice capture (M2b; two-gesture since the June 2026 ruling, on Space
+  // since June 12 2026): mic-press is the Space KEYDOWN — it begins the
+  // tap-vs-hold machine (logic/michold.ts); toggle-mic is the
+  // instantaneous pointer form (indicator segment click — a click IS a
+  // tap, so it toggles).
   | { kind: "toggle-mic" }
   | { kind: "mic-press" }
   // the station's info seat (pointer-only): pin the expansion open
@@ -165,7 +174,6 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   contextMenuOpen: false,
   chromeHidden: false,
   autoAdvance: false,
-  lookAtFit: true,
   sort: DEFAULT_SORT,
   thumbStep: DEFAULT_THUMB_STEP,
   surround: "black",

@@ -1,15 +1,18 @@
 /**
  * Keyboard map dispatch — the interpreter (logic/keymap.ts) over the typed
- * action registry. Every P3.2 row is asserted; the mic row (M) stays
- * reserved and dispatches to NOTHING; the pencil band went live in P5.1
- * (its block below carries the amendment citation); single-letter keys are
- * suppressed while a text input is focused (UI §11).
+ * action registry. Every P3.2 row is asserted; the mic is live (P6.4,
+ * two-gesture June 2026) and sits on SPACE since June 12 2026 — "like a
+ * Zoom call"; M returned to the reserved pool. The pencil band went live
+ * in P5.1 (its block below carries the amendment citation); typing keys
+ * are suppressed while a text input is focused (UI §11).
  *
  * EXACTLY THREE existing expectations are amended in P4.2, each citing its
  * founder decision in place:
  *   (1) Tab → lights-out, `\` → toggle-rail              (D5)
  *   (2) Space in Grid → open-look (§0 symmetric open/close);
  *       selection-toggle moves to Ctrl+Space             (DECISIONS entry 1)
+ *       [re-amended June 12 2026: Space is the mic key; open-look is
+ *        Enter-only — see the grid block below]
  *   (3) rail arrow routing gates on railFocused, not railOpen
  *       (the rail is push-persistent)                    (DECISIONS entry 3)
  * The P3.2 "J does not exist" guard is RETIRED (not amended): D2 pulls the
@@ -77,12 +80,25 @@ describe("global rows", () => {
     });
   });
 
-  it("M begins the two-gesture mic press — but ONLY while the supervised ASR is ready", () => {
-    expect(dispatch(key("m"), base)).toBeNull();
+  it("Space begins the two-gesture mic press — but ONLY while the supervised ASR is ready", () => {
+    expect(dispatch(key(" "), base)).toBeNull();
     // Keydown dispatches mic-press (tap-vs-hold resolves at the raw
     // keyup — logic/michold.ts); the pointer toggle is the same def
     // resolved with arg "toggle" (Indicator.svelte).
-    expect(dispatch(key("m"), { ...base, asrReady: true })).toEqual({ kind: "mic-press" });
+    expect(dispatch(key(" "), { ...base, asrReady: true })).toEqual({ kind: "mic-press" });
+  });
+
+  it("M is back in the reserved pool (June 12 2026) — it dispatches NOTHING", () => {
+    expect(dispatch(key("m"), base)).toBeNull();
+    expect(dispatch(key("m"), { ...base, asrReady: true })).toBeNull();
+  });
+
+  it("Space keeps typing spaces — the §11 suppression covers it even with ASR ready", () => {
+    // The rule keys on "the chord can type" (match.ts), not on single
+    // LETTERS specifically, so " " is suppressed with no special case.
+    expect(
+      dispatch(key(" "), { ...base, asrReady: true, inputFocused: true }),
+    ).toBeNull();
   });
 });
 
@@ -178,12 +194,15 @@ describe("grid rows", () => {
     });
   });
 
-  // AMENDED (2) — featureset §0 symmetric open/close: Space opens Look
-  // (supersedes UI.md §3.4 Space-toggle); keyboard selection-toggle moves
-  // to Ctrl+Space (not a hot-path per-image verb, so the no-chorded-verbs
-  // guardrail is not violated — DECISIONS entry 1).
-  it("Space opens Look; Ctrl+Space toggles selection on the active item", () => {
-    expect(dispatch(key(" "), base)).toEqual({ kind: "open-look" });
+  // RE-AMENDED (2) — June 12 2026: Space is 100% the microphone key, so
+  // the P4.2 Space-opens-Look chord is withdrawn; open-look is Enter-only
+  // (plus double-click). Ctrl+Space selection-toggle SURVIVES: it is a
+  // modifier chord, a different chord shape from the mic's plain Space.
+  it("Space no longer opens Look (it is the mic key); Ctrl+Space still toggles selection", () => {
+    expect(dispatch(key(" "), base)).toBeNull(); // ASR not ready: inert, never open-look
+    expect(dispatch(key(" "), { ...base, asrReady: true })).toEqual({
+      kind: "mic-press",
+    });
     expect(dispatch(key(" ", { ctrlOrMeta: true }), base)).toEqual({
       kind: "toggle-select-focused",
     });
@@ -255,11 +274,14 @@ describe("look rows", () => {
   it("F toggles the filmstrip", () => {
     expect(dispatch(key("f"), look)).toEqual({ kind: "toggle-filmstrip" });
   });
-  it("Space closes Look at fit; while zoomed it is the pan key, not a verb", () => {
-    expect(dispatch(key(" "), { ...look, lookAtFit: true })).toEqual({
-      kind: "look-close",
+  it("Space is the mic key in Look too (June 12 2026) — close is Esc's job alone", () => {
+    // The look-close row is GONE: Space dispatches the mic when ASR is
+    // ready and nothing otherwise; Esc closes via the escape ladder.
+    expect(dispatch(key(" "), look)).toBeNull();
+    expect(dispatch(key(" "), { ...look, asrReady: true })).toEqual({
+      kind: "mic-press",
     });
-    expect(dispatch(key(" "), { ...look, lookAtFit: false })).toBeNull();
+    expect(dispatch(key("Escape"), look)).toEqual({ kind: "escape" });
   });
   it("the pencil band is LIVE (P5.1 keymap reconciliation: spec wins — UI §4.4/§11 put the toggle on B, hold-E erases, O overlays; the reserved P and V rows retired)", () => {
     // Amended by P5.1: this block previously asserted the P4.2 reserved

@@ -104,7 +104,7 @@ export function zoomAtPoint(
   return { scale: s1, tx: p.x - ix * s1, ty: p.y - iy * s1 };
 }
 
-/** Drag / Space-hold pan: container-px deltas, scale untouched. */
+/** Drag pan: container-px deltas, scale untouched. */
 export function panBy(t: ZoomTransform, dx: number, dy: number): ZoomTransform {
   return { scale: t.scale, tx: t.tx + dx, ty: t.ty + dy };
 }

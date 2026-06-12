@@ -210,22 +210,28 @@ export const GLOBAL_DEFS: ActionDef[] = [
     available: always,
   },
   {
-    // ONE mic verb, two input forms (June 2026 ruling: M is SOLELY the
-    // microphone key). The M KEYDOWN dispatches `mic-press`, which begins
-    // the tap-vs-hold machine (logic/michold.ts: tap toggles, hold is
-    // push-to-talk; release/blur are raw window facts in App.svelte — the
-    // hold-E precedent). The indicator segment click resolves with arg
-    // "toggle" for the instantaneous `toggle-mic` — a click IS a tap, so
-    // the pointer form keeps plain toggle semantics with zero new verbs.
+    // ONE mic verb, two input forms (June 12 2026 ruling: SPACE is 100%
+    // the microphone key — "like a Zoom call"; M went back to the
+    // reserved pool). The Space KEYDOWN dispatches `mic-press`, which
+    // begins the tap-vs-hold machine (logic/michold.ts: tap toggles, hold
+    // is push-to-talk; release/blur are raw window facts in App.svelte —
+    // the hold-E precedent). The station mic seat click resolves with
+    // arg "toggle" for the instantaneous `toggle-mic` — a click IS a tap,
+    // so the pointer form keeps plain toggle semantics with zero new
+    // verbs. Space's former verbs were displaced for this (founder-
+    // accepted): grid open-look is Enter-only, Look closes on Esc only,
+    // and the Look Space-pan pipeline is deleted. Typing safety needs no
+    // special case: match.ts's §11 rule suppresses any chord that CAN
+    // TYPE while an input is focused, and " " types a space.
     id: "mic-press",
     verb: "Microphone",
     label: "Microphone — tap toggles, hold to talk",
-    keys: [{ key: "m" }],
+    keys: [{ key: " " }],
     scope: "global",
     group: "capture",
     // Live since P6.4 (the cpal device + supervised sherpa client are
-    // wired). Gated on the §8.3 readiness flag: the row — and the M key —
-    // exists only while the supervised ASR child reports Ready.
+    // wired). Gated on the §8.3 readiness flag: the row — and the Space
+    // key — exists only while the supervised ASR child reports Ready.
     available: (ctx) => ctx.asrReady,
     toAction: (_ctx, arg) =>
       arg === "toggle" ? { kind: "toggle-mic" } : { kind: "mic-press" },

@@ -99,11 +99,9 @@ describe("pencil mode lifecycle (UI §4.4)", () => {
     ui.look.togglePencil();
     ui.look.onStrokeCommitted("01S", HASH_A, "S1");
     ui.look.overlayVisible = true;
-    ui.look.spaceHeld = true; // its tracker (LookStage) unmounts with Look
     ui.look.close();
     expect(ui.look.pencilMode).toBe(false);
     expect(ui.look.eraserHeld).toBe(false);
-    expect(ui.look.spaceHeld).toBe(false);
     expect(ui.look.overlayVisible).toBe(true); // per app-run, not per visit
     expect(ui.look.undoStack.length).toBe(1); // per process (§8.5)
   });
