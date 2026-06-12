@@ -105,6 +105,26 @@ impl Tool {
     }
 }
 
+// The normative stroke envelope (spec/EVENTS.md §3.3 / CAPTURE §8.2),
+// published so the shell's honest-error boundary check and this module's
+// canonical re-validation provably test the SAME range — they used to be
+// two unconnected copies of the spec values.
+
+/// Point-count cap per stroke: capture downsamples to stay under it.
+pub const STROKE_MAX_POINTS: usize = 8192;
+/// Coordinate floor: 0..=10000 is the display-oriented extent in
+/// ten-thousandths; the 2500 margin (25 percent of the extent) admits
+/// strokes that start or end off-image.
+pub const STROKE_COORD_MIN: i32 = -2500;
+/// Coordinate ceiling — see `STROKE_COORD_MIN` for the margin rationale.
+pub const STROKE_COORD_MAX: i32 = 12500;
+/// Pressure is per-mille; 1000 doubles as "device reports no pressure".
+pub const STROKE_PRESSURE_MAX: u16 = 1000;
+/// EXIF orientation values are the standard 1..=8 set.
+pub const ORIENTATION_MIN: u8 = 1;
+/// EXIF orientation ceiling — see `ORIENTATION_MIN`.
+pub const ORIENTATION_MAX: u8 = 8;
+
 /// One stroke sample: `[x, y, p, t]` (spec/EVENTS.md §3.3, X1).
 ///
 /// `x`/`y`: ten-thousandths of the display-oriented extent, −2500..=12500.
@@ -328,18 +348,20 @@ impl Event {
 }
 
 fn validate_stroke_payload(p: &StrokePayload) -> Result<(), ValidationError> {
-    if !(1..=8).contains(&p.orientation) {
+    if !(ORIENTATION_MIN..=ORIENTATION_MAX).contains(&p.orientation) {
         return fail("stroke orientation must be 1..=8");
     }
-    if p.points.is_empty() || p.points.len() > 8192 {
+    if p.points.is_empty() || p.points.len() > STROKE_MAX_POINTS {
         return fail("stroke requires 1..=8192 points");
     }
     let mut prev_t: Option<u32> = None;
     for (i, pt) in p.points.iter().enumerate() {
-        if !(-2500..=12500).contains(&pt.x) || !(-2500..=12500).contains(&pt.y) {
+        if !(STROKE_COORD_MIN..=STROKE_COORD_MAX).contains(&pt.x)
+            || !(STROKE_COORD_MIN..=STROKE_COORD_MAX).contains(&pt.y)
+        {
             return fail("stroke coordinates must be in -2500..=12500");
         }
-        if pt.p > 1000 {
+        if pt.p > STROKE_PRESSURE_MAX {
             return fail("stroke pressure must be 0..=1000");
         }
         match prev_t {
@@ -416,6 +438,18 @@ mod tests {
         let mut bad = ok;
         bad.orientation = 9;
         assert!(validate_stroke_payload(&bad).is_err());
+    }
+
+    /// Pins the published stroke envelope to spec/EVENTS.md §3.3 — these
+    /// values are normative; both the shell boundary check and core's
+    /// canonical re-validation reference the consts, so a drift here is a
+    /// spec change, not a refactor.
+    #[test]
+    fn stroke_envelope_consts_match_the_spec() {
+        assert_eq!(STROKE_MAX_POINTS, 8192);
+        assert_eq!((STROKE_COORD_MIN, STROKE_COORD_MAX), (-2500, 12500));
+        assert_eq!(STROKE_PRESSURE_MAX, 1000);
+        assert_eq!((ORIENTATION_MIN, ORIENTATION_MAX), (1, 8));
     }
 
     #[test]

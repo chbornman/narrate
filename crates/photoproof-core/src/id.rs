@@ -316,9 +316,15 @@ fn fresh_ulid_value(ms: u64) -> u128 {
     ((ms as u128) << 80) | (Ulid::new().0 & RAND80_MASK)
 }
 
+/// Device id length per spec/EVENTS.md §9: 32 lowercase hex characters.
+/// Published so the shell that MINTS ids (settings.rs truncates a blake3
+/// hex to this length) and this validator provably agree — a mismatch
+/// would silently re-mint a fresh id on every launch.
+pub const DEVICE_ID_LEN: usize = 32;
+
 /// `device_id` per spec/EVENTS.md §9: 32 lowercase hex, random per install.
 pub fn validate_device_id(s: &str) -> Result<(), IdError> {
-    if s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if s.len() == DEVICE_ID_LEN && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         Ok(())
     } else {
         Err(IdError::InvalidDeviceId)
