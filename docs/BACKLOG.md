@@ -49,6 +49,18 @@ managing = off-thesis).
   the corpus showed deferred resets clip the next word's start when
   pauses run short.
 
+- [ ] **Roots and subfolders: the long-practice design round** (founder,
+  June 2026): today the model is a FLAT list of watched roots, each with
+  a navigable subfolder tree in the rail (folder_tree); fine at 3 roots,
+  unexamined at 30. Questions for a deliberate round: nested or
+  overlapping roots (adding a folder inside an existing root - refuse,
+  merge, or alias?); whether the Folders tab should group roots (by
+  volume? by year-shaped naming?); deep-tree ergonomics (lazy loading,
+  filtering, jump-to-folder); root lifecycle (a root that moved volumes;
+  archiving a root without losing its journal); and how the
+  collections-first philosophy shapes how much folder UI we even want.
+  Pairs with the sidebar design pass already logged under founder
+  appetite. (Founder, June 2026.)
 - [ ] **Audiobook WER stress harness** (founder idea, June 2026): run a
   LONG known-transcript recording through the full pipeline - a LibriVox
   public-domain audiobook chapter (librivox.org) with its Project
