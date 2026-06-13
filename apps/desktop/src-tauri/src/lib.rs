@@ -234,6 +234,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::ingest_status,
         commands::app::settings_get,
         commands::app::set_stack_display,
+        commands::app::set_external_editor,
         commands::app::runtime_status,
         commands::app::runtime_consent,
         commands::app::runtime_accept_license,
@@ -256,6 +257,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::os::reveal_in_file_manager,
         commands::os::reveal_folder,
         commands::os::open_with_default,
+        commands::os::open_in_external_editor,
     ]
 }
 
@@ -297,6 +299,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::ingest_status,
         commands::app::settings_get,
         commands::app::set_stack_display,
+        commands::app::set_external_editor,
         commands::app::runtime_status,
         commands::app::runtime_consent,
         commands::app::runtime_accept_license,
@@ -319,6 +322,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::os::reveal_in_file_manager,
         commands::os::reveal_folder,
         commands::os::open_with_default,
+        commands::os::open_in_external_editor,
         debug::debug_tail_events,
         debug::debug_capture,
         debug::debug_ingest,

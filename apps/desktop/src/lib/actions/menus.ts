@@ -66,6 +66,7 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "reveal-in-file-manager",
     "copy-file-path",
     "open-with-default",
+    "open-in-external-editor",
   ],
   gutter: [
     "select-all",
@@ -119,6 +120,10 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "flip-stack-member",
     "—",
     "set-surround",
+    "—",
+    // Configurable external editor (BACKLOG, D4 revisit): the Look-side
+    // pointer seat — hand the original off without leaving review.
+    "open-in-external-editor",
     "—",
     "go-grid",
     "toggle-lights-out",

@@ -165,4 +165,19 @@ export const LOOK_DEFS: ActionDef[] = [
     enabled: lookKeysFree,
     checked: (ctx) => ctx.overlayVisible,
   },
+  // Configurable external editor (BACKLOG "Configurable external editor, D4
+  // revisit"): the Look-side def. SEPARATE from grid's because id is unique
+  // per (id, scope) — same Action kind, scope "look" (the flip-stack-member
+  // precedent). NO key; pointer-seated on the look backdrop. Empty pref =
+  // OS default handler.
+  {
+    id: "open-in-external-editor",
+    verb: "Open in external editor",
+    keys: [],
+    scope: "look",
+    group: "system",
+    seats: ["look-backdrop"],
+    available: always,
+    enabled: (ctx) => ctx.activeHash !== null,
+  },
 ];

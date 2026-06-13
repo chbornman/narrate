@@ -169,6 +169,11 @@ export const settingsGet = () => invoke<AppSettings>("settings_get");
  * to every window (the main grid re-pairs live). */
 export const setStackDisplay = (display: "jpeg" | "raw") =>
   invoke<AppSettings>("set_stack_display", { display });
+/** Settings → "Open in external editor" target (BACKLOG "Configurable
+ * external editor, D4 revisit"): persists and emits `settings-changed`.
+ * Empty/whitespace clears the pref back to the OS default handler. */
+export const setExternalEditor = (editor: string) =>
+  invoke<AppSettings>("set_external_editor", { editor });
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 /** §10.2–10.3: the ONE consent decision — Download now / Later / Never.
  * No download starts without it; Never is remembered; skipping changes
@@ -227,6 +232,11 @@ export const revealFolder = (rootId: string, folder: string) =>
   invoke<void>("reveal_folder", { rootId, folder });
 export const openWithDefault = (hash: string) =>
   invoke<void>("open_with_default", { hash });
+/** "Open in external editor" (BACKLOG "Configurable external editor, D4
+ * revisit"): hand the original off to the configured editor, or the OS
+ * default handler when the pref is empty. */
+export const openInExternalEditor = (hash: string) =>
+  invoke<void>("open_in_external_editor", { hash });
 
 /** Rail-folder menu: rescan a watched root on demand. */
 export const rescanRoot = (rootId: string) =>

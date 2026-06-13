@@ -26,6 +26,14 @@ pub enum StackDisplay {
 pub struct AppSettings {
     pub last_export_ts: Option<String>,
     pub stack_display: StackDisplay,
+    /// Configurable external editor (BACKLOG "Configurable external editor,
+    /// D4 revisit"): the app name (macOS) or executable (Win/Linux) the
+    /// "Open in external editor" verb hands the ORIGINAL off to. None = use
+    /// the OS default handler, so the single menu seat always does
+    /// something sensible. `#[serde(default)]` (the struct attr above) lets
+    /// pre-existing settings.json files — written before this field — load
+    /// it as None instead of failing to parse.
+    pub external_editor: Option<String>,
 }
 
 pub fn settings_path(app_data: &Path) -> PathBuf {
@@ -82,11 +90,24 @@ mod tests {
         let s = AppSettings {
             last_export_ts: Some("2026-06-09T12:00:00Z".into()),
             stack_display: StackDisplay::Raw,
+            external_editor: Some("Affinity Photo".into()),
         };
         save(dir.path(), &s).unwrap();
         let loaded = load(dir.path());
         assert_eq!(loaded.last_export_ts, s.last_export_ts);
         assert_eq!(loaded.stack_display, StackDisplay::Raw);
+        assert_eq!(loaded.external_editor.as_deref(), Some("Affinity Photo"));
+    }
+
+    #[test]
+    fn external_editor_defaults_to_none_for_pre_existing_files() {
+        // A settings.json written before this field existed has no
+        // externalEditor key; #[serde(default)] must load it as None (the
+        // OS-default fallback) rather than fail the whole parse.
+        let legacy = r#"{ "stackDisplay": "raw" }"#;
+        let s: AppSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.external_editor, None);
+        assert_eq!(s.stack_display, StackDisplay::Raw);
     }
 
     #[test]
@@ -98,6 +119,7 @@ mod tests {
         let json = serde_json::to_string(&AppSettings {
             last_export_ts: None,
             stack_display: StackDisplay::Raw,
+            external_editor: None,
         })
         .unwrap();
         assert!(json.contains("\"stackDisplay\":\"raw\""), "got: {json}");

@@ -1673,6 +1673,21 @@ export class Ui {
           }
         break;
       }
+      case "open-in-external-editor": {
+        // Hand the original off to the configured editor (or the OS default
+        // when the pref is empty). Silent catch like the sibling OS verbs
+        // reveal/open-with-default: toast.svelte.ts is a closed 3-kind enum
+        // (spec §7.5 guardrail), so an offline-volume / unreachable-backend
+        // failure is a quiet no-op, never a toast.
+        const hash = this.actionContext().activeHash;
+        if (hash !== null)
+          try {
+            await ipc.openInExternalEditor(hash);
+          } catch {
+            /* offline volume / unreachable backend: quiet no-op */
+          }
+        break;
+      }
       // ---- search bar (M3 search-as-scope) ------------------------------------
       // search-nav / search-open-result are RETIRED: results are grid cells,
       // so grid focus-move + Enter (open-look) drive them — there is no
