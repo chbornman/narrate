@@ -1,0 +1,366 @@
+# LANDED — shipped from the backlog
+
+The archive half of BACKLOG.md: every `[x]` item moves here verbatim once it
+ships, commit hashes, root causes, and founder context intact — this is the
+de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
+this file only grows. Organized by era, newest first; older entries keep
+their original wording.
+
+## June 12 2026 — the evening waves (two parallel-agent builds + inline fixes)
+
+- [x] **B summons the overlay** — landed `c13f09b`: the key was dead
+  twice over (the `pencil-pen` def gated on `overlayVisible`, and
+  `togglePencil()` refused while hidden); now B with hidden paper shows
+  the overlay AND arms the pencil in one keystroke (show-and-arm),
+  visible-overlay toggling byte-for-byte unchanged. (Founder, June
+  2026.)
+- [x] **The What's-Happening Station (indicator 2.0)** — landed
+  `de9f126` (merge-fixed: the mic seat resolves `mic-press` arg
+  "toggle", the def the M→Space move owns): pure StationModel
+  (logic/station.ts) over existing state, collapsed icon row with one
+  breathe driver, hover-expand via the indicator Popover (read-only
+  body; icons are the only click targets), info seat pins via new
+  `toggle-station-detail` row, pop-chips generalize the note pop to
+  mic arm/disarm/"Captured". Founder manual pass pending: pulse/hover
+  feel, chip stacking. Original riff: (founder, June
+  12, 2026 — "Do you see what I mean?" riff, captured verbatim in
+  spirit): evolve the bottom-right capture indicator into the app-wide
+  LIVING STATUS ORGAN. Same corner, bigger presence. Two states:
+  COLLAPSED = a quiet icon row (mic, magnifying-glass search,
+  background-tasks/info dot, the note pencil), pulsing gently when
+  something is happening; HOVER = the capsule expands large with real
+  context (ingest/digest progress with counts, background task list,
+  current scope, streaming utterance), shrinking back to icons on
+  leave — counts move INTO the hover, off the always-on chrome.
+  Events POP from the station: note creation already does (founder:
+  "which is cool" — that's the signature move, keep it), mic
+  arm/disarm and push-to-talk evidence join it, and searches could
+  pop from there too (pairs with the search-as-scope direction).
+  Each icon is a clickable seat with the expected verb: mic =
+  toggle (the M tap twin), magnifier = focus search, info = expand
+  the tasks view. Existing rulings carry forward: lights-out
+  exemption (DECISIONS U5), scope-segment → inspector bridge, the
+  note-input summon. This is likely WHERE the digest-visibility
+  surface below lives — design the two together. (Founder, June
+  2026.)
+- [x] **Voice notes save a leading space** — landed `6ee8554`:
+  `on_final` mints `seg.text.trim()` (edges only; interior spacing
+  verbatim — §6.5 protects words from paraphrase, not BPE tokenizer
+  plumbing); acceptance test pins " Slow  down " → "Slow  down".
+  NOT taken: normalizing the handful of existing test-note rows
+  (append-only journal; they're tonight's throwaway dictation).
+  Original report (founder, June 12, 2026):
+  every voice remark in the journal starts with a literal " " —
+  CONFIRMED IN THE STORE, not a render artifact (sqlite:
+  `[ Slow down]`, `[ We've got time left to be lazy]` …; typed notes
+  unaffected). Root cause shape: BPE-style ASR tokens carry the
+  word-boundary space, so an utterance's first token decodes as
+  " Slow", and the engine mints the final without trimming. Fix at the
+  final-minting boundary in the capture engine (trim leading/trailing
+  whitespace before the journal event exists — whitespace is not "the
+  user's words", K14 is safe); decide whether to also normalize the
+  nine-and-counting existing rows (journal events are append-only —
+  if normalization is wrong, a display-time trim for legacy rows is
+  the honest fallback). Check the sidecar snapshots carry the same
+  bytes. (Founder, June 12, 2026.)
+- [x] **Desktop platform conventions pass** — landed `a0cac41` (audit
+  found NO native menu existed): macOS menu bar App/File/Edit/View/
+  Window with standard roles (Edit roles = ⌘C/⌘V in WKWebView fields;
+  predefined Quit still exits through the sidecar-flush path), custom
+  rows routed through the one action registry via a `menu-action`
+  event (the menu is a fourth rendering of the action table); UI-scale
+  zoom ⌘=/⌘−/⌘0 on a 0.8–1.5 ladder via webview setZoom, persisted
+  (`pp.uiZoom`), distinct from Look's plain-key image zoom; keymap now
+  forfeits ctrl+meta chords to the menu layer (⌃⌘F fullscreen no
+  longer starved by ⌘F search). Founder manual smoke test pending
+  (menus/zoom/Edit-paste/window verbs). Original ask:
+  (Founder, June 12, 2026):
+  all the things long-lived desktop apps just DO, audited and wired for
+  macOS first: (a) UI-scale zoom on Cmd+= / Cmd+− / Cmd+0-to-reset —
+  the webview zoom convention every Tauri/Electron app inherits (note:
+  distinct from the existing image zoom in Look; UI zoom scales the
+  chrome) — persist the chosen scale; (b) the window-management row:
+  Cmd+W close window, Cmd+M minimize, Cmd+H hide (these come free with
+  a proper native menu bar — audit ours for the standard App/File/Edit/
+  View/Window menus and make sure every in-app action with a key also
+  appears in a menu, which is also what makes them discoverable and
+  remappable in System Settings); (c) Cmd+, opens settings (verify the
+  existing open-settings binding uses it); (d) Edit-menu basics working
+  in every text field (cut/copy/paste/select-all/undo); (e) sweep for
+  the rest: double-click titlebar to zoom, full-screen Cmd+Ctrl+F (a
+  toggle-fullscreen action exists — check the binding), text-field
+  focus outlines. One pass, one checklist, so the app feels NATIVE,
+  not webby. (Founder, June 2026.)
+- [x] **Click feedback pass: every action acknowledges the click** —
+  landed `d8a8658`: one global `button:active` rule (filter+transform,
+  chosen because component-scoped background overrides would swallow a
+  background-based press) gives every real button a pressed state; new
+  `AckFlash`/`AckButton` primitives (copyflash idiom) give
+  fire-and-forget verbs a truthful momentary done-label — Restart
+  runtime ("Restarted") and Re-detect hardware ("Re-detected") adopted.
+  Non-button clickables audited and deliberately left alone (selection
+  surfaces already self-signal). (Founder, fresh-instance dogfood,
+  June 12, 2026.)
+- [x] **M key = push-to-talk on hold, mic toggle on click** — landed
+  `2fbe2c9`: pure hold machine (`logic/michold.ts`, time-as-parameter),
+  press arms immediately from disarmed (both gestures want sound from
+  the keydown), release <250 ms = tap (arm stands), ≥250 ms = PTT
+  (explicit disarm ships through the normal drain); from armed, tap
+  disarms and hold is deliberately inert (an absent-minded hold never
+  tears down a deliberately armed mic). Intents are explicit
+  arm/disarm via a new idempotent `set_mic` command — never blind
+  toggle. Auto-repeat absorbed; window blur resolves a gesture-opened
+  mic, leaves a pre-armed one alone. (Founder, June 12, 2026.)
+  SUPERSEDED same night (founder: "like a Zoom call"): the mic moves
+  to SPACE — tap toggles, hold is push-to-talk; M is freed back to
+  the reserved pool; Space's old verbs displaced (open-Look keeps
+  Enter, Look-close keeps Esc, zoomed hold-Space pan dies — drag-pan
+  remains). LANDED `e486023`; the hold machine itself was unchanged,
+  and §11 input suppression already covered Space (the rule keys on
+  "the chord can type", not "single letter").
+- [x] **Model download progress must be model-cumulative** — landed
+  `ab1369a`: core's download loop carries a `base` accumulator so every
+  DownloadProgress event is model-cumulative (the per-file completion
+  event is what advances the row through DFN5B's ~290 sub-coalescing
+  shards); enqueue seeds from `downloaded_bytes(model)` (statted before
+  the host lock) so a resume opens at its true bytes; the dead `last`
+  fold deleted. Original diagnosis (founder, fresh-instance dogfood,
+  June 12, 2026 — caused two separate "it didn't resume / stuck at
+  zero" impressions in one evening while downloads were in fact
+  healthy; founder's actual bar: "look and feel modern"): two
+  compounding display defects on the settings model rows. (a) `DownloadProgress` bus events carry the CURRENT FILE's
+  bytes (core download.rs publish sites), but the row divides by the
+  whole model's total (runtime.rs status ~336) — DFN5B is 400 files,
+  ~290 of them tiny shards, so the displayed number sits at ~0% while
+  gigabytes land verified on disk. (b) clicking Download seeds
+  `state.downloads` with `(0, total_bytes)` (enqueue_downloads ~525), so
+  a resume of a 1 GB part file FIRST displays "0 bytes" — reads as
+  progress thrown away. Fix shape: publish cumulative model bytes from
+  core's per-model loop (it knows the model), or seed/fold in the
+  manager's `downloaded_bytes(model)` baseline host-side; the discarded
+  `last` fold in run_download (~597–623, `let _ = last;`) is a vestige
+  of the same seam. One number, one meaning: bytes of THIS MODEL on
+  disk over its manifest total.
+- [x] **Auto-retry interrupted model downloads** — landed `ab1369a`:
+  `run_download` retries the `Interrupted` class ONLY, 4 more attempts
+  at 2/5/15/30 s backoff (sliced sleeps against the stop latch so quit
+  mid-backoff returns within a beat), row stays "downloading" with a
+  `retry_hint` ("connection interrupted — retrying (attempt 2 of 5)")
+  until exhaustion; checksum/license/HTTP errors still fail fast.
+  NOT taken (still open if wanted): resume-on-launch for models with a
+  part file + recorded acceptance. (Founder, fresh-instance dogfood,
+  June 12, 2026 — interruptions hit 3× in one evening.) — from the grid or from Look, click-
+  drag an image out of the window and drop it into Finder/another app as
+  the ORIGINAL file (a native OS file drag carrying absolute paths — the
+  D4 reveal/open-with class of OS integration, not an in-app file verb;
+  D3 stands: the library never moves or deletes its own files, the drop
+  target copies). Implementation pointers: Tauri needs a native start-
+  drag (HTML5 dragstart cannot carry real files out of a webview) —
+  tauri-plugin-drag (CrabNebula) or NSDraggingSession/NSFilePromise via
+  the window handle on macOS. Sub-questions to decide at build time:
+  a multi-select drag carries the whole selection; does a collapsed
+  RAW+JPEG pair drag both members or the display member (lean: both —
+  the pair is one image to the user, and a half-exported pair is the
+  kind of silent data loss the welcome card warns about); offline-volume
+  images can't drag (no readable path) — quiet refusal, no toast spam.
+  (Founder, dogfood round 3, June 2026.)
+- [x] **Layout architecture design round: canvas-centered, everything
+  resizable** — landed `c12a90c`: one `Panel` primitive (drag-resize
+  with pointer capture, double-click-resets, min/max clamps, sizes
+  persisted globally under pp.panel.*), canvas-centered shell (flex
+  [rail][center 1fr][inspector], center = [canvas][filmstrip] so the
+  filmstrip is canvas-width by construction), Tab snapshot-restores
+  exactly what was open (DECISIONS exemptions preserved), F total in
+  both surfaces (the "works sometimes" gate was scope:"look"), rail
+  resize root cause was an $effect that re-read size every drag frame
+  and snapped back. Founder manual pass pending: drag feel, filmstrip
+  width tracking, traffic-light lockstep. FIRST DOGFOOD FIX `8e24911`:
+  the launch filmstrip rendered a fixed 17-neighbor window ("only loads
+  17 images… doesn't fill the width") — now a virtual horizontal list
+  over the whole order, selected photo centered with the founder's
+  override rule (manual scroll holds until the next selection snaps
+  back). (Supersedes the narrower "sidebar design pass" from
+  dogfood round 2; founder, fresh-instance dogfood, June 12, 2026):
+  rethink the BASE LAYERS of the app layout. The principle: the canvas
+  (grid/Look) is the center section ALWAYS, regardless of which
+  top/bottom/left/right bars are open; every bar is a peer panel with
+  the same contract. Concretely from tonight's annoyances: (a) the left
+  rail can't be click-drag resized — all four edges' panels should be
+  drag-resizable; (b) the left rail and right inspector have visibly
+  different UX (affordances, headers, toggle behavior) — one panel
+  system, two instances; (c) the filmstrip doesn't extend the full app
+  width (and shouldn't depend on what else is open — see the canvas
+  principle); (d) F sometimes opens the filmstrip and sometimes doesn't
+  — find the contextual gate (or focus dependence) and either make it
+  total or make the WHY visible; (e) interaction contract: each panel
+  gets its individual toggle, AND the Tab global hide-everything stays
+  (it works today and feels right). Layout state (sizes, open/closed)
+  persists. This is an architecture round first (the panel/dock layer),
+  then reconcile the existing rail/inspector/filmstrip into it.
+  (Founder, June 2026.) FOUNDER CALLS (June 12, 2026 — build in
+  flight): filmstrip spans the CANVAS width (bottom of the center
+  column, dynamic as side panels toggle); panel sizes persist
+  GLOBALLY (one size per panel, not per-surface); Tab lights-out
+  restores WHAT WAS OPEN (snapshot at hide); F toggles the filmstrip
+  in BOTH grid and Look.
+
+## June 12 2026 — the dogfood waves (rounds 1–3: wave2 polish, batch-1 clusters)
+
+- [x] **Mid-ingest scroll stability** — landed: the scroll anchor pins
+  the IMAGE (hash) across re-lists — when a re-sort moves it, the
+  viewport follows it to its new offset (B64 applied to scroll); and
+  scroll-focus-into-view keys on `focusNav` (bumped only by
+  setSelection, the user-driven path), so a refresh's silent focus
+  remap never yanks the viewport. (Founder, dogfood round 3, June
+  2026.)
+
+- [x] **Pair targets vs "+N others"** — landed `wave2/polish` (B61:
+  suppress, the stack badge already says it): `siblingTargetsLabel`
+  gains the inspected image's pair-mate and never counts it — the mark
+  shows only for genuinely DIFFERENT images; `GridSlice.pairMateOf`
+  resolves the mate (collapsed alt or expanded partner cell), JournalTab
+  threads it down. (Founder, dogfood round 3, June 2026.)
+- [x] **"Rebuild previews…" on the rail folder menu** — landed `8755af1`:
+  `Library::rebuild_previews(root_id)` re-pends the preview pass for every
+  image with an active path under the root, fresh budget, backfill
+  priority (the generator_version machinery's manual trigger; regeneration
+  overwrites idempotently, §9.8); rail-folder seat
+  row right after Rescan. Becomes more load-bearing with M1.5
+  preview-policy knobs. (Founder, dogfood round 3, June 2026.)
+- [x] **First-run welcome card: how your data is stored** — landed
+  `8755af1`: WelcomeCard modal on launch — sidecars
+  (`.photoproof.json`, SIDECARS §2.1) live beside images, ARE the data,
+  and are filename-specific (outside-the-app renames lean on the §7
+  relink heuristics); the index is rebuildable. "Don't show again"
+  toggle (default ON) via prefs.ts; escape layer 1; redaction-modal
+  frame/focus pattern. (Founder, dogfood round 3, June 2026.)
+- [x] **Header shows background jobs** — landed: `IngestStatus` now
+  carries a per-pass-kind `passes` breakdown (pending+running, versions
+  summed — pure surfacing of `pass_counters` over the existing
+  `ingest-progress` channel), and the titlebar shows one dim word
+  ("digesting") while ANY kind has queued work; count + kind live in
+  the hover title ("Still digesting — hashing 12 · building previews
+  480"), never a progress bar. Ingest, preview rebuilds, doctor
+  re-pends, and the M3 embedding/caption backfills all flow through
+  `ingest_passes`, so the register covers every background job by
+  construction (logic/jobs.ts maps queue names to reviewer words;
+  unknown passes surface verbatim). The §7.5 indicator hairline keeps
+  the fraction. (Founder, June 2026.)
+- [x] **Copy actions confirm themselves** — landed: ONE register, the
+  icon-to-check flash (toasts stay spec-capped at three triggers,
+  UI §7.5/R5, so the confirmation lives AT the affordance).
+  `primitives/copyflash.svelte.ts` is the shared seam: every copy
+  affordance writes through `copyToClipboard(key, text)` (the one
+  webview-fallback clipboard path now) and renders a brief Lucide check
+  while `copyFlash.key` matches — truthfully, only after the write
+  landed. Applied everywhere copy exists today: the Metadata tab's
+  hash/path glyphs flash to a check; the thumb menu's "Copy file path"
+  row (def-level `copyConfirm` flag → row `flashKey`) shows the check
+  and holds the menu open ~900 ms so the confirmation has a seat.
+  Future copy verbs join by setting `copyConfirm` on their def.
+  (Founder, dogfood round 3, June 2026.)
+
+- [x] **Library doctor / self-check pass** — v1 landed `8755af1`:
+  `Library::doctor()` re-pends done preview passes whose
+  artifacts are missing on disk, COUNTS orphaned stale path rows (no
+  deletion — conservative by charter), sweeps stranded preview temp
+  files; runs on the maintenance tick and as the debug panel's [dev]
+  doctor; `info!`s the report when nonzero. v2 candidates remain:
+  half-ingested RAW+JPEG pairs (one member's passes dead) → re-enqueue
+  the laggard; marker/identity drift → report; stale-orphan sweep. Born
+  from dogfood round 3's mangled-folder session: the offline-defer fix
+  (`l13_08`) removes the biggest poison source, but mangled states will
+  keep happening and the library should HEAL, not just avoid. (Founder,
+  June 2026.)
+- [x] **Grid: recycled `<img>` can flash the previous image's pixels** —
+  landed `wave2/polish`: both loaded-marking paths in Thumb (the
+  complete-check effect and onload) now prove via `currentSrc` that the
+  element holds THIS hash's bitmap (`srcHash` in ipc/urls.ts) — a
+  recycled img stays at the opacity-0 placeholder until the new hash's
+  first load; stale complete/naturalWidth and in-flight load events for
+  the previous occupant can no longer re-mark it. (P5.1-polish review
+  residual, June 2026.)
+- [x] **Zoom centering + pan clamp** — landed `652c839` (clampOffsets in
+  carryOver; per-axis centering + edge clamp). (Founder, dogfood round 1.)
+- [x] **Search entry as overlay, results as canvas** — landed
+  (wave2/search): `/` floats the input over a dimmed, pointer-inert
+  scrim (visual only — Esc remains the one return path, Sheet's scrim
+  contract stands); results expand to the full canvas as they arrive,
+  zero-results stays a quiet line in the panel; the contact-sheet
+  contracts (selection/write-scope/Look, return point, Esc layers) are
+  unchanged. (Founder, dogfood round 2.)
+- [x] **Adopt Lucide icons** (`@lucide/svelte`) — landed (wave2/lucide):
+  ad-hoc glyphs (🔍 from the spec mockup, sort ▾, ⏏, ×, chevrons, titlebar
+  buttons) replaced with the Lucide stroke set, sized per-site (12–16 px)
+  and toned via the existing tokens (icons inherit currentColor). Lucide
+  ships no eject, so the offline-volume ⏏ became Unplug. UI.md §5 mockup
+  emoji is illustrative, not normative. (Founder, dogfood round 2.)
+- [x] **Roots changes propagate live across windows** — landed `6dab0f6`
+  (batch-1 rail cluster): `add_root`/`remove_root` emit `roots-changed`
+  (the `settings-changed` pattern); App listens → `refreshRoots()`.
+  (Founder, dogfood round 2.)
+- [x] **Add watched folder from the rail, one button click** — landed `6dab0f6`: "Add folder…" footer button + rail-folder context-menu `add-root` row, both opening the picker directly. (Founder, dogfood rounds 1+2.)
+
+- [x] **Compose entries from the journal panel** — landed `506d81a` (batch-1 journal cluster): inline composer in the Journal tab (quiet textarea + rating binding; its focus joins the Esc text-edit layers). (Founder, dogfood round 2.)
+- [x] **Journal entries show sibling targets** — landed `506d81a`: "+N
+  others" quiet mark (`siblingTargetsLabel`), targets surfaced on the
+  journal DTO. (Founder, dogfood round 1.)
+- [x] **Select images from note** — landed `506d81a`: `select-journal-targets`
+  row affordance + journal-row seat (jump home + select the entry's full
+  target set). Availability: every entry kind except redacted stubs (B59).
+- [x] **Backend `journal-changed` event** — landed `506d81a`: carries
+  affected hashes; journal panel, grid badges, and the Look overlay
+  refresh off it (the indicator pulse is pure feedback again).
+
+- [x] **RAW 1:1 via the embedded full-res JPEG** — landed `1cbf7ad`
+  (batch-1 raw cluster): `/embedded` route serves the RAW's embedded JPEG
+  at native size with the preview's exact §9.3.1 orientation policy
+  (strokes stay put at deep zoom); ladder is /original → /embedded →
+  preview stands. True decoded 1:1 stays M1.5.
+- [x] **Esc keeps the inspector on Look→Grid** — landed `506d81a`: the
+  inspector layer peels AFTER Look→Grid (returning to the grid keeps the
+  panel on the still-active image). Multi-select display resolved by B60:
+  anchor image + quiet "N selected" (`64b220e`).
+- [x] **Filmstrip pushes, doesn't overlay** — landed `ca5c9a7` (batch-1
+  look cluster): the filmstrip moves the Look viewport up rather than
+  covering it (deliberately opposite the rail's I1 overlay convention —
+  Look's canvas is the one surface where covered pixels matter).
+  (Founder, June 2026.)
+
+## June 12 2026 — lighting up M3
+
+- [x] **Embedder bake-off (MacBook half)** — DONE June 12 2026 (B73,
+  docs/SPIKE-P7-EMBED.md): text = EmbeddingGemma-300m q8 (chosen),
+  Qwen3-Embedding-0.6B int8 alternative; image = DFN5B confirmed
+  (founder call + feasibility numbers + eye-verified zero-shot). All
+  SHAs pinned in the report; integration traps recorded.
+
+- [x] **Rail: Folders vs Collections tabs — first slice** — landed
+  `98e3cb5`/`d92bd29` (Phase 7): peer tabs in the rail, collection list
+  with create + click-to-view (grid shows current members), add/remove
+  membership on the image context menu, welcome copy reframed
+  (collections are the point; folders are mechanical). REMAINING for the
+  design round: the full encouragement UX and autosuggest (below).
+  (Founder, June 2026.)
+
+## M2b voice — the P6.1 → P6.2 wiring obligations
+
+All eight closed by P6.2 runtime (`fd0adc8`); recorded at P6.1 review, retired
+as a set:
+
+- [x] P6.2: reconcile the two ASR-readiness ctx flags — asrReady (hardcoded false) vs the live asrUnavailable — when supervision lands. (P6.1 review.)
+- [x] P6.2: session rotation must re-point an attached CaptureEngine at the newly opened session (shell attaches NoCapture today; currently an undocumented caller burden). (P6.1 review.)
+- [x] P6.2: move AudioFeed out of photoproof-connectors' mock namespace — the production engine imports its audio inlet from mock:: (plumbing, not mock behavior). (P6.1 review.)
+- [x] P6.2: the shell's real bounded 5 s drain wait at quit (the engine enforces the deadline on its clock; the pump loop owns the blocking wait). (P6.1, B52.)
+- [x] P6.2: drain deadline only bites on Poll::Pending — ready finals past the cap still mint and a never-pending stream defeats it; harden against the real stream. (P6.1 review.)
+- [x] P6.2: cfg-gate partial text out of the release debug-note ring (§6.5 makes partials dev-build debug territory; today the bounded in-memory ring holds text in all build configs). (P6.1 review.)
+- [x] P6.2: pin §6.4's "ArmedSpeaking holds while any utterance is in flight" with a test — a guard-removal mutant currently survives. (P6.1 review.)
+- [x] P6.2: close processors run synchronously inline on the close/quit path — fine while the registry is empty, but §2.5 says step 3 never blocks; move onto the pump before real processors register. (P6.1 review.)
+
+## M2a pencil — P5.1 review polish (P5.1 shipped `1e06f1e`)
+
+- [x] Pencil: jitter-dedupe baseline recomputed on transform change (wheel-zoom mid-stroke) — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: button-0 gate evaluated before eraser intent — middle/right-click with E held no longer erases or pre-empts the look-backdrop menu — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: PencilOverlay consumes the shared ui.look spaceHeld slice (eraserHeld precedent); the one tracker lives in LookStage behind stageOwnsRawKeys (+ the Space-at-fit close fix, `ffbd515`) — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: "Undo stroke" row on the look-backdrop seat (enabled: pencilUndoable) replaces the keyboard-only exemption — landed `ca5c9a7`. (P5.1 review.)
+- [x] Pencil: terminal pen-up sample (dedupe-exempt) to make ts − t_last exact for held dots — founder-resolved, landed with P6.1 (B41). 

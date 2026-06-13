@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photoproof - Docs</title>
+<style>
+  :root {
+    --bg: #141414;
+    --panel: #1d1d1d;
+    --panel2: #242424;
+    --line: #3a3a3a;
+    --text: #e8e6e1;
+    --dim: #9a968e;
+    --faint: #6b675f;
+    --red: #c0392b;        /* the grease pencil */
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.55; font-size: 15px;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 4px; }
+  h1 .pencil { color: var(--red); }
+  .subtitle { color: var(--dim); margin: 0 0 6px; }
+  .stamp { color: var(--faint); font-family: var(--mono); font-size: 12px; margin-bottom: 40px; }
+  h2 {
+    font-size: 19px; font-weight: 600; margin: 56px 0 6px;
+    padding-top: 18px; border-top: 1px solid var(--line);
+  }
+  .lede { color: var(--dim); margin: 0 0 22px; max-width: 70ch; }
+  a { color: inherit; text-decoration: none; }
+
+  /* the two rendered pages get cards; everything else is a row */
+  .pages { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin: 26px 0 0; }
+  .page {
+    display: block; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .page:hover { border-color: var(--red); }
+  .page b { display: block; margin-bottom: 4px; font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
+  .page span { color: var(--dim); font-size: 13.5px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13.5px; }
+  td { padding: 8px 12px 8px 0; border-bottom: 1px solid #262626; vertical-align: top; }
+  td.name { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; width: 1%; padding-right: 24px; }
+  td.name a { border-bottom: 1px solid var(--line); }
+  td.name a:hover { color: #fff; border-bottom-color: var(--red); }
+  td.what { color: var(--dim); }
+  footer { color: var(--faint); font-size: 12.5px; margin-top: 64px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Photoproof <span class="pencil">/</span> docs</h1>
+<p class="subtitle">One line per file so nothing here reads as randomly named. Where any doc disagrees with a spec, the spec wins.</p>
+<p class="stamp">generated June 12, 2026 - main @ 6ee8554 - the catalog mirrors docs/README.md</p>
+
+<div class="pages">
+  <a class="page" href="architecture.html"><b>architecture.html</b>
+    <span>The one-page visual architecture: processes, models, seams, truth stores.</span></a>
+  <a class="page" href="features.html"><b>features.html</b>
+    <span>The cascading tree of everything built.</span></a>
+</div>
+
+<h2>Live</h2>
+<p class="lede">Maintained continuously; updated at every packet close.</p>
+<table>
+  <tr><td class="name"><a href="STATUS.md">STATUS.md</a></td>
+      <td class="what">The capability ledger — every spec obligation, its build state (five states), and the evidence.</td></tr>
+  <tr><td class="name"><a href="BUILD-LOOP.md">BUILD-LOOP.md</a></td>
+      <td class="what">The packet-grain build ledger: how packets run, gates, the status table, retired-docs list.</td></tr>
+  <tr><td class="name"><a href="BACKLOG.md">BACKLOG.md</a></td>
+      <td class="what">Decided-but-not-scheduled work; items graduate into packets. Open items only.</td></tr>
+  <tr><td class="name"><a href="LANDED.md">LANDED.md</a></td>
+      <td class="what">The shipped-from-backlog archive — every <code>[x]</code> item, moved verbatim with its hashes and context; the de facto changelog.</td></tr>
+  <tr><td class="name"><a href="FOUNDER-CHECKLIST.md">FOUNDER-CHECKLIST.md</a></td>
+      <td class="what">Decisions awaiting Caleb + founder-machine verification pending.</td></tr>
+</table>
+
+<h2>Reference</h2>
+<p class="lede">Stable; updated when their subject changes.</p>
+<table>
+  <tr><td class="name"><a href="SCOPE.md">SCOPE.md</a></td>
+      <td class="what">The vision and architecture overview — the pitch, the problem, the shape of the product.</td></tr>
+  <tr><td class="name"><a href="FEATURES.md">FEATURES.md</a></td>
+      <td class="what">The milestone-tagged feature inventory the specs elaborate.</td></tr>
+  <tr><td class="name"><a href="UI-FEATURESET.md">UI-FEATURESET.md</a></td>
+      <td class="what">Normative UI addendum (desktop-conventions agreement); where UI.md is silent, this wins.</td></tr>
+  <tr><td class="name"><a href="UI-ARCHITECTURE.md">UI-ARCHITECTURE.md</a></td>
+      <td class="what">Frontend architecture contracts (action registry, slices, guardrails) — frozen by FOUNDATIONS.</td></tr>
+  <tr><td class="name"><a href="DOGFOOD-M1.md">DOGFOOD-M1.md</a> / <a href="DOGFOOD-M2.md">DOGFOOD-M2.md</a></td>
+      <td class="what">Founder-machine verification scripts: what to run, what to look at.</td></tr>
+  <tr><td class="name"><a href="MODELS.md">MODELS.md</a></td>
+      <td class="what">The connector-options matrix: per seam, the current pick, alternates evaluated, candidates, watch triggers.</td></tr>
+  <tr><td class="name"><a href="SPIKE-ASR35.md">SPIKE-ASR35.md</a></td>
+      <td class="what">Nemotron 3.5 dev evaluation + the chunk-size root-cause finding (B74).</td></tr>
+  <tr><td class="name"><a href="SPIKE-P6.3.md">SPIKE-P6.3.md</a></td>
+      <td class="what">Model-spike findings and recipes (ASR/LLM/VAD pins, flags, measurements) — load-bearing for RUNTIME.</td></tr>
+  <tr><td class="name"><a href="SPEC-GAPS.md">SPEC-GAPS.md</a></td>
+      <td class="what">CLOSED historical record: the gap-id registry the spec status banners cite ("Closes E5"). Not a TODO.</td></tr>
+  <tr><td class="name"><a href="research/">research/</a></td>
+      <td class="what">The cited pre-build research reports (archive).</td></tr>
+</table>
+
+<h2>spec/</h2>
+<p class="lede">The normative implementation contract. Section ids and decision numbers live here; everything above defers to these.</p>
+<table>
+  <tr><td class="name"><a href="../spec/DECISIONS.md">DECISIONS.md</a></td>
+      <td class="what">The numbered decision log — the D/K/B ids every other doc cites.</td></tr>
+  <tr><td class="name"><a href="../spec/EVENTS.md">EVENTS.md</a></td>
+      <td class="what">The append-only event log: kinds, folds, revision, retraction, redaction.</td></tr>
+  <tr><td class="name"><a href="../spec/SIDECARS.md">SIDECARS.md</a></td>
+      <td class="what">The sidecar format — the truth beside the images, merge rules, rebuild.</td></tr>
+  <tr><td class="name"><a href="../spec/LIBRARY.md">LIBRARY.md</a></td>
+      <td class="what">Watched roots, ingest passes, identity by hash, previews, the watcher.</td></tr>
+  <tr><td class="name"><a href="../spec/CAPTURE.md">CAPTURE.md</a></td>
+      <td class="what">Voice, pencil, and typed capture: sessions, the scope ring, VAD-onset binding.</td></tr>
+  <tr><td class="name"><a href="../spec/RETRIEVAL.md">RETRIEVAL.md</a></td>
+      <td class="what">Search: FTS, vectors, fusion, provenance — your words outrank the machine's.</td></tr>
+  <tr><td class="name"><a href="../spec/RUNTIME.md">RUNTIME.md</a></td>
+      <td class="what">The model runtime: supervision, SHA-pinned downloads, consent, tiers.</td></tr>
+  <tr><td class="name"><a href="../spec/UI.md">UI.md</a></td>
+      <td class="what">The desktop UI contract: surfaces, keys, layers, the quiet defaults.</td></tr>
+</table>
+
+<footer>
+Photoproof docs - one page, hand-maintained beside docs/README.md. The .md
+links open in your editor or on GitHub; the .html pages render anywhere. No
+build tooling: this file is self-contained HTML; edit and reload.
+</footer>
+
+</main>
+</body>
+</html>

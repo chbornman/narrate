@@ -11,7 +11,8 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 |---|---|
 | `STATUS.md` | **The capability ledger** — every spec obligation, its build state (five states), and the evidence. Updated at every packet close. |
 | `BUILD-LOOP.md` | The packet-grain build ledger: how packets run, gates, the status table, retired-docs list. |
-| `BACKLOG.md` | Decided-but-not-scheduled work; items graduate into packets. |
+| `BACKLOG.md` | Decided-but-not-scheduled work; items graduate into packets. Open items only — shipped items move to LANDED.md. |
+| `LANDED.md` | The shipped-from-backlog archive: every `[x]` item, moved verbatim with its hashes and context — the de facto changelog of backlog-sourced work. |
 | `FOUNDER-CHECKLIST.md` | Decisions awaiting Caleb + founder-machine verification pending. |
 
 ## Reference (stable; updated when their subject changes)
@@ -25,6 +26,7 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 | `DOGFOOD-M1.md` / `DOGFOOD-M2.md` | Founder-machine verification scripts: what to run, what to look at. |
 | `architecture.html` | The one-page visual architecture (self-contained HTML+SVG): processes, models, seams, truth stores. Regenerate at packet close, beside STATUS.md. |
 | `features.html` | The one-page cascading feature tree (self-contained HTML): everything BUILT, by product area, with honest partial markers. Regenerate beside STATUS.md. |
+| `index.html` | The docs landing page (self-contained HTML): this catalog as a linked map — one row per doc, Live / Reference / spec/. |
 | `MODELS.md` | The connector-options matrix: per seam, the current pick, alternates evaluated, candidates, watch triggers. |
 | `SPIKE-ASR35.md` | Nemotron 3.5 dev evaluation + the chunk-size root-cause finding (B74). |
 | `SPIKE-P6.3.md` | Model-spike findings and recipes (ASR/LLM/VAD pins, flags, measurements) — load-bearing for RUNTIME. |
