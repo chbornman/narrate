@@ -339,4 +339,20 @@ export const GRID_DEFS: ActionDef[] = [
     available: always,
     enabled: (ctx) => ctx.activeHash !== null,
   },
+  // Configurable external editor (BACKLOG "Configurable external editor, D4
+  // revisit"; on-thesis: review here, edit there). NO key — free
+  // single-letter keys are scarce and a menu seat suffices. Grid and Look
+  // need SEPARATE defs because id is unique per (id, scope) — the
+  // flip-stack-member pattern. Empty pref = OS default handler, so this
+  // always does something sensible.
+  {
+    id: "open-in-external-editor",
+    verb: "Open in external editor",
+    keys: [],
+    scope: "grid",
+    group: "system",
+    seats: ["thumb"],
+    available: always,
+    enabled: (ctx) => ctx.activeHash !== null,
+  },
 ];

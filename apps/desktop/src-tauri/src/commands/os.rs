@@ -17,7 +17,7 @@
 //! NO deletion verbs exist here, by decision (D3): the app never deletes
 //! or trashes files — "Show in file manager" covers it.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -118,9 +118,37 @@ fn open_spec(path: &Path) -> (&'static str, Vec<OsString>) {
     (program, vec![path.as_os_str().to_owned()])
 }
 
+/// "Open in external editor" (BACKLOG "Configurable external editor, D4
+/// revisit"): hand the FILE to the configured editor as SEPARATE argv
+/// entries — never a shell string. On macOS, `open -a <editor> <path>`
+/// launches the named application against the file; elsewhere the editor IS
+/// the program and the file its sole arg. Keeping editor and path distinct
+/// argv slots is the injection guard: an editor name carrying shell
+/// metacharacters (or a path that does) is data passed straight to execvp,
+/// never re-parsed by a shell.
+fn editor_spec(editor: &str, path: &Path) -> (OsString, Vec<OsString>) {
+    #[cfg(target_os = "macos")]
+    {
+        (
+            OsString::from("open"),
+            vec![
+                OsString::from("-a"),
+                OsString::from(editor),
+                path.as_os_str().to_owned(),
+            ],
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (OsString::from(editor), vec![path.as_os_str().to_owned()])
+    }
+}
+
 /// Fire-and-forget launch; a detached reaper thread waits the child so
-/// short-lived openers never accumulate as zombies.
-fn spawn_detached((program, args): (&'static str, Vec<OsString>)) -> CmdResult<()> {
+/// short-lived openers never accumulate as zombies. `P: AsRef<OsStr>` so it
+/// takes either a `&'static str` default-handler program (reveal/open-with-
+/// default) or an OWNED editor program snapshotted out of settings.
+fn spawn_detached<P: AsRef<OsStr>>((program, args): (P, Vec<OsString>)) -> CmdResult<()> {
     let mut child = Command::new(program).args(args).spawn()?;
     std::thread::Builder::new()
         .name("pp-os-open".into())
@@ -186,6 +214,45 @@ pub async fn open_with_default(app: S<'_>, hash: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         app.touch()?;
         spawn_detached(open_spec(&online_abs(&app.library, &hash)?))
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// "Open in external editor" (BACKLOG "Configurable external editor, D4
+/// revisit"; on-thesis: review here, edit there). Resolves the readable
+/// ORIGINAL via the same online_abs/best_path chain reveal/open-with-default
+/// use, REFUSES a missing or unreadable file WITHOUT spawning (a stale index
+/// row pointing at a deleted file would otherwise launch the editor on
+/// nothing), snapshots the configured editor under the settings lock then
+/// DROPS the lock before spawning (never hold a mutex across a process
+/// launch), and dispatches: a configured editor → editor_spec; unset → the
+/// open_spec OS-default path (the empty-pref fallback that keeps the single
+/// menu seat useful).
+#[tauri::command]
+pub async fn open_in_external_editor(app: S<'_>, hash: String) -> CmdResult<()> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        let path = online_abs(&app.library, &hash)?;
+        // Refuse the missing/unreadable file before any spawn: an offline
+        // volume already errored in online_abs; this catches a path that
+        // resolved but no longer points at a real file.
+        if !path.is_file() {
+            return Err(CmdError::Invalid(
+                "image file is missing or unreadable".into(),
+            ));
+        }
+        // Snapshot the pref, then DROP the lock — the launch happens outside
+        // the critical section.
+        let editor = {
+            let s = app.settings.lock().expect("settings mutex");
+            s.external_editor.clone()
+        };
+        match editor {
+            Some(editor) => spawn_detached(editor_spec(&editor, &path)),
+            None => spawn_detached(open_spec(&path)),
+        }
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -304,6 +371,39 @@ mod tests {
 
         let (program, args) = open_spec(Path::new("/mnt/vol/shoot/IMG_0001.jpg"));
         assert_eq!(program, "xdg-open");
+        assert_eq!(args, vec![OsString::from("/mnt/vol/shoot/IMG_0001.jpg")]);
+    }
+
+    // editor_spec injection safety: a shell-metacharacter editor name and
+    // the path must each be their OWN argv entry, never a joined shell
+    // string. execvp(program, argv) never re-parses the metacharacters, so
+    // an editor name like `evil; rm -rf ~` is inert data, not a command.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_editor_spec_keeps_editor_and_path_distinct_argv() {
+        let evil = "evil; rm -rf ~ #";
+        let (program, args) = editor_spec(evil, Path::new("/mnt/vol/shoot/IMG_0001.jpg"));
+        assert_eq!(program, OsString::from("open"));
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-a"),
+                OsString::from(evil),
+                OsString::from("/mnt/vol/shoot/IMG_0001.jpg"),
+            ]
+        );
+        // The metacharacters live in ONE argv slot, undiluted — they were
+        // never split into a path or a second program.
+        assert_eq!(args[1], OsString::from(evil));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_editor_spec_keeps_editor_and_path_distinct_argv() {
+        let evil = "evil; rm -rf ~ #";
+        let (program, args) = editor_spec(evil, Path::new("/mnt/vol/shoot/IMG_0001.jpg"));
+        // The editor IS the program; the path is its lone, separate arg.
+        assert_eq!(program, OsString::from(evil));
         assert_eq!(args, vec![OsString::from("/mnt/vol/shoot/IMG_0001.jpg")]);
     }
 }

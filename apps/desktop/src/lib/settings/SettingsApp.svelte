@@ -100,6 +100,13 @@
     settings = await ipc.setStackDisplay(display);
   }
 
+  /** "Open in external editor" target (BACKLOG "Configurable external
+   * editor, D4 revisit"): the backend trims and treats empty as the OS
+   * default handler, then emits `settings-changed`. */
+  async function setExternalEditor(editor: string) {
+    settings = await ipc.setExternalEditor(editor);
+  }
+
   async function runExport() {
     const dir = await open({ directory: true, multiple: false, title: "Export destination" });
     if (typeof dir !== "string") return;
@@ -199,6 +206,23 @@
         <option value="raw">RAW</option>
       </select>
     </div>
+    <!-- Configurable external editor (BACKLOG, D4 revisit): hand the
+         original off for real editing (review here, edit there). -->
+    <div class="row pref">
+      <span class="name">Open in external editor</span>
+      <input
+        type="text"
+        class="editor-input"
+        aria-label="External editor"
+        placeholder="System default"
+        value={settings?.externalEditor ?? ""}
+        onchange={(e) => void setExternalEditor(e.currentTarget.value)}
+      />
+    </div>
+    <p class="helper">
+      The app to open an image's original in. Leave blank to use the system
+      default. On macOS use the application name (for example, Affinity Photo).
+    </p>
   </section>
 
   <!-- 2. Microphone — hidden until ASR is installed (UI §2.4 / RUNTIME) -->
@@ -406,6 +430,16 @@
   .row.pref .name {
     flex: initial;
     color: var(--text-dim);
+  }
+  .editor-input {
+    flex: 1;
+    min-width: 0;
+    margin-left: 8px;
+  }
+  .helper {
+    margin: 4px 0 0;
+    font-size: 11px;
+    color: var(--text-faint);
   }
   .row.license {
     margin: -4px 0 10px;

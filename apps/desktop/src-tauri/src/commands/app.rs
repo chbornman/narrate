@@ -44,6 +44,34 @@ pub fn set_stack_display(
     Ok(next)
 }
 
+/// Settings → "Open in external editor" target (BACKLOG "Configurable
+/// external editor, D4 revisit"). Trim the input and treat empty/whitespace
+/// as None — clearing the pref back to the OS default handler, so the single
+/// menu seat always does something sensible. Persists in settings.json and
+/// emits `settings-changed` (mirroring set_stack_display) so the Settings
+/// window's edit reaches the main window's command path live. localStorage
+/// is webview-local, so this preference needs the shared Rust store.
+#[tauri::command]
+pub fn set_external_editor(
+    app: S<'_>,
+    handle: AppHandle,
+    editor: String,
+) -> CmdResult<AppSettings> {
+    let trimmed = editor.trim();
+    let next = {
+        let mut s = app.settings.lock().expect("settings mutex");
+        s.external_editor = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        };
+        crate::settings::save(&app.app_data, &s)?;
+        s.clone()
+    };
+    let _ = handle.emit("settings-changed", next.clone());
+    Ok(next)
+}
+
 /// The RUNTIME contract (P6.2): tier, consent, per-model rows with
 /// license + progress, readiness gates. Settings renders the Models
 /// section from this; the one-time consent card reads the same snapshot.

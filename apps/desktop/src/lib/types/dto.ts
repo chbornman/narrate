@@ -149,6 +149,11 @@ export interface AppSettings {
   /** Which member a collapsed RAW+JPEG stack displays (featureset §5
    * dogfood amendment; backend settings.rs StackDisplay twin). */
   stackDisplay: "jpeg" | "raw";
+  /** Configurable external editor (BACKLOG "Configurable external editor,
+   * D4 revisit"): the app name (macOS) / executable (Win/Linux) the
+   * "Open in external editor" verb hands the original off to. null = the
+   * OS default handler (settings.rs external_editor twin). */
+  externalEditor: string | null;
 }
 
 export interface ExportReportDto {

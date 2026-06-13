@@ -127,6 +127,10 @@ export type Action =
   | { kind: "reveal-in-file-manager" }
   | { kind: "copy-file-path" }
   | { kind: "open-with-default" }
+  // configurable external editor (BACKLOG "Configurable external editor, D4
+  // revisit"): hand the original off to the user's editor (review here,
+  // edit there). Pointer-seated only — no key.
+  | { kind: "open-in-external-editor" }
   // search
   | { kind: "search-nav"; dir: "up" | "down" | "left" | "right" }
   | { kind: "search-open-result" }
