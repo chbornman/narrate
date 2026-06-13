@@ -384,11 +384,32 @@ export function simulate(
  * after a topic-set / alpha change. > 1 so nodes (and anchors) pull hard and
  * close the distance fast; `coolHeat` decays it back toward the 1.0 steady
  * state over the following frames. */
-export const REHEAT_START = 6;
-/** Per-frame geometric cooling toward 1.0. At ~60 fps a START of 6 cooling at
- * 0.92 reaches ~1.0 in roughly a second (≈ 22 frames to halve the excess), so
- * the layout snaps then relaxes — the founder's "settles in about a second". */
-export const HEAT_COOL = 0.92;
+export const REHEAT_START = 10;
+/** Per-frame geometric cooling toward 1.0. A START of 10 cooling at 0.88 reaches
+ * ~1.0 in well under a second (≈ 14 frames to halve the excess at ~60 fps), so
+ * the layout SNAPS into place then relaxes — the founder's "should snap the
+ * photos over, not ooze". A higher start + faster cool than the original (6 /
+ * 0.92), paired with the hot-phase sub-stepping below, makes the settle visible
+ * in a fraction of a second. */
+export const HEAT_COOL = 0.88;
+
+/** Heat above this counts as the "hot phase" of a reheat: while the layout is
+ * pulling hard the caller runs MULTIPLE sim sub-steps per animation frame so the
+ * nodes close the distance fast (a frame's worth of wall-clock buys several
+ * integration steps), then drops back to one step per frame as it cools. */
+export const HOT_HEAT = 2;
+/** How many sim sub-steps to run per frame during the hot phase. 3 sub-steps
+ * triples the convergence rate of the opening frames without tripling the draw
+ * cost (the expensive part — the canvas paint — still runs once per frame). */
+export const HOT_SUBSTEPS = 3;
+
+/** The number of sim sub-steps to advance this frame given the current heat:
+ * the hot phase (heat > HOT_HEAT) runs HOT_SUBSTEPS, the cooled steady state
+ * runs 1. Pure so the caller's per-frame loop is trivial and the policy is
+ * unit-testable. */
+export function subStepsForHeat(heat: number): number {
+  return heat > HOT_HEAT ? HOT_SUBSTEPS : 1;
+}
 
 /** Cool a heat value one frame toward the 1.0 steady state (never below 1). The
  * caller multiplies `config.attraction`/`anchorAttraction` by this; a pure
@@ -422,6 +443,55 @@ export function seedNodes(
       affinity: aff.length === topicCount ? aff : padTo(aff, topicCount),
     };
   });
+}
+
+/**
+ * Pull each node's START position toward the anchor it most relates to, so a
+ * topic add SNAPS its relevant photos over instead of waiting for the physics to
+ * drift them across the whole canvas (founder: "snap the relevant photos over,
+ * not ooze"). For every node we find its strongest POSITIVE affinity; if it
+ * clears `minAffinity` the node is seeded a fraction `pull` of the way from its
+ * current (spiral) seed toward that anchor. A node with no strong topic stays at
+ * its spiral seed (it has no home to snap to). Nodes shared between topics get
+ * pulled toward their dominant one, and the reheated sim then resolves the
+ * tie-break between the now-nearby anchors — a much shorter trip than from the
+ * center.
+ *
+ * Mutates `nodes` in place (and returns it, for chaining). Pure + deterministic
+ * (no Math.random), so the seeding is unit-testable: a high-affinity node lands
+ * near its anchor, a flat node stays put.
+ *
+ * @param pull fraction of the gap to the anchor to close immediately (0 = no
+ *   move, 1 = sit exactly on the anchor). ~0.6 lands nodes in the anchor's
+ *   neighborhood while leaving the physics room to spread the cluster.
+ * @param minAffinity the floor a node's peak affinity must clear to be snapped
+ *   (a weakly-related node has no clear home and is left at its seed).
+ */
+export function seedNearAnchors(
+  nodes: ImageNode[],
+  anchors: TopicAnchor[],
+  pull = 0.6,
+  minAffinity = 0.15,
+): ImageNode[] {
+  for (const node of nodes) {
+    if (node.fixed === true) continue; // a held node keeps its placed position
+    // Find the anchor this node holds to most strongly (its semantic home).
+    let bestAnchor: TopicAnchor | null = null;
+    let bestAff = minAffinity;
+    for (const anchor of anchors) {
+      const w = node.affinity[anchor.topic] ?? 0;
+      if (w > bestAff) {
+        bestAff = w;
+        bestAnchor = anchor;
+      }
+    }
+    if (bestAnchor === null) continue; // no strong topic: leave at the spiral seed
+    // Close `pull` of the gap from the current seed to that anchor, so the node
+    // STARTS near its home and the reheated sim only fine-tunes from there.
+    node.x += (bestAnchor.x - node.x) * pull;
+    node.y += (bestAnchor.y - node.y) * pull;
+  }
+  return nodes;
 }
 
 /** Pad/truncate an affinity row to exactly `len` (defensive against a topic

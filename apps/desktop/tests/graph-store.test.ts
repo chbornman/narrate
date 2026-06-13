@@ -104,6 +104,21 @@ describe("graph lens open/close", () => {
     expect(ui.surface).toBe("grid");
     expect(ui.graphOpen).toBe(true);
   });
+
+  it("go-grid (G / goHome) CLOSES the lens (founder bug: G left it hidden behind)", async () => {
+    await ui.openGraph();
+    expect(ui.graphOpen).toBe(true);
+    // The go-grid action routes through goHome, which must drop the lens so the
+    // user lands on the grid, not stay behind the still-open Visualizer.
+    await ui.perform({ kind: "go-grid" });
+    expect(ui.graphOpen).toBe(false);
+  });
+
+  it("goHome closes the lens even when there is no derived scope to clear", async () => {
+    await ui.openGraph();
+    await ui.goHome();
+    expect(ui.graphOpen).toBe(false);
+  });
 });
 
 describe("graphScope derivation from the current grid scope", () => {

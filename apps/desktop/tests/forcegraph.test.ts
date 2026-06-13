@@ -10,14 +10,18 @@ import {
   aggregateToSuperNodes,
   coolHeat,
   expandSuperNode,
+  HOT_HEAT,
+  HOT_SUBSTEPS,
   REHEAT_START,
   ringAnchors,
   screenToSim,
+  seedNearAnchors,
   seedNodes,
   shouldUseLod,
   simToScreen,
   simulate,
   step,
+  subStepsForHeat,
   type ForceConfig,
   type ImageNode,
   type TopicAnchor,
@@ -478,5 +482,126 @@ describe("view transform", () => {
     const [px, py] = simToScreen(10, 10, panned);
     expect(px - bx).toBeCloseTo(30, 9);
     expect(py - by).toBeCloseTo(-15, 9);
+  });
+});
+
+describe("reheat settle policy (founder: snap, not ooze)", () => {
+  it("a fresh reheat is hot enough to drive multiple sub-steps per frame", () => {
+    // The reheat starts well into the hot band, so the opening frames run the
+    // accelerated multi-substep convergence.
+    expect(REHEAT_START).toBeGreaterThan(HOT_HEAT);
+    expect(subStepsForHeat(REHEAT_START)).toBe(HOT_SUBSTEPS);
+  });
+
+  it("the cooled steady state runs a single step per frame", () => {
+    expect(subStepsForHeat(1)).toBe(1);
+    expect(subStepsForHeat(HOT_HEAT)).toBe(1); // boundary: not strictly hot
+  });
+
+  it("coolHeat carries the reheat through the hot band into the steady state", () => {
+    // Cooling REHEAT_START repeatedly must drop below HOT_HEAT (so sub-stepping
+    // ends) and converge toward 1 (so the loop can finally idle).
+    let h = REHEAT_START;
+    let hotFrames = 0;
+    for (let i = 0; i < 200; i++) {
+      if (subStepsForHeat(h) > 1) hotFrames++;
+      h = coolHeat(h);
+    }
+    expect(hotFrames).toBeGreaterThan(0); // there WAS a hot phase
+    expect(h).toBeCloseTo(1, 3); // and it cooled to the steady state
+  });
+});
+
+describe("seedNearAnchors — snap relevant nodes to their topic (founder)", () => {
+  const anchors: TopicAnchor[] = [
+    { topic: 0, x: -100, y: 0, vx: 0, vy: 0 },
+    { topic: 1, x: 100, y: 0, vx: 0, vy: 0 },
+  ];
+
+  it("moves a high-affinity node toward the anchor it most relates to", () => {
+    // Node strongly holds topic 1; it should jump most of the way to anchor 1
+    // from a far seed, instead of starting at the origin and oozing across.
+    const node: ImageNode = {
+      hash: "h",
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: [0.1, 0.9],
+    };
+    const before = Math.hypot(node.x - 100, node.y - 0);
+    seedNearAnchors([node], anchors, 0.6, 0.15);
+    const after = Math.hypot(node.x - 100, node.y - 0);
+    expect(after).toBeLessThan(before); // closer to its home anchor
+    expect(node.x).toBeCloseTo(60, 6); // 60% of the way from 0 to 100
+  });
+
+  it("leaves a flat / weakly-related node at its seed (no clear home)", () => {
+    const node: ImageNode = {
+      hash: "h",
+      x: 7,
+      y: -3,
+      vx: 0,
+      vy: 0,
+      affinity: [0.05, 0.05], // below the minAffinity floor
+    };
+    seedNearAnchors([node], anchors, 0.6, 0.15);
+    expect(node.x).toBe(7);
+    expect(node.y).toBe(-3);
+  });
+
+  it("does not move a held (fixed) node", () => {
+    const node: ImageNode = {
+      hash: "h",
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: [0.9, 0.1],
+      fixed: true,
+    };
+    seedNearAnchors([node], anchors, 0.6, 0.15);
+    expect(node.x).toBe(0);
+    expect(node.y).toBe(0);
+  });
+
+  it("a seeded node STARTS closer to its settled home than an un-seeded one", () => {
+    // The convergence win is that each node begins its trip near its home anchor
+    // instead of out at the spiral seed, so after the SAME small step budget the
+    // seeded layout is measurably closer to rest. We compare the distance from a
+    // strongly-topic-1 node to anchor 1 after a fixed handful of steps: seeding
+    // must leave it nearer its home than the un-seeded run.
+    const hashes = ["a", "b", "c", "d"];
+    const affinities = new Map<string, number[]>([
+      ["a", [0.9, 0.0]],
+      ["b", [0.85, 0.05]],
+      ["c", [0.0, 0.9]],
+      ["d", [0.05, 0.85]],
+    ]);
+    const cfg: ForceConfig = {
+      attraction: 0.05,
+      repulsion: 200,
+      damping: 0.85,
+      centering: 0.01,
+      ringRadius: 100,
+      anchorAttraction: 0,
+      anchorRepulsion: 0,
+      anchorDamping: 0.8,
+    };
+    const anc = ringAnchors(2, 100);
+    const home = anc[1]; // anchor for topic 1 (node "c" holds it strongest)
+
+    const distOfCAfter = (seed: boolean): number => {
+      const ns = seedNodes(hashes, affinities, 2);
+      if (seed) seedNearAnchors(ns, ringAnchors(2, 100));
+      // A short, equal step budget for both runs.
+      for (let i = 0; i < 8; i++) step(ns, ringAnchors(2, 100), cfg);
+      const c = ns.find((n) => n.hash === "c")!;
+      return Math.hypot(c.x - home.x, c.y - home.y);
+    };
+
+    // Pre-seeded, node c starts ~60% of the way to its home, so after the same
+    // few steps it is strictly nearer its anchor than the un-seeded spiral start.
+    expect(distOfCAfter(true)).toBeLessThan(distOfCAfter(false));
   });
 });

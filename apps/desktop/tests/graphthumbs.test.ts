@@ -15,6 +15,9 @@ import {
   nodeDrawRect,
   THUMB_BASE_PX,
   THUMB_DRAG_PX,
+  ZOOM_MAX_PX,
+  ZOOM_MIN_PX,
+  zoomedSide,
 } from "../src/lib/logic/graphthumbs";
 import {
   OFFSCREEN_PRIORITY_BASE,
@@ -278,5 +281,44 @@ describe("viewportPriority — visible-first thumb fill", () => {
     expect(q.pop()).toBe("center"); // visible, nearest center
     expect(q.pop()).toBe("edge"); // visible, farther
     expect(q.pop()).toBe("offscreen"); // off-screen, last
+  });
+});
+
+describe("zoomedSide — zoom GROWS the thumbnail, clamped (founder)", () => {
+  const base = THUMB_BASE_PX; // a plain node's unscaled side
+
+  it("scales linearly with zoom inside the clamp band", () => {
+    // At zoom 1 the node draws ~its base; at 2x it is twice as big (still under
+    // the max ceiling for this base), so zooming in is a REAL enlargement.
+    expect(zoomedSide(base, 1)).toBe(base);
+    expect(zoomedSide(base, 2)).toBe(base * 2);
+    expect(zoomedSide(base, 1.5)).toBe(base * 1.5);
+  });
+
+  it("never grows past the max ceiling (a deep zoom-in stays capped)", () => {
+    expect(zoomedSide(base, 100)).toBe(ZOOM_MAX_PX);
+    expect(zoomedSide(base, 5)).toBeLessThanOrEqual(ZOOM_MAX_PX);
+  });
+
+  it("never shrinks below the min floor (a deep zoom-out stays legible)", () => {
+    expect(zoomedSide(base, 0.01)).toBe(ZOOM_MIN_PX);
+    expect(zoomedSide(base, 0.2)).toBeGreaterThanOrEqual(ZOOM_MIN_PX);
+  });
+
+  it("honors custom min/max bounds", () => {
+    expect(zoomedSide(40, 10, 10, 80)).toBe(80); // clamps to max
+    expect(zoomedSide(40, 0.1, 30, 80)).toBe(30); // clamps to min
+  });
+
+  it("treats a degenerate (non-positive / non-finite) zoom as 1x", () => {
+    expect(zoomedSide(base, 0)).toBe(base);
+    expect(zoomedSide(base, -3)).toBe(base);
+    expect(zoomedSide(base, Number.NaN)).toBe(base);
+    expect(zoomedSide(base, Number.POSITIVE_INFINITY)).toBe(base);
+  });
+
+  it("zooming in produces a strictly bigger draw than zooming out (the founder ask)", () => {
+    expect(zoomedSide(base, 3)).toBeGreaterThan(zoomedSide(base, 1));
+    expect(zoomedSide(base, 1)).toBeGreaterThan(zoomedSide(base, 0.3));
   });
 });
