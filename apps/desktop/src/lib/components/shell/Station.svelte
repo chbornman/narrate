@@ -111,9 +111,12 @@
   const popThumbs = $derived(
     scopeTargets({
       surface: ui.surface,
-      searchOpen: ui.searchOpen,
+      // Search is no longer a separate selection surface (M3): results are
+      // grid cells, so the scope is the grid selection in every non-Look
+      // case. searchOpen/searchSelection held false/empty for scope.ts.
+      searchOpen: false,
       gridSelection: ui.grid.selectionTargets,
-      searchSelection: ui.searchSel.order,
+      searchSelection: [],
       lookTargets: ui.look.currentTargets,
     }).slice(0, POPOVER_THUMB_MAX),
   );

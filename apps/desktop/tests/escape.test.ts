@@ -38,7 +38,8 @@ const none: EscapeContext = {
   indicatorPopoverOpen: false,
   debugPanelOpen: false,
   inspectorOpen: false,
-  searchOpen: false,
+  queryScopeActive: false,
+  searchBarFocused: false,
   surface: "grid",
   hasSelection: false,
 };
@@ -56,12 +57,16 @@ const everything: EscapeContext = {
   indicatorPopoverOpen: true,
   debugPanelOpen: true,
   inspectorOpen: true,
-  searchOpen: true,
+  queryScopeActive: true,
+  searchBarFocused: true,
   surface: "look",
   hasSelection: true,
 };
 
-// (flag to clear, expected action) in layer order, 1..14.
+// (flag to clear, expected action) in layer order. The single search layer
+// split into two (M3 search-as-scope): first Esc clears the query SCOPE,
+// the next blurs the always-visible bar — the two-press sequence the design
+// specifies, both above Look→Grid.
 const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
   ["welcomeCardOpen", "close-welcome-card"],
   ["redactionModalOpen", "close-redaction-modal"],
@@ -73,7 +78,8 @@ const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
   ["cheatsheetOpen", "close-cheatsheet"],
   ["indicatorPopoverOpen", "close-indicator-popover"],
   ["debugPanelOpen", "close-debug-panel"],
-  ["searchOpen", "leave-search"],
+  ["queryScopeActive", "clear-query-scope"],
+  ["searchBarFocused", "blur-search-bar"],
   ["surface", "leave-look"],
   ["inspectorOpen", "close-inspector"],
   ["hasSelection", "clear-selection"],
@@ -142,9 +148,14 @@ describe("contract spot checks", () => {
     ).toBe("close-context-menu");
   });
 
-  it("search closes before Look; Look→Grid KEEPS the inspector (founder, June 2026)", () => {
-    expect(escapeAction({ ...none, searchOpen: true, surface: "look" })).toBe(
-      "leave-search",
+  it("a query scope clears before Look; Look→Grid KEEPS the inspector (founder, June 2026)", () => {
+    // M3: a committed query is the grid's scope, peeled before Look. With
+    // the bar focused but no scope, the next Esc blurs it (also before Look).
+    expect(escapeAction({ ...none, queryScopeActive: true, surface: "look" })).toBe(
+      "clear-query-scope",
+    );
+    expect(escapeAction({ ...none, searchBarFocused: true, surface: "look" })).toBe(
+      "blur-search-bar",
     );
     // The founder ask verbatim: Esc back to the grid must not close the
     // Journal/metadata sidebar — the still-active image's content stays.

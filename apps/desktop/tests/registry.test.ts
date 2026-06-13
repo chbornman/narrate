@@ -179,9 +179,10 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
     "look-nav": "filmstrip thumb clicks",
     "rail-nav": "pointer-native: rail rows are clickable",
     "rail-enter": "pointer-native: a rail row click opens the folder",
-    "search-nav": "pointer-native: result rows are clickable",
-    "search-open-result": "search result row click",
-    "remove-last-chip": "chip × buttons in the search overlay",
+    // search-nav / search-open-result / remove-last-chip retired with the
+    // search overlay (M3 search-as-scope): results are grid cells driven by
+    // the grid's own focus + Enter; the header bar handles its own keys. No
+    // defs carry these ids anymore, so they leave the audit table too.
     "pencil-eraser":
       "pointer-native: the stylus eraser end (hold-E is the keyboard form; a menu item cannot hold)",
     "mic-press":

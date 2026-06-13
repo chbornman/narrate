@@ -180,6 +180,7 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   chromeHidden: false,
   autoAdvance: false,
   sort: DEFAULT_SORT,
+  queryActive: false,
   thumbStep: DEFAULT_THUMB_STEP,
   surround: "black",
   filmstrip: false,

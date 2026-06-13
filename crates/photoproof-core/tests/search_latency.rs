@@ -465,6 +465,83 @@ fn latency_smoke_search_as_you_type_on_1m_row_corpus() {
     }
 }
 
+/// The lexical lane guardrail (M3 search-as-scope, Phase 1). The desktop
+/// `search` command now takes a `mode` arg: as-you-type passes
+/// `mode:"lexical"`, which forces `run_search_keyword` — the
+/// `keyword_only_rig` over `Searcher` — EVEN on a warm-embedder machine.
+/// `Searcher::search` (called below) IS that lane's engine: the keyword rig
+/// is the degenerate case of the hybrid pipeline with every model slot
+/// `None`, so byte-for-byte this is what `mode:"lexical"` runs. This test
+/// pins that lane under the 100 ms budget so the always-visible bar's live
+/// re-scope can never regress past it — no embedder, no CLIP, no LLM parse
+/// on the keystroke path, by construction of the lexical mode.
+///
+/// (The desktop crate's `run_search`/`SearchMode` routing — and the parse
+/// of the wire arg — is unit-tested in `search_wire.rs`; this test owns the
+/// performance half on the >1M-row corpus the budget is defined against.)
+#[test]
+#[ignore = "generates a >1M-row corpus; run in release with --ignored"]
+fn lexical_lane_search_as_you_type_stays_under_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let (total_rows, _fts_rows) = build_corpus(&path);
+    assert!(total_rows >= 1_000_000, "corpus must reach 1M rows");
+
+    let searcher = Searcher::open(&path).unwrap();
+    let chip = [Filter::Rating(Comparison::Gte(3))];
+
+    // The same as-you-type keystroke stream as the smoke above, run through
+    // the lexical lane's engine: progressive prefixes of two-word queries.
+    let mut rng = Rng(0xFACE_FEED_F00D_D00D);
+    let mut keystrokes: Vec<(String, bool)> = Vec::new();
+    for q in 0..60 {
+        let w1 = VOCAB[rng.skewed(VOCAB.len() as u64) as usize];
+        let w2 = VOCAB[rng.skewed(VOCAB.len() as u64) as usize];
+        let full = format!("{w1} {w2}");
+        let with_chip = q % 2 == 0;
+        for end in 2..=full.chars().count() {
+            let prefix: String = full.chars().take(end).collect();
+            if prefix
+                .split_whitespace()
+                .last()
+                .is_none_or(|t| t.chars().count() < 2)
+            {
+                continue;
+            }
+            keystrokes.push((prefix, with_chip));
+        }
+    }
+
+    // Warm (cold first-query excluded from the budget, RETRIEVAL §1.3).
+    for (q, with_chip) in keystrokes.iter().take(20) {
+        let filters: &[Filter] = if *with_chip { &chip } else { &[] };
+        searcher.search(q, filters).unwrap();
+    }
+
+    let mut samples_ms: Vec<f64> = Vec::with_capacity(keystrokes.len());
+    for (q, with_chip) in &keystrokes {
+        let filters: &[Filter] = if *with_chip { &chip } else { &[] };
+        let t = Instant::now();
+        searcher.search(q, filters).unwrap(); // mode:"lexical" runs exactly this
+        samples_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples_ms.sort_by(f64::total_cmp);
+    let p95 = percentile(&samples_ms, 0.95);
+    println!(
+        "lexical lane p95 {p95:.2} ms over {} keystroke queries",
+        samples_ms.len()
+    );
+
+    // Same §13.1 budget; asserted in release only (debug reports without
+    // failing, like the smoke test).
+    if !cfg!(debug_assertions) {
+        assert!(
+            p95 < 100.0,
+            "lexical lane p95 {p95:.2} ms exceeds the 100 ms as-you-type budget"
+        );
+    }
+}
+
 /// Diagnostic cost split: the §4 statement (FTS rank over all matches +
 /// LIMITed join) vs result/provenance assembly. Not a gate; prints data.
 #[test]

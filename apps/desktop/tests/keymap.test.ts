@@ -299,29 +299,28 @@ describe("look rows", () => {
   });
 });
 
-describe("search overlay rows", () => {
-  const search = { ...base, searchOpen: true, searchInputFocused: true, inputFocused: true };
-  it("Enter opens the focused result; arrows move result focus", () => {
-    expect(dispatch(key("Enter"), search)).toEqual({ kind: "search-open-result" });
-    expect(dispatch(key("ArrowDown"), search)).toEqual({
-      kind: "search-nav",
-      dir: "down",
+describe("search bar (M3 search-as-scope): no search-scope keymap rows", () => {
+  // The overlay's search SCOPE is retired — the query is a grid scope now,
+  // and the always-visible header bar is a focused text input that handles
+  // its own keys locally (Enter commits the semantic lane, Backspace drops a
+  // chip). So no chord dispatches a search action; Enter/arrows/Backspace
+  // either fall through to the grid (when not in an input) or to the input.
+  const barFocused = { ...base, searchInputFocused: true, inputFocused: true };
+  it("Enter/arrows/Backspace no longer dispatch search actions from the keymap", () => {
+    expect(dispatch(key("Enter"), barFocused)).toBeNull();
+    expect(dispatch(key("ArrowDown"), barFocused)).toBeNull();
+    expect(dispatch(key("Backspace"), { ...barFocused, queryEmpty: true })).toBeNull();
+  });
+  it("`/` and Cmd+F resolve to open-search (which focuses the bar)", () => {
+    // `/` types while an input is focused (§11 suppression); from the grid
+    // it focuses the bar. Cmd+F works even in an input (worksInInput).
+    expect(dispatch(key("/"), base)).toEqual({ kind: "open-search" });
+    expect(dispatch({ key: "f", ctrlOrMeta: true, shift: false }, barFocused)).toEqual({
+      kind: "open-search",
     });
   });
-  it("←/→ keep moving the text cursor while the input is focused", () => {
-    expect(dispatch(key("ArrowLeft"), search)).toBeNull();
-    expect(
-      dispatch(key("ArrowLeft"), { ...search, searchInputFocused: false, inputFocused: false }),
-    ).toEqual({ kind: "search-nav", dir: "left" });
-  });
-  it("Backspace maps to chip removal only when the query is empty (def-gated)", () => {
-    expect(dispatch(key("Backspace"), { ...search, queryEmpty: true })).toEqual({
-      kind: "remove-last-chip",
-    });
-    expect(dispatch(key("Backspace"), { ...search, queryEmpty: false })).toBeNull();
-  });
-  it("letters keep typing into the input", () => {
-    expect(dispatch(key("n"), search)).toBeNull();
-    expect(dispatch(key("3"), search)).toBeNull();
+  it("letters keep typing into the input (§11)", () => {
+    expect(dispatch(key("n"), barFocused)).toBeNull();
+    expect(dispatch(key("3"), barFocused)).toBeNull();
   });
 });

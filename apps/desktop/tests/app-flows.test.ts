@@ -57,6 +57,32 @@ vi.mock("@tauri-apps/api/core", () => ({
         return [];
       case "ingest_status":
         return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
+      case "search":
+        // Fused-order result hashes; the test seeds them via failSearch-free
+        // default of three results r1..r3 (overridable per-test isn't needed).
+        return {
+          query: { raw: args?.query, filters: args?.filters ?? [], dropped: [], fallback: false },
+          images: ["r1", "r2", "r3"].map((h) => ({
+            image_hash: h,
+            preview: h,
+            score: 1,
+            provenance: { type: "filter_only" },
+            last_annotated_ts: null,
+            debug: null,
+          })),
+          session_hits: [],
+        };
+      case "list_images":
+        return ((args?.hashes ?? []) as string[]).map((h) => ({
+          hash: h,
+          fileName: `${h}.jpg`,
+          relPath: `${h}.jpg`,
+          captureTs: null,
+          addedTs: "2026-02-01T00:00:00Z",
+          hasJournal: false,
+          rating: null,
+          offline: false,
+        }));
       default:
         return null;
     }
@@ -98,7 +124,7 @@ describe("navigation set = entry selection (featureset §2)", () => {
     let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 3);
     s = sel.toggle(s, ui.grid.unitHashes, 1);
     await ui.applySelection(s);
-    await ui.openLook("d", false);
+    await ui.openLook("d");
     expect(ui.look.order.map((e) => e.display)).toEqual(["b", "d"]);
     expect(ui.look.currentHash).toBe("d");
     // ←/→ stay inside the entry selection.
@@ -109,7 +135,7 @@ describe("navigation set = entry selection (featureset §2)", () => {
 
   it("single-image entry cycles the whole folder", async () => {
     await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 2));
-    await ui.openLook("c", false);
+    await ui.openLook("c");
     expect(ui.look.order.map((e) => e.display)).toEqual(["a", "b", "c", "d"]);
   });
 
@@ -117,21 +143,24 @@ describe("navigation set = entry selection (featureset §2)", () => {
     let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 0);
     s = sel.toggle(s, ui.grid.unitHashes, 1);
     await ui.applySelection(s);
-    await ui.openLook("d", false);
+    await ui.openLook("d");
     expect(ui.look.order).toHaveLength(4);
   });
 
-  it("the same rule governs search-result entry", async () => {
-    await ui.openSearch();
-    ui.results = {
-      query: { raw: "q", filters: [], dropped: [], fallback: false },
-      images: ["r1", "r2", "r3"].map((h) => ({ image_hash: h })),
-      session_hits: [],
-    } as never;
-    ui.searchSel = { order: ["r3", "r1"], focus: 0, anchor: 0 };
-    await ui.openLook("r1", true);
-    expect(ui.look.order.map((e) => e.display)).toEqual(["r1", "r3"]); // result order
-    expect(ui.searchOpen).toBe(false); // Look entered from Search
+  it("the same rule governs query-result entry (M3: results are grid cells)", async () => {
+    // A committed query re-scopes the grid to r1,r2,r3 (fused order). Results
+    // are ordinary cells now, so the SAME navigation-set rule applies: a ≥2
+    // selection including the entry cycles within it, in grid order.
+    ui.query = "fog"; // 2+ chars: above MIN_QUERY_CHARS, a real query
+    await ui.runQueryScope("semantic");
+    expect(ui.grid.unitHashes).toEqual(["r1", "r2", "r3"]);
+    // Select r3 then r1 (selection order r3,r1) — grid order is r1,r3.
+    let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 2); // r3
+    s = sel.toggle(s, ui.grid.unitHashes, 0); // + r1
+    await ui.applySelection(s);
+    await ui.openLook("r1");
+    expect(ui.look.order.map((e) => e.display)).toEqual(["r1", "r3"]); // grid order
+    expect(ui.surface).toBe("look");
   });
 });
 
@@ -155,7 +184,7 @@ describe("collapsed RAW+JPEG pair — the ● 2 truth end to end (D1)", () => {
   });
 
   it("viewing the pair in Look keeps both targets; R re-orders display-first", async () => {
-    await ui.openLook("jpegHash", false);
+    await ui.openLook("jpegHash");
     expect(lastCall("set_scope")?.args?.targets).toEqual(["jpegHash", "rawHash"]);
     await ui.perform({ kind: "flip-stack-member" });
     expect(ui.look.currentHash).toBe("rawHash");
@@ -163,7 +192,7 @@ describe("collapsed RAW+JPEG pair — the ● 2 truth end to end (D1)", () => {
   });
 
   it("leaving Look after R lands focus on the pair's cell (flip-aware)", async () => {
-    await ui.openLook("jpegHash", false);
+    await ui.openLook("jpegHash");
     await ui.perform({ kind: "flip-stack-member" }); // viewing the RAW now
     await ui.leaveLook();
     expect(ui.surface).toBe("grid");
@@ -178,7 +207,7 @@ describe("the inspector follows the active image (featureset §3)", () => {
     expect(ui.inspector.hash).toBe("a");
     await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 1));
     expect(ui.inspector.hash).toBe("b");
-    await ui.openLook("b", false);
+    await ui.openLook("b");
     await ui.lookNav(1);
     expect(ui.inspector.hash).toBe("c");
   });
