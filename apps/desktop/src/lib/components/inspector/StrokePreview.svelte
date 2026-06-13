@@ -12,6 +12,7 @@
    */
   import { thumbUrl } from "../../ipc/urls";
   import { denormalize, longEdge, QUANT, svgPathFor, wireToNorm } from "../../logic/stroke";
+  import { tooltip } from "../../primitives/tooltip";
   import type { StrokeDto } from "../../types/dto";
 
   let {
@@ -39,7 +40,12 @@
   );
 </script>
 
-<button class="stroke-preview" onclick={onflash} title="Flash this stroke in Look">
+<button
+  class="stroke-preview"
+  onclick={onflash}
+  aria-label="Flash this stroke in Look"
+  {@attach tooltip({ text: "Flash this stroke in Look" })}
+>
   <img
     src={thumbUrl(hash)}
     alt=""
