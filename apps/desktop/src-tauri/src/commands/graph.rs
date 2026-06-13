@@ -47,7 +47,11 @@ pub enum GraphScope {
 /// Resolve a scope to its in-scope image hashes (lowercase hex strings), the
 /// universe `topic_affinities` scores. Reuses the SAME core reads the grid
 /// feeders use, so the graph's set matches the grid's exactly.
-fn enumerate_scope(app: &App, scope: &GraphScope) -> CmdResult<Vec<String>> {
+///
+/// `pub(crate)` so the topics commands (the Topics-tab ranked grid + the
+/// topic→collection bake) resolve a scope identically — the tab and the graph
+/// are two views of one topic set over one scope (DESIGN-TOPICS-COLLECTIONS.md).
+pub(crate) fn enumerate_scope(app: &App, scope: &GraphScope) -> CmdResult<Vec<String>> {
     let hashes = match scope {
         GraphScope::Folder { root_id, folder } => app
             .library

@@ -18,6 +18,7 @@ import type {
   IndicatorState,
   IngestStatus,
   JournalEntryDto,
+  RankedImageDto,
   RebuildReportDto,
   RedactReportDto,
   RootDto,
@@ -25,6 +26,7 @@ import type {
   ScopeView,
   StrokeCommitDto,
   StrokePayloadWire,
+  TopicDto,
 } from "../types/dto";
 import type { Filter, FusionWeights, SearchResults } from "../types/search";
 
@@ -278,6 +280,56 @@ export const collectionNotes = (id: string) =>
  * appended note; mutations emit `collections-changed`. */
 export const addCollectionNote = (id: string, text: string) =>
   invoke<CollectionNoteDto>("add_collection_note", { id, text });
+
+// -- topics + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md) -------
+//
+// A topic is a SAVED PHRASE (like a saved search): its images are ALWAYS
+// computed affinity (topicRankedImages), never stored membership. The bake is a
+// ONE-WAY commit of a topic threshold (or a client-computed selection) into an
+// ordinary evented collection. The cluster-derived autosuggested topics come
+// from `clusterTopics` above (the graph lens shares this topic set).
+
+/** Save a phrase as a manual topic. `space`: "annotation" | "clip" pins one
+ * embedding space; omitted blends both at the configured alpha (the default). */
+export const addTopic = (phrase: string, space?: string) =>
+  invoke<TopicDto>("add_topic", { phrase, space });
+/** Every saved manual topic, newest first. */
+export const listTopics = () => invoke<TopicDto[]>("list_topics");
+/** Remove a saved topic by id (errors if already gone). */
+export const removeTopic = (id: string) =>
+  invoke<void>("remove_topic", { id });
+/** The in-scope images ranked by blended affinity to one topic phrase,
+ * descending — the Topics-tab grid; the slider thresholds on `score`. `alpha`
+ * omitted uses the graph default. Graceful: an un-embedded scope returns []. */
+export const topicRankedImages = (
+  phrase: string,
+  scope: GraphScope,
+  alpha?: number,
+) => {
+  const args: Record<string, unknown> = { phrase, scope };
+  if (alpha !== undefined) args.alpha = alpha;
+  return invoke<RankedImageDto[]>("topic_ranked_images", args);
+};
+/** Bake a topic threshold into a collection: members are the in-scope images
+ * scoring >= `threshold`. Provenance (phrase + threshold + alpha) is recorded
+ * in the collection description. ONE-WAY: the result is an ordinary independent
+ * collection (no live link back). Emits `collections-changed`. */
+export const createCollectionFromTopic = (
+  phrase: string,
+  scope: GraphScope,
+  threshold: number,
+  name: string,
+  alpha?: number,
+) => {
+  const args: Record<string, unknown> = { phrase, scope, threshold, name };
+  if (alpha !== undefined) args.alpha = alpha;
+  return invoke<CollectionDto>("create_collection_from_topic", args);
+};
+/** The generic bake the graph's lasso/slider uses when the selection is already
+ * computed client-side: commit the given hashes into an evented collection
+ * (provenance "from topic graph selection"). Emits `collections-changed`. */
+export const createCollectionFromSelection = (hashes: string[], name: string) =>
+  invoke<CollectionDto>("create_collection_from_selection", { hashes, name });
 
 // -- ingest / settings / export ---------------------------------------------
 

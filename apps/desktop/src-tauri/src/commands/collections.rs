@@ -19,7 +19,10 @@ use crate::dto::{CollectionDto, CollectionNoteDto, GridItem};
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
-fn dto(rec: CollectionRecord) -> CollectionDto {
+/// `pub(crate)` so the topic→collection bake (commands/topics.rs) returns the
+/// SAME DTO shape every collection command does — a baked collection is an
+/// ordinary collection.
+pub(crate) fn collection_dto(rec: CollectionRecord) -> CollectionDto {
     CollectionDto {
         id: rec.id,
         name: rec.name,
@@ -41,7 +44,12 @@ fn note_dto(n: NoteEntry) -> CollectionNoteDto {
 }
 
 fn snapshot(app: &App) -> CmdResult<Vec<CollectionDto>> {
-    Ok(app.collections.list()?.into_iter().map(dto).collect())
+    Ok(app
+        .collections
+        .list()?
+        .into_iter()
+        .map(collection_dto)
+        .collect())
 }
 
 /// Every mutation emits the fresh full snapshot — collections number in
@@ -56,7 +64,7 @@ fn snapshot(app: &App) -> CmdResult<Vec<CollectionDto>> {
 /// mutation. Reading the snapshot inside the lock, after the mutation
 /// committed, guarantees each emitted snapshot is current as of its emit
 /// and emits leave in snapshot order.
-fn emit_collections_changed<R: Runtime>(app: &App, handle: &AppHandle<R>) {
+pub(crate) fn emit_collections_changed<R: Runtime>(app: &App, handle: &AppHandle<R>) {
     static EMIT_ORDER: Mutex<()> = Mutex::new(());
     let _ordered = EMIT_ORDER.lock().expect("collections emit mutex");
     if let Ok(list) = snapshot(app) {
@@ -92,7 +100,7 @@ pub async fn create_collection<R: Runtime>(
             photoproof_core::UtcMillis::now(),
         )?;
         emit_collections_changed(&app, &handle);
-        Ok(dto(rec))
+        Ok(collection_dto(rec))
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -111,7 +119,7 @@ pub async fn rename_collection<R: Runtime>(
         app.collections
             .rename(&id, &name, photoproof_core::UtcMillis::now())?;
         emit_collections_changed(&app, &handle);
-        Ok(dto(app.collections.get(&id)?))
+        Ok(collection_dto(app.collections.get(&id)?))
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -131,7 +139,7 @@ pub async fn set_collection_status<R: Runtime>(
         app.collections
             .set_status(&id, status, photoproof_core::UtcMillis::now())?;
         emit_collections_changed(&app, &handle);
-        Ok(dto(app.collections.get(&id)?))
+        Ok(collection_dto(app.collections.get(&id)?))
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -150,7 +158,7 @@ pub async fn set_collection_description<R: Runtime>(
         app.collections
             .set_description(&id, &description, photoproof_core::UtcMillis::now())?;
         emit_collections_changed(&app, &handle);
-        Ok(dto(app.collections.get(&id)?))
+        Ok(collection_dto(app.collections.get(&id)?))
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -276,7 +284,7 @@ pub async fn collections_for_image(app: S<'_>, hash: String) -> CmdResult<Vec<Co
             .collections
             .collections_for_image(&h)?
             .into_iter()
-            .map(dto)
+            .map(collection_dto)
             .collect())
     })
     .await

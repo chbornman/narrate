@@ -74,6 +74,18 @@ signature moment.
 2. The slider-to-collection bake (graph + tab) + `create_collection_from_selection`.
 3. The extra autosuggest signals (co-annotation, repeated-phrase, time/folder).
 
+> Backend status (June 13 2026): phases 1 + 2 landed. Manual-topic CRUD
+> (`add_topic` / `list_topics` / `remove_topic`) over a `topics` table (schema
+> v13: `id, phrase, space?, created_ts`); `topic_ranked_images(phrase, scope,
+> alpha?)` reuses the graph's `topic_affinities` for the ranked grid + the
+> slider; the one-way bake (`create_collection_from_topic`,
+> `create_collection_from_selection`) commits through the existing evented
+> collection create+add path, recording provenance in the collection
+> description. The cluster autosuggestions are the v2 `cluster_topics` command.
+> Phase 3 (co-annotation / repeated-phrase / time+folder candidate signals) is
+> NOT yet built (a `TODO(autosuggest phase 3)` marks the seam in
+> `commands/topics.rs`).
+
 ## Why this is on-thesis
 Collections are the core of helping the photographer think/plan/organize
 (founder). Topics are the machine's *proposals*; the bake keeps the human as the
