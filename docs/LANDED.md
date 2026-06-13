@@ -8,6 +8,32 @@ their original wording.
 
 ## June 12-13 2026 — RAW decode + UI polish wave (three parallel-agent builds)
 
+- [x] **Semantic topic-graph (v1)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. The
+  force-directed lens generalizing "more like this" from an image anchor to a
+  TOPIC PHRASE anchor. Backend `photoproof-core::topic`: `topic_affinities`
+  embeds each topic in BOTH spaces (CLIP-text tower for the VISUAL half, the
+  text embedder + §3 instruct template for the ANNOTATION half), scores every
+  in-scope image via a new `PpvecStore::score_images` (the same brute-force
+  cosine kernel `search()` uses, but over a KNOWN scope set, not a global
+  top-k), then blends `α·visual + (1−α)·annotation`. `suggest_topics` = cheap
+  v1 candidates (frequent note n-grams + overlapping collection names, no LLM).
+  Three Tauri commands (`topic_affinities`/`suggest_topics`/`graph_tuning`) over
+  folder / collection / WHOLE-library scope (the deliberate scale spike; node
+  count + scan time LOGGED, never silently capped). Frontend: a pure
+  velocity-Verlet force sim (`logic/forcegraph.ts`, ring anchors + affinity
+  attraction + repulsion + centering, unit-tested for deterministic
+  convergence) rendered to canvas in `components/graph/TopicGraph.svelte` (an
+  add-topic input, a suggestion chip rail, a looks/said α slider that re-blends
+  live, a full-library toggle, drag/click). Click a topic anchor → semantic
+  query scope of the grid; click an image node → Look. `GraphTuning` added to
+  the centralized tuning config (`[graph]` block, file-overridable). Graceful
+  by construction: a degraded/un-embedded rig returns a well-formed zeros report
+  with honest readiness flags, never an error. Tests: blend at α 0/1/0.5 over
+  real planted vectors + degraded-rig zeros; suggest_topics n-gram mining;
+  GraphTuning defaults + toml merge; the pure force sim convergence + topic
+  add/scope/open flows. REMAINING (still in BACKLOG): v2 cluster auto-labels +
+  full-library LOD; v3 LLM topic suggestion.
+
 - [x] **Full RAW decode (1:1 preview)** — landed `6d7c4fb` (merge `0722efe`):
   Phase 1 on-demand neutral develop. New `raw_develop` module in
   `photoproof-core`: black/scale (rawler `apply_scaling`) → white-balance

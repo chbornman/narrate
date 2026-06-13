@@ -100,6 +100,48 @@ const BETA_MAX: f64 = 1.0;
 const EDGE_MIN: u32 = 256;
 const EDGE_MAX: u32 = 16_384;
 
+// --- Semantic topic-graph defaults (DESIGN-SEMANTIC-GRAPH.md) ---
+//
+// The force-directed lens' knobs. ALL are physics/layout tunables the founder
+// tunes by feel — so they live here, file-overridable, never scattered consts
+// in the frontend or a new const block. The frontend reads them through the
+// `graph_tuning` command (which returns `tuning().graph`); the affinity BLEND
+// default α also gates the backend's `topic_affinities` when a caller passes
+// none, so search and the graph share one blend model.
+
+/// α — the looks-vs-said blend default (0 = pure annotation, 1 = pure visual).
+/// 0.5 starts neutral (DESIGN open decision: "50/50 start?").
+const GRAPH_ALPHA_DEFAULT: f64 = 0.5;
+/// Attraction stiffness: an image's pull toward a topic anchor scales with this
+/// times its blended affinity to that topic. Higher = tighter clusters.
+const GRAPH_ATTRACTION: f64 = 0.02;
+/// Mutual image-image repulsion strength (an inverse-square-ish spread force),
+/// so dense clusters don't collapse to a point.
+const GRAPH_REPULSION: f64 = 800.0;
+/// Per-step velocity damping (velocity-Verlet friction): the sim cools toward a
+/// stable layout instead of oscillating forever.
+const GRAPH_DAMPING: f64 = 0.85;
+/// Centering pull toward the origin, so an image related to no topic drifts to
+/// the middle rather than flying off the canvas.
+const GRAPH_CENTERING: f64 = 0.01;
+/// Topic-anchor ring radius (px) in sim space. Anchors sit on a ring (DESIGN
+/// open decision: "lean ring for v1" — stable, readable).
+const GRAPH_RING_RADIUS: f64 = 320.0;
+
+// Validation bounds for the graph knobs (clamp-or-default like every other
+// section: a hand-edited tuning.toml can never inject a silent bad number).
+/// α is a blend fraction; outside [0, 1] it would flip or over-weight a space.
+const GRAPH_ALPHA_MIN: f64 = 0.0;
+const GRAPH_ALPHA_MAX: f64 = 1.0;
+/// Force/length knobs are positive magnitudes; a generous span catches typos
+/// (a negative force would invert the layout; an absurd one would explode it).
+const GRAPH_FORCE_MIN: f64 = 0.0;
+const GRAPH_FORCE_MAX: f64 = 100_000.0;
+/// Damping is a per-step retain fraction in (0, 1]; 0 freezes instantly, >1
+/// injects energy and diverges.
+const GRAPH_DAMPING_MIN: f64 = 0.0;
+const GRAPH_DAMPING_MAX: f64 = 1.0;
+
 // ---------------------------------------------------------------------------
 // The typed config, nested by domain.
 // ---------------------------------------------------------------------------
@@ -251,14 +293,100 @@ impl PreviewTuning {
     }
 }
 
-/// The whole tuning surface, one section per domain. Heatmap and graph
-/// sections will be added by those features when they land (their design docs
-/// already name the knobs); we add no empty dead sections here.
+/// Semantic topic-graph tuning (DESIGN-SEMANTIC-GRAPH.md). LIVE consumers: the
+/// `topic_affinities` blend default (`alpha`) and the frontend force sim, which
+/// reads every field through the `graph_tuning` command. Defaults are starting
+/// points the founder tunes by feel — that is exactly why they live here,
+/// file-overridable, rather than as frontend consts.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphTuning {
+    /// Looks-vs-said blend default (0 = annotation only, 1 = visual only).
+    pub alpha_default: f64,
+    /// Attraction stiffness toward a topic anchor (× blended affinity).
+    pub attraction: f64,
+    /// Mutual image-image repulsion strength.
+    pub repulsion: f64,
+    /// Per-step velocity damping (the sim's cooling).
+    pub damping: f64,
+    /// Centering pull toward the origin.
+    pub centering: f64,
+    /// Topic-anchor ring radius in sim-space px.
+    pub ring_radius: f64,
+}
+
+impl Default for GraphTuning {
+    fn default() -> Self {
+        Self {
+            alpha_default: GRAPH_ALPHA_DEFAULT,
+            attraction: GRAPH_ATTRACTION,
+            repulsion: GRAPH_REPULSION,
+            damping: GRAPH_DAMPING,
+            centering: GRAPH_CENTERING,
+            ring_radius: GRAPH_RING_RADIUS,
+        }
+    }
+}
+
+impl GraphTuning {
+    fn validated(self) -> Self {
+        let d = Self::default();
+        GraphTuning {
+            alpha_default: range_or_default(
+                "graph.alpha_default",
+                self.alpha_default,
+                GRAPH_ALPHA_MIN,
+                GRAPH_ALPHA_MAX,
+                d.alpha_default,
+            ),
+            attraction: range_or_default(
+                "graph.attraction",
+                self.attraction,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.attraction,
+            ),
+            repulsion: range_or_default(
+                "graph.repulsion",
+                self.repulsion,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.repulsion,
+            ),
+            damping: range_or_default(
+                "graph.damping",
+                self.damping,
+                GRAPH_DAMPING_MIN,
+                GRAPH_DAMPING_MAX,
+                d.damping,
+            ),
+            centering: range_or_default(
+                "graph.centering",
+                self.centering,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.centering,
+            ),
+            ring_radius: range_or_default(
+                "graph.ring_radius",
+                self.ring_radius,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.ring_radius,
+            ),
+        }
+    }
+}
+
+/// The whole tuning surface, one section per domain. The heatmap section will
+/// be added by that feature when it lands (its design doc already names the
+/// knobs); we add no empty dead sections here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tuning {
     pub search: SearchTuning,
     pub preview: PreviewTuning,
+    pub graph: GraphTuning,
 }
 
 impl Tuning {
@@ -293,6 +421,7 @@ impl Tuning {
         Tuning {
             search: self.search.validated(),
             preview: self.preview.validated(),
+            graph: self.graph.validated(),
         }
     }
 }
@@ -381,6 +510,34 @@ mod tests {
         assert_eq!(t.search.beta, 0.5);
         assert_eq!(t.preview.display_edge, 2560);
         assert_eq!(t.preview.embedded_accept_edge, 2048);
+        // Graph (DESIGN-SEMANTIC-GRAPH.md) — must match tuning.default.toml.
+        assert_eq!(t.graph.alpha_default, 0.5);
+        assert_eq!(t.graph.attraction, 0.02);
+        assert_eq!(t.graph.repulsion, 800.0);
+        assert_eq!(t.graph.damping, 0.85);
+        assert_eq!(t.graph.centering, 0.01);
+        assert_eq!(t.graph.ring_radius, 320.0);
+    }
+
+    /// A partial `[graph]` override merges over defaults like every other
+    /// section, and an out-of-range graph knob snaps back to its default.
+    #[test]
+    fn graph_partial_merge_and_range_reject() {
+        let toml = r#"
+            [graph]
+            alpha_default = 0.8
+            damping = 9.0
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        // The in-range override took:
+        assert_eq!(merged.graph.alpha_default, 0.8);
+        // The out-of-range damping (>1) snapped back to the default:
+        assert_eq!(merged.graph.damping, 0.85);
+        // Untouched graph fields kept their defaults:
+        assert_eq!(merged.graph.attraction, 0.02);
+        assert_eq!(merged.graph.ring_radius, 320.0);
+        // Other sections are entirely undisturbed:
+        assert_eq!(merged.search, SearchTuning::default());
     }
 
     /// A partial file merges over defaults: it sets one field and leaves the

@@ -22,6 +22,9 @@
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Search from "@lucide/svelte/icons/search";
   import Settings2 from "@lucide/svelte/icons/settings-2";
+  // Topic-graph lens entry (DESIGN-SEMANTIC-GRAPH.md): a network glyph reads as
+  // "spatial/related view" — the force-directed map of the current scope.
+  import Share2 from "@lucide/svelte/icons/share-2";
   import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
   // Search-bar keystroke debounce now lives in the centralized UI tuning
@@ -192,6 +195,20 @@
       title="fuzzy: typo-tolerant camera/lens/filename matching"
     >
       ~
+    </button>
+
+    <!-- Topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): open the force-directed
+         map of the current scope. A quiet glyph next to the ranking controls;
+         no em-dashes in the tooltip (gate: check:emdash). -->
+    <button
+      class="quiet"
+      class:active={ui.graphOpen}
+      onclick={() => void ui.openGraph()}
+      aria-label="Topic graph"
+      aria-pressed={ui.graphOpen}
+      title="Topic graph: a force-directed map of this scope"
+    >
+      <Share2 size={14} />
     </button>
 
     <!-- ⚙ "Ranking signals" (Phase 3): on-demand, never on the keystroke path.

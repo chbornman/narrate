@@ -116,6 +116,15 @@ export class Ui {
   // search-overlay return point are retired with the overlay.
   surface = $state<"grid" | "look">("grid");
 
+  // -- semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md) --------------------
+  // The graph is a force-directed OVERLAY over the grid, not a third surface:
+  // it opens on top, reads the current grid scope, and on interaction re-uses
+  // the grid's existing scope/Look machinery (a topic anchor scopes the grid
+  // like a query; an image node opens Look). One boolean gates it; the
+  // TopicGraph component owns all topic/affinity/sim state. Kept deliberately
+  // small + clearly named so the parallel heatmap merge stays mechanical.
+  graphOpen = $state(false);
+
   // -- roots & folder tree (shared by rail + grid) ----------------------------
   roots = $state<RootDto[]>([]);
   tree = $state<FolderNode[]>([]);
@@ -831,6 +840,58 @@ export class Ui {
     if (load !== this.gridLoad) return;
     this.grid.setItems(items);
     await this.reportScope();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md) — a focused, clearly
+  // named region so the parallel heatmap merge into this file stays mechanical.
+  // ---------------------------------------------------------------------------
+
+  /** Open the force-directed topic-graph lens over the current grid scope.
+   * Leaves Look first (the lens is a grid-level overlay), like find-similar. */
+  async openGraph() {
+    if (this.surface === "look") await this.leaveLook();
+    this.graphOpen = true;
+  }
+
+  /** Close the lens; the grid underneath is untouched (the lens never mutated
+   * the scope unless the user clicked a topic, which scopes explicitly). */
+  closeGraph() {
+    this.graphOpen = false;
+  }
+
+  /** The backend GraphScope for the lens, derived from the CURRENT grid scope
+   * (the lens shows whatever the grid shows). A derived scope (query/similar)
+   * unwraps to its underlying folder/collection source; the founder can also
+   * point the lens at the WHOLE library (the deliberate scale spike) via the
+   * lens' own control, which passes `{ kind: "library" }` directly. */
+  graphScope(): ipc.GraphScope {
+    const src = this.scopeSource();
+    if (src.kind === "collection") return { kind: "collection", id: src.id };
+    if (src.kind === "folder")
+      return { kind: "folder", root_id: src.rootId, folder: src.folder };
+    // A bare query/similar with no resolvable folder/collection source falls
+    // back to the whole library (nothing narrower to scope to).
+    return { kind: "library" };
+  }
+
+  /** Click a topic anchor → scope the grid to that topic. v1 reuses the query
+   * scope machinery: the topic phrase becomes a committed semantic query, so
+   * the grid shows the topic's strongest matches in fused order, with the
+   * residue + Escape-to-clear the query scope already provides. The lens closes
+   * so the user lands on the scoped grid (the find-similar pattern). */
+  async scopeToTopic(phrase: string) {
+    this.closeGraph();
+    this.query = phrase;
+    this.chips = [];
+    await this.runQueryScope("semantic");
+  }
+
+  /** Click an image node → open it in Look. The lens closes; openLook builds
+   * the nav set over the grid units exactly as a grid click would. */
+  async openFromGraph(hash: string) {
+    this.closeGraph();
+    await this.openLook(hash);
   }
 
   /** Re-point the grid from a DERIVED scope (query OR similar) back to its
