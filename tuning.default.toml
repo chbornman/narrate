@@ -55,6 +55,11 @@ repulsion = 800.0     # mutual image-image repulsion (spreads clusters). Range [
 damping = 0.85        # per-step velocity damping (the sim's cooling). Range [0, 1].
 centering = 0.01      # pull toward the origin (un-topic'd images drift to center). Range [0, 100000].
 ring_radius = 320.0   # topic-anchor ring radius in sim-space px. Range [0, 100000].
+# v2 cluster auto-labels (cluster_topics k-means): k = clamp(round(sqrt(n/2)), k_min, k_max).
+cluster_k_min = 2     # minimum cluster count. Range [1, 64].
+cluster_k_max = 12    # maximum cluster count (caps the suggestion rail width). Range [1, 64].
+# v2 full-library LOD: aggregate images into super-nodes past this node count.
+lod_threshold = 1500  # node count past which the lens aggregates into super-nodes. Range [50, 1000000].
 
 # Heatmap — attention/engagement intensity (DESIGN-ATTENTION-HEATMAP.md). NOT a
 # gaze tracker: it scores where you put intent (what you opened/marked/said),

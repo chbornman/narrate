@@ -215,6 +215,8 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md).
         commands::graph::topic_affinities,
         commands::graph::suggest_topics,
+        commands::graph::cluster_topics,
+        commands::graph::suggest_topics_llm,
         commands::graph::graph_tuning,
         commands::collections::list_collections,
         commands::collections::create_collection,
@@ -289,6 +291,8 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md).
         commands::graph::topic_affinities,
         commands::graph::suggest_topics,
+        commands::graph::cluster_topics,
+        commands::graph::suggest_topics_llm,
         commands::graph::graph_tuning,
         commands::collections::list_collections,
         commands::collections::create_collection,

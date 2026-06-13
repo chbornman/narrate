@@ -168,7 +168,21 @@ export interface TopicSuggestion {
   source: "note" | "collection";
   count: number;
 }
-/** The force-sim physics knobs (twin of the Rust `GraphTuning`). */
+/** A note-grounded auto-topic (v2): one labeled k-means cluster of the scope's
+ * image vectors. Twin of the Rust `ClusterTopic`. */
+export interface ClusterTopic {
+  label: string;
+  size: number;
+  centroid_affinity: number;
+}
+/** The v3 LLM-suggestion seam state (twin of the Rust `LlmSuggestions`). Until
+ * the Gemma connector is wired this is always `unavailable` and the UI shows the
+ * cluster + n-gram suggestions instead. */
+export type LlmSuggestions =
+  | { state: "unavailable"; reason: string }
+  | { state: "ready"; topics: string[] };
+/** The force-sim physics knobs + v2 LOD/cluster knobs (twin of the Rust
+ * `GraphTuning`). */
 export interface GraphTuning {
   alpha_default: number;
   attraction: number;
@@ -176,6 +190,11 @@ export interface GraphTuning {
   damping: number;
   centering: number;
   ring_radius: number;
+  /** v2 cluster auto-labels: k-means k bounds. */
+  cluster_k_min: number;
+  cluster_k_max: number;
+  /** v2 full-library LOD: aggregate into super-nodes past this node count. */
+  lod_threshold: number;
 }
 
 /** Per-image blended affinity to each topic anchor (looks vs said, blend
@@ -195,6 +214,23 @@ export const topicAffinities = (
  * names). v1: no LLM, no clustering. */
 export const suggestTopics = (scope: GraphScope) =>
   invoke<TopicSuggestion[]>("suggest_topics", { scope });
+
+/** v2 note-grounded auto-topics: cluster the in-scope image vectors and label
+ * each cluster by its most representative note phrase. `k` omitted picks from
+ * the scope size. Never errors on a degraded rig (empty/un-embedded resolves to
+ * an empty rail). */
+export const clusterTopics = (scope: GraphScope, k?: number) => {
+  const args: Record<string, unknown> = { scope };
+  if (k !== undefined) args.k = k;
+  return invoke<ClusterTopic[]>("cluster_topics", args);
+};
+
+/** v3 SEAM: LLM-suggested theme topics. The Gemma connector is not wired yet
+ * (mocked in M1), so this resolves to `{ state: "unavailable" }` and the rail
+ * degrades to the cluster + n-gram suggestions. Real themes appear only once the
+ * connector lands. */
+export const suggestTopicsLlm = (scope: GraphScope) =>
+  invoke<LlmSuggestions>("suggest_topics_llm", { scope });
 
 /** The GraphTuning knobs the force sim + alpha slider read. */
 export const graphTuning = () => invoke<GraphTuning>("graph_tuning");

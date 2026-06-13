@@ -172,6 +172,19 @@ const GRAPH_CENTERING: f64 = 0.01;
 /// Topic-anchor ring radius (px) in sim space. Anchors sit on a ring (DESIGN
 /// open decision: "lean ring for v1" — stable, readable).
 const GRAPH_RING_RADIUS: f64 = 320.0;
+/// v2 cluster auto-labels — k bounds for `cluster_topics`' k-means. The cluster
+/// count is `clamp(round(sqrt(n/2)), k_min, k_max)` unless a `k` is passed: a
+/// handful of images yields `k_min` clusters; a large scope is capped at `k_max`
+/// so the suggestion rail stays short and the k-means cheap.
+const GRAPH_CLUSTER_K_MIN: u32 = 2;
+const GRAPH_CLUSTER_K_MAX: u32 = 12;
+/// v2 full-library LOD — the node count past which the lens AGGREGATES images
+/// into super-nodes instead of rendering every one (DESIGN scale section).
+/// Default 1500: above the v1 scale-spike strain point (the v1 banner fired at
+/// ~1200 nodes) so the force sim runs over super-nodes within the budget the
+/// spike measured. FOUNDER-REVIEW: reconcile with the real spike numbers once
+/// the full-library profile lands.
+const GRAPH_LOD_THRESHOLD: u32 = 1500;
 
 // Validation bounds for the graph knobs (clamp-or-default like every other
 // section: a hand-edited tuning.toml can never inject a silent bad number).
@@ -186,6 +199,15 @@ const GRAPH_FORCE_MAX: f64 = 100_000.0;
 /// injects energy and diverges.
 const GRAPH_DAMPING_MIN: f64 = 0.0;
 const GRAPH_DAMPING_MAX: f64 = 1.0;
+/// Cluster k bounds: at least 1 cluster, capped at a readable rail width. A k of
+/// 0 would yield no clusters; an absurd k would over-fragment the rail.
+const GRAPH_CLUSTER_K_BOUND_MIN: u32 = 1;
+const GRAPH_CLUSTER_K_BOUND_MAX: u32 = 64;
+/// LOD threshold bounds: at least a handful (below ~50 there is nothing to
+/// aggregate); a generous ceiling catches a typo without freezing aggregation
+/// off on a real library.
+const GRAPH_LOD_MIN: u32 = 50;
+const GRAPH_LOD_MAX: u32 = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // The typed config, nested by domain.
@@ -358,6 +380,13 @@ pub struct GraphTuning {
     pub centering: f64,
     /// Topic-anchor ring radius in sim-space px.
     pub ring_radius: f64,
+    /// v2 cluster auto-labels — minimum k for `cluster_topics`' k-means.
+    pub cluster_k_min: u32,
+    /// v2 cluster auto-labels — maximum k (caps the suggestion rail width).
+    pub cluster_k_max: u32,
+    /// v2 full-library LOD — the node count past which the lens aggregates
+    /// images into super-nodes instead of rendering every one.
+    pub lod_threshold: u32,
 }
 
 impl Default for GraphTuning {
@@ -369,6 +398,9 @@ impl Default for GraphTuning {
             damping: GRAPH_DAMPING,
             centering: GRAPH_CENTERING,
             ring_radius: GRAPH_RING_RADIUS,
+            cluster_k_min: GRAPH_CLUSTER_K_MIN,
+            cluster_k_max: GRAPH_CLUSTER_K_MAX,
+            lod_threshold: GRAPH_LOD_THRESHOLD,
         }
     }
 }
@@ -456,6 +488,27 @@ impl GraphTuning {
                 GRAPH_FORCE_MIN,
                 GRAPH_FORCE_MAX,
                 d.ring_radius,
+            ),
+            cluster_k_min: count_or_default(
+                "graph.cluster_k_min",
+                self.cluster_k_min,
+                GRAPH_CLUSTER_K_BOUND_MIN,
+                GRAPH_CLUSTER_K_BOUND_MAX,
+                d.cluster_k_min,
+            ),
+            cluster_k_max: count_or_default(
+                "graph.cluster_k_max",
+                self.cluster_k_max,
+                GRAPH_CLUSTER_K_BOUND_MIN,
+                GRAPH_CLUSTER_K_BOUND_MAX,
+                d.cluster_k_max,
+            ),
+            lod_threshold: count_or_default(
+                "graph.lod_threshold",
+                self.lod_threshold,
+                GRAPH_LOD_MIN,
+                GRAPH_LOD_MAX,
+                d.lod_threshold,
             ),
         }
     }
@@ -634,6 +687,24 @@ fn edge_or_default(field: &str, v: u32, default: u32) -> u32 {
     }
 }
 
+/// A u32 count knob clamped to `[min, max]` (the graph cluster-k / LOD-threshold
+/// bounds). Out of range snaps back to the default with a warning, like every
+/// other knob.
+fn count_or_default(field: &str, v: u32, min: u32, max: u32, default: u32) -> u32 {
+    if (min..=max).contains(&v) {
+        v
+    } else {
+        tracing::warn!(
+            field,
+            value = v,
+            min,
+            max,
+            "tuning count out of range; keeping default"
+        );
+        default
+    }
+}
+
 /// A dwell-tier rate: finite, in the OPEN-LOW interval (0, 1]. A 0 erases the
 /// tier's dwell entirely (never a tuning intent) and > 1 invents elapsed time.
 fn rate_or_default(field: &str, v: f64, default: f64) -> f64 {
@@ -690,6 +761,10 @@ mod tests {
         assert_eq!(t.graph.damping, 0.85);
         assert_eq!(t.graph.centering, 0.01);
         assert_eq!(t.graph.ring_radius, 320.0);
+        // Graph v2 knobs (cluster k bounds + LOD threshold).
+        assert_eq!(t.graph.cluster_k_min, 2);
+        assert_eq!(t.graph.cluster_k_max, 12);
+        assert_eq!(t.graph.lod_threshold, 1500);
         // Heatmap defaults (DESIGN-ATTENTION-HEATMAP.md): dwell leads, the
         // grid tier is a small fraction of Look, 60 s cap, 14-day half-life.
         assert_eq!(t.heatmap.w_dwell, 0.0001);
@@ -709,15 +784,22 @@ mod tests {
             [graph]
             alpha_default = 0.8
             damping = 9.0
+            lod_threshold = 800
+            cluster_k_max = 200
         "#;
         let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
         // The in-range override took:
         assert_eq!(merged.graph.alpha_default, 0.8);
         // The out-of-range damping (>1) snapped back to the default:
         assert_eq!(merged.graph.damping, 0.85);
+        // The in-range v2 LOD threshold override took:
+        assert_eq!(merged.graph.lod_threshold, 800);
+        // The out-of-range cluster k (>64) snapped back to its default:
+        assert_eq!(merged.graph.cluster_k_max, 12);
         // Untouched graph fields kept their defaults:
         assert_eq!(merged.graph.attraction, 0.02);
         assert_eq!(merged.graph.ring_radius, 320.0);
+        assert_eq!(merged.graph.cluster_k_min, 2);
         // Other sections are entirely undisturbed:
         assert_eq!(merged.search, SearchTuning::default());
     }

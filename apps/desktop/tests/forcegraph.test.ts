@@ -7,11 +7,15 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  aggregateToSuperNodes,
+  expandSuperNode,
   ringAnchors,
   seedNodes,
+  shouldUseLod,
   simulate,
   step,
   type ForceConfig,
+  type ImageNode,
 } from "../src/lib/logic/forcegraph";
 
 const config: ForceConfig = {
@@ -140,5 +144,132 @@ describe("seedNodes", () => {
     // A missing hash seeds an all-zero row of the right width.
     const c = seedNodes(["missing"], new Map(), 2);
     expect(c[0].affinity).toEqual([0, 0]);
+  });
+});
+
+// LOD (DESIGN v2): the full-library tractability layer. Tested in the PURE
+// layer — super-node creation past the threshold, the member-count-weighted
+// centroid, expand/collapse, and the force sim handling mass.
+describe("LOD aggregation", () => {
+  it("shouldUseLod fires only past the threshold", () => {
+    expect(shouldUseLod(1500, 1500)).toBe(false); // at the threshold: full detail
+    expect(shouldUseLod(1501, 1500)).toBe(true); // past it: LOD
+    expect(shouldUseLod(10, 1500)).toBe(false);
+  });
+
+  it("bins images into super-nodes by dominant topic with member-count and mean affinity", () => {
+    // 3 images favor topic 0, 2 favor topic 1.
+    const aff = new Map<string, number[]>([
+      ["a", [0.9, 0.1]],
+      ["b", [0.8, 0.0]],
+      ["c", [0.7, 0.2]],
+      ["d", [0.1, 0.9]],
+      ["e", [0.0, 0.8]],
+    ]);
+    const nodes = seedNodes([...aff.keys()], aff, 2);
+    const supers = aggregateToSuperNodes(nodes, 2);
+    // Two bins → two super-nodes, in ascending topic order.
+    expect(supers).toHaveLength(2);
+    expect(supers[0].hash).toBe("super:0");
+    expect(supers[1].hash).toBe("super:1");
+    // Masses + member lists reflect the bin sizes.
+    expect(supers[0].mass).toBe(3);
+    expect(supers[0].members).toEqual(["a", "b", "c"]);
+    expect(supers[1].mass).toBe(2);
+    expect(supers[1].members).toEqual(["d", "e"]);
+    // The super-node affinity is the member-count MEAN of its members' rows.
+    expect(supers[0].affinity[0]).toBeCloseTo((0.9 + 0.8 + 0.7) / 3, 6);
+    expect(supers[0].affinity[1]).toBeCloseTo((0.1 + 0.0 + 0.2) / 3, 6);
+  });
+
+  it("is deterministic: same input yields identical super-nodes", () => {
+    const aff = new Map<string, number[]>([
+      ["a", [0.9, 0.1]],
+      ["b", [0.1, 0.9]],
+    ]);
+    const nodes = seedNodes([...aff.keys()], aff, 2);
+    const first = aggregateToSuperNodes(nodes, 2);
+    const second = aggregateToSuperNodes(nodes, 2);
+    expect(first.map((n) => [n.hash, n.x, n.y, n.mass])).toEqual(
+      second.map((n) => [n.hash, n.x, n.y, n.mass]),
+    );
+  });
+
+  it("expands a super-node back into its member image nodes near its position", () => {
+    const aff = new Map<string, number[]>([
+      ["a", [0.9, 0.1]],
+      ["b", [0.8, 0.0]],
+      ["c", [0.1, 0.9]],
+    ]);
+    const nodes = seedNodes([...aff.keys()], aff, 2);
+    const supers = aggregateToSuperNodes(nodes, 2);
+    // Expand super:0 (members a, b); super:1 (member c) stays aggregated.
+    const expanded = expandSuperNode(supers, "super:0", aff, 2);
+    const hashes = expanded.map((n) => n.hash).sort();
+    expect(hashes).toEqual(["a", "b", "super:1"].sort());
+    // The expanded members carry their REAL per-image affinity (not the mean).
+    const a = expanded.find((n) => n.hash === "a")!;
+    expect(a.affinity).toEqual([0.9, 0.1]);
+    expect(a.members).toBeUndefined();
+    // And they spilled out NEAR the super-node's position.
+    const sup0 = supers.find((n) => n.hash === "super:0")!;
+    expect(Math.hypot(a.x - sup0.x, a.y - sup0.y)).toBeLessThan(20);
+  });
+
+  it("with zero topics, all images bin into one unaffiliated super-node", () => {
+    const aff = new Map<string, number[]>([
+      ["a", []],
+      ["b", []],
+      ["c", []],
+    ]);
+    const nodes = seedNodes([...aff.keys()], aff, 0);
+    const supers = aggregateToSuperNodes(nodes, 0);
+    expect(supers).toHaveLength(1);
+    expect(supers[0].hash).toBe("super:-1");
+    expect(supers[0].mass).toBe(3);
+  });
+});
+
+describe("force sim handles super-nodes (mass)", () => {
+  it("a heavy super-node repels a light one harder than the reverse displacement", () => {
+    // Place a heavy (mass 10) and a light (mass 1) node apart on the x-axis with
+    // NO topics (pure repulsion + centering). The light node should be pushed
+    // FARTHER from the origin than the heavy one moves, because the pair force is
+    // equal-and-opposite but the heavy node's acceleration is divided by its
+    // larger mass.
+    const heavy: ImageNode = {
+      hash: "H",
+      x: -5,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: [],
+      mass: 10,
+      members: new Array(10).fill("x"),
+    };
+    const light: ImageNode = {
+      hash: "L",
+      x: 5,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: [],
+      mass: 1,
+    };
+    const nodes = [heavy, light];
+    for (let i = 0; i < 50; i++) step(nodes, [], config);
+    // Both moved finitely (no NaN/blowup), and the light node ended FARTHER from
+    // the origin than the heavy one (the heavy mass barely budged).
+    expect(Number.isFinite(light.x)).toBe(true);
+    expect(Math.abs(light.x)).toBeGreaterThan(Math.abs(heavy.x));
+  });
+
+  it("a single-image node (no mass) behaves exactly as mass 1", () => {
+    const a: ImageNode = { hash: "a", x: 10, y: 0, vx: 0, vy: 0, affinity: [] };
+    const b: ImageNode = { hash: "b", x: 10, y: 0, vx: 0, vy: 0, affinity: [], mass: 1 };
+    step([a], [], config);
+    step([b], [], config);
+    expect(a.x).toBeCloseTo(b.x, 10);
+    expect(a.vx).toBeCloseTo(b.vx, 10);
   });
 });

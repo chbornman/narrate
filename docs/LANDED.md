@@ -36,6 +36,44 @@ their original wording.
   toggle state/persist/fetch, sort-by-attention). Gate green (the pre-existing
   `s02_2_case_only_rename_relinks_sidecar` failure aside).
 
+- [x] **Semantic topic-graph (v2)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. The
+  v2 wave on top of the v1 lens: cluster auto-labels + full-library LOD + the v3
+  seam scaffold. Backend (photoproof-core::topic): `cluster_topics(scope, k?,
+  space?)` runs a self-contained, DETERMINISTIC k-means (farthest-first seeding
+  by index + fixed iteration order, no RNG) over the in-scope image vectors — the
+  ANNOTATION space (`image_summary`) by default since the labels are
+  note-grounded, CLIP optional. `k = clamp(round(sqrt(n/2)), cluster_k_min,
+  cluster_k_max)` unless passed. Each cluster is LABELED by the most
+  representative salient n-gram in its members' notes (reusing v1's `mine_ngrams`,
+  refactored out of `suggest_topics`; most frequent then longer phrase then
+  alphabetical), with a generic `Group N` fallback. Returns `[{ label, size,
+  centroid_affinity }]`. Reads STORED vectors via a new bulk
+  `PpvecStore::read_image_vectors` (one lock/mmap pair, mirroring `score_images`)
+  + `any_model_id` so it clusters an embedded library even with models unloaded;
+  empty/un-embedded scope returns empty, never errors. New per-image
+  `scope_note_texts_by_hash` for per-cluster labeling. v3 SEAM (scaffold only,
+  not faked): a `TopicLlm` trait + `suggest_topics_llm` returning an explicit
+  `Unavailable` state (Gemma connector mocked in M1) with `// TODO(v3)`. Frontend
+  (apps/desktop): `forcegraph.ts` gains LOD — `aggregateToSuperNodes` (bin by
+  dominant topic, mass = member count, position = affinity-weighted centroid),
+  `expandSuperNode`, `shouldUseLod`; the pure `step` integrator now weights
+  repulsion by the mass product and divides acceleration by mass (a single image
+  at mass 1 is byte-identical to v1). `TopicGraph.svelte` shows a note-grounded
+  "auto topics" rail above the cheap rail + a hidden LLM "themes" rail (appears
+  only when the seam is real), aggregates past `graph.lod_threshold` (default
+  1500) with the banner now reading "LOD active (showing N clusters of M
+  images)", and expands a super-node on click or zoom. New `[graph]` knobs:
+  `cluster_k_min`/`cluster_k_max` (k bounds) + `lod_threshold`, with
+  `tuning.default.toml` in lockstep. Tests: backend (k-means deterministic on
+  planted clusters, k>=n, `pick_k` heuristic, label picks the right note phrase,
+  no-notes generic fallback, empty/un-embedded empty, the LLM seam Unavailable,
+  the new tuning defaults + merge + range-reject, the command graceful path);
+  frontend (super-node creation past threshold, mean-affinity centroid,
+  determinism, expand/collapse, the sim handling mass). Gate green (the
+  pre-existing `s02_2_case_only_rename_relinks_sidecar` failure aside).
+  FOUNDER-REVIEW: the `lod_threshold` 1500 default is a placeholder just above
+  v1's ~1200-node strain banner — reconcile with the real scale-spike profile.
+
 ## June 12-13 2026 — RAW decode + UI polish wave (three parallel-agent builds)
 
 - [x] **Semantic topic-graph (v1)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. The
