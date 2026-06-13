@@ -36,6 +36,7 @@
   import { tooltip } from "../../primitives/tooltip";
   import type { Filter } from "../../types/search";
   import RankingSignals from "./RankingSignals.svelte";
+  import TopicBakeBar from "../topics/TopicBakeBar.svelte";
 
   // The ⚙ "Ranking signals" popover anchor (Phase 3). The popover itself reads
   // ui.rankingPopoverOpen; this only holds the element it floats from.
@@ -97,6 +98,7 @@
   // reachable.
   const showDetail = $derived(
     ui.gridScope.kind === "similar" ||
+      ui.gridScope.kind === "topic" ||
       (ui.barFocused && (ui.query.trim().length > 0 || ui.chips.length > 0)),
   );
 
@@ -105,6 +107,14 @@
    * scope is active. No em-dash in user copy (gate: check:emdash). */
   const similarLabel = $derived(
     ui.gridScope.kind === "similar" ? ui.gridScope.filename : null,
+  );
+
+  /** Topic-scope residue copy (DESIGN-TOPICS-COLLECTIONS.md): the topic phrase
+   * the grid is showing ranked images for. Like the similar residue, it stays
+   * visible without bar focus so the one-key clear is always reachable. Null
+   * unless a topic scope is active. No em-dash in user copy (gate). */
+  const topicLabel = $derived(
+    ui.gridScope.kind === "topic" ? ui.gridScope.phrase : null,
   );
 
   // The lane status indicator (M3 Phase 2): the detail row names the lane the
@@ -294,6 +304,17 @@
         >
           similar to {similarLabel} <X size={11} />
         </button>
+      {:else if topicLabel !== null}
+        <!-- Topic-scope residue (DESIGN-TOPICS-COLLECTIONS.md): names the topic
+             phrase whose ranked images fill the grid; one-key clear returns to
+             the source (the same clearQueryScope funnel). -->
+        <button
+          class="residue"
+          onclick={() => void ui.clearQueryScope()}
+          aria-label="Clear topic, return to source"
+        >
+          topic: {topicLabel} <X size={11} />
+        </button>
       {:else if withinLabel !== null}
         <button
           class="residue"
@@ -311,12 +332,20 @@
           >
         </span>
       {/each}
-      <!-- The lane status indicator (M3 Phase 2): names the live lane. The
-           `committed` class lifts it out of the faint hint tone once a
-           semantic commit lands, so "semantic" reads as state, not a prompt. -->
-      <span class="lane-hint" class:committed={ui.searchLane === "semantic"}>
-        {laneHint}
-      </span>
+      {#if topicLabel !== null}
+        <!-- Topic scope: the bake bar (threshold -> live count -> "Make a
+             collection") sits in the detail row, sharing the same pure
+             threshold math + bake command as the graph slider. No lane hint
+             here (a topic has no lexical/semantic lane). -->
+        <TopicBakeBar phrase={topicLabel} scored={ui.topicScored} />
+      {:else}
+        <!-- The lane status indicator (M3 Phase 2): names the live lane. The
+             `committed` class lifts it out of the faint hint tone once a
+             semantic commit lands, so "semantic" reads as state, not a prompt. -->
+        <span class="lane-hint" class:committed={ui.searchLane === "semantic"}>
+          {laneHint}
+        </span>
+      {/if}
     </div>
   {/if}
 </header>

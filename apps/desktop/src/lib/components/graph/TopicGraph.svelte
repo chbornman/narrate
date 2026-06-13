@@ -44,6 +44,12 @@
     type TopicAttention,
   } from "../../logic/synthesis";
   import { GraphThumbCache, nodeBaseSizePx } from "../../logic/graphthumbs";
+  import {
+    countAboveThreshold,
+    DEFAULT_BAKE_THRESHOLD,
+    selectedAboveThreshold,
+    type ScoredImage,
+  } from "../../logic/topicbake";
 
   // -- topic + scope state ----------------------------------------------------
   let topics = $state<string[]>([]);
@@ -106,6 +112,82 @@
    * inherit its dominant topic's overlooked score for a cluster-level glow that
    * agrees with the readout. Empty outside Overlooked mode. */
   let overlookedByTopic: number[] = [];
+
+  // -- the slider-to-collection bake (the signature gesture) ------------------
+  // Clicking a topic anchor SELECTS it for baking: a threshold slider (0..1)
+  // appears, the images with blended affinity >= threshold GLOW in the graph
+  // (the "nearby set lighting up"), a live count updates, and "Make a
+  // collection" commits that threshold selection into an evented collection
+  // (ui.bakeTopicCollection -> createCollectionFromTopic; the ONE-WAY bake,
+  // provenance recorded by the backend). The threshold -> selected-set math is
+  // the shared pure logic/topicbake module, so the glow set here and the Topics
+  // tab's count and the bake membership agree exactly.
+  let selectedTopic = $state<number | null>(null);
+  let bakeThreshold = $state(DEFAULT_BAKE_THRESHOLD);
+  let bakeName = $state("");
+  let baking = $state(false);
+
+  /** Every in-scope image's blended affinity to the SELECTED topic (the column
+   * of the affinity matrix for that anchor), as ScoredImage. The threshold math
+   * runs over this so the glow + count + bake all key off the same numbers the
+   * graph already computed (DESIGN: "reuse the affinity data the graph has"). */
+  let bakeScored = $derived<ScoredImage[]>(
+    selectedTopic === null
+      ? []
+      : [...affinity.entries()].map(([hash, row]) => ({
+          hash,
+          score: row[selectedTopic!] ?? 0,
+        })),
+  );
+  /** The hashes glowing right now (affinity >= threshold for the selected
+   * topic). A Set for O(1) per-node lookup in the draw loop. */
+  let glowSet = $derived(
+    new Set(selectedAboveThreshold(bakeScored, bakeThreshold)),
+  );
+  /** The live "N photos" count the bake panel shows. */
+  let glowCount = $derived(countAboveThreshold(bakeScored, bakeThreshold));
+
+  /** Select a topic anchor for baking: open the slider panel, default the
+   * threshold + the collection name (to the phrase), and repaint so the glow
+   * appears. A re-click on the same anchor closes it (toggle). */
+  function selectTopicForBake(topicIndex: number) {
+    if (selectedTopic === topicIndex) {
+      selectedTopic = null;
+    } else {
+      selectedTopic = topicIndex;
+      bakeThreshold = DEFAULT_BAKE_THRESHOLD;
+      bakeName = topics[topicIndex] ?? "";
+    }
+    draw();
+  }
+
+  /** Commit the current threshold selection into a collection (the bake). Uses
+   * the SAME ui.bakeTopicCollection the Topics tab uses, so the graph and the
+   * tab share one bake path + provenance. On success, surface a station pop and
+   * close the panel (the new collection appears in the rail via the snapshot
+   * refresh). */
+  async function commitBake() {
+    if (selectedTopic === null || baking) return;
+    const phrase = topics[selectedTopic];
+    baking = true;
+    try {
+      const created = await ui.bakeTopicCollection(phrase, bakeThreshold, bakeName);
+      if (created !== null) {
+        ui.shell.stationPop(`Collection - ${created.name}`);
+        selectedTopic = null;
+        draw();
+      }
+    } finally {
+      baking = false;
+    }
+  }
+
+  // A topic removed while selected drops the bake panel (the index would dangle).
+  $effect(() => {
+    if (selectedTopic !== null && selectedTopic >= topics.length) {
+      selectedTopic = null;
+    }
+  });
 
   // -- canvas -----------------------------------------------------------------
   let canvasEl: HTMLCanvasElement | null = $state(null);
@@ -516,6 +598,10 @@
     const c = canvasColors();
     const mode = overlay();
     const overlayOn = mode !== "off";
+    // The bake selection takes visual priority over the attention overlay: when
+    // a topic anchor is selected, the above-threshold images GLOW and the rest
+    // recede (the signature "nearby set lighting up"). Computed once per frame.
+    const bakeActive = selectedTopic !== null;
     ctx.clearRect(0, 0, width, height);
     // image nodes. Each draws as its TINY preview thumbnail (founder: "tiny
     // previews as the markers"); until the thumb loads, the old colored DOT is
@@ -546,6 +632,16 @@
       const ov = overlayOn
         ? nodeOverlay(n, intensity, mode, overlookedByTopic)
         : { glow: 0, sizeScale: 1, intensity: 0 };
+      // Bake glow: when a topic anchor is selected, a node above the threshold
+      // glows full and the rest recede. A super-node glows if ANY member is in
+      // the set (its representative thumbnail still stands for the cluster). The
+      // bake glow OVERRIDES the attention overlay glow while a topic is selected.
+      const inGlow = bakeActive
+        ? n.members !== undefined
+          ? n.members.some((h) => glowSet.has(h))
+          : glowSet.has(n.hash)
+        : false;
+      const effGlow = bakeActive ? (inGlow ? 1 : 0) : ov.glow;
       const side = baseSide * ov.sizeScale;
       const half = side / 2;
 
@@ -558,17 +654,20 @@
       thumbs.request(rh, dx * dx + dy * dy);
       const img = thumbs.get(rh);
 
-      // Overlay alpha: a glowing node is bright, an out-of-focus node recedes,
-      // the plain (no-overlay) node is fully opaque.
+      // A node is "lit" when it carries glow (attention overlay weight, or the
+      // bake's above-threshold membership) and "dimmed" when an overlay/bake is
+      // active but this node is not lit. The plain (no overlay, no bake) node is
+      // fully opaque. `effGlow` already folds bake-priority over the overlay.
+      const dimActive = overlayOn || bakeActive;
       const bodyAlpha =
-        overlayOn && ov.glow > 0 ? 0.6 + 0.4 * ov.glow : overlayOn ? 0.45 : 1;
+        effGlow > 0 ? 0.6 + 0.4 * effGlow : dimActive ? 0.45 : 1;
 
       ctx.save();
-      // The Engaged/Overlooked GLOW becomes a soft colored HALO behind the
-      // thumbnail, scaled by glow weight (a hotter node halos stronger).
-      if (overlayOn && ov.glow > 0) {
+      // The GLOW becomes a soft colored HALO behind the thumbnail, scaled by
+      // glow weight (a hotter / above-threshold node halos stronger).
+      if (effGlow > 0) {
         ctx.shadowColor = c.glow;
-        ctx.shadowBlur = 6 + 16 * ov.glow;
+        ctx.shadowBlur = 6 + 16 * effGlow;
       }
       ctx.globalAlpha = bodyAlpha;
 
@@ -589,9 +688,9 @@
         ctx.drawImage(img, sx - half, sy - half, side, side);
         ctx.restore();
       } else {
-        // Placeholder: the prior dot, tinted by overlay/super/drag state.
+        // Placeholder: the prior dot, tinted by glow/super/drag state.
         ctx.fillStyle =
-          overlayOn && ov.glow > 0
+          effGlow > 0
             ? c.glow
             : isSuper
               ? c.superFill
@@ -601,21 +700,21 @@
         ctx.fill();
       }
 
-      // The affinity/selection BORDER RING on the thumbnail. In an overlay mode
-      // a glowing node rings in the accent (agreeing with the halo); otherwise a
-      // super-node / dragged node rings to read as distinct, a plain node gets a
-      // hairline so the thumbnail has a crisp edge in both themes.
+      // The affinity/selection BORDER RING on the thumbnail. A glowing node
+      // (attention or bake) rings in the accent (agreeing with the halo);
+      // otherwise a super-node / dragged node rings to read as distinct, a plain
+      // node gets a hairline so the thumbnail has a crisp edge in both themes.
       ctx.shadowBlur = 0;
       ctx.globalAlpha = Math.min(1, bodyAlpha + 0.2);
       ctx.beginPath();
       roundedRectPath(ctx, sx - half, sy - half, side, side, Math.min(8, half));
       ctx.strokeStyle =
-        overlayOn && ov.glow > 0
+        effGlow > 0
           ? c.glow
           : isSuper || n.fixed === true
             ? c.stroke
             : c.nodeFill;
-      ctx.lineWidth = isSuper || (overlayOn && ov.glow > 0) ? 2 : 1;
+      ctx.lineWidth = isSuper || effGlow > 0 ? 2 : 1;
       ctx.stroke();
       ctx.restore();
 
@@ -635,11 +734,14 @@
         ctx.shadowColor = c.glow;
         ctx.shadowBlur = 4 + 14 * score;
       }
+      // The anchor SELECTED for baking reads as distinct: a larger accent ring
+      // (it is the topic whose threshold is lighting the graph up).
+      const isBakeSel = selectedTopic === a.topic;
       ctx.beginPath();
-      ctx.arc(sx, sy, 8, 0, Math.PI * 2);
+      ctx.arc(sx, sy, isBakeSel ? 10 : 8, 0, Math.PI * 2);
       ctx.fillStyle = c.anchorFill;
-      ctx.strokeStyle = overlayOn && score > 0 ? c.glow : c.stroke;
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = isBakeSel || (overlayOn && score > 0) ? c.glow : c.stroke;
+      ctx.lineWidth = isBakeSel ? 3 : 2;
       ctx.fill();
       ctx.stroke();
       if (overlayOn && score > 0) ctx.restore();
@@ -809,9 +911,13 @@
       canvasEl?.releasePointerCapture(e.pointerId);
       const quick = performance.now() - downAt < 250;
       if (!moved && quick) {
-        // A quick press-release with no movement on an anchor scopes the grid to
-        // that topic (the preserved click behavior).
-        void ui.scopeToTopic(topics[anchor.topic]);
+        // A quick press-release with no movement on an anchor SELECTS it for
+        // baking (DESIGN-TOPICS-COLLECTIONS.md, the signature gesture): the
+        // threshold slider appears, the above-threshold images glow, and "Make
+        // a collection" bakes the selection. Scoping the grid to a topic's
+        // ranked images is the Topics rail tab's job (ui.openTopic); the graph
+        // is the spatial bake surface.
+        selectTopicForBake(anchor.topic);
       } else {
         // A dragged anchor stays where the user put it: PIN it so the anchor
         // forces leave it alone until the user unpins (double-click).
@@ -1164,6 +1270,53 @@
       ondblclick={onDblClick}
       onwheel={onWheel}
     ></canvas>
+
+    <!-- The slider-to-collection bake panel (the signature gesture): appears
+         when a topic anchor is selected. Drag the threshold -> the
+         above-threshold images glow in the graph -> "Make a collection" bakes
+         the selection. Floats over the canvas, theme-aware. -->
+    {#if selectedTopic !== null}
+      <div class="bake-panel" aria-label="Bake topic into a collection">
+        <div class="bake-head">
+          <span class="bake-topic">{topics[selectedTopic] ?? ""}</span>
+          <button
+            class="bake-x"
+            aria-label="Close bake panel"
+            onclick={() => selectTopicForBake(selectedTopic!)}>x</button
+          >
+        </div>
+        <label class="bake-slider">
+          <span class="lbl">threshold</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            bind:value={bakeThreshold}
+            aria-label="Affinity threshold"
+          />
+          <span class="val">{bakeThreshold.toFixed(2)}</span>
+        </label>
+        <div class="bake-count">
+          {glowCount.toLocaleString()} {glowCount === 1 ? "photo" : "photos"}
+        </div>
+        <div class="bake-commit">
+          <input
+            class="bake-name"
+            bind:value={bakeName}
+            placeholder="Collection name"
+            aria-label="New collection name"
+          />
+          <button
+            class="bake-go"
+            disabled={baking || glowCount === 0 || bakeName.trim() === ""}
+            onclick={() => void commitBake()}
+          >
+            {baking ? "Baking..." : "Make a collection"}
+          </button>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -1360,5 +1513,98 @@
     position: absolute;
     inset: 0;
     touch-action: none;
+  }
+  /* The slider-to-collection bake panel: floats over the canvas (top-right),
+     theme-aware (tokens only). */
+  .bake-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome-strong);
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+    font-size: 12px;
+    color: var(--text);
+  }
+  .bake-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .bake-topic {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bake-x {
+    all: unset;
+    cursor: pointer;
+    color: var(--text-faint);
+    padding: 0 4px;
+  }
+  .bake-x:hover {
+    color: var(--text);
+  }
+  .bake-slider {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+  }
+  .bake-slider .lbl {
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+  }
+  .bake-slider input[type="range"] {
+    flex: 1;
+    min-width: 0;
+  }
+  .bake-slider .val {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    min-width: 2.4em;
+    text-align: right;
+  }
+  .bake-count {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .bake-commit {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .bake-name {
+    background: var(--bg);
+    border: 1px solid var(--chrome);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+  .bake-go {
+    background: var(--bg);
+    border: 1px solid var(--chrome-strong);
+    color: var(--text);
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .bake-go:hover:not(:disabled) {
+    border-color: var(--focus);
+  }
+  .bake-go:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 </style>
