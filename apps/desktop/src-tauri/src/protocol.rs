@@ -19,6 +19,13 @@
 //!                     space; the library refuses geometry disagreement).
 //!                     Non-RAW, offline, placeholder, and small/no-embedded
 //!                     sources refuse with the same uniform 404.
+//!   /full-decode/<hash>  the on-demand NEUTRAL RAW develop at native sensor
+//!                     resolution (OD-1) — the deepest Look zoom rung. Served
+//!                     straight off the `previews/` cache once the
+//!                     full-raw-decode pass has written it (whichever
+//!                     container: WebP, or JPEG for over-cap dimensions). A
+//!                     404 is the "developing..." state: the frontend has
+//!                     enqueued the develop (request_full_decode) and retries.
 //!
 //! Image bytes NEVER cross `invoke`/IPC and are never base64-encoded. URLs
 //! are content-addressed, so every route carries the same immutable cache
@@ -27,7 +34,9 @@
 use std::path::{Path, PathBuf};
 
 use photoproof_core::ContentHash;
-use photoproof_core::library::{ArtifactKind, ImageFormat, Library, artifact_path};
+use photoproof_core::library::{
+    ArtifactKind, ImageFormat, Library, artifact_path, existing_full_artifact,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -37,11 +46,16 @@ pub enum Route {
     Original,
     /// The RAW's embedded full-resolution JPEG at native size.
     Embedded,
+    /// The on-demand full-decode artifact at NATIVE sensor resolution
+    /// (OD-1): the neutral RAW develop Look's 100%-zoom rung serves. 404s
+    /// until the develop pass has written it (the "developing..." state).
+    FullDecode,
 }
 
 /// Parse `/thumb/<hash>` | `/display/<hash>` (a trailing `.webp` is
-/// tolerated) | `/original/<hash>` | `/embedded/<hash>`. Returns the route
-/// and the validated content hash — hash validation is the traversal guard.
+/// tolerated) | `/original/<hash>` | `/embedded/<hash>` |
+/// `/full-decode/<hash>`. Returns the route and the validated content hash —
+/// hash validation is the traversal guard.
 pub fn parse_path(path: &str) -> Option<(Route, ContentHash)> {
     let mut parts = path.trim_start_matches('/').splitn(2, '/');
     let route = match parts.next()? {
@@ -49,12 +63,15 @@ pub fn parse_path(path: &str) -> Option<(Route, ContentHash)> {
         "display" => Route::Artifact(ArtifactKind::Display),
         "original" => Route::Original,
         "embedded" => Route::Embedded,
+        "full-decode" => Route::FullDecode,
         _ => return None,
     };
     let rest = parts.next()?;
     let hash_str = match route {
         Route::Artifact(_) => rest.strip_suffix(".webp").unwrap_or(rest),
-        Route::Original | Route::Embedded => rest,
+        // Content-addressed, no extension tolerance (the format is resolved
+        // from the cache, not the URL).
+        Route::Original | Route::Embedded | Route::FullDecode => rest,
     };
     let hash = ContentHash::from_hex(hash_str).ok()?;
     Some((route, hash))
@@ -68,7 +85,9 @@ pub fn resolve(cache_dir: &Path, path: &str) -> Option<PathBuf> {
             file.exists().then_some(file)
         }
         // Originals and embedded natives resolve through the library.
-        (Route::Original | Route::Embedded, _) => None,
+        // The full-decode artifact resolves straight off disk in `serve`
+        // (its existence is the cache-hit signal), so it returns None here.
+        (Route::Original | Route::Embedded | Route::FullDecode, _) => None,
     }
 }
 
@@ -127,6 +146,15 @@ pub fn serve(library: &Library, path: &str) -> http::Response<Vec<u8>> {
             .ok()
             .flatten()
             .map(|native| respond_ok(native.jpeg, "image/jpeg"))
+            .unwrap_or_else(respond_not_found),
+        // The on-demand full-decode artifact (OD-1): served straight off
+        // disk if the develop pass has written it (whichever container —
+        // WebP, or JPEG for over-cap dimensions). A 404 here is the
+        // "developing..." state — the frontend has already enqueued the
+        // develop via `request_full_decode` and retries.
+        Some((Route::FullDecode, hash)) => existing_full_artifact(library.cache_dir(), &hash)
+            .and_then(|(file, format)| std::fs::read(file).ok().map(|bytes| (bytes, format)))
+            .map(|(bytes, format)| respond_ok(bytes, format.content_type()))
             .unwrap_or_else(respond_not_found),
         None => respond_not_found(),
     }
@@ -200,6 +228,53 @@ mod tests {
         assert!(parse_path("/embedded/").is_none());
         let dir = tempfile::tempdir().unwrap();
         assert!(resolve(dir.path(), &format!("/embedded/{}", h.as_str())).is_none());
+    }
+
+    #[test]
+    fn parses_the_full_decode_route() {
+        let h = hash();
+        let (r, parsed) = parse_path(&format!("/full-decode/{}", h.as_str())).unwrap();
+        assert_eq!(r, Route::FullDecode);
+        assert_eq!(parsed, h);
+        // Same discipline: no suffix tolerance, no traversal, hash-validated.
+        assert!(parse_path(&format!("/full-decode/{}.webp", h.as_str())).is_none());
+        assert!(parse_path("/full-decode/not-a-hash").is_none());
+        assert!(parse_path("/full-decode/../../etc/passwd").is_none());
+        assert!(parse_path("/full-decode/").is_none());
+        // Resolves straight off disk in `serve`, not via `resolve`.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve(dir.path(), &format!("/full-decode/{}", h.as_str())).is_none());
+    }
+
+    /// A full-decode artifact sitting in the cache is served with its
+    /// container's content-type; a missing one 404s (the "developing..."
+    /// state). The develop pass writes the bytes; here we drop them in
+    /// directly to test the wire contract.
+    #[test]
+    fn serves_the_full_decode_artifact_when_present_else_404() {
+        use photoproof_core::library::{FullDecodeFormat, full_artifact_path};
+        let (_tmp, lib, _probe) = raw_env();
+        let h = hash_with_format(&lib, ImageFormat::Raw);
+        // Not developed yet: 404 (the develop pass has not written it).
+        assert_eq!(
+            serve(&lib, &format!("/full-decode/{}", h.as_str())).status(),
+            404
+        );
+        // Drop a WebP full artifact in the cache slot the route reads. The
+        // route serves the bytes verbatim with the slot's content-type (it
+        // never decodes), so opaque bytes suffice for the wire contract.
+        let dest = full_artifact_path(lib.cache_dir(), &h, FullDecodeFormat::Webp);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let body = b"RIFF....WEBPbytes".to_vec();
+        std::fs::write(&dest, &body).unwrap();
+        let resp = serve(&lib, &format!("/full-decode/{}", h.as_str()));
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["content-type"], "image/webp");
+        assert_eq!(
+            resp.headers()["cache-control"],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(resp.body().as_slice(), body.as_slice());
     }
 
     #[test]

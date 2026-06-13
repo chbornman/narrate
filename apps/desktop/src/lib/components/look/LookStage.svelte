@@ -17,10 +17,18 @@
    * registry is keydown-only; engagement is the pencil-eraser row).
    */
   import { ui } from "../../state/app.svelte";
-  import { displayUrl, embeddedUrl, originalUrl } from "../../ipc/urls";
+  import {
+    displayUrl,
+    embeddedUrl,
+    fullDecodeUrl,
+    originalUrl,
+  } from "../../ipc/urls";
+  import { requestFullDecode } from "../../ipc/commands";
+  import { listen } from "@tauri-apps/api/event";
   import * as zoom from "../../logic/zoom";
   import {
     FIRST_SOURCE,
+    isFullDecodeRung,
     loadProvesPixels,
     needsOriginal,
     nextSource,
@@ -80,6 +88,27 @@
   /** Hashes whose whole ladder the protocol refused: never re-asked. */
   let fullresFailed = $state<ReadonlySet<string>>(new Set());
 
+  // ---- on-demand full-decode rung (OD-1) -------------------------------------
+  //
+  // When the ladder reaches /full-decode for a RAW that has not been developed,
+  // we ask the backend to develop it (requestFullDecode) and show a
+  // "developing..." state. The develop runs on the pump; when it lands the
+  // backend fires `previews-changed`, and we bump a cache-bust token to re-load
+  // the /full-decode URL (whose immutable cache headers would otherwise hold
+  // the 404). A 404 on this rung does NOT advance the ladder while a develop is
+  // pending — it is "developing", not a refusal. Only a develop the backend
+  // DECLINES (non-RAW, unsupported CFA — requestFullDecode resolved false AND
+  // nothing is cached) exhausts the rung.
+
+  /** Hash currently being developed (spinner shown until it lands). */
+  let developingHash = $state<string | null>(null);
+  /** Bumped on `previews-changed` for the developing hash → re-loads the
+   * /full-decode URL past the webview's immutable cache. */
+  let developBust = $state(0);
+  /** Hashes whose develop the backend declined (non-RAW / unsupported CFA):
+   * the /full-decode rung is a hard refusal for these, never "developing". */
+  let developDeclined = $state<ReadonlySet<string>>(new Set());
+
   const wantsFullres = $derived(
     hash !== null &&
       ready &&
@@ -101,16 +130,96 @@
     hash !== null && fullresHash === hash && fullresLoadedHash === hash,
   );
 
+  /** Show the "developing..." state: this hash's develop is in flight and a
+   * developed full-res has not yet been swapped in. */
+  const developing = $derived(
+    hash !== null && developingHash === hash && !fullresShown,
+  );
+
+  // The /full-decode <img> src, with a cache-bust token so `previews-changed`
+  // forces a fresh request when the develop lands (the 404 was cached immutably).
+  const fullDecodeSrc = $derived(
+    fullresHash === null
+      ? ""
+      : `${fullDecodeUrl(fullresHash)}?v=${developBust}`,
+  );
+
+  // Reaching the /full-decode rung for a not-yet-declined hash: ask the backend
+  // to develop. `false` with nothing cached means declined (non-RAW / wrong
+  // format) → the rung is a hard refusal; `false` with a cache hit means the
+  // URL already serves (the load will prove pixels and swap); `true` means a
+  // develop is now pending → show "developing..." until `previews-changed`.
+  let requestedDecodeFor: string | null = null;
+  $effect(() => {
+    const h = fullresHash;
+    if (
+      h === null ||
+      !isFullDecodeRung(fullresSource) ||
+      developDeclined.has(h) ||
+      requestedDecodeFor === h
+    ) {
+      return;
+    }
+    requestedDecodeFor = h;
+    void requestFullDecode(h)
+      .then((pending) => {
+        if (pending) {
+          developingHash = h;
+        }
+        // pending === false: either cached (the <img> load swaps it in) or
+        // declined; an ensuing 404 walks onFullresError, which decides.
+      })
+      .catch(() => {
+        // Command failure (rare): treat the rung as refused so the preview
+        // stands rather than spinning forever.
+        markDeclined(h);
+      });
+  });
+
+  // The develop landed (or any preview changed for this hash): re-load the
+  // /full-decode URL past its immutable-cached 404.
+  $effect(() => {
+    const stop = listen<{ hashes: string[] }>("previews-changed", (e) => {
+      if (
+        developingHash !== null &&
+        e.payload.hashes.includes(developingHash)
+      ) {
+        developBust += 1; // force the <img> to re-fetch /full-decode
+      }
+    });
+    return () => {
+      void stop.then((un) => un());
+    };
+  });
+
+  function markDeclined(h: string) {
+    const declined = new Set(developDeclined);
+    declined.add(h);
+    developDeclined = declined;
+    if (developingHash === h) developingHash = null;
+  }
+
   function onFullresError() {
     if (fullresHash === null) return;
+    // On the /full-decode rung, a 404 while a develop is pending is
+    // "developing...", not a refusal — hold the rung and wait for
+    // `previews-changed` to bump the cache-bust and retry.
+    if (isFullDecodeRung(fullresSource) && developingHash === fullresHash) {
+      return;
+    }
     const next = nextSource(fullresSource);
     if (next !== null) {
       fullresSource = next; // e.g. a RAW: /original refused, try /embedded
       return;
     }
+    // The /full-decode rung 404'd with no develop pending → the backend
+    // declined this hash (non-RAW / unsupported CFA). Exhaust the ladder.
+    if (isFullDecodeRung(fullresSource)) {
+      markDeclined(fullresHash);
+    }
     const failed = new Set(fullresFailed);
     failed.add(fullresHash);
-    fullresFailed = failed; // ladder exhausted: the preview stands (M1.5)
+    fullresFailed = failed; // ladder exhausted: the preview stands
     fullresHash = null;
   }
 
@@ -286,13 +395,18 @@
       }}
     />
     {#if fullresHash === hash}
-      <!-- the full-res source (original or embedded-native), laid out in
-           the PREVIEW's pixel box under the same transform: invisible
-           until loaded, then swapped in place -->
+      <!-- the full-res source (original, embedded-native, or the on-demand
+           full-decode at native resolution), laid out in the PREVIEW's pixel
+           box under the same transform: invisible until loaded, then swapped
+           in place -->
       <img
         class="fullres"
         class:shown={fullresShown}
-        src={fullresSource === "original" ? originalUrl(hash) : embeddedUrl(hash)}
+        src={fullresSource === "original"
+          ? originalUrl(hash)
+          : fullresSource === "embedded"
+            ? embeddedUrl(hash)
+            : fullDecodeSrc}
         alt=""
         draggable="false"
         decoding="async"
@@ -304,6 +418,11 @@
         onload={onFullresLoad}
         onerror={onFullresError}
       />
+    {/if}
+    {#if developing && !ui.shell.chromeHidden}
+      <!-- on-demand develop in flight (OD-1): the preview stays painted; this
+           is a quiet status line, not a blocking spinner. No em-dash in copy. -->
+      <span class="developing">developing...</span>
     {/if}
   {/if}
   {#if hash !== null && ready && t !== null}
@@ -351,6 +470,20 @@
   .readout {
     position: absolute;
     left: 14px;
+    bottom: 12px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    background: var(--bg-overlay);
+    border: 1px solid var(--chrome);
+    color: var(--text-dim);
+    font-size: 12px;
+    pointer-events: none;
+  }
+  /* On-demand develop status: a quiet line opposite the zoom readout, same
+     transient-chrome family. The preview stays painted underneath. */
+  .developing {
+    position: absolute;
+    right: 14px;
     bottom: 12px;
     padding: 2px 10px;
     border-radius: 12px;

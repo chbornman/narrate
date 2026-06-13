@@ -26,6 +26,13 @@ const QUEUE_BATCH: usize = 64;
 /// jobs indicator updates promptly. Embedding a batch is seconds of CPU
 /// (DFN5B image ~3 s each, spike), so this stays deliberately small.
 const EMBED_BATCH: usize = 8;
+/// The on-demand full-raw-decode drain's bounded batch (OD-1). A develop is
+/// seconds of CPU + a full-sensor buffer in flight, and it is interactive
+/// (a user waiting on a "developing..." spinner), so the batch is small: each
+/// idle turn develops a couple, then the loop re-checks for a freshly-arriving
+/// ingest item or an armed mic before the next. Cancel is checked PER ITEM
+/// inside the drain, so a mic armed mid-batch preempts at once.
+const DECODE_BATCH: usize = 2;
 const IDLE_SLEEP: Duration = Duration::from_millis(500);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
@@ -128,6 +135,20 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     })
                     .unwrap_or_default();
                 let processed = report.processed;
+                // The on-demand full-raw-decode drain (OD-1). It runs when the
+                // regular ingest queue went idle this turn (same L4 politeness
+                // as embeddings), but BEFORE embeddings: a view-time develop is
+                // interactive (a user waiting on a "developing..." spinner),
+                // the highest-priority work in the queue, so it outranks the
+                // lowest-priority embedding backfill. It is a no-op (zero items)
+                // unless a develop was requested AND the mic is not armed; its
+                // completed develops emit `previews-changed` so Look swaps in
+                // the developed artifact the moment it lands.
+                let decoded = if processed == 0 {
+                    drain_raw_decode(&app, &handle)
+                } else {
+                    0
+                };
                 // P7.4 decision 5: the embedding backfill drain. Politeness
                 // rule (L4 ordering) — embeddings are the LOWEST priority, so
                 // they run ONLY when the regular ingest queue went idle this
@@ -170,10 +191,10 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     let _ = handle.emit("ingest-progress", status.clone());
                     last_emit = Some((Instant::now(), status));
                 }
-                // Sleep only when BOTH queues are drained — otherwise an
+                // Sleep only when ALL drains are idle — otherwise a develop or
                 // embedding batch would pace at one batch per IDLE_SLEEP and
                 // never catch up. Any work this turn loops straight back.
-                if processed == 0 && embedded == 0 {
+                if processed == 0 && decoded == 0 && embedded == 0 {
                     std::thread::sleep(IDLE_SLEEP);
                 }
             }
@@ -237,6 +258,48 @@ fn drain_embeddings(app: &App) -> usize {
             // per-item transient path inside the drain already handles model
             // failures without aborting. Never crashes the pump.
             tracing::warn!(error = %e, "embedding drain failed this turn");
+            0
+        }
+    }
+}
+
+/// OD-1: drain a bounded batch of the on-demand full-raw-decode queue. Returns
+/// the number of develop passes processed (0 = nothing requested / paused /
+/// failed). Mirrors `drain_embeddings`' politeness, with the same two-layer
+/// `capture_live` pause (no new batch while armed; `cancel` wired so a mic
+/// armed mid-batch preempts at the next item — a develop is seconds, the §10.3
+/// preempt bound). Completed develops emit `previews-changed` so Look swaps in
+/// the developed full-res artifact the instant it lands.
+fn drain_raw_decode(app: &App, handle: &AppHandle) -> usize {
+    // The mic owns the machine: no develop batch starts while armed.
+    if app.runtime.capture_live.load(Ordering::Relaxed) {
+        return 0;
+    }
+    match app.library.process_raw_decode_queue(&QueueOptions {
+        cancel: Some(app.runtime.capture_live.clone()),
+        max_items: Some(DECODE_BATCH),
+    }) {
+        Ok(report) => {
+            // A developed RAW's display/thumb artifacts changed (source flips
+            // to 'full-decode', needs_full_decode clears) AND its native
+            // full-decode artifact is now servable — `previews-changed` tells
+            // the grid/Look to refresh, exactly like the preview pass.
+            if !report.completed_previews.is_empty() {
+                let _ = handle.emit(
+                    "previews-changed",
+                    crate::dto::PreviewsChanged {
+                        hashes: report
+                            .completed_previews
+                            .iter()
+                            .map(|h| h.as_str().to_owned())
+                            .collect(),
+                    },
+                );
+            }
+            report.processed
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "full-raw-decode drain failed this turn");
             0
         }
     }

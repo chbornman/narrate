@@ -78,10 +78,18 @@ impl PassState {
 }
 
 /// Priorities (§10.3, lower = sooner).
-pub const PRIORITY_WATCHER: i64 = 0; // P0: live-watcher discoveries
-pub const PRIORITY_SCAN: i64 = 1; // P1: reconciliation / initial scans
-pub const PRIORITY_BACKFILL: i64 = 2; // P2: full-raw-decode, regeneration
-pub const PRIORITY_GPU: i64 = 3; // P3: model backfills
+///
+/// `PRIORITY_INTERACTIVE` is the NEW top priority (June 2026, on-demand
+/// full-raw-decode): a user staring at a "developing..." spinner in Look is
+/// the most urgent work in the queue, ahead of even the live folder-watcher.
+/// The view-time develop trigger enqueues at this priority; nothing else
+/// does. (Renumbered so it sorts first while every existing constant keeps
+/// its relative order.)
+pub const PRIORITY_INTERACTIVE: i64 = 0; // P-1: view-time on-demand develop
+pub const PRIORITY_WATCHER: i64 = 1; // P0: live-watcher discoveries
+pub const PRIORITY_SCAN: i64 = 2; // P1: reconciliation / initial scans
+pub const PRIORITY_BACKFILL: i64 = 3; // P2: regeneration (§9.8)
+pub const PRIORITY_GPU: i64 = 4; // P3: model backfills
 
 /// Retry policy (§10.5).
 pub const TRANSIENT_BACKOFF_MS: [i64; 2] = [60_000, 600_000]; // 1 min, 10 min

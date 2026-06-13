@@ -48,3 +48,11 @@ export const originalUrl = (hash: string): string =>
  * answer 404 and Look falls back per logic/fullres.ts. */
 export const embeddedUrl = (hash: string): string =>
   `photoproof://localhost/embedded/${hash}`;
+
+/** The on-demand full-decode artifact at NATIVE sensor resolution (OD-1):
+ * the neutral RAW develop Look's 100%-zoom rung serves, the deepest rung.
+ * 404s while the develop is in flight ("developing..."); the frontend
+ * enqueues the develop via the requestFullDecode command and retries until
+ * the pump's drain writes it. */
+export const fullDecodeUrl = (hash: string): string =>
+  `photoproof://localhost/full-decode/${hash}`;

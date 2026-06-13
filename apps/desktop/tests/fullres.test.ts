@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 import {
   FIRST_SOURCE,
+  isFullDecodeRung,
   loadProvesPixels,
   needsOriginal,
   nextSource,
@@ -64,7 +65,7 @@ describe("needsOriginal — the swap-threshold predicate", () => {
   });
 });
 
-describe("the source ladder — original, then embedded-native, then the preview stands", () => {
+describe("the source ladder — original, embedded-native, full-decode, then the preview stands", () => {
   it("a fresh request starts at the original", () => {
     expect(FIRST_SOURCE).toBe("original");
   });
@@ -73,8 +74,18 @@ describe("the source ladder — original, then embedded-native, then the preview
     expect(nextSource("original")).toBe("embedded");
   });
 
-  it("a refused embedded exhausts the ladder (preview stands; decoded 1:1 is M1.5)", () => {
-    expect(nextSource("embedded")).toBeNull();
+  it("a refused embedded advances to the on-demand full-decode rung (OD-1)", () => {
+    expect(nextSource("embedded")).toBe("full-decode");
+  });
+
+  it("a refused full-decode exhausts the ladder (preview stands)", () => {
+    expect(nextSource("full-decode")).toBeNull();
+  });
+
+  it("isFullDecodeRung marks only the on-demand develop rung", () => {
+    expect(isFullDecodeRung("full-decode")).toBe(true);
+    expect(isFullDecodeRung("original")).toBe(false);
+    expect(isFullDecodeRung("embedded")).toBe(false);
   });
 });
 
