@@ -63,7 +63,7 @@ work lives here.
   into `tracing` while there so one sink captures everything. Surface
   the log path in the debug panel / settings for "reveal in Finder."
   (Founder, June 12 2026.)
-- [ ] **Full RAW decode (1:1 preview) — PLAN WRITTEN `docs/PLAN-RAW-DECODE.md`**
+- [x] (LANDED `6d7c4fb`, merge `0722efe`; details in LANDED.md) **Full RAW decode (1:1 preview) — PLAN WRITTEN `docs/PLAN-RAW-DECODE.md`**
   (`ffd118a`): the founder asked to build it (not just hide the count).
   Key finding — NO new dependency: rawler 0.7.2 already exposes WB
   coeffs, cam→XYZ matrix, CFA, levels; we write the develop arithmetic
@@ -91,7 +91,7 @@ work lives here.
   surfacing pending counts for passes that have no worker, or label
   them "available in a future version," not "left to decode." (Same
   root cause as the DNG item below.) (Founder, June 12 2026.)
-- [ ] **DNG (and other RAW) never loads a 1:1 preview** (founder:
+- [x] (LANDED `6d7c4fb`; same root cause, resolved by the RAW decode pass above) **DNG (and other RAW) never loads a 1:1 preview** (founder:
   "Embedded preview — full decode pending… a dng file never loads
   1-to-1 preview"). SAME ROOT CAUSE as the stuck-RAW item: the 1:1
   view needs a full demosaic, which IS the `full-raw-decode` M1.5 pass
@@ -134,7 +134,7 @@ work lives here.
   editor-written embedded full-res preview when present. SEPARATE from the
   develop pass — must not block it. Needs a design round. (Founder, June
   12 2026.)
-- [ ] **Grid right-click submenus are janky** (founder: "submenus don't
+- [x] (LANDED `91bfa15`, merge `e8faf55`) **Grid right-click submenus are janky** (founder: "submenus don't
   stick out the side, don't always open/close smoothly"). The whole
   context menu is `ContextMenuHost.svelte` (a 1 KB stub) — submenus
   (add-to-collection, surround, etc.) don't flyout to the side and
@@ -144,7 +144,7 @@ work lives here.
   so diagonal travel into the submenu doesn't dismiss it, keyboard
   arrows. Likely wants a small reusable Menu primitive rather than
   more ad-hoc positioning. (Founder, June 12 2026.)
-- [ ] **T cell-info should grow the cell, not overlay the image; info at
+- [x] (LANDED `d541854`, merge `10796c8`) **T cell-info should grow the cell, not overlay the image; info at
   the TOP** (founder). Today the cell-info row (`cellinfo.ts` cycled by
   T) is `position: absolute` over the bottom of the thumbnail
   (`Thumb.svelte` ~234), covering the image. Founder wants: when info

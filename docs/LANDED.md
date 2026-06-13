@@ -6,6 +6,65 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 12-13 2026 — RAW decode + UI polish wave (three parallel-agent builds)
+
+- [x] **Full RAW decode (1:1 preview)** — landed `6d7c4fb` (merge `0722efe`):
+  Phase 1 on-demand neutral develop. New `raw_develop` module in
+  `photoproof-core`: black/scale (rawler `apply_scaling`) → white-balance
+  as-shot → bilinear Bayer (RGGB-family) demosaic → camera→sRGB matrix → sRGB
+  gamma → orient LAST (geometry-exact, strokes-land-where-drawn, §9.4). The
+  matrix is composed dcraw-style — `cam2rgb = pseudo_inverse(normalize(
+  xyz_to_cam[RGB] · SRGB_TO_XYZ_D65))` — mirroring rawler's OWN neutral path,
+  because `cam_to_xyz_normalized()` normalizes to camera-neutral=XYZ(1,1,1)
+  (not D65) and tints grays (verified). CFA-vs-linear-DNG guard (a linear DNG
+  is cpp=3, NOT demosaiced); X-Trans / RGBE / CYGM / monochrome skip clean
+  (`UnsupportedCfa`) so the embedded preview always stands; decode wrapped
+  panic-safe. `process_raw_decode_queue` drains on a NEW decode pool
+  (`max(2, physical_cores/2)`, separate from the M1 CPU pool), `capture_live`-
+  cancellable per item (yields to an armed mic). ON-DEMAND: the eager ingest
+  enqueue is REMOVED (the 154 permanently-pending rows dissolve); a view-time
+  trigger (`request_full_decode`) enqueues one row at a new `PRIORITY_INTERACTIVE`
+  (above the watcher) when Look opens an undeveloped RAW, showing "developing...".
+  OD-1: a full-SENSOR-resolution artifact (WebP q90, JPEG fallback past
+  libwebp's 16383px cap), served by a new `/full-decode/<hash>` deep-zoom route,
+  in addition to the 2560 display+thumb tiers (`source='full-decode'`). 7
+  synthetic unit tests (known-color RGGB phase, gray-neutrality, orientation
+  aspect, linear-DNG-not-demosaiced, X-Trans/RGBE unsupported, float-data) plus
+  an `#[ignore]` founder-machine real-RAW stub. The plan was CORRECTED first:
+  rawler 0.7.2 `cropped_cfa()` and `linearize()` are `todo!()` PANICS (the same
+  panic that stalled imagepipe's migration) — routed around via `camera.cfa` +
+  `CFA::shift` and `apply_scaling`; `pixels_u16()` panics on float DNGs — uses
+  `data.as_f32()`. Founder decisions ratified in `docs/PLAN-RAW-DECODE.md`.
+  REVIEW NOTES (open follow-ups): the full-res artifact is disk-only (no
+  `preview_artifacts` schema bump — existence on disk is the cache signal); the
+  CFA-shift-with-nonzero-crop phase is exercised only by the founder-machine
+  real-RAW test, not the synthetic ones; stroke-promotion logic removed (stroked
+  RAWs now develop on view like any other). Resolves the "Embedded preview —
+  full decode pending" / "154 stuck RAWs" / "DNG never loads 1:1" founder
+  reports (same root cause). (Founder, June 12 2026.)
+- [x] **Grid right-click submenus are janky** — landed `91bfa15` (merge
+  `e8faf55`): cascading side-flyout submenu panels replacing the in-place
+  one-level + breadcrumb swap. New pure `flyout.ts` (edge-aware flip: prefer
+  right, flip left only when right overflows and left fits, clamp on-screen,
+  top-align with bottom-clamp) and `hoverintent.ts` (open-delay 110ms /
+  close-delay 280ms, the simple delay model not a geometric safe-triangle).
+  `Menu.svelte` reworked to render the open chain (= `nav.path`) as fixed,
+  measured, stacked panels that stay DOM descendants of the menu root (so
+  `Popover`'s outside-click is untouched). The `menu.ts` keyboard controller and
+  the `menus.ts` data model are UNCHANGED — every call site is invisible to the
+  migration. 11 new pure-module tests; the 16 existing menu tests stayed green.
+  (Founder, June 12 2026.)
+- [x] **T cell-info grows the cell, not overlays the image; info at the top** —
+  landed `d541854` (merge `10796c8`): because cell-info is global (one level
+  for all cells), every row reserves the same fixed info strip at the TOP and
+  the cell extends downward, so the image stays fully visible and rows stay
+  UNIFORM — the virtualizer needed no algorithm change beyond a larger row
+  stride (`rowH = cell + info + gap`). New pure `infoStripHeight(level)`
+  (none=0, minimal=18, annotated=32 px). `marquee.ts` hit-test offset by the
+  strip height so selection still targets the image box, not the strip (the one
+  subtle spot). Badges re-anchored to the image box. All retry/recycle/
+  placeholder logic untouched. (Founder, June 12 2026.)
+
 ## June 12 2026 — the evening waves (two parallel-agent builds + inline fixes)
 
 - [x] **B summons the overlay** — landed `c13f09b`: the key was dead
