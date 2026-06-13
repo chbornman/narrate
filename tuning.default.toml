@@ -54,7 +54,14 @@ attraction = 0.02     # pull stiffness toward a topic anchor (× blended affinit
 repulsion = 800.0     # mutual image-image repulsion (spreads clusters). Range [0, 100000].
 damping = 0.85        # per-step velocity damping (the sim's cooling). Range [0, 1].
 centering = 0.01      # pull toward the origin (un-topic'd images drift to center). Range [0, 100000].
-ring_radius = 320.0   # topic-anchor ring radius in sim-space px. Range [0, 100000].
+ring_radius = 320.0   # topic-anchor ring radius (the INITIAL anchor layout). Range [0, 100000].
+# Force-placed anchors (founder dogfood): the ring is only the start. Each anchor
+# is pulled toward its images' affinity-weighted centroid (so related topics drift
+# together) with mutual anchor repulsion (so they don't collapse). Draggable +
+# pinnable in the UI; double-click a pinned anchor to release it.
+anchor_attraction = 0.08    # anchor pull toward its images' centroid. Range [0, 100000].
+anchor_repulsion = 60000.0  # mutual anchor-anchor repulsion (keeps topics spread). Range [0, 100000].
+anchor_damping = 0.8        # per-step damping for the anchors' own motion. Range [0, 1].
 # v2 cluster auto-labels (cluster_topics k-means): k = clamp(round(sqrt(n/2)), k_min, k_max).
 cluster_k_min = 2     # minimum cluster count. Range [1, 64].
 cluster_k_max = 12    # maximum cluster count (caps the suggestion rail width). Range [1, 64].

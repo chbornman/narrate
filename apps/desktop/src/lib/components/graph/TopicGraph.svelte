@@ -22,14 +22,19 @@
   import * as ipc from "../../ipc/commands";
   import {
     aggregateToSuperNodes,
+    coolHeat,
     expandSuperNode,
+    REHEAT_START,
     ringAnchors,
+    screenToSim,
     seedNodes,
     shouldUseLod,
+    simToScreen,
     step,
     type ForceConfig,
     type ImageNode,
     type TopicAnchor,
+    type ViewTransform,
   } from "../../logic/forcegraph";
   import {
     engagedTopics,
@@ -111,6 +116,10 @@
   let zoom = 1;
   let panX = 0;
   let panY = 0;
+  // Reheat energy (founder dogfood): a topic-set / alpha change boosts this
+  // above 1 so the layout SETTLES fast; the rAF loop cools it back toward 1 each
+  // frame. forceConfig() feeds it into the sim as the attraction multiplier.
+  let heat = 1;
 
   // -- thumbnail cache --------------------------------------------------------
   // Each image node draws as its TINY preview thumbnail instead of a plain dot
@@ -170,6 +179,14 @@
       damping: t?.damping ?? 0.85,
       centering: t?.centering ?? 0.01,
       ringRadius: t?.ring_radius ?? 320,
+      // Force-placed anchors (founder dogfood): the anchors gain their own pull
+      // toward their images' centroid + mutual repulsion, both tunable knobs.
+      anchorAttraction: t?.anchor_attraction ?? 0.08,
+      anchorRepulsion: t?.anchor_repulsion ?? 60000,
+      anchorDamping: t?.anchor_damping ?? 0.8,
+      // The live reheat multiplier on the attraction terms; cooled each frame in
+      // the rAF loop back toward the 1.0 steady state.
+      heat,
     };
   }
 
@@ -226,7 +243,17 @@
     // The overlay reads per-image intensity; a fresh affinity set means a fresh
     // in-scope hash set, so re-fetch + re-rank against it.
     void refreshOverlay();
+    // A fresh topic-set / alpha / scope change REHEATS the sim so the new layout
+    // snaps into place in about a second instead of oozing in (founder dogfood).
+    reheat();
     restartLoop();
+  }
+
+  /** Boost the sim energy so the layout SETTLES fast then cools (founder
+   * dogfood): a topic added/removed, the blend slider moved, or a fresh scope
+   * re-seeds the heat high. The rAF loop cools it back toward 1.0 each frame. */
+  function reheat() {
+    heat = REHEAT_START;
   }
 
   // -- attention overlay: intensity fetch + synthesis -------------------------
@@ -345,11 +372,15 @@
     let cool = 0;
     const tick = () => {
       const energy = step(nodes, anchors, forceConfig());
+      // Cool the reheat one frame toward the 1.0 steady state (pure helper, so
+      // the curve is unit-testable). While heat is still elevated we keep
+      // ticking even if the energy momentarily dips, so a reheat fully plays out.
+      heat = coolHeat(heat);
       draw();
-      // Stop ticking once the layout is at rest (saves battery); a fresh
-      // recompute or a drag restarts it. A few settle frames guard against an
-      // early-zero on the opening frame.
-      if (energy < 1e-2 && ++cool > 30) {
+      // Stop ticking once the layout is at rest AND the reheat has fully cooled
+      // (saves battery); a fresh recompute or a drag restarts it. A few settle
+      // frames guard against an early-zero on the opening frame.
+      if (energy < 1e-2 && heat <= 1.0001 && ++cool > 30) {
         cancelAnimationFrame(raf);
         return;
       }
@@ -359,11 +390,14 @@
   }
 
   // -- rendering --------------------------------------------------------------
+  // The view transform (sim-space ↔ screen) is the pure forcegraph helper, so
+  // the pan/zoom math has one unit-tested source of truth.
+  const view = (): ViewTransform => ({ width, height, zoom, panX, panY });
   function toScreen(x: number, y: number): [number, number] {
-    return [width / 2 + panX + x * zoom, height / 2 + panY + y * zoom];
+    return simToScreen(x, y, view());
   }
   function fromScreen(sx: number, sy: number): [number, number] {
-    return [(sx - width / 2 - panX) / zoom, (sy - height / 2 - panY) / zoom];
+    return screenToSim(sx, sy, view());
   }
 
   /** Read the canvas colors from the theme TOKENS (getComputedStyle), so the
@@ -609,6 +643,14 @@
       ctx.fill();
       ctx.stroke();
       if (overlayOn && score > 0) ctx.restore();
+      // A PINNED anchor (user-placed) reads as distinct: a small filled inner
+      // dot, so the founder can see which topics they have fixed in place.
+      if (a.pinned === true) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = c.text;
+        ctx.fill();
+      }
       ctx.fillStyle = c.text;
       ctx.fillText(topics[a.topic] ?? "", sx, sy - 16);
     }
@@ -629,7 +671,18 @@
   );
 
   // -- pointer interaction ----------------------------------------------------
+  // A pointer-drag is one of THREE gestures, decided at pointer-down by the hit
+  // test (founder dogfood): on a NODE it drags that node; on a topic ANCHOR it
+  // drags (and on release PINS) that anchor; on EMPTY canvas it PANS the view.
   let dragging: ImageNode | null = null;
+  let draggingAnchor: TopicAnchor | null = null;
+  /** Background pan in progress: the screen point and the pan offset at the
+   * moment of pointer-down, so move() can apply the raw delta to panX/panY. */
+  let panning: { startX: number; startY: number; panX0: number; panY0: number } | null = null;
+  /** Whether the current drag actually MOVED (past a small threshold). A
+   * press-release that did not move is a CLICK (scope-to-topic / open Look);
+   * a move is a drag (pin the anchor / reposition the node). */
+  let moved = false;
 
   /** A node's drawn half-side in SCREEN px (its hit radius): the same base-size
    * mapping the draw loop uses, times the overlay size scale, times zoom — so
@@ -670,26 +723,36 @@
     return null;
   }
 
-  function localXY(e: PointerEvent): [number, number] {
+  function localXY(e: MouseEvent): [number, number] {
     const r = canvasEl!.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
   }
 
   function onPointerDown(e: PointerEvent) {
     const [sx, sy] = localXY(e);
+    moved = false;
+    // Anchors hit-test first (drawn on top). A press on an anchor begins an
+    // anchor drag; a release without movement still scopes to that topic.
     const anchor = pickAnchor(sx, sy);
     if (anchor) {
-      // Click a topic anchor -> scope the grid to that topic.
-      void ui.scopeToTopic(topics[anchor.topic]);
+      draggingAnchor = anchor;
+      anchor.fixed = true; // hold it under the pointer during the drag
+      canvasEl?.setPointerCapture(e.pointerId);
+      restartLoop();
       return;
     }
+    // Then image nodes: a press on a node drags that node.
     const node = pickNode(sx, sy);
     if (node) {
       dragging = node;
       node.fixed = true;
       canvasEl?.setPointerCapture(e.pointerId);
       restartLoop();
+      return;
     }
+    // Empty canvas: begin a background pan (the gesture the founder was missing).
+    panning = { startX: sx, startY: sy, panX0: panX, panY0: panY };
+    canvasEl?.setPointerCapture(e.pointerId);
   }
 
   /** Expand a LOD super-node into its member image nodes (DESIGN v2). The
@@ -701,15 +764,62 @@
     nodeCount = nodes.length;
     restartLoop();
   }
+  /** A small movement threshold (screen px) so a tiny jitter during a click is
+   * still read as a click, not a drag. */
+  const MOVE_THRESHOLD = 4;
+
   function onPointerMove(e: PointerEvent) {
-    if (!dragging) return;
     const [sx, sy] = localXY(e);
+    if (panning) {
+      // Pan the view by the raw screen delta (pan is in screen px, so no zoom
+      // division). Past the threshold this counts as a real gesture.
+      const dx = sx - panning.startX;
+      const dy = sy - panning.startY;
+      if (Math.abs(dx) > MOVE_THRESHOLD || Math.abs(dy) > MOVE_THRESHOLD) moved = true;
+      panX = panning.panX0 + dx;
+      panY = panning.panY0 + dy;
+      draw();
+      return;
+    }
     const [x, y] = fromScreen(sx, sy);
-    dragging.x = x;
-    dragging.y = y;
+    if (draggingAnchor) {
+      draggingAnchor.x = x;
+      draggingAnchor.y = y;
+      moved = true;
+      return;
+    }
+    if (dragging) {
+      dragging.x = x;
+      dragging.y = y;
+      moved = true;
+    }
   }
   let downAt = 0;
   function onPointerUp(e: PointerEvent) {
+    if (panning) {
+      // End the pan; nothing else to do (the view already moved live).
+      panning = null;
+      canvasEl?.releasePointerCapture(e.pointerId);
+      return;
+    }
+    if (draggingAnchor) {
+      const anchor = draggingAnchor;
+      anchor.fixed = false;
+      draggingAnchor = null;
+      canvasEl?.releasePointerCapture(e.pointerId);
+      const quick = performance.now() - downAt < 250;
+      if (!moved && quick) {
+        // A quick press-release with no movement on an anchor scopes the grid to
+        // that topic (the preserved click behavior).
+        void ui.scopeToTopic(topics[anchor.topic]);
+      } else {
+        // A dragged anchor stays where the user put it: PIN it so the anchor
+        // forces leave it alone until the user unpins (double-click).
+        anchor.pinned = true;
+        restartLoop();
+      }
+      return;
+    }
     if (!dragging) return;
     const node = dragging;
     node.fixed = false;
@@ -718,12 +828,25 @@
     // A quick press-release with little movement is a CLICK. On a LOD super-node
     // a click EXPANDS it into its members; on a single image it opens Look. A
     // drag just releases the node back into the physics.
-    if (performance.now() - downAt < 250) {
+    if (!moved && performance.now() - downAt < 250) {
       if (node.members !== undefined) {
         expandSuper(node);
       } else {
         void ui.openFromGraph(node.hash);
       }
+    }
+  }
+
+  /** Double-click a PINNED anchor to release it back into the physics (founder
+   * dogfood: "double-click to unpin"). A reheat lets it find its new home
+   * quickly. Double-click elsewhere is a no-op. */
+  function onDblClick(e: MouseEvent) {
+    const [sx, sy] = localXY(e);
+    const anchor = pickAnchor(sx, sy);
+    if (anchor && anchor.pinned === true) {
+      anchor.pinned = false;
+      reheat();
+      restartLoop();
     }
   }
 
@@ -736,7 +859,17 @@
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    zoom = Math.max(0.2, Math.min(5, zoom * factor));
+    const zoom0 = zoom;
+    const zoom1 = Math.max(0.2, Math.min(5, zoom0 * factor));
+    // Zoom toward the CURSOR, not the canvas center (founder dogfood): keep the
+    // sim point currently under the pointer fixed on screen by adjusting the pan
+    // for the zoom ratio. screen = center + pan + sim*zoom, so the offset of the
+    // cursor from center scales by zoom1/zoom0 around the cursor.
+    const [cx, cy] = localXY(e);
+    const ratio = zoom1 / zoom0;
+    panX = cx - width / 2 - (cx - width / 2 - panX) * ratio;
+    panY = cy - height / 2 - (cy - height / 2 - panY) * ratio;
+    zoom = zoom1;
     if (lodActive) {
       const anyExpanded = nodes.some((n) => n.members === undefined);
       const anyAggregated = nodes.some((n) => n.members !== undefined);
@@ -1027,6 +1160,8 @@
       }}
       onpointermove={onPointerMove}
       onpointerup={onPointerUp}
+      onpointercancel={onPointerUp}
+      ondblclick={onDblClick}
       onwheel={onWheel}
     ></canvas>
   </div>
