@@ -8,9 +8,21 @@
 //! so the shipping no-models posture is unchanged by construction.
 //!
 //! B69 (founder, binding): `image_clip` (S4) votes on EVERY semantic query
-//! — own-words identity is protected by WEIGHT (0.5 vs 1.0), not by the
-//! §5.2 activation gate, which B69 demotes to a latency lever this packet
-//! does not need. Annotating an image only ever ADDS ways to find it.
+//! — own-words identity is protected by the activation posture, not by a
+//! discount: §5.2's gate is demoted to a latency lever this packet does not
+//! need. Annotating an image only ever ADDS ways to find it.
+//!
+//! §5.3 fusion amendment (founder dogfood, June 12 2026): the spec's pure
+//! weighted RRF is rank-flat — it scores by RANK, not similarity — so a
+//! perfect CLIP visual match and a tangential note hit at the same rank
+//! scored identically and ANY note buried even a perfect visual match. Two
+//! changes fix it WITHOUT abandoning the RRF skeleton: (1) S4 raised to a
+//! note's full weight (1.0, not 0.5 — visual evidence is not half a note);
+//! (2) each DENSE (vector/cosine) signal blends its normalized similarity
+//! into its per-image contribution (`SIM_BLEND_BETA`), so a strong
+//! dense-signal match outscores a near-miss at the same rank. Sparse (bm25)
+//! signals stay pure RRF. RRF stays the spec skeleton; the §12 golden-set
+//! eval remains the gate that owns retuning the weights and β.
 //!
 //! Signal failure posture: a vector signal that errors (store IO, embedder
 //! down) degrades to "absent" with a logged warning — search never errors
@@ -39,6 +51,39 @@ use super::{
 
 /// §5.3 RRF constant.
 pub const RRF_K: f64 = 60.0;
+
+/// §5.3 amendment (founder dogfood, June 12 2026) — the dense-signal
+/// similarity tilt `β` in the RRF blend
+/// `contribution = w·(1/(k+rank))·(1 + β·(2·norm_sim − 1))`.
+///
+/// WHY this exists: pure RRF scores by RANK, not similarity, so a PERFECT
+/// cosine match and a tangential near-miss at the SAME rank score
+/// identically. In the founder's June 12 dogfood that rank-flatness meant a
+/// weak note-keyword hit at rank #1 (1.0/61 ≈ 0.016393) always buried a
+/// perfect CLIP visual match at rank #1 (then 0.5/61 ≈ 0.008197, and even at
+/// parity a plain multiplicative blend can only TIE it) — "any saved note
+/// outranks even a perfect visual match." We tilt each DENSE (vector/cosine)
+/// signal's per-image contribution around its RRF baseline by the
+/// similarity: `norm_sim` is centered at 0.5 (`2·norm_sim − 1` ∈ [−1, 1]), so
+/// a high-cosine hit lands ABOVE its rank baseline and a near-miss BELOW it.
+/// That is the bit that matters: a strong dense match can now BEAT — not just
+/// tie — a same-rank sparse keyword hit, which is exactly what the dogfood
+/// demanded.
+///
+/// WHY this shape (multiplicative tilt, not additive): scaling the RRF term
+/// keeps the contribution proportional to the rank discount, so the blend
+/// never lets a deep-rank dense hit leapfrog a top-rank one on similarity
+/// alone — RRF's rank skeleton (the spec's §5.3 model) still governs the
+/// gross order; similarity only breaks the rank-flat ties RRF leaves behind.
+///
+/// WHY β = 0.5: the multiplier spans [1−β, 1+β] = [0.5, 1.5] across the
+/// cosine range [0, 1]. A perfect match earns up to +50% over its rank
+/// baseline (enough to clear an equal-rank sparse hit); a near-zero-cosine
+/// hit is halved. Generous enough to un-bury strong matches, bounded enough
+/// not to dominate. It is a DEFAULT, not a finding — it lives beside the
+/// data-shaped `FusionWeights` because the §12 golden-set eval owns retuning
+/// it, never a magic constant in the loop.
+pub const SIM_BLEND_BETA: f64 = 0.5;
 
 /// §5.2 candidate depth for the vector signals.
 const VECTOR_K: usize = 200;
@@ -72,7 +117,18 @@ impl Default for FusionWeights {
             s1: 1.0,
             s2: 1.0,
             s3_each: 0.5,
-            s4: 0.5,
+            // S4 raised 0.5 → 1.0 (founder dogfood, June 12 2026). Visual
+            // evidence is not half a note: a perfect CLIP match must vote at
+            // a note's full weight, not at half. Combined with the §5.3
+            // similarity blend (`SIM_BLEND_BETA`) this is the fix for the
+            // "any note buries any visual match" rank-flatness the dogfood
+            // surfaced. S3_each stays 0.5 deliberately — summaries are
+            // DERIVED prose (the model's words, not the photographer's) and
+            // the §5.3 invariant that they never outvote actual words holds;
+            // the similarity blend already lifts a strong S3 vector hit
+            // without granting derived prose note-level weight. The §12
+            // golden-set eval owns retuning all of these (they are data).
+            s4: 1.0,
         }
     }
 }
@@ -320,7 +376,27 @@ type RankedImages = Vec<(String, f32)>;
 struct RankedList {
     signal: SignalId,
     weight: f64,
+    /// §5.3 amendment: dense (vector/cosine) signals blend their normalized
+    /// similarity into each contribution; sparse signals (bm25) do NOT. The
+    /// raw `f32` in `images` is a cosine in ~[-1, 1] for dense signals but a
+    /// bm25 score (negative, scale-free, NOT comparable across queries) for
+    /// FTS — only the former is a meaningful similarity to blend. Keeping
+    /// keyword signals pure RRF is deliberate: their rank already IS the
+    /// signal's verdict.
+    dense: bool,
     images: RankedImages,
+}
+
+/// §5.3 amendment: normalize a vector signal's raw cosine (~[-1, 1]) to a
+/// [0, 1] similarity for the RRF blend. An ABSOLUTE map (`(cos+1)/2`), not a
+/// per-list min-max: min-max would make a single-hit list always score 1.0
+/// and would let the same image's similarity shift with the rest of the
+/// candidate set — both non-deterministic and indefensible. `(cos+1)/2` is
+/// stable, query-independent, and clamps the int8-quantization slop at the
+/// ends. Negative cosines (orthogonal-or-worse) floor at 0, never below.
+fn norm_cosine(raw: f32) -> f64 {
+    let s = (f64::from(raw) + 1.0) / 2.0;
+    s.clamp(0.0, 1.0)
 }
 
 /// Resolve S1 chunk hits to a per-image ranked list (max per signal — best
@@ -670,26 +746,31 @@ where
         RankedList {
             signal: SignalId::S1AnnotationChunk,
             weight: w.s1,
+            dense: true, // annotation_chunk vectors — cosine
             images: s1_ranked,
         },
         RankedList {
             signal: SignalId::S2EventFts,
             weight: w.s2,
+            dense: false, // bm25 — pure RRF
             images: s2_ranked,
         },
         RankedList {
             signal: SignalId::S3Summaries,
             weight: w.s3_each,
+            dense: false, // summaries_fts bm25 — pure RRF
             images: s3_fts,
         },
         RankedList {
             signal: SignalId::S3Summaries,
             weight: w.s3_each,
+            dense: true, // image_summary vectors — cosine
             images: s3_vec,
         },
         RankedList {
             signal: SignalId::S4ImageClip,
             weight: w.s4,
+            dense: true, // image_clip vectors — cosine
             images: s4_ranked,
         },
     ];
@@ -701,7 +782,24 @@ where
     for list in &lists {
         for (idx, (hash, score)) in list.images.iter().enumerate() {
             let rank = idx as f64 + 1.0;
-            *fused.entry(hash.clone()).or_insert(0.0) += list.weight / (RRF_K + rank);
+            let rrf = list.weight / (RRF_K + rank);
+            // §5.3 amendment (founder dogfood): dense signals blend their
+            // normalized cosine so a high-similarity hit outscores a
+            // near-miss at the SAME rank; sparse (bm25) signals stay pure
+            // RRF — their bm25 is not a comparable similarity, and their
+            // rank already IS the verdict. See `SIM_BLEND_BETA`.
+            let contribution = if list.dense {
+                // Tilt around the RRF baseline by the centered similarity:
+                // (2·norm_sim − 1) ∈ [−1, 1], so blend ∈ [1−β, 1+β]. A strong
+                // cosine lands above baseline (can BEAT a same-rank sparse
+                // hit), a near-miss below it. See `SIM_BLEND_BETA`.
+                let centered = 2.0 * norm_cosine(*score) - 1.0;
+                let blend = 1.0 + SIM_BLEND_BETA * centered;
+                rrf * blend
+            } else {
+                rrf
+            };
+            *fused.entry(hash.clone()).or_insert(0.0) += contribution;
             signals.entry(hash.clone()).or_default().push((
                 list.signal,
                 Some(idx as u32 + 1),

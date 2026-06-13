@@ -504,17 +504,51 @@ promise is "your best matching words come back": a max, not an integral.
 **Fusion formula:**
 
 ```
-score(img) = Σ over signals s where img appears:   w_s / (k + rank_s(img))
-k = 60
-w: S1 annotation_chunk vectors          = 1.0
-   S2 event_fts (FTS5)                  = 1.0
-   S3 summaries  (both sub-lists)       = 0.5
-   S4 image_clip                        = 0.5  (when active, §5.2)
+score(img) = Σ over signals s where img appears:   contribution_s(img)
+
+dense (vector/cosine) signal:  w_s · (1/(k+rank)) · (1 + β·(2·norm_cosine − 1))
+sparse (bm25) signal:          w_s · (1/(k+rank))                     [pure RRF]
+
+k = 60,  β = 0.5,  norm_cosine = clamp((cos+1)/2, 0, 1)
+w: S1 annotation_chunk vectors  (dense)   = 1.0
+   S2 event_fts (FTS5)          (sparse)  = 1.0
+   S3 summaries — summaries_fts  (sparse) = 0.5
+   S3 summaries — image_summary  (dense)  = 0.5
+   S4 image_clip                (dense)   = 1.0  (when active, §5.2)
 ```
 
 `rank_s` is 1-based within signal s. S3's two sub-lists (FTS and vector over
 summaries) each contribute at w=0.5 — summaries are derived prose and must
 never outvote the photographer's actual words.
+
+**§5.3 amendment — similarity-aware RRF (founder dogfood, June 12 2026; B75).**
+Pure weighted RRF scores by RANK, not similarity: a *perfect* CLIP visual
+match and a tangential near-miss at the *same* rank score identically. The
+first real-library dogfood proved the failure this risked — "any saved note
+outranks even a perfect visual match" — because a note-keyword hit at rank #1
+(1.0/61) buried a perfect visual match at rank #1 (then 0.5/61). RRF remains
+the skeleton; two amendments make it discriminate:
+
+1. **S4 raised 0.5 → 1.0.** Visual evidence is not half a note. A perfect
+   CLIP match votes at a note's full weight.
+2. **Dense signals are similarity-aware.** Each vector signal (S1, the S3
+   `image_summary` sub-list, S4) *tilts* its per-image RRF contribution
+   around the rank baseline by its centered cosine — `(2·norm_cosine − 1) ∈
+   [−1, 1]`, so the multiplier spans `[1−β, 1+β] = [0.5, 1.5]`. A high-cosine
+   hit lands *above* its rank baseline (so it can BEAT, not merely tie, a
+   same-rank sparse hit); a near-miss lands below. **Sparse (bm25) signals —
+   S2 and the S3 `summaries_fts` sub-list — stay pure RRF**: bm25 is not a
+   comparable similarity, and its rank already is the verdict. The
+   multiplicative shape keeps similarity from letting a deep-rank dense hit
+   leapfrog a top-rank one on score alone — RRF's rank order still governs
+   the gross ranking; similarity only breaks the rank-flat ties RRF leaves.
+
+S3_each stays 0.5: summaries are DERIVED prose (not the photographer's
+words); the blend lifts a strong S3 vector hit without granting derived prose
+note-level weight. The weights and β are **defaults expressed as data**
+(`FusionWeights` + `SIM_BLEND_BETA` in code), not findings — the §12
+golden-set eval is still the named gate that owns retuning them (and remains
+the gate for the convex-combination upgrade RRF is a stepping stone toward).
 
 **Tie-breaking:** equal fused scores order by `image_journal_stats.last_ts`
 (EVENTS §5.3 — the materialized recency of the image's last live annotation
@@ -645,23 +679,32 @@ WHERE on every join). S4 inactive (`visual=false`, S1∪S2 ≥ 10). Suppose:
   containing "quieter"/"series"): img **B** rank 1, img **A** rank 2.
 - S3 (summaries): img **A** rank 1, img **C** rank 2.
 
-**Stage 3 — fusion** (k=60, weights 1.0 / 1.0 / 0.5):
+**Stage 3 — fusion** (k=60; §5.3 amendment — dense signals similarity-aware,
+β=0.5). Pinned cosines: S1 A/B/C ≈ 0.9/0.8/0.7; S3-vec A/C ≈ 0.95/0.5. The
+dense tilt is `(1 + β·(2·norm_cosine − 1))`, `norm_cosine = (cos+1)/2`; S2
+(bm25) stays pure RRF:
 
 ```
-A = 1.0/(60+1) + 1.0/(60+2) + 0.7/(60+1)   = 0.016393 + 0.016129 + 0.011475 = 0.043997
-B = 1.0/(60+2) + 1.0/(60+1)                = 0.016129 + 0.016393            = 0.032522
-C = 1.0/(60+3) + 0.7/(60+2)                = 0.015873 + 0.011290            = 0.027163
+A = 1.0/61·(1+0.5·(2·0.95 −1)) + 1.0/62 + 0.7/61·(1+0.5·(2·0.975−1))
+  = 0.016393·1.45 + 0.016129 + 0.011475·1.475 = 0.023770 + 0.016129 + 0.016926 = 0.056825
+B = 1.0/62·(1+0.5·(2·0.90 −1)) + 1.0/61      = 0.016129·1.30 + 0.016393       = 0.038999
+C = 1.0/63·(1+0.5·(2·0.85 −1)) + 0.7/62·(1+0.5·(2·0.75−1)) = 0.015873·1.20 + 0.011290·1.00 = 0.035569
 ```
 
 \* In this example S3 fuses as a single combined sub-list at an effective
 weight of 0.7 to keep the arithmetic small; implementations fuse the two S3
-sub-lists at 0.5 each per §5.3. Final order: **A, B, C**.
+sub-lists at 0.5 each per §5.3. Final order: **A, B, C** (unchanged by the
+amendment — the similarity tilt sharpens the margins without reordering this
+example; own-words note matches still rank well). Pre-amendment these summed
+to 0.043997 / 0.032522 / 0.027163 (pure RRF, S4 at 0.5); see §5.3/B75 for why
+those rank-flat values buried strong visual matches in dogfooding.
 
 **Stage 4 — results.** `ImageResult` for A: provenance =
 `Quote { event_id: 01HV…Q3, ts: 2026-01-14T21:08:11Z, source: voice, text:
 "something quieter in these three… almost mournful, could anchor the slow
 series", char_start: 0, char_end: 88, … }`. Debug panel (dev build) shows the
-three per-signal ranks, the fused 0.043997, and the dropped collection clause.
+three per-signal ranks, the fused 0.056822 (§5.3 amendment; was 0.043997 under
+pure RRF), and the dropped collection clause.
 
 ### 7.2 M1: typing `fog ba` with filter chip `rating ≥ 3`
 
@@ -979,7 +1022,8 @@ before/after numbers on it.
 6. **Worked examples:** integration tests reproduce §7.1 and §7.2 — the parse
    JSON (under a stubbed `LanguageModel`), the dropped-clause record, the
    per-signal ranked lists, the fused scores to 6 decimal places
-   (0.043997 / 0.032522 / 0.027163), the result ordering, and the exact
+   (0.056822 / 0.038999 / 0.035569 — §5.3 amendment; pre-amendment pure RRF
+   was 0.043997 / 0.032522 / 0.027163), the result ordering, and the exact
    provenance spans.
 7. **Multi-target correctness:** one event targeting N images can surface all
    N, and per-image filters exclude individual targets without suppressing the
