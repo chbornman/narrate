@@ -91,6 +91,7 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "—",
     // F is total (founder, June 12 2026): the Grid-side pointer seat.
     "toggle-filmstrip",
+    "toggle-graph",
     "toggle-lights-out",
     "toggle-fullscreen",
     "toggle-cheatsheet",

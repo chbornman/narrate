@@ -39,6 +39,7 @@ export type Action =
   // contract / global
   | { kind: "escape" }
   | { kind: "go-grid" }
+  | { kind: "toggle-graph" }
   | { kind: "toggle-lights-out" }
   | { kind: "toggle-rail" }
   | { kind: "toggle-cheatsheet" }

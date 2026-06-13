@@ -35,6 +35,16 @@ export const GLOBAL_DEFS: ActionDef[] = [
     available: always,
   },
   {
+    id: "toggle-graph",
+    verb: "Topic graph",
+    label: "Open or close the topic graph lens (semantic map)",
+    keys: [{ key: "l" }],
+    scope: "global",
+    group: "panels",
+    seats: ["gutter"],
+    available: always,
+  },
+  {
     id: "toggle-lights-out",
     verb: "Lights-out",
     label: "Hide all chrome (Tab again restores)",

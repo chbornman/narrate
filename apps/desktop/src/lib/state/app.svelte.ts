@@ -1586,6 +1586,10 @@ export class Ui {
       case "go-grid":
         await this.goHome();
         break;
+      case "toggle-graph":
+        if (this.graphOpen) this.closeGraph();
+        else await this.openGraph();
+        break;
       case "toggle-lights-out":
         await this.toggleLightsOut();
         break;
