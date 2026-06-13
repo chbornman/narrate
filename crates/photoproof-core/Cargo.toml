@@ -56,6 +56,17 @@ strsim = "0.11"
 name = "photoproof-stub-child"
 path = "src/bin/stub_child.rs"
 
+[[bin]]
+# The M3 golden-query retrieval-quality gate runner (RETRIEVAL §12). Loads a
+# golden query set + a populated library DB, runs each query through the
+# hybrid rig, and scores P@k/R@k/MRR/nDCG so the founder can sweep
+# FusionWeights and read the metric deltas (settles B69 S4 weight + the
+# reranker go/no-go). Founder-machine tool: needs a real DB + query set, so
+# it is NOT a CI test (the CI proof is the retrieval_eval_sample test).
+# Explicit [[bin]] only to spell the name with hyphens (pp-retrieval-eval).
+name = "pp-retrieval-eval"
+path = "src/bin/pp_retrieval_eval.rs"
+
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }
