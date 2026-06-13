@@ -35,7 +35,14 @@ work lives here.
   per-signal toggles from that design make the weighting VISIBLE and
   tunable by the user, not just an invisible constant. (Founder, June
   12 2026.)
-- [ ] **Backend logs to a rotating file** (founder asked; also: the
+- [x] **Backend logs to a file** — landed `6c1f44b`: fresh
+  file per `tauri dev` launch (founder preferred over rotating) at
+  `<app_data>/logs/photoproof.log`, installed in `lib.rs::install_logging`
+  (console + truncate-on-start file sharing one env filter). Recorded
+  in CLAUDE.md as the first-class debug surface. NOT done: folding the
+  stray `eprintln!`s into tracing; surfacing the path in settings.
+  ORIGINAL ASK:
+  (founder asked; also: the
   assistant can't see runtime behavior without it): `lib.rs` installs
   a `tracing_subscriber::fmt()` to STDERR only (`info` default,
   `photoproof_core/desktop=debug`), plus scattered `eprintln!`s
