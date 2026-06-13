@@ -41,20 +41,47 @@ use tauri_plugin_window_state::StateFlags;
 
 use state::App;
 
-pub fn run() {
-    // Structured logging (BACKLOG metrics, first slice): core/connectors
-    // emit `tracing` spans and events; the shell is the ONE place a
-    // subscriber installs. RUST_LOG overrides; the default keeps release
-    // consoles quiet (info) while photoproof's own drains/passes show at
-    // debug under `cargo tauri dev` — set RUST_LOG=trace for the firehose.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,photoproof_core=debug,photoproof_desktop=debug".into()),
-        )
-        .compact()
-        .init();
+/// Structured logging: core/connectors emit `tracing` spans/events and the
+/// shell is the ONE place a subscriber installs. Two sinks share one filter
+/// (RUST_LOG overrides; default keeps release consoles quiet at `info` while
+/// photoproof's own drains/passes show at `debug` — set RUST_LOG=trace for
+/// the firehose):
+///   - the console (stdout), as before, for `cargo tauri dev`;
+///   - a FRESH file at `<app_data>/logs/photoproof.log`, truncated on every
+///     launch (founder, June 2026: "a new log file whenever we run tauri
+///     dev"). Each Rust process start = one clean session log, so a jank is
+///     reviewable after the fact without console scrollback. Best-effort: a
+///     logs dir that won't open leaves the console sink alone.
+///
+/// Installed from `.setup()` (not the top of `run()`) because the path comes
+/// from Tauri's resolver — `App::init`'s heavy startup still logs into it,
+/// since init runs after this.
+fn install_logging(app_data: &std::path::Path) {
+    use tracing_subscriber::prelude::*;
 
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,photoproof_core=debug,photoproof_desktop=debug".into());
+    let console = tracing_subscriber::fmt::layer().compact();
+
+    // File::create truncates-or-creates: the "new file each launch" the
+    // founder asked for falls out of opening it fresh per process.
+    let file_layer = std::fs::create_dir_all(app_data.join("logs"))
+        .and_then(|()| std::fs::File::create(app_data.join("logs").join("photoproof.log")))
+        .ok()
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false) // no terminal escapes in a file
+                .with_writer(std::sync::Mutex::new(file))
+        });
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console)
+        .with(file_layer) // Option<Layer>: None = console-only, no-op
+        .init();
+}
+
+pub fn run() {
     let builder = tauri::Builder::default()
         // §8.5 single-instance discipline: a second launch never reaches
         // the supervisor — it forwards focus to the first instance and
@@ -123,6 +150,9 @@ pub fn run() {
             menu::install(app)?;
 
             let app_data = app.path().app_data_dir()?;
+            // Logging first, so App::init's startup (DB open, migrations,
+            // supervisor plan) lands in this launch's fresh log file.
+            install_logging(&app_data);
             let state = Arc::new(App::init(app_data)?);
 
             // Restart watchers for every active root on online volumes.
