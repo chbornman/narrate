@@ -278,6 +278,18 @@ export interface CollectionDto {
   noteCount: number;
 }
 
+/** One append-only collection note (RETRIEVAL §10, B71; P7.3 store). A
+ * collection note is about the GROUPING's intent (why these images are
+ * together), a DELIBERATELY separate kind from per-image journal events —
+ * it never targets a single image. Append-only, like the journal: no edit,
+ * no delete (K14: the record preserves the user's own words). */
+export interface CollectionNoteDto {
+  id: string;
+  /** RFC 3339. */
+  ts: string;
+  text: string;
+}
+
 /** image_abs_path result (D4: reveal / copy path / open-default). */
 export interface ImagePathsDto {
   /** Best online absolute path, null when every path is offline. */

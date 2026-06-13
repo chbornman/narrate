@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   CollectionDto,
+  CollectionNoteDto,
   ExportReportDto,
   FolderNode,
   GridItem,
@@ -126,6 +127,17 @@ export const collectionsForImage = (hash: string) =>
  * its members in the grid, exactly as folder selection drives it. */
 export const listCollectionMembers = (id: string) =>
   invoke<GridItem[]>("list_collection_members", { id });
+/** The collection's append-only notes, chronological (P7.3 store). A
+ * collection note records the GROUPING's intent, never a single image —
+ * the sibling of the per-image journal, read in the rail's collection
+ * view. */
+export const collectionNotes = (id: string) =>
+  invoke<CollectionNoteDto[]>("collection_notes", { id });
+/** Append a note to the collection (append-only — no edit/delete; the
+ * journal's event model for the grouping). Resolves to the freshly
+ * appended note; mutations emit `collections-changed`. */
+export const addCollectionNote = (id: string, text: string) =>
+  invoke<CollectionNoteDto>("add_collection_note", { id, text });
 
 // -- ingest / settings / export ---------------------------------------------
 
