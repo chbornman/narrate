@@ -35,6 +35,21 @@ export interface ScopeSource {
    * scope. Renamed from `graphSelection` — no longer graph-specific, a future
    * compare view could reuse it (DESIGN-VIEW-MODES.md). */
   viewSelection?: string | null;
+  /** DESIGN-VOICE-SUBJECTS.md subject context: the collection whose detail is
+   * open (id + name), or null. Dictation routes to its note log ONLY when no
+   * image is focused. */
+  collection?: { id: string; name: string } | null;
+  /** The SAVED topic whose detail is open (id + phrase), or null. Lower
+   * precedence than an open collection. */
+  topic?: { id: string; name: string } | null;
+}
+
+/** DESIGN-VOICE-SUBJECTS.md: a non-image dictation subject (collection/topic
+ * note log) the frontend reports alongside an EMPTY target list. */
+export interface ScopeSubjectResult {
+  kind: "collection" | "topic";
+  id: string;
+  name: string;
 }
 
 export function scopeTargets(src: ScopeSource): string[] {
@@ -51,9 +66,51 @@ export function scopeTargets(src: ScopeSource): string[] {
   return [...src.gridSelection];
 }
 
+/**
+ * DESIGN-VOICE-SUBJECTS.md: derive the non-image dictation subject, by exact
+ * precedence:
+ *
+ *   focused image  >  collection subject  >  topic subject  >  neutral
+ *
+ * WHY focused-image-wins: dictating ABOUT a specific member image while inside
+ * a collection must keep working (it mints an image note as today). A subject
+ * is offered ONLY when there is no image to honor — `scopeTargets(src)` is
+ * empty — so the two are mutually exclusive by construction and an image note
+ * is never silently lost. With an image focused this returns null; with a
+ * collection open and nothing focused it names the collection (a topic detail
+ * loses to an open collection); neutral otherwise = a zero-target session
+ * note.
+ */
+export function scopeSubject(src: ScopeSource): ScopeSubjectResult | null {
+  // A focused image always wins: if any target resolves, there is no subject.
+  if (scopeTargets(src).length > 0) return null;
+  if (src.collection != null)
+    return { kind: "collection", id: src.collection.id, name: src.collection.name };
+  if (src.topic != null)
+    return { kind: "topic", id: src.topic.id, name: src.topic.name };
+  return null;
+}
+
 /** Indicator scope text (UI §7.2): `● N` or `● session`; `● 0` never renders. */
 export function scopeLabel(kind: string, count: number): string {
   return kind === "session" ? "session" : String(count);
+}
+
+/**
+ * DESIGN-VOICE-SUBJECTS.md indicator copy: when dictation targets a
+ * collection/topic note log, the scope segment NAMES the subject so the user
+ * sees where their words land before speaking. "noting: <collection name>" /
+ * "noting topic: <phrase>". The name is preferred; without it (heavy to wire
+ * in some path) it still says the words target the collection/topic, never an
+ * image. No em-dashes in the copy (the gate enforces this).
+ */
+export function subjectScopeText(
+  subject: "collection" | "topic",
+  name: string | null,
+): string {
+  if (subject === "topic")
+    return name != null && name !== "" ? `noting topic: ${name}` : "noting topic";
+  return name != null && name !== "" ? `noting: ${name}` : "noting collection";
 }
 
 /** Typed-note placeholder copy (UI §6: scope echoed as dimmed placeholder). */

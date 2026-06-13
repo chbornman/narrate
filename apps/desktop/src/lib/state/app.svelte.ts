@@ -33,7 +33,7 @@ import {
   micUp,
   type MicHoldState,
 } from "../logic/michold";
-import { scopeLabel, scopeTargets } from "../logic/scope";
+import { scopeLabel, scopeSubject, scopeTargets } from "../logic/scope";
 import { nextLane, type SearchLane } from "../logic/searchmode";
 import {
   defaultToggles,
@@ -516,8 +516,34 @@ export class Ui {
     }
   }
 
+  /** DESIGN-VOICE-SUBJECTS.md: the open collection's {id, name} for subject
+   * routing, or null. `collectionId` already unwraps a query/similar/topic
+   * scope sitting OVER a collection (the residue still points there), so this
+   * follows it; the name comes from the loaded collections list. */
+  private scopeCollection(): { id: string; name: string } | null {
+    const id = this.collectionId;
+    if (id === null) return null;
+    const c = this.collections.find((c) => c.id === id);
+    return c === undefined ? null : { id, name: c.name };
+  }
+
+  /** The open SAVED topic's {id, name} for subject routing, or null. The name
+   * is the saved phrase; only a topic opened WITH its saved id (the rail
+   * Topics tab) carries `topicDetailId`, so a phrase-only lens reads null. */
+  private scopeTopic(): { id: string; name: string } | null {
+    const id = this.topicDetailId;
+    if (id === null) return null;
+    const t = this.topics.find((t) => t.id === id);
+    return t === undefined ? null : { id, name: t.phrase };
+  }
+
   async reportScope() {
-    const targets = scopeTargets({
+    // DESIGN-VOICE-SUBJECTS.md: build the scope source ONCE and derive both
+    // the image targets and the optional non-image subject from it, so the
+    // focused-image > collection > topic > neutral precedence is single-sourced
+    // in scope.ts (an image always wins; a subject only rides an empty target
+    // list).
+    const src = {
       viewMode: this.viewMode,
       // Search is no longer a separate selection surface (M3): query results
       // ARE grid cells, so the write scope is the grid selection in every
@@ -531,9 +557,13 @@ export class Ui {
       // session-neutral when none) takes precedence over grid/Look so its
       // dictation/rating never targets a stale image (scope.ts comment).
       viewSelection: this.viewSelection,
-    });
+      collection: this.scopeCollection(),
+      topic: this.scopeTopic(),
+    };
+    const targets = scopeTargets(src);
+    const subject = scopeSubject(src);
     try {
-      const echoed = await ipc.setScope(targets);
+      const echoed = await ipc.setScope(targets, subject);
       this.shell.onScopeEcho(echoed);
     } catch {
       /* backend unavailable (tests/dev): scope keeps last echo */

@@ -24,10 +24,12 @@ pub use audio::AudioRing;
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use engine::{
     ASSOCIATION_MAX_SKEW_MS, CaptureEngine, DRAIN_WINDOW_MS, DegradedFlags, IndicatorState,
-    MicState, ONSET_ERROR_BUDGET_MS, PRE_ROLL_MS, StreamingView,
+    MicState, ONSET_ERROR_BUDGET_MS, PRE_ROLL_MS, StreamingView, SubjectNoteSink,
 };
 pub use link::{StrokeSpan, UtteranceSpan, resolve_stroke_link, resolve_utterance_link};
-pub use scope::{ScopeKind, ScopeLookup, ScopeRing, ScopeSnapshot, ScopeView};
+pub use scope::{
+    ScopeKind, ScopeLookup, ScopeRing, ScopeSnapshot, ScopeSubject, ScopeView, SubjectKind,
+};
 pub use session::{
     Activity, CaptureDrain, CloseProcessing, CloseProcessor, IDLE_BOUNDARY_MS, NoCapture, NoFlush,
     SessionEngine, SidecarFlush, recover_crashed_sessions,

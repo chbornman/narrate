@@ -26,6 +26,7 @@ import type {
   RedactReportDto,
   RootDto,
   RuntimeStatus,
+  ScopeSubject,
   ScopeView,
   StrokeCommitDto,
   StrokePayloadWire,
@@ -36,9 +37,13 @@ import type { Filter, FusionWeights, SearchResults } from "../types/search";
 
 // -- scope & capture --------------------------------------------------------
 
-/** Report the selection/view-derived target list; the core echoes the scope. */
-export const setScope = (targets: string[]) =>
-  invoke<ScopeView>("set_scope", { targets });
+/** Report the selection/view-derived target list and, DESIGN-VOICE-SUBJECTS.md,
+ * an OPTIONAL non-image subject (a collection/topic whose note log dictation
+ * lands in when no image is focused); the core echoes the scope. The two are
+ * mutually exclusive (image targets always win), so `subject` is sent only
+ * when `targets` is empty. */
+export const setScope = (targets: string[], subject?: ScopeSubject | null) =>
+  invoke<ScopeView>("set_scope", { targets, subject: subject ?? null });
 
 export const indicatorState = () => invoke<IndicatorState>("indicator_state");
 

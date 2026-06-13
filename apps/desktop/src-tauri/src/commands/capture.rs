@@ -12,28 +12,57 @@ use photoproof_core::{
 };
 use tauri::{AppHandle, Emitter};
 
+use photoproof_core::capture::ScopeSubject;
+
 use super::{S, announce_events, emit_journal_changed, emit_pulse, hashes, indicator, parse_hash};
-use crate::dto::{IndicatorState, ScopeView, StrokeCommitDto, StrokePayloadDto};
+use crate::dto::{IndicatorState, ScopeSubjectDto, ScopeView, StrokeCommitDto, StrokePayloadDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
 
-/// The UI reports its selection/view-derived target list (ordered); the core
-/// echoes the scope back (UI §3.4: the UI performs no scope logic).
+/// The UI reports its selection/view-derived target list (ordered) and,
+/// DESIGN-VOICE-SUBJECTS.md, an OPTIONAL non-image subject (a collection or
+/// topic whose note log dictation should land in when no image is focused);
+/// the core echoes the scope back (UI §3.4: the UI performs no scope logic).
+/// The frontend never sends both — image targets always win — but if it
+/// did, the core ring drops the subject (image note never silently lost).
 #[tauri::command]
-pub fn set_scope(app: S<'_>, handle: AppHandle, targets: Vec<String>) -> CmdResult<ScopeView> {
+pub fn set_scope(
+    app: S<'_>,
+    handle: AppHandle,
+    targets: Vec<String>,
+    subject: Option<ScopeSubjectDto>,
+) -> CmdResult<ScopeView> {
     app.touch()?;
     let hashes: Result<Vec<ContentHash>, _> =
         targets.iter().map(|t| ContentHash::from_hex(t)).collect();
     let hashes = hashes.map_err(|e| CmdError::Invalid(format!("bad target hash: {e}")))?;
+    // Map the wire subject to the core enum; an unknown kind is a contract
+    // violation, surfaced rather than silently dropped.
+    let (subject, subject_name) = match subject {
+        Some(s) => {
+            let core = match s.kind.as_str() {
+                "collection" => ScopeSubject::Collection(s.id),
+                "topic" => ScopeSubject::Topic(s.id),
+                other => {
+                    return Err(CmdError::Invalid(format!(
+                        "unknown scope subject kind: {other}"
+                    )));
+                }
+            };
+            (Some(core), Some(s.name))
+        }
+        None => (None, None),
+    };
     let view = {
         let mut scope = app.scope.lock().expect("scope mutex");
-        scope.set(hashes.clone())
+        scope.set_with_subject(hashes.clone(), subject.clone(), subject_name.clone())
     };
     // P6.4: the capture engine's scope ring gets every update too — VOICE
     // binding snapshots `scope_at(onset)` from the ring (CAPTURE §5.1), so
-    // it must be current the moment speech starts, armed or not.
+    // it must be current the moment speech starts, armed or not. The subject
+    // rides along so a voice final can route to its note log.
     if let Some(engine) = app.capture.lock().expect("capture mutex").as_mut() {
-        engine.set_scope(hashes);
+        engine.set_scope_with_subject(hashes, subject, subject_name);
     }
     let _ = handle.emit("indicator-state", indicator(&app));
     Ok(view)

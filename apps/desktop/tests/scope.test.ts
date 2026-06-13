@@ -7,7 +7,13 @@
  * RAW) is asserted here over the expanded lists.
  */
 import { describe, expect, it } from "vitest";
-import { notePlaceholder, scopeLabel, scopeTargets } from "../src/lib/logic/scope";
+import {
+  notePlaceholder,
+  scopeLabel,
+  scopeSubject,
+  scopeTargets,
+  subjectScopeText,
+} from "../src/lib/logic/scope";
 import * as note from "../src/lib/logic/note";
 import type { ScopeView } from "../src/lib/types/dto";
 
@@ -166,5 +172,71 @@ describe("note input scope snapshot (UI §6 acceptance)", () => {
 
   it("cancel discards without residue", () => {
     expect(note.cancel(note.summon(scope("session", 0))).open).toBe(false);
+  });
+});
+
+describe("voice dictation subject (DESIGN-VOICE-SUBJECTS.md)", () => {
+  // Precedence: focused image > collection subject > topic subject > neutral.
+  const coll = { id: "coll01", name: "Cover Edit" };
+  const topic = { id: "topic07", name: "golden hour" };
+
+  it("collection open + no image focused → the collection subject", () => {
+    expect(scopeSubject({ ...base, collection: coll, topic })).toEqual({
+      kind: "collection",
+      id: "coll01",
+      name: "Cover Edit",
+    });
+  });
+
+  it("topic detail open + no image focused (no collection) → the topic subject", () => {
+    expect(scopeSubject({ ...base, topic })).toEqual({
+      kind: "topic",
+      id: "topic07",
+      name: "golden hour",
+    });
+  });
+
+  it("an image IS focused → NO subject (focused image always wins)", () => {
+    // A grid selection resolves a target, so dictation mints an image note as
+    // today even while a collection is open underneath.
+    expect(
+      scopeSubject({ ...base, gridSelection: ["a"], collection: coll, topic }),
+    ).toBeNull();
+    // And the Look-viewed image likewise wins over an open collection.
+    expect(
+      scopeSubject({
+        ...base,
+        viewMode: "look",
+        lookTargets: ["b"],
+        collection: coll,
+      }),
+    ).toBeNull();
+  });
+
+  it("collection outranks topic when both are open", () => {
+    expect(scopeSubject({ ...base, collection: coll, topic })?.kind).toBe(
+      "collection",
+    );
+  });
+
+  it("nothing focused, no subject open → neutral (null = session note)", () => {
+    expect(scopeSubject(base)).toBeNull();
+  });
+
+  it("the indicator names the subject, no em-dashes", () => {
+    expect(subjectScopeText("collection", "Cover Edit")).toBe("noting: Cover Edit");
+    expect(subjectScopeText("topic", "golden hour")).toBe(
+      "noting topic: golden hour",
+    );
+    // Name unreachable: still says it targets the collection/topic, not an image.
+    expect(subjectScopeText("collection", null)).toBe("noting collection");
+    expect(subjectScopeText("topic", "")).toBe("noting topic");
+    for (const t of [
+      subjectScopeText("collection", "Cover Edit"),
+      subjectScopeText("topic", "golden hour"),
+      subjectScopeText("collection", null),
+    ]) {
+      expect(t).not.toContain("—"); // em-dash
+    }
   });
 });

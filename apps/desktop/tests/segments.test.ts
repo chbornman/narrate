@@ -169,4 +169,34 @@ describe("the streaming-utterance tether (CAPTURE §5.4/§11, UI §7.3)", () => 
     });
     expect(segs.find((s) => s.id === "scope")?.text).toBe("● 3 ⇠");
   });
+
+  // DESIGN-VOICE-SUBJECTS.md: the scope segment NAMES a collection/topic
+  // subject so the user sees where dictation lands before speaking.
+  it("a collection subject scope names it: noting: <name>", () => {
+    const segs = segments({
+      ...base,
+      scope: {
+        kind: "session",
+        count: 0,
+        subject: "collection",
+        subjectName: "Cover Edit",
+      },
+    });
+    expect(segs.find((s) => s.id === "scope")?.text).toBe("noting: Cover Edit");
+  });
+
+  it("a topic subject scope names it: noting topic: <phrase>", () => {
+    const segs = segments({
+      ...base,
+      scope: {
+        kind: "session",
+        count: 0,
+        subject: "topic",
+        subjectName: "golden hour",
+      },
+    });
+    expect(segs.find((s) => s.id === "scope")?.text).toBe(
+      "noting topic: golden hour",
+    );
+  });
 });
