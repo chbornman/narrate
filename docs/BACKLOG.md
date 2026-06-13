@@ -7,6 +7,111 @@ loop. The vision filter applies to every line (reviewing/processing = core;
 managing = off-thesis). Shipped items move to LANDED.md verbatim — only open
 work lives here.
 
+## Dogfood round 4 (founder, June 12 2026 evening — second live session)
+
+- [ ] **Search ranking is rank-flat: any note outranks a perfect CLIP
+  match** (founder, THE headline bug): "ANY saved note in the image
+  journal is outranking even perfect semantic visual clip search."
+  ROOT CAUSE FOUND (`search/hybrid.rs` FusionWeights): weighted RRF
+  with k=60. S2 (note keyword FTS) and S1 (note own-words vectors) are
+  weight 1.0; S4 (image_clip visual) is weight 0.5. Because RRF scores
+  by RANK not similarity — score = weight / (60 + rank) — an image
+  ranked #1 by a weak note keyword hit scores 1.0/61 = 0.0164 and a
+  PERFECT CLIP visual match ranked #1 scores 0.5/61 = 0.0082, so the
+  note ALWAYS wins regardless of how strong the visual match is or how
+  weak the note hit. The 0.5 CLIP weight (B69: "protected by WEIGHT not
+  exclusion") was a spec default explicitly flagged as "data not
+  findings, the §12 golden-set eval is the named gate." This is that
+  gate arriving via dogfood. Two moves, likely both: (a) re-weight —
+  CLIP visual should not sit at half a note's vote when the query is
+  visual; consider raising S4 or making weights query-shaped (a
+  visually-descriptive query leans S4, a "what did I say about…" query
+  leans S1/S2); (b) RRF's rank-flatness is itself the deeper culprit —
+  a near-miss and a perfect match at the same rank score identically;
+  consider a similarity-aware fusion or a score-floor so a high-cosine
+  CLIP hit can't be buried under a tangential keyword brush. PAIRS WITH
+  the search-as-scope UI overhaul the founder asked to start now (see
+  "Lighting up M3" + the search-scope riff) — the relevance-sort and
+  per-signal toggles from that design make the weighting VISIBLE and
+  tunable by the user, not just an invisible constant. (Founder, June
+  12 2026.)
+- [ ] **Backend logs to a rotating file** (founder asked; also: the
+  assistant can't see runtime behavior without it): `lib.rs` installs
+  a `tracing_subscriber::fmt()` to STDERR only (`info` default,
+  `photoproof_core/desktop=debug`), plus scattered `eprintln!`s
+  (mic.rs, pump.rs, state.rs, embedders.rs). Nothing persists, so a
+  crash/jank is unreviewable after the fact. Add a file layer
+  (`tracing-appender` non-blocking rolling appender) writing to the
+  app-data dir (e.g. `<app>/logs/photoproof.log`, daily roll, keep N);
+  keep the stderr layer for `tauri dev`. Fold the stray `eprintln!`s
+  into `tracing` while there so one sink captures everything. Surface
+  the log path in the debug panel / settings for "reveal in Finder."
+  (Founder, June 12 2026.)
+- [ ] **"154 RAWs left to decode" reads as stuck — it's an UNBUILT pass,
+  not a stall** (founder: "154 raws left to decode that seem stuck").
+  DIAGNOSED: `ingest_passes` has 154 `full-raw-decode` rows in state
+  `pending`, `attempts=0`, no error — they were enqueued and NEVER
+  claimed, because `ingest::claim_next` drains only `Exif` + `Preview`;
+  `full-raw-decode` is M1.5 and has NO worker yet ("stay pending in the
+  queue by design"). So nothing is broken — but the UI advertises a
+  count of work that will never move until M1.5 ships, which reads as a
+  hang. Fix is honesty, not a decoder (unless M1.5 graduates now): stop
+  surfacing pending counts for passes that have no worker, or label
+  them "available in a future version," not "left to decode." (Same
+  root cause as the DNG item below.) (Founder, June 12 2026.)
+- [ ] **DNG (and other RAW) never loads a 1:1 preview** (founder:
+  "Embedded preview — full decode pending… a dng file never loads
+  1-to-1 preview"). SAME ROOT CAUSE as the stuck-RAW item: the 1:1
+  view needs a full demosaic, which IS the `full-raw-decode` M1.5 pass
+  — unbuilt, never claimed, so "full decode pending" is permanent. The
+  embedded preview (the in-RAW JPEG) loads; the true 1:1 cannot until
+  the decode pass exists (`preview.rs` already enqueues it at backfill
+  priority and notes the CR3 HDR-PQ / chained-JPEG ladder it would
+  feed). DECISION NEEDED: graduate the M1.5 full-RAW-decode pass now
+  (rawler demosaic → 1:1 artifact), or make the UI stop promising a 1:1
+  that won't arrive. For DNG specifically, verify rawler's DNG path and
+  whether a larger embedded preview exists to show meanwhile. (Founder,
+  June 12 2026.)
+- [ ] **Add-to-collection from the grid must offer "New collection…"**
+  (founder: "if I right click on image(s) in grid, I want to add to a
+  collection even if none exists / add to new collection"). Today the
+  thumb context menu's add-to-collection only lists EXISTING collections
+  (`collectionRows` over the current set); with zero collections there's
+  no path, and you can't mint one from the selection. Add a "New
+  collection…" item to the add-to-collection submenu that creates the
+  collection AND adds the current selection in one evented step (the
+  rail already has an inline "New collection…" creator —
+  `SourceRail.svelte` — reuse its create path, then chain
+  add-to-collection). This is also the natural feeder for the
+  autosuggest/encourage-collecting thesis. (Founder, June 12 2026.)
+- [ ] **Grid right-click submenus are janky** (founder: "submenus don't
+  stick out the side, don't always open/close smoothly"). The whole
+  context menu is `ContextMenuHost.svelte` (a 1 KB stub) — submenus
+  (add-to-collection, surround, etc.) don't flyout to the side and
+  open/close unreliably. Needs a real submenu implementation: side
+  flyout with edge-aware flipping (open left when the right edge is
+  near the viewport), hover-intent open/close with a small close delay
+  so diagonal travel into the submenu doesn't dismiss it, keyboard
+  arrows. Likely wants a small reusable Menu primitive rather than
+  more ad-hoc positioning. (Founder, June 12 2026.)
+- [ ] **T cell-info should grow the cell, not overlay the image; info at
+  the TOP** (founder). Today the cell-info row (`cellinfo.ts` cycled by
+  T) is `position: absolute` over the bottom of the thumbnail
+  (`Thumb.svelte` ~234), covering the image. Founder wants: when info
+  is shown, the cell EXTENDS DOWNWARD to make room (image stays fully
+  visible, info sits in its own strip below — or per the founder, info
+  at the TOP of the cell). Touches the grid layout math (cell height
+  becomes image + info-strip when active) and the gridlayout row-height
+  calc, not just Thumb CSS. (Founder, June 12 2026.)
+- [ ] **No em-dashes in UI copy** (founder, emphatic: "no emdashes in the
+  UI!!!"). Sweep user-VISIBLE strings (EmptyState lines, button labels,
+  settings copy, station/indicator text, welcome/consent cards,
+  tooltips) and replace `—` with " - " or a rephrase. ~408 `—` occur in
+  the frontend but MOST are code comments — target only rendered text;
+  do not touch comments or this backlog. Consider a tiny lint (grep gate
+  in CI over .svelte template regions / string literals) so they don't
+  creep back. (Founder, June 12 2026.)
+
 ## Next polish round (small, founder-requested)
 
 - [ ] **Voice chunking tuning** — first live run (June 2026) works end to
