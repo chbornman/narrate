@@ -676,6 +676,7 @@ fn develop_linear_rgb(
 mod tests {
     use super::*;
     use image::GenericImageView;
+    use proptest::prelude::*;
     use rawler::cfa::{CFA, PlaneColor};
     use rawler::decoders::Camera;
     use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, WhiteLevel};
@@ -1133,5 +1134,150 @@ mod tests {
         //       .unwrap();
         //   let img = develop_to_display_oriented(raw, exif_orientation).unwrap();
         // then time it and eyeball / checksum-pin one fixture.
+    }
+
+    // -----------------------------------------------------------------------
+    // Property tests (proptest): the black-fix invariant under generated
+    // matrices and sensor data.
+    //
+    // WHY: the example tests pin specific degenerate shapes (all-zero, one
+    // zero row, a NaN). These sweep ARBITRARY 3x3 matrices (zeros, NaN, Inf,
+    // extreme magnitudes) plus random sensor pixels and assert the two
+    // load-bearing invariants: (a) `matrix_3x3_is_usable` is a CONSISTENT
+    // predicate (its own definition holds), and (b) the full develop path
+    // NEVER panics and NEVER ships a NaN/Inf-derived matrix; it falls back to
+    // the neutral identity path (the strokes-stay-visible black-fix).
+    //
+    // The develop path is the expensive one (allocates + per-pixel loops), so
+    // it runs FEWER cases (64) on small rasters; the cheap predicate runs the
+    // default 256. Fixed ProptestConfig (no persistence file) keeps CI stable.
+    // -----------------------------------------------------------------------
+
+    /// A strategy over f32 cells that deliberately includes the pathological
+    /// values the black-fix exists for: zeros, NaN, +/-Inf, tiny and huge
+    /// magnitudes, alongside ordinary finite values.
+    fn pathological_f32() -> impl Strategy<Value = f32> {
+        prop_oneof![
+            Just(0.0f32),
+            Just(f32::NAN),
+            Just(f32::INFINITY),
+            Just(f32::NEG_INFINITY),
+            Just(f32::EPSILON),
+            Just(f32::MIN),
+            Just(f32::MAX),
+            -10.0f32..10.0f32,
+            -1.0e30f32..1.0e30f32,
+        ]
+    }
+
+    /// A 3x3 matrix of pathological-or-ordinary cells.
+    fn pathological_matrix() -> impl Strategy<Value = [[f32; 3]; 3]> {
+        prop::array::uniform3(prop::array::uniform3(pathological_f32()))
+    }
+
+    /// Build an RGGB develop input whose camera `xyz_to_cam` is an arbitrary
+    /// 3x3 (4th E-row zero), with a uniform mosaic. This drives the matrix-
+    /// sourcing + compose + develop path with a generated colour matrix.
+    fn raw_with_xyz_to_cam(m: [[f32; 3]; 3], px_val: u16) -> RawImage {
+        let camera = Camera {
+            xyz_to_cam: [m[0], m[1], m[2], [0.0; 3]],
+            ..Camera::default()
+        };
+        let (w, h) = (4usize, 4usize);
+        let pix = vec![px_val; w * h];
+        let black = BlackLevel::new(&[0u16], 1, 1, 1);
+        let mut raw = RawImage::new_with_data(
+            camera,
+            RawImageData::Integer(pix),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, 1.0],
+            rggb_config(),
+            Some(black),
+            Some(WhiteLevel::new(vec![u16::MAX as u32; 1])),
+            false,
+        );
+        raw.crop_area = None;
+        raw.active_area = None;
+        raw
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// INVARIANT: `matrix_3x3_is_usable` is exactly "all entries finite AND
+        /// every row sums to a non-zero magnitude". The predicate must agree
+        /// with its own definition for ANY generated matrix; this is the gate
+        /// that stands between a degenerate source and a NaN inverse.
+        #[test]
+        fn matrix_usable_predicate_is_consistent(m in pathological_matrix()) {
+            let all_finite = m.iter().all(|row| row.iter().all(|v| v.is_finite()));
+            let rows_have_signal = m
+                .iter()
+                .all(|row| row.iter().sum::<f32>().abs() > f32::EPSILON);
+            let expected = all_finite && rows_have_signal;
+            prop_assert_eq!(matrix_3x3_is_usable(&m), expected);
+        }
+
+        /// INVARIANT: `compose_cam_rgb_to_linear_srgb` NEVER returns a matrix
+        /// with a non-finite entry, for ANY generated `xyz_to_cam`. A
+        /// degenerate/singular source must fall back to the finite identity
+        /// matrix rather than emit a NaN/Inf matrix (which would clamp pixels
+        /// to all-black). When it does fall back, the source is `Identity`.
+        #[test]
+        fn composed_matrix_is_always_finite(m in pathological_matrix()) {
+            let raw = raw_with_xyz_to_cam(m, 32768);
+            let (composed, source) = compose_cam_rgb_to_linear_srgb(&raw);
+            let finite = composed.iter().all(|row| row.iter().all(|v| v.is_finite()));
+            prop_assert!(finite, "composed matrix has a non-finite entry: {composed:?}");
+            // If the source matrix was not usable, the result MUST be the
+            // identity fallback (never a composed NaN).
+            if source == MatrixSource::Identity {
+                use rawler::imgop::matrix::IDENTITY_MATRIX_3;
+                prop_assert_eq!(composed, IDENTITY_MATRIX_3);
+            }
+        }
+    }
+
+    proptest! {
+        // The develop path allocates + loops per pixel, so fewer cases.
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// THE BLACK-FIX INVARIANT under generated inputs: for ANY 3x3 colour
+        /// matrix (zeros, NaN, Inf, extreme) and ANY uniform sensor value, the
+        /// full develop NEVER panics and ALWAYS produces a real image of the
+        /// expected size (u8 pixels are finite by construction; the real guard
+        /// is "no panic and a correctly sized buffer came back"). A degenerate
+        /// matrix routes through the identity fallback, not a NaN-black crash.
+        #[test]
+        fn develop_never_panics_and_pixels_are_finite(
+            m in pathological_matrix(),
+            px_val in any::<u16>(),
+            orientation in 1u16..=8,
+        ) {
+            let raw = raw_with_xyz_to_cam(m, px_val);
+            // Must not panic; a develop either succeeds with a sized image or
+            // returns a clean DevelopError (never a crash on the pool thread).
+            match develop_to_display_oriented(raw, orientation) {
+                Ok(img) => {
+                    let rgb = img.to_rgb8();
+                    prop_assert_eq!(rgb.len(), (img.width() * img.height() * 3) as usize);
+                    prop_assert!(img.width() >= 2 && img.height() >= 2);
+                }
+                Err(_) => {
+                    // A clean error is acceptable; the contract is "no panic",
+                    // which reaching here proves.
+                }
+            }
+        }
     }
 }

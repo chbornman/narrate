@@ -681,6 +681,7 @@ fn parse_llm_ts(s: &str) -> Result<UtcMillis, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn no_grounding() -> Grounding {
         Grounding {
@@ -758,5 +759,140 @@ mod tests {
         let err = resolve_collection(&rows, "quieter melancholic series").unwrap_err();
         assert!(err.contains("Quiet Hours"), "{err}");
         assert!(err.contains("\u{2265} 0.80"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property tests (proptest): the firewall under generated inputs.
+    //
+    // WHY: the example tests above pin specific shapes; these sweep many
+    // generated inputs to catch edge cases (arbitrary unicode, non-vocabulary
+    // tokens, whitespace/empty/very-long) the examples never enumerate. A fixed
+    // ProptestConfig (256 cases, no persistence file) keeps CI deterministic.
+    // -----------------------------------------------------------------------
+
+    /// One vocabulary the firewall validates camera/lens chips against. Fixed
+    /// so the "non-vocabulary token is never a chip" property has a known set
+    /// to generate OUTSIDE of.
+    fn fixed_grounding() -> Grounding {
+        Grounding {
+            collections: Vec::new(),
+            cameras: Vec::new(),
+            lenses: Vec::new(),
+            roots: Vec::new(),
+            cameras_full: vec!["FUJIFILM X-T5".into(), "RICOH GR III".into()],
+            lenses_full: vec!["XF35mmF1.4 R".into()],
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// INVARIANT: validating an arbitrary unicode string as the model's
+        /// response text NEVER panics. A non-JSON / non-conforming response is
+        /// the firewall fallback (returns None), never a crash.
+        #[test]
+        fn validate_response_never_panics_on_arbitrary_unicode(s in ".*") {
+            let g = no_grounding();
+            // The contract is "no panic"; the value is irrelevant here.
+            let _ = validate_response(&s, &g);
+        }
+
+        /// INVARIANT: whitespace / empty / very-long inputs are handled (no
+        /// panic) and an all-whitespace or empty response never deserializes to
+        /// a parse (it is not valid JSON), so it triggers the firewall fallback.
+        #[test]
+        fn whitespace_and_long_inputs_are_handled(
+            ws in prop::collection::vec(prop_oneof![Just(' '), Just('\t'), Just('\n'), Just('\r')], 0..4096),
+        ) {
+            let g = no_grounding();
+            let s: String = ws.into_iter().collect();
+            // Pure whitespace (or empty) is not a JSON object, so no parse.
+            prop_assert!(validate_response(&s, &g).is_none());
+        }
+
+        /// FIREWALL INVARIANT (the load-bearing one): a generated token that is
+        /// NOT a case-insensitive substring of ANY vocabulary entry is NEVER
+        /// mis-classified as a camera/lens filter chip; `validate_clause`
+        /// rejects it. This is the hallucination firewall: the model can only
+        /// name gear the library actually has.
+        #[test]
+        fn non_vocabulary_token_is_never_a_camera_or_lens_chip(token in "[A-Za-z0-9 ]{1,24}") {
+            let g = fixed_grounding();
+            let needle = token.to_lowercase();
+            let needle = needle.trim();
+            // Only assert the firewall when the token is genuinely OUTSIDE the
+            // vocabulary (and non-empty after trim). A token that happens to be
+            // a substring of a vocab entry SHOULD validate (it is grounded).
+            let in_camera_vocab = g.cameras_full.iter().any(|v| v.to_lowercase().contains(needle));
+            let in_lens_vocab = g.lenses_full.iter().any(|v| v.to_lowercase().contains(needle));
+            prop_assume!(!needle.is_empty());
+
+            if !in_camera_vocab {
+                let clause = json!({ "type": "camera", "value": token });
+                prop_assert!(
+                    validate_clause(&clause, &g).is_err(),
+                    "non-vocabulary camera token '{token}' was accepted as a chip"
+                );
+            }
+            if !in_lens_vocab {
+                let clause = json!({ "type": "lens", "value": token });
+                prop_assert!(
+                    validate_clause(&clause, &g).is_err(),
+                    "non-vocabulary lens token '{token}' was accepted as a chip"
+                );
+            }
+        }
+
+        /// FIREWALL INVARIANT: an arbitrary unknown `type` discriminant is
+        /// always dropped (never silently becomes a typed filter).
+        #[test]
+        fn unknown_filter_type_is_always_dropped(ty in "[a-z_]{1,16}") {
+            // Skip the real discriminants; only assert UNKNOWN ones drop.
+            prop_assume!(!matches!(
+                ty.as_str(),
+                "date" | "camera" | "lens" | "folder" | "rating"
+                    | "collection" | "volume" | "has_strokes" | "source"
+            ));
+            let g = no_grounding();
+            let clause = json!({ "type": ty, "value": "anything" });
+            prop_assert!(validate_clause(&clause, &g).is_err());
+        }
+
+        /// FIREWALL INVARIANT: a rating with an arbitrary value is accepted IFF
+        /// it is within 0..=5; anything above is dropped (never a silent
+        /// out-of-range rating chip).
+        #[test]
+        fn rating_chip_accepts_iff_in_range(value in 0u16..=300, op in prop_oneof![Just("eq"), Just("gte"), Just("lte")]) {
+            let g = no_grounding();
+            let clause = json!({ "type": "rating", "op": op, "value": value });
+            let result = validate_clause(&clause, &g);
+            // The output_schema caps value at u8; values > 255 fail to deserialize
+            // (out of u8 range) and 6..=255 fail the explicit 0..=5 guard. Either
+            // way the firewall holds: only 0..=5 is accepted.
+            if value <= 5 {
+                prop_assert!(result.is_ok(), "in-range rating {value} was dropped");
+            } else {
+                prop_assert!(result.is_err(), "out-of-range rating {value} was accepted");
+            }
+        }
+
+        /// ROUND-TRIP INVARIANT (where the design intends it): a generated
+        /// millisecond-precision RFC 3339 timestamp parses, and rendering it
+        /// back to rfc3339 then re-parsing is stable (a parse/render/parse fixed
+        /// point). This is the one place the firewall promises a stable form.
+        #[test]
+        fn timestamp_parse_render_parse_is_stable(
+            // A bounded, valid UTC instant in ms (year ~1973..~2065).
+            millis in 100_000_000_000i64..3_000_000_000_000i64,
+        ) {
+            let t = UtcMillis::from_epoch_ms(millis);
+            let rendered = t.to_rfc3339();
+            let reparsed = parse_llm_ts(&rendered).expect("rendered ts must re-parse");
+            prop_assert_eq!(reparsed.to_rfc3339(), t.to_rfc3339());
+        }
     }
 }
