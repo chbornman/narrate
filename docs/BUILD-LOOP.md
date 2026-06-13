@@ -46,6 +46,14 @@ resolved by the reading most consistent with the integrity invariants,
 implemented, and *flagged* — never silently "improved." Spec changes go
 through DECISIONS.md.
 
+**Docs discipline (the long-term rule, founder, June 12 2026):** behavior
+changes carry their spec delta; closed work moves a ledger (BACKLOG → LANDED
+with the commit hash; STATUS at packet close). The HTML pages
+(`index.html`, `architecture.html`, `features.html`) are RENDERED VIEWS —
+self-contained on purpose (no toolchain to rot), regenerated at packet
+close, never the source of truth. Where any page disagrees with a spec or
+ledger, the markdown wins.
+
 ## What "tested" can mean in this environment (honest scope)
 
 | Verifiable here (cloud container) | Requires the founder's machine |
