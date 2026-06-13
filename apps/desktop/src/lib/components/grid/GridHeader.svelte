@@ -215,9 +215,9 @@
       class="quiet"
       class:active={ui.graphOpen}
       onclick={() => void ui.openGraph()}
-      aria-label="Topic graph"
+      aria-label="Visualizer"
       aria-pressed={ui.graphOpen}
-      title="Topic graph: a force-directed map of this scope"
+      title="Visualizer: a force-directed map of this scope"
     >
       <Share2 size={14} />
     </button>
