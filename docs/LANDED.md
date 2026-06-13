@@ -140,6 +140,22 @@ their original wording.
   June 13 2026 — blocked-item advance: instrument built, query set is the
   founder's to supply.)
 
+- [x] **"More like this" (visual-similarity search)** — landed `3ea6f2f`
+  (merge `33865e1`): right-click an image -> "Find similar images" -> the grid
+  fills with its visual neighbours. A new `find_similar(hash, limit)` Tauri
+  command reuses the existing `image_clip` PPVEC store (`VectorStore::search`,
+  brute-force cosine) — new `fetch`/`image_clip_model_id`/`similar_images`
+  accessors on `PpvecStore`; resolves the model_id from the stored vectors
+  metadata so similarity works even when the CLIP model isn't loaded in memory.
+  Surfaced through the search-as-scope machinery: a new `gridScope` variant
+  `{kind:"similar", hash, filename}` rendered exactly like a query scope
+  (relevance/similarity order, residue "similar to <filename>", one-key clear,
+  Escape) via a `runSimilarScope()` mirroring `runQueryScope`. Self-excluded;
+  empty/un-embedded index returns empty gracefully (correct before any embed
+  pass). Additive only - hybrid fusion + text-search command untouched. 5
+  backend + 5 frontend tests. This also proves the topic-graph primitive:
+  "score every image vs a reference vector" generalizes from an image anchor to
+  a topic-phrase embedding. (Coordinator, June 13 2026 - nice-to-have.)
 - [x] **Foreign-edit sidecar reader (portable subset)** — landed `15d88fb`
   (merge) + `0396581` (gate fix): a READ-ONLY backend reader for Lightroom /
   darktable XMP sidecars extracting only the PORTABLE subset — rating (0..5,
