@@ -611,7 +611,7 @@ export class Ui {
       // The pop move (founder: "which is cool"): the shipped note flashes
       // a rising chip from the station, named with its summon-time scope.
       this.shell.stationPop(
-        `Noted — ● ${scopeLabel(scope?.kind ?? "session", scope?.count ?? 0)}`,
+        `Noted - ● ${scopeLabel(scope?.kind ?? "session", scope?.count ?? 0)}`,
       );
       await this.refreshInspectorIfTargeted();
       // A remark lights the has-journal dot (B37): refresh badges live too.

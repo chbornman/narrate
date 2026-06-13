@@ -17,7 +17,7 @@ export interface MetadataRow {
   dim?: boolean;
 }
 
-const UNKNOWN = "—";
+const UNKNOWN = "-";
 
 const row = (label: string, value: string | null, copyable = false): MetadataRow =>
   value === null
@@ -59,7 +59,7 @@ export function previewLine(source: string | null, pending: boolean): string {
         : source === "original"
           ? "Preview from original"
           : "No preview yet";
-  return pending ? `${name} — full decode pending` : name;
+  return pending ? `${name} - full decode pending` : name;
 }
 
 function formatDateTime(ts: string): string {

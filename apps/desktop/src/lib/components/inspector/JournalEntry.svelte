@@ -105,7 +105,7 @@
     {#if entry.linkedEvent !== null}
       <!-- the subtle link mark (UI §8.2): drawn while speaking — the
            backend resolves the one-way pointer in BOTH directions -->
-      <span class="linked" title="Linked — drawn and spoken together">⇠ linked</span>
+      <span class="linked" title="Linked - drawn and spoken together">⇠ linked</span>
     {/if}
   {:else if editing}
     <!-- svelte-ignore a11y_autofocus — the edit is user-summoned -->
@@ -121,7 +121,7 @@
     <span class="body">
       <span class="text"
         >“{entry.text}”{#if entry.linkedEvent !== null}
-          <span class="linked" title="Linked — drawn and spoken together">⇠ linked</span
+          <span class="linked" title="Linked - drawn and spoken together">⇠ linked</span
           >{/if}</span
       >
       {#if entry.corrected}
@@ -143,7 +143,7 @@
 
   {#if siblings !== null}
     <!-- sibling targets (BACKLOG): the event also wrote on other images -->
-    <span class="siblings" title="This entry targets other images too — Select picks them all">
+    <span class="siblings" title="This entry targets other images too - Select picks them all">
       {siblings}
     </span>
   {/if}

@@ -61,7 +61,7 @@ export function segments(
     out.push({
       id: "ingest",
       text: "",
-      title: `Indexing — ${input.ingest.done.toLocaleString()} of ${input.ingest.total.toLocaleString()}`,
+      title: `Indexing - ${input.ingest.done.toLocaleString()} of ${input.ingest.total.toLocaleString()}`,
       fraction,
     });
   }
@@ -76,7 +76,7 @@ export function segments(
     out.push({
       id: "scope",
       text: `● ${scopeLabel(streaming.kind, streaming.count)} ⇠`,
-      title: `Words in flight land on the earlier selection — the live selection is ● ${scopeLabel(input.scope.kind, input.scope.count)}`,
+      title: `Words in flight land on the earlier selection - the live selection is ● ${scopeLabel(input.scope.kind, input.scope.count)}`,
       pulse: true,
     });
   } else {

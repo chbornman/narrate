@@ -41,13 +41,13 @@ describe("jobs.ts — the background-jobs register", () => {
       ]),
     );
     expect(title).toBe(
-      `Still digesting — hashing 12 · building previews 480 · embedding images ${(1032).toLocaleString()}`,
+      `Still digesting - hashing 12 · building previews 480 · embedding images ${(1032).toLocaleString()}`,
     );
   });
 
   it("an unknown pass name passes through verbatim (future passes surface themselves)", () => {
     expect(jobsTitle(status([{ name: "palette", remaining: 3 }]))).toBe(
-      "Still digesting — palette 3",
+      "Still digesting - palette 3",
     );
   });
 });

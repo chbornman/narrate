@@ -142,14 +142,14 @@
         every search index and vector, and from every sidecar file it appears
         in. The event’s id and timestamp remain as a “redacted” marker for
         log continuity. A redaction can never be undone, and old sidecars can
-        never merge the content back — redaction wins.
+        never merge the content back - redaction wins.
       </p>
 
       <!-- §8.4 item 3: what redaction does NOT do (I4 limits, named). -->
       <p>
         It cannot scrub copies exported or backed up outside Photoproof.
         Sidecars on currently-offline volumes are scrubbed only when that
-        volume next connects — until then the content still exists on that
+        volume next connects - until then the content still exists on that
         disk{offlineVolumes.length > 0
           ? ` (offline now: ${offlineVolumes.join(", ")})`
           : ""}.

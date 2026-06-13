@@ -101,7 +101,7 @@ export const GLOBAL_DEFS: ActionDef[] = [
   {
     id: "rate",
     verb: "Rate",
-    label: "Rate 0–5 (0 clears)",
+    label: "Rate 0-5 (0 clears)",
     keys: [0, 1, 2, 3, 4, 5].map((v) => ({ key: String(v), arg: v })),
     scope: "global",
     group: "capture",
@@ -242,7 +242,7 @@ export const GLOBAL_DEFS: ActionDef[] = [
     // TYPE while an input is focused, and " " types a space.
     id: "mic-press",
     verb: "Microphone",
-    label: "Microphone — tap toggles, hold to talk",
+    label: "Microphone - tap toggles, hold to talk",
     keys: [{ key: " " }],
     scope: "global",
     group: "capture",

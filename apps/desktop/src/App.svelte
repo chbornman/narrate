@@ -295,13 +295,13 @@
                          files (10.1), so the copy must not claim nothing was
                          gathered. -->
                     <EmptyState
-                      line={`${memberCount} gathered ${memberCount === 1 ? "image is" : "images are"} not in this library — they appear once their files are indexed here.`}
+                      line={`${memberCount} gathered ${memberCount === 1 ? "image is" : "images are"} not in this library - they appear once their files are indexed here.`}
                     />
                   {:else}
                     <!-- an empty collection states its own next action: the
                          verb lives on the image context menu -->
                     <EmptyState
-                      line="Nothing gathered yet — right-click an image and choose Add to collection."
+                      line="Nothing gathered yet - right-click an image and choose Add to collection."
                     />
                   {/if}
                 {:else if ui.shell.ingest.running || ui.shell.ingestExpecting}
@@ -312,10 +312,10 @@
                        count keeps a slow volume's long walk honest -->
                   {#if ui.shell.ingest.scanning && ui.shell.ingest.discovered > 0}
                     <EmptyState
-                      line={`Indexing — ${ui.shell.ingest.discovered.toLocaleString()} ${ui.shell.ingest.discovered === 1 ? "photograph" : "photographs"} found so far…`}
+                      line={`Indexing - ${ui.shell.ingest.discovered.toLocaleString()} ${ui.shell.ingest.discovered === 1 ? "photograph" : "photographs"} found so far…`}
                     />
                   {:else}
-                    <EmptyState line="Indexing — photographs appear as they are found." />
+                    <EmptyState line="Indexing - photographs appear as they are found." />
                   {/if}
                 {:else}
                   <EmptyState line="No photographs in this folder.">

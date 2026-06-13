@@ -85,7 +85,7 @@ describe("ingest and digest activities", () => {
     });
     expect(m.pulsing).toBe(true);
     const row = m.activities.find((a) => a.kind === "ingest");
-    expect(row?.text).toBe("Indexing — 1,240 of 48,377");
+    expect(row?.text).toBe("Indexing - 1,240 of 48,377");
     expect(row?.fraction).toBeCloseTo(1240 / 48377);
     expect(row?.hint).toBeUndefined();
   });
@@ -95,7 +95,7 @@ describe("ingest and digest activities", () => {
       ...base,
       ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
     });
-    expect(scanning.activities[0].text).toBe("Indexing — scanning…");
+    expect(scanning.activities[0].text).toBe("Indexing - scanning…");
     const errored = stationModel({
       ...base,
       ingest: { running: true, done: 5, total: 10, errors: 2, passes: [], scanning: false, discovered: 0 },
@@ -121,8 +121,8 @@ describe("ingest and digest activities", () => {
       },
     });
     expect(m.activities.map((a) => a.text)).toEqual([
-      "Building previews — 480 remaining",
-      "Embedding images — 1,200 remaining",
+      "Building previews - 480 remaining",
+      "Embedding images - 1,200 remaining",
     ]);
     // Queued digestion alone is not the founder's pulse list.
     expect(m.pulsing).toBe(false);
@@ -139,7 +139,7 @@ describe("download activities (RUNTIME §5.2 rows)", () => {
     });
     expect(m.pulsing).toBe(true);
     const row = m.activities.find((a) => a.kind === "download");
-    expect(row?.text).toBe("Downloading dfn5b — 62%");
+    expect(row?.text).toBe("Downloading dfn5b - 62%");
     expect(row?.hint).toBe("retrying, attempt 2");
     expect(row?.fraction).toBeCloseTo(0.62);
   });
@@ -150,7 +150,7 @@ describe("download activities (RUNTIME §5.2 rows)", () => {
       runtime: runtime([model({ state: "failed", error: null })]),
     });
     const row = m.activities.find((a) => a.kind === "download-failed");
-    expect(row?.text).toBe("Download failed — dfn5b");
+    expect(row?.text).toBe("Download failed - dfn5b");
     expect(row?.hint).toBe("retry from Settings");
     expect(m.pulsing).toBe(false);
   });
@@ -185,7 +185,7 @@ describe("the mic seat mirrors CAPTURE §6.4/§11 (the modes.ts mapping)", () =>
     const speaking = stationModel({ ...base, asrReady: true, micState: "armedSpeaking" });
     expect(speaking.seats[0].tone).toBe("live");
     expect(speaking.pulsing).toBe(true);
-    expect(speaking.activities.map((a) => a.text)).toEqual(["Listening — speech detected"]);
+    expect(speaking.activities.map((a) => a.text)).toEqual(["Listening - speech detected"]);
   });
 
   it("degraded = the muted-mic glyph + the §7.3 line, even before asrReady", () => {
@@ -193,7 +193,7 @@ describe("the mic seat mirrors CAPTURE §6.4/§11 (the modes.ts mapping)", () =>
     expect(m.seats[0].icon).toBe("mic-off");
     expect(m.seats[0].tone).toBe("dim");
     expect(m.activities[0].text).toBe(
-      "Voice capture unavailable — typed notes and pencil still work.",
+      "Voice capture unavailable - typed notes and pencil still work.",
     );
   });
 });
@@ -202,7 +202,7 @@ describe("the streaming utterance (§5.4)", () => {
   it("names where words land and pulses while in flight", () => {
     const m = stationModel({ ...base, streaming: { kind: "multi", count: 3 } });
     expect(m.pulsing).toBe(true);
-    expect(m.activities.map((a) => a.text)).toEqual(["Capturing — words land on ● 3"]);
+    expect(m.activities.map((a) => a.text)).toEqual(["Capturing - words land on ● 3"]);
   });
 });
 

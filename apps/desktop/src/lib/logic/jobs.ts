@@ -34,5 +34,5 @@ export function jobsTitle(status: IngestStatus): string {
   const parts = status.passes.map(
     (p) => `${KIND_LABELS[p.name] ?? p.name} ${p.remaining.toLocaleString()}`,
   );
-  return `Still digesting — ${parts.join(" · ")}`;
+  return `Still digesting - ${parts.join(" · ")}`;
 }

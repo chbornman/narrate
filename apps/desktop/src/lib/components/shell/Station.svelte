@@ -188,7 +188,7 @@
             {/if}
           </div>
         {:else}
-          <div class="row dim">Nothing happening — the library is settled.</div>
+          <div class="row dim">Nothing happening - the library is settled.</div>
         {/each}
       </div>
     </Popover>

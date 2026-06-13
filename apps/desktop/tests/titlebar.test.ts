@@ -144,7 +144,7 @@ describe("Titlebar platform chrome", () => {
     const pill = busy.container.querySelector(".jobs");
     expect(pill?.textContent).toBe("digesting");
     expect(pill?.getAttribute("title")).toBe(
-      "Still digesting — hashing 12 · embedding images 485",
+      "Still digesting - hashing 12 · embedding images 485",
     );
     ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
   });

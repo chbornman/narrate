@@ -29,7 +29,7 @@
       </div>
     {/each}
     <p class="note">
-      Photoproof indexes the photographs in place — files are never moved,
+      Photoproof indexes the photographs in place - files are never moved,
       modified, or deleted.
     </p>
     {#if ui.dropError !== null}

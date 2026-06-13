@@ -50,10 +50,10 @@
       <p class="quote">
         “{#each display.runs as run, i (i)}{#if run.marked}<mark>{run.text}</mark>{:else}{run.text}{/if}{/each}”
       </p>
-      <span class="date">— {display.dateLabel}</span>
+      <span class="date">- {display.dateLabel}</span>
     {:else if display.kind === "stroke"}
       <p class="label">marked with the pencil</p>
-      <span class="date">— {display.dateLabel}</span>
+      <span class="date">- {display.dateLabel}</span>
     {:else if display.kind === "visual-match"}
       <p class="label">{VISUAL_MATCH_LABEL}</p>
     {:else}

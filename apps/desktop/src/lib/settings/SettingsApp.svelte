@@ -220,7 +220,7 @@
           (detected {runtime.tierDetected}, overridden)
         {/if}
         {#if runtime.tierOverriddenAbove}
-          — set above detected hardware; models may not fit.
+          - set above detected hardware; models may not fit.
         {/if}
       </p>
       {#if runtime.tierEffective === 0}
@@ -245,12 +245,12 @@
           <span class="name">{m.id}</span>
           <span class="state">
             {#if m.state === "downloading"}
-              downloading — {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
+              downloading - {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
               <!-- Auto-retry of an interrupted transfer: still
                    "downloading", never a terminal "failed" until the
                    retry schedule is exhausted. -->
               {#if m.retryHint !== null}
-                <span class="dim">— {m.retryHint}</span>
+                <span class="dim">- {m.retryHint}</span>
               {/if}
             {:else if m.state === "unpinned"}
               <!-- B55 fail-closed: no verified pin yet (embedders until
@@ -259,7 +259,7 @@
             {:else}
               {m.state}
               {#if m.state === "installed" && runtime !== null && embedderStatus(m.id, runtime) !== ""}
-                — {embedderStatus(m.id, runtime)}
+                - {embedderStatus(m.id, runtime)}
               {/if}
             {/if}
           </span>
@@ -279,7 +279,7 @@
         <div class="row license">
           <a href={m.licenseUrl} target="_blank" rel="noreferrer">{m.licenseName}</a>
           {#if m.accepted}<span class="dim">accepted</span>{/if}
-          {#if m.error !== null}<span class="dim">— {m.error}</span>{/if}
+          {#if m.error !== null}<span class="dim">- {m.error}</span>{/if}
         </div>
       {/each}
       <!-- Both verbs complete invisibly when the status text happens not

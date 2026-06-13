@@ -189,7 +189,7 @@ describe("redact flow (the one modal → sanctioned toast 2)", () => {
     slice.beginRedact("01A");
     await slice.confirmRedact();
     expect(toasts.items[0].text).toBe(
-      "Redacted from journal, sidecars, and indexes — 1 offline sidecar pending",
+      "Redacted from journal, sidecars, and indexes - 1 offline sidecar pending",
     );
   });
 
