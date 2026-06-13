@@ -42,6 +42,13 @@ export class LookSlice {
    * snapshot closes/restores it at the root. */
   filmstrip = $state(false);
 
+  /** Histogram overlay (H): a reviewing aid (exposure / clipping check),
+   * NOT an editing tool. A session-remembered UI toggle like the filmstrip;
+   * defaults OFF. The overlay reads this and hides unconditionally under
+   * lights-out (the snapshot lives at the root, but a histogram is canvas
+   * chrome, not a panel, so it gates on chromeHidden in the component). */
+  histogram = $state(false);
+
   /** Display hashes flipped to their alt member (R), keyed by entry
    * display hash (logic/looknav.ts toggleFlip/displayedHash). */
   flips = $state<ReadonlySet<string>>(new Set());
@@ -98,6 +105,7 @@ export class LookSlice {
 
   loadPrefs() {
     this.filmstrip = prefs.loadFilmstrip();
+    this.histogram = prefs.loadHistogram();
   }
 
   open(order: LookEntry[], index: number) {
@@ -134,6 +142,12 @@ export class LookSlice {
   toggleFilmstrip() {
     this.filmstrip = !this.filmstrip;
     prefs.saveFilmstrip(this.filmstrip);
+  }
+
+  /** H: toggle the histogram overlay; remembered for the session. */
+  toggleHistogram() {
+    this.histogram = !this.histogram;
+    prefs.saveHistogram(this.histogram);
   }
 
   /** R: flip the displayed pair member; lone images no-op (featureset §5). */

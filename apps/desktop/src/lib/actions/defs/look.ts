@@ -81,6 +81,18 @@ export const LOOK_DEFS: ActionDef[] = [
   // toggle-filmstrip MOVED to defs/global.ts (founder, June 12 2026): F
   // is total — the strip is a center-column bottom panel in BOTH surfaces.
   {
+    id: "toggle-histogram",
+    verb: "Histogram",
+    label: "Histogram overlay (exposure / clipping check)",
+    keys: [{ key: "h" }],
+    scope: "look",
+    group: "look",
+    seats: ["look-backdrop"], // pointer reachability, like the other toggles
+    available: always,
+    enabled: lookKeysFree,
+    checked: (ctx) => ctx.histogram,
+  },
+  {
     id: "flip-stack-member",
     verb: "Flip RAW/JPEG",
     label: "Show the other stack member",

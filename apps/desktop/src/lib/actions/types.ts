@@ -76,6 +76,8 @@ export interface ActionContext {
   thumbStep: number;
   surround: SurroundLevel;
   filmstrip: boolean;
+  /** Histogram overlay shown (H; Look reviewing aid). */
+  histogram: boolean;
   // grease pencil (live since P5.1 — M2a)
   /** Sticky pencil mode (B; Look only, resets on return to Grid). */
   pencilMode: boolean;
