@@ -20,6 +20,7 @@
    */
   // Lucide (BACKLOG "Adopt Lucide icons").
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import Flame from "@lucide/svelte/icons/flame";
   import Search from "@lucide/svelte/icons/search";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import X from "@lucide/svelte/icons/x";
@@ -207,6 +208,38 @@
     >
       <Settings2 size={14} />
     </button>
+
+    <!-- Attention heat-tint toggle (DESIGN-ATTENTION-HEATMAP.md): a quiet
+         reviewing aid like the histogram, off by default. When on, grid cells
+         get a warm glow scaled by engagement intensity. No em-dashes in the
+         copy (gate: check:emdash). -->
+    <button
+      class="quiet heat"
+      class:active={ui.heatOn}
+      onclick={() => ui.toggleHeat()}
+      aria-label="Attention heat"
+      aria-pressed={ui.heatOn}
+      title="attention heat: warm glow scaled by engagement"
+    >
+      <Flame size={14} />
+    </button>
+    <!-- "All-time" recency switch (founder decision): shown only while the heat
+         tint is on. Off = recency-weighted ("what am I working on now"); on =
+         flat all-time ("what mattered most ever"). -->
+    {#if ui.heatOn}
+      <button
+        class="quiet all-time"
+        class:active={ui.heatAllTime}
+        onclick={() => ui.toggleAllTime()}
+        aria-label="All-time attention"
+        aria-pressed={ui.heatAllTime}
+        title={ui.heatAllTime
+          ? "all-time (what mattered most ever)"
+          : "recent (what you are working on now)"}
+      >
+        {ui.heatAllTime ? "all-time" : "recent"}
+      </button>
+    {/if}
 
     <button
       bind:this={sortBtn}

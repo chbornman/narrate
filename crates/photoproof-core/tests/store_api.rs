@@ -6,8 +6,8 @@ mod common;
 
 use common::*;
 use photoproof_core::{
-    AppendError, Event, EventDraft, JournalEntry, Kind, RedactError, RemarkSource, SessionContext,
-    SessionId, SessionRecord, StoreError, UtcMillis, canonical_json,
+    AppendError, DwellSource, Event, EventDraft, JournalEntry, Kind, RedactError, RemarkSource,
+    SessionContext, SessionId, SessionRecord, StoreError, UtcMillis, canonical_json,
 };
 
 // -- sessions (§9, E7) --------------------------------------------------------
@@ -1021,4 +1021,192 @@ fn v5_migration_restores_has_text_on_pre_p41_databases() {
         "migrated stats must carry real fold values"
     );
     assert!(stats[0].has_journal());
+}
+
+// -- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) ---------------
+
+/// record_dwell applies the tier rate and the per-episode cap (the rates/cap
+/// are config, applied in the backend). Look = full weight, Grid = the small
+/// fraction; both clamp at dwell_cap_ms per call.
+#[test]
+fn record_dwell_applies_tier_and_cap() {
+    let ts = new_store();
+    let look = hash(1);
+    let grid = hash(2);
+    let now = UtcMillis::now();
+
+    // Look tier is full-weight (default rate 1.0): 5 s of elapsed -> 5000 ms.
+    ts.store
+        .record_dwell(&look, DwellSource::Look, 5_000, now)
+        .unwrap();
+    // Grid tier is ~0.15x (default): 5 s elapsed -> 750 ms.
+    ts.store
+        .record_dwell(&grid, DwellSource::Grid, 5_000, now)
+        .unwrap();
+
+    // A single huge episode is capped at 60 s per call (the walk-away guard),
+    // even at the full Look rate.
+    ts.store
+        .record_dwell(&look, DwellSource::Look, 10_000_000, now)
+        .unwrap();
+
+    let conn = ts.raw_conn();
+    let read = |h: &str| -> (i64, i64) {
+        conn.query_row(
+            "SELECT dwell_ms, focus_count FROM image_dwell WHERE image_hash = ?1",
+            [h],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let (look_ms, look_n) = read(look.as_str());
+    // 5000 (first) + 60000 (capped second) = 65000; two episodes.
+    assert_eq!(look_ms, 65_000, "Look full-rate + capped accrual");
+    assert_eq!(look_n, 2, "two focus episodes counted");
+
+    let (grid_ms, grid_n) = read(grid.as_str());
+    assert_eq!(grid_ms, 750, "Grid tier is the small fraction of elapsed");
+    assert_eq!(grid_n, 1);
+}
+
+/// image_intensity composes the weighted sum across dwell + event_count +
+/// stroke_count and NORMALIZES the scope to 0..1 (the hottest image is 1.0).
+#[test]
+fn image_intensity_composite_and_normalization() {
+    let ts = new_store();
+    let hot = hash(1);
+    let cool = hash(2);
+    let cold = hash(3); // no signal at all
+    let now = UtcMillis::now();
+
+    // `hot` gets dwell + a remark + a stroke; `cool` gets only one remark.
+    ts.store
+        .record_dwell(&hot, DwellSource::Look, 60_000, now)
+        .unwrap();
+    ts.store
+        .append(&ts.session, d_remark("note", vec![hot.clone()]), None)
+        .unwrap();
+    ts.store
+        .append(&ts.session, d_stroke(hot.clone(), None), None)
+        .unwrap();
+    ts.store
+        .append(&ts.session, d_remark("note", vec![cool.clone()]), None)
+        .unwrap();
+
+    // All-time (flat) so the assertion is about the composite, not recency.
+    let scope = vec![hot.clone(), cool.clone(), cold.clone()];
+    let scores = ts.store.image_intensity(&scope, true, now).unwrap();
+    assert_eq!(scores.len(), 3);
+    // Input order is preserved.
+    assert_eq!(scores[0].image, hot);
+    assert_eq!(scores[1].image, cool);
+    assert_eq!(scores[2].image, cold);
+    // Normalized: the hottest is exactly 1.0, the no-signal image is 0.0,
+    // and the middle sits strictly between.
+    assert_eq!(scores[0].intensity, 1.0, "hottest normalizes to 1.0");
+    assert_eq!(scores[2].intensity, 0.0, "no-signal image is 0.0");
+    assert!(
+        scores[1].intensity > 0.0 && scores[1].intensity < 1.0,
+        "a lesser-engaged image sits between 0 and 1: {}",
+        scores[1].intensity
+    );
+}
+
+/// Recency weighting (default) makes a stale-but-busy image rank BELOW a
+/// fresh one with the same raw signal; all-time (flat) ties them.
+#[test]
+fn image_intensity_recency_vs_all_time() {
+    let ts = new_store();
+    let old = hash(1);
+    let new = hash(2);
+
+    // Identical raw signal (one capped Look episode each), but at very
+    // different ages: `old` is 30 days stale, `new` is right now.
+    let now = UtcMillis::now();
+    let long_ago = UtcMillis::from_epoch_ms(now.epoch_ms() - 30 * 86_400_000);
+    ts.store
+        .record_dwell(&old, DwellSource::Look, 60_000, long_ago)
+        .unwrap();
+    ts.store
+        .record_dwell(&new, DwellSource::Look, 60_000, now)
+        .unwrap();
+
+    let scope = vec![old.clone(), new.clone()];
+
+    // All-time: equal raw signal -> equal normalized intensity (both 1.0).
+    let flat = ts.store.image_intensity(&scope, true, now).unwrap();
+    assert_eq!(flat[0].intensity, flat[1].intensity, "all-time ties them");
+    assert_eq!(flat[1].intensity, 1.0);
+
+    // Recency-weighted: the fresh one is hotter; the stale one decays below it.
+    let recent = ts.store.image_intensity(&scope, false, now).unwrap();
+    assert_eq!(recent[1].intensity, 1.0, "fresh image normalizes to 1.0");
+    assert!(
+        recent[0].intensity < recent[1].intensity,
+        "30-day-stale image decays below the fresh one: {} vs {}",
+        recent[0].intensity,
+        recent[1].intensity
+    );
+}
+
+/// stroke_count is maintained in the same recompute transaction as the event
+/// insert/retract: it rises with each live stroke and falls when one is
+/// retracted (non-live), exactly like event_count.
+#[test]
+fn stroke_count_maintained_across_insert_and_retract() {
+    let ts = new_store();
+    let img = hash(1);
+
+    let s1 = ts
+        .store
+        .append(&ts.session, d_stroke(img.clone(), None), None)
+        .unwrap();
+    ts.store
+        .append(&ts.session, d_stroke(img.clone(), None), None)
+        .unwrap();
+
+    let stats = ts.store.journal_stats(std::slice::from_ref(&img)).unwrap();
+    assert_eq!(stats[0].stroke_count, 2, "two live strokes counted");
+    assert!(stats[0].has_strokes);
+
+    // Retract one: it becomes non-live, dropping the count to 1.
+    ts.store
+        .append(&ts.session, d_retract(s1.id), None)
+        .unwrap();
+    let stats = ts.store.journal_stats(std::slice::from_ref(&img)).unwrap();
+    assert_eq!(stats[0].stroke_count, 1, "retracted stroke drops the count");
+    assert!(stats[0].has_strokes, "one live stroke remains");
+}
+
+/// clear_dwell wipes the local dwell telemetry but leaves the annotation
+/// counts (the user's journal) untouched.
+#[test]
+fn clear_dwell_wipes_telemetry_only() {
+    let ts = new_store();
+    let img = hash(1);
+    let now = UtcMillis::now();
+
+    ts.store
+        .record_dwell(&img, DwellSource::Look, 60_000, now)
+        .unwrap();
+    ts.store
+        .append(&ts.session, d_remark("note", vec![img.clone()]), None)
+        .unwrap();
+
+    let removed = ts.store.clear_dwell().unwrap();
+    assert_eq!(removed, 1, "one dwell row removed");
+
+    // Dwell intensity is gone; but the remark still counts (all-time so the
+    // event_count alone drives a non-zero, top-of-scope intensity).
+    let scores = ts
+        .store
+        .image_intensity(std::slice::from_ref(&img), true, now)
+        .unwrap();
+    assert_eq!(
+        scores[0].intensity, 1.0,
+        "annotation count survives the wipe"
+    );
+    // And the journal stats are intact.
+    let stats = ts.store.journal_stats(std::slice::from_ref(&img)).unwrap();
+    assert_eq!(stats[0].event_count, 1);
 }

@@ -84,6 +84,10 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     // Dogfood round 1 reachability audit: every verb gets a pointer seat.
     "cycle-cell-info",
     "toggle-auto-advance",
+    // Attention heatmap (DESIGN-ATTENTION-HEATMAP.md): the heat-tint toggle and
+    // the All-time recency switch (the latter only available while heat is on).
+    "toggle-heat",
+    "toggle-attention-all-time",
     "—",
     // F is total (founder, June 12 2026): the Grid-side pointer seat.
     "toggle-filmstrip",

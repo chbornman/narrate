@@ -224,6 +224,30 @@ export function saveSurround(level: SurroundLevel) {
   safeSet("pp.surround", level);
 }
 
+// ---- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) -------------
+
+/** Grid heat-tint toggle, default OFF (a reviewing aid, like the histogram).
+ * Persisted across the session like every other UI toggle so a reviewer who
+ * wants it keeps it. */
+export function loadHeatOn(): boolean {
+  return loadBool("pp.heatOn", false);
+}
+
+export function saveHeatOn(on: boolean) {
+  saveBool("pp.heatOn", on);
+}
+
+/** "All-time" recency switch (founder decision), default OFF = recency-weighted
+ * ("what am I working on now"); ON = flat all-time ("what mattered most ever").
+ * Persisted like the heat toggle. */
+export function loadHeatAllTime(): boolean {
+  return loadBool("pp.heatAllTime", false);
+}
+
+export function saveHeatAllTime(on: boolean) {
+  saveBool("pp.heatAllTime", on);
+}
+
 // ---- ranking signals (search-as-scope Phase 3) ------------------------------
 
 /** The ⚙ "Ranking signals" on/off state, persisted across the session like

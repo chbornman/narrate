@@ -153,6 +153,15 @@
     }
   }
 
+  // Attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md): the privacy-
+  // hygiene reset. Inline confirm (not a modal, UI §2.4); the AckButton says
+  // it landed even when the count is the only thing that changed.
+  let clearAttentionConfirm = $state(false);
+  async function clearAttention(): Promise<void> {
+    await ipc.clearDwell();
+    clearAttentionConfirm = false;
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") void win.close();
   }
@@ -348,6 +357,30 @@
       {/if}
     </div>
     {#if exportNote !== ""}<p class="dim">{exportNote}</p>{/if}
+  </section>
+
+  <!-- 5. Attention data (DESIGN-ATTENTION-HEATMAP.md): the privacy-hygiene
+       reset for the local, machine-observed dwell telemetry. The annotation
+       journal (your own words/marks) is never touched. No em-dashes in the
+       copy (gate: check:emdash). -->
+  <section>
+    <h2>Attention data</h2>
+    <p class="dim">
+      The heatmap records where you put attention (what you open and mark),
+      capped and stored only on this machine. Your journal is never affected.
+    </p>
+    <div class="row">
+      {#if clearAttentionConfirm}
+        <!-- inline (not modal) confirm (UI §2.4) -->
+        <span class="dim">Clear all recorded attention data?</span>
+        <AckButton label="Clear" doneLabel="Cleared" verb={clearAttention} />
+        <button class="quiet" onclick={() => (clearAttentionConfirm = false)}>Cancel</button>
+      {:else}
+        <button class="quiet" onclick={() => (clearAttentionConfirm = true)}
+          >Clear attention data…</button
+        >
+      {/if}
+    </div>
   </section>
 </main>
 

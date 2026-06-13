@@ -36,6 +36,7 @@
     active,
     size,
     infoStrip,
+    intensity = 0,
     onpointerselect,
     onopen,
     onstacktoggle,
@@ -63,6 +64,11 @@
     /** Fixed info-strip height (px) reserved ABOVE the image; 0 when off.
      * The cell GROWS by this so the image is never overlaid (cellinfo.ts). */
     infoStrip: number;
+    /** Normalized engagement intensity 0..1 (DESIGN-ATTENTION-HEATMAP.md):
+     * when the heat tint is on, the cell shows a warm glow + corner heat-bar
+     * scaled by this. 0 (the default, and the tint-off case) renders nothing,
+     * so the shimmer/badges are undisturbed. */
+    intensity?: number;
     onpointerselect: (e: MouseEvent) => void;
     onopen: () => void;
     onstacktoggle: () => void;
@@ -70,6 +76,13 @@
   } = $props();
 
   const info = $derived(infoLine(cellInfo, { fileName, rating, hasJournal }));
+
+  // Heat-tint (DESIGN-ATTENTION-HEATMAP.md): a warm glow + a corner heat-bar
+  // scaled by normalized engagement intensity. Clamp 0..1 defensively; a tiny
+  // floor keeps a barely-warm cell from rendering a sub-pixel sliver. Off-tint
+  // (and cold cells) pass 0, so nothing renders and the quiet grid stands.
+  const heat = $derived(Math.max(0, Math.min(1, intensity)));
+  const showHeat = $derived(heat > 0.01);
 
   // Per-signal provenance hint (search-as-scope Phase 3, "show, don't just
   // tune"): ONLY while the ⚙ "Ranking signals" popover is open, name which
@@ -240,6 +253,13 @@
     <!-- Signal-provenance hint (Phase 3): only while the ⚙ popover tunes, a
          quiet per-cell breakdown of which signals contributed to this match. -->
     {#if signals !== ""}<span class="signal-hint">{signals}</span>{/if}
+    <!-- Heat-tint (DESIGN-ATTENTION-HEATMAP.md): a warm glow over the image
+         plus a left-edge corner heat-bar, both scaled by intensity. Pointer-
+         inert and below the badges so it never blocks a click or hides a dot. -->
+    {#if showHeat}
+      <span class="heat-glow" style:opacity={heat} aria-hidden="true"></span>
+      <span class="heat-bar" style:--heat={heat} aria-hidden="true"></span>
+    {/if}
     <!-- badges anchor to the IMAGE box, top/bottom edges of the thumbnail -->
     {#if hasJournal}<span class="journal-dot"></span>{/if}
     {#if offline}<span class="offline-badge"><Unplug size={11} /></span>{/if}
@@ -342,6 +362,39 @@
   .thumb.active {
     outline: 1px solid var(--focus-cell);
     outline-offset: 1px;
+  }
+  /* Heat-tint (DESIGN-ATTENTION-HEATMAP.md): a warm radial glow scaled by
+     intensity (the inline opacity), warmest at the corner where the bar sits.
+     Pointer-inert, achromatic-warm so it reads as "hot" without a hard tint. */
+  .heat-glow {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(
+      circle at 8% 92%,
+      rgba(255, 120, 40, 0.55) 0%,
+      rgba(255, 140, 60, 0.22) 38%,
+      transparent 70%
+    );
+    mix-blend-mode: screen;
+  }
+  /* Corner heat-bar: a short vertical wedge at the bottom-left whose HEIGHT
+     scales with intensity (--heat, 0..1). A discrete read of the glow's
+     analog warmth — the LrC-style flag without a clickable badge. */
+  .heat-bar {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    width: 3px;
+    height: calc(6px + var(--heat, 0) * 60%);
+    max-height: calc(100% - 8px);
+    border-radius: 2px;
+    background: linear-gradient(
+      to top,
+      rgba(255, 90, 30, 0.95),
+      rgba(255, 170, 70, 0.85)
+    );
+    pointer-events: none;
   }
   /* Badges: display-only, hover-quiet — pointer-inert by construction. */
   .journal-dot {

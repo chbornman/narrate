@@ -239,6 +239,10 @@ pub struct JournalStats {
     pub has_text: bool,
     /// Any live, non-scrubbed stroke (B4) — marks evidence.
     pub has_strokes: bool,
+    /// Count of live, non-scrubbed strokes — the heatmap's small stroke factor
+    /// (DESIGN-ATTENTION-HEATMAP.md). `has_strokes` carries presence; this
+    /// carries the count, maintained in the same recompute transaction.
+    pub stroke_count: i64,
     /// ts of the greatest-id live event.
     pub last_ts: UtcMillis,
 }
@@ -248,6 +252,24 @@ impl JournalStats {
     pub fn has_journal(&self) -> bool {
         self.has_text || self.has_strokes
     }
+}
+
+/// Which focus tier a dwell episode was captured at (DESIGN-ATTENTION-HEATMAP.md):
+/// `Look` = single-image view (full weight), `Grid` = grid select / multi-select
+/// (a small fraction of the Look rate). The tier RATE is config (`tuning()`); the
+/// store applies it in `record_dwell`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DwellSource {
+    Look,
+    Grid,
+}
+
+/// One image's normalized (0..1) engagement intensity in a scope
+/// (DESIGN-ATTENTION-HEATMAP.md). Produced by [`EventStore::image_intensity`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageIntensity {
+    pub image: ContentHash,
+    pub intensity: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,10 +336,12 @@ impl EventStore {
             minter: Minter::new(),
             vectors_dir: crate::retrieval::default_vectors_dir(path),
         };
-        // v5 added `has_text` with a placeholder DEFAULT; databases migrated
-        // from an earlier version need the real fold values (B37). Fresh
-        // databases (from_version 0) and current ones skip this.
-        if (1..5).contains(&from_version) {
+        // Two migrations added an `image_journal_stats` column with a
+        // placeholder DEFAULT that the real fold must backfill: v5 added
+        // `has_text` (B37) and v12 added `stroke_count` (the heatmap's stroke
+        // factor). A database opened below either needs its derived tables
+        // rebuilt. Fresh databases (from_version 0) and current ones skip this.
+        if (1..12).contains(&from_version) {
             store.rebuild_derived()?;
         }
         Ok(store)
@@ -486,7 +510,7 @@ impl EventStore {
             for chunk in images.chunks(IN_LIST_CHUNK) {
                 let marks = vec!["?"; chunk.len()].join(",");
                 let sql = format!(
-                    "SELECT image_hash, event_count, has_text, has_strokes, last_ts \
+                    "SELECT image_hash, event_count, has_text, has_strokes, stroke_count, last_ts \
                      FROM image_journal_stats WHERE image_hash IN ({marks}) \
                      ORDER BY image_hash"
                 );
@@ -495,18 +519,210 @@ impl EventStore {
                 let mut rows = stmt.query(params_from_iter(params.iter()))?;
                 while let Some(row) = rows.next()? {
                     let hash: String = row.get(0)?;
-                    let last_ts: String = row.get(4)?;
+                    let last_ts: String = row.get(5)?;
                     out.push(JournalStats {
                         image: ContentHash::from_hex(&hash).map_err(corrupt)?,
                         event_count: row.get(1)?,
                         has_text: row.get::<_, i64>(2)? != 0,
                         has_strokes: row.get::<_, i64>(3)? != 0,
+                        stroke_count: row.get(4)?,
                         last_ts: UtcMillis::parse(&last_ts).map_err(corrupt)?,
                     });
                 }
             }
             Ok(out)
         })
+    }
+
+    // -- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) -----------
+    //
+    // Dwell is machine-observed telemetry, kept in `image_dwell` SEPARATE from
+    // the annotation event log (K14: the journal stays the user's own
+    // words/marks). It is local-only and never enters a sidecar. The tier rate
+    // and the per-episode cap are read from the heatmap tuning config here —
+    // keeping them in the BACKEND keeps tuning authoritative; the frontend just
+    // reports a raw episode (hash, source, elapsed_ms).
+
+    /// Record one finished focus EPISODE for an image (DESIGN §"dwell
+    /// capture"). `source` selects the tier: `Look` (single-image view, full
+    /// weight) or `Grid` (grid select / multi-select, a small fraction). The
+    /// tier rate is applied to `elapsed_ms` and the result is capped at
+    /// `dwell_cap_ms` PER CALL (so a walk-away inside one episode can add at
+    /// most the cap), then accumulated: `dwell_ms += min(rate*elapsed, cap)`,
+    /// `focus_count += 1`, `last_ts = now`.
+    pub fn record_dwell(
+        &self,
+        hash: &ContentHash,
+        source: DwellSource,
+        elapsed_ms: i64,
+        now: UtcMillis,
+    ) -> Result<(), StoreError> {
+        let h = crate::tuning::tuning().heatmap;
+        let rate = match source {
+            DwellSource::Look => h.dwell_look_rate,
+            DwellSource::Grid => h.dwell_grid_rate,
+        };
+        // Negative elapsed (a clock glitch) contributes nothing; the tier rate
+        // and the cap together bound the credit at `dwell_cap_ms` per call.
+        let raw = (rate * elapsed_ms.max(0) as f64).floor() as i64;
+        let add = raw.clamp(0, h.dwell_cap_ms);
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        w.prepare_cached(
+            "INSERT INTO image_dwell(image_hash, dwell_ms, focus_count, last_ts) \
+             VALUES (?1, ?2, 1, ?3) \
+             ON CONFLICT(image_hash) DO UPDATE SET \
+               dwell_ms = dwell_ms + excluded.dwell_ms, \
+               focus_count = focus_count + 1, \
+               last_ts = excluded.last_ts",
+        )?
+        .execute(params![hash.as_str(), add, now.to_rfc3339()])?;
+        Ok(())
+    }
+
+    /// Per-image engagement intensity over a scope, normalized to 0..1
+    /// (DESIGN-ATTENTION-HEATMAP.md). For each hash in `hashes`:
+    ///
+    /// ```text
+    /// raw = w_dwell·dwell_ms + w_events·event_count + w_strokes·stroke_count
+    /// ```
+    ///
+    /// (dwell from `image_dwell`, the counts from `image_journal_stats`; a hash
+    /// absent from either contributes 0 for that family). When `all_time` is
+    /// false (the DEFAULT — "what am I working on NOW"), `raw` is multiplied by
+    /// a recency weight before normalization:
+    ///
+    /// ```text
+    /// recency(age_days) = 0.5 ^ (age_days / recency_half_life_days)
+    /// ```
+    ///
+    /// where `age_days` is the age of the image's most recent signal time
+    /// (`max(image_dwell.last_ts, image_journal_stats.last_ts)`) relative to
+    /// `now`. Recent attention burns hotter; the half-life is the tunable knob.
+    /// When `all_time` is true the recency factor is omitted (flat all-time —
+    /// "what mattered most ever"). The scaled scores are then NORMALIZED by the
+    /// scope maximum so the hottest image is 1.0; an all-zero scope returns all
+    /// zeros (no division by zero). The returned vector is in INPUT order.
+    pub fn image_intensity(
+        &self,
+        hashes: &[ContentHash],
+        all_time: bool,
+        now: UtcMillis,
+    ) -> Result<Vec<ImageIntensity>, StoreError> {
+        let h = crate::tuning::tuning().heatmap;
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_reader(|conn| {
+            // Pull the raw component rows for the scope in batched IN-list
+            // chunks (the journal_stats plan), keyed by hash for assembly.
+            struct Acc {
+                dwell_ms: i64,
+                event_count: i64,
+                stroke_count: i64,
+                last_epoch_ms: Option<i64>,
+            }
+            let mut acc: HashMap<String, Acc> = HashMap::new();
+            for chunk in hashes.chunks(IN_LIST_CHUNK) {
+                let marks = vec!["?"; chunk.len()].join(",");
+                let params: Vec<&str> = chunk.iter().map(ContentHash::as_str).collect();
+
+                // Annotation counts + their last_ts.
+                let sql = format!(
+                    "SELECT image_hash, event_count, stroke_count, last_ts \
+                     FROM image_journal_stats WHERE image_hash IN ({marks})"
+                );
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let mut rows = stmt.query(params_from_iter(params.iter()))?;
+                while let Some(row) = rows.next()? {
+                    let hash: String = row.get(0)?;
+                    let last_ts: String = row.get(3)?;
+                    let epoch = UtcMillis::parse(&last_ts).map_err(corrupt)?.epoch_ms();
+                    let e = acc.entry(hash).or_insert(Acc {
+                        dwell_ms: 0,
+                        event_count: 0,
+                        stroke_count: 0,
+                        last_epoch_ms: None,
+                    });
+                    e.event_count = row.get(1)?;
+                    e.stroke_count = row.get(2)?;
+                    e.last_epoch_ms = Some(e.last_epoch_ms.map_or(epoch, |p| p.max(epoch)));
+                }
+
+                // Dwell telemetry + its last_ts.
+                let sql = format!(
+                    "SELECT image_hash, dwell_ms, last_ts \
+                     FROM image_dwell WHERE image_hash IN ({marks})"
+                );
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let mut rows = stmt.query(params_from_iter(params.iter()))?;
+                while let Some(row) = rows.next()? {
+                    let hash: String = row.get(0)?;
+                    let last_ts: String = row.get(2)?;
+                    let epoch = UtcMillis::parse(&last_ts).map_err(corrupt)?.epoch_ms();
+                    let e = acc.entry(hash).or_insert(Acc {
+                        dwell_ms: 0,
+                        event_count: 0,
+                        stroke_count: 0,
+                        last_epoch_ms: None,
+                    });
+                    e.dwell_ms = row.get(1)?;
+                    e.last_epoch_ms = Some(e.last_epoch_ms.map_or(epoch, |p| p.max(epoch)));
+                }
+            }
+
+            // Scale each hash's raw composite, optionally recency-weighted.
+            let half_life_ms = h.recency_half_life_days * 86_400_000.0;
+            let mut scaled: Vec<(usize, f64)> = Vec::with_capacity(hashes.len());
+            let mut max = 0.0_f64;
+            for (i, hash) in hashes.iter().enumerate() {
+                let s = match acc.get(hash.as_str()) {
+                    None => 0.0,
+                    Some(a) => {
+                        let raw = h.w_dwell * a.dwell_ms as f64
+                            + h.w_events * a.event_count as f64
+                            + h.w_strokes * a.stroke_count as f64;
+                        if all_time {
+                            raw
+                        } else {
+                            // age in ms from the most recent signal to `now`;
+                            // future timestamps (clock skew) clamp to age 0 =
+                            // full weight, never a >1 boost.
+                            let age_ms = a.last_epoch_ms.map_or(0, |e| (now.epoch_ms() - e).max(0));
+                            let recency = 0.5_f64.powf(age_ms as f64 / half_life_ms);
+                            raw * recency
+                        }
+                    }
+                };
+                if s > max {
+                    max = s;
+                }
+                scaled.push((i, s));
+            }
+
+            // Normalize by the scope max (0..1). An all-zero scope stays zero.
+            let mut out = vec![
+                ImageIntensity {
+                    image: hashes[0].clone(),
+                    intensity: 0.0,
+                };
+                hashes.len()
+            ];
+            for (i, s) in scaled {
+                out[i] = ImageIntensity {
+                    image: hashes[i].clone(),
+                    intensity: if max > 0.0 { s / max } else { 0.0 },
+                };
+            }
+            Ok(out)
+        })
+    }
+
+    /// Wipe ALL dwell telemetry (the "clear attention data" reset, DESIGN
+    /// §"open decisions"). Annotation counts are untouched — those are the
+    /// user's own journal, not telemetry. Returns the rows removed.
+    pub fn clear_dwell(&self) -> Result<usize, StoreError> {
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        Ok(w.execute("DELETE FROM image_dwell", [])?)
     }
 
     // -- raw reads ------------------------------------------------------------
@@ -2102,6 +2318,12 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
     let mut event_count: i64 = 0;
     let mut has_text = false;
     let mut has_strokes = false;
+    // Heatmap stroke factor (DESIGN-ATTENTION-HEATMAP.md): the COUNT of live,
+    // non-scrubbed strokes, maintained in this same recompute transaction as
+    // `has_strokes`. A redaction scrubs the stroke (drops it from the count);
+    // a retraction makes it non-live (skipped above), so both retract and
+    // redact lower the count, exactly like event_count.
+    let mut stroke_count: i64 = 0;
     let mut last_ts: Option<String> = None;
     let mut winner: Option<(String, String, i64)> = None; // (event_id, ts, value)
     while let Some(row) = rows.next()? {
@@ -2121,7 +2343,10 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
             // non-scrubbed. A redacted remark renders as a "[redacted]" stub
             // (Q2) but carries no words; it lights no dot.
             "remark" if !scrubbed => has_text = true,
-            "stroke" if !scrubbed => has_strokes = true,
+            "stroke" if !scrubbed => {
+                has_strokes = true;
+                stroke_count += 1;
+            }
             "rating" if !scrubbed => {
                 if let Some(p) = payload
                     && let Ok(Payload::Rating { value }) =
@@ -2150,17 +2375,19 @@ fn recompute_image(tx: &Connection, hash: &str) -> Result<(), StoreError> {
     }
     if event_count > 0 {
         tx.prepare_cached(
-            "INSERT INTO image_journal_stats(image_hash, event_count, has_text, has_strokes, last_ts) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+            "INSERT INTO image_journal_stats(image_hash, event_count, has_text, has_strokes, stroke_count, last_ts) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT(image_hash) DO UPDATE SET \
                event_count = excluded.event_count, has_text = excluded.has_text, \
-               has_strokes = excluded.has_strokes, last_ts = excluded.last_ts",
+               has_strokes = excluded.has_strokes, stroke_count = excluded.stroke_count, \
+               last_ts = excluded.last_ts",
         )?
         .execute(params![
             hash,
             event_count,
             has_text as i64,
             has_strokes as i64,
+            stroke_count,
             last_ts.expect("count > 0")
         ])?;
     } else {

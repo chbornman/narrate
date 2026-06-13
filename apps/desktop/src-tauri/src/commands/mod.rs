@@ -14,6 +14,7 @@
 pub mod app;
 pub mod capture;
 pub mod collections;
+pub mod heatmap;
 pub mod journal;
 pub mod library;
 pub mod os;

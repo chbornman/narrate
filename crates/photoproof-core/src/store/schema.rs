@@ -541,6 +541,26 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
 ) STRICT, WITHOUT ROWID;
 "#;
 
+/// Migration slot for the attention/engagement heatmap
+/// (DESIGN-ATTENTION-HEATMAP.md). Only the heatmap packet edits this constant.
+///
+/// `image_dwell` — local, machine-observed dwell telemetry, kept SEPARATE from
+/// the annotation event log (K14: the journal stays the user's own
+/// words/marks). It is NOT in sidecars and never leaves the machine; a missing
+/// row simply means "no observed dwell". Rebuildable-index rules do not apply
+/// — it is fresh capture, not a fold of the log, so `rebuild_derived` preserves
+/// it (like `sidecar_dirty`).
+/// IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+/// downgrade-simulation test) and captured telemetry must survive that re-run.
+const HEATMAP_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS image_dwell (
+  image_hash   TEXT PRIMARY KEY,
+  dwell_ms     INTEGER NOT NULL,
+  focus_count  INTEGER NOT NULL,
+  last_ts      TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -605,6 +625,30 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     if version < 11 {
         conn.execute_batch(SUMMARIES_FIXES_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 11")?;
+    }
+    if version < 12 {
+        // v12: the attention/engagement heatmap. The `image_dwell` telemetry
+        // table, plus `image_journal_stats.stroke_count` (the heatmap's small
+        // stroke factor — `has_strokes` already carries presence). Fresh
+        // databases would still have no `stroke_count` column (it post-dates
+        // the v1 DDL), so the ALTER is guarded like v5's `has_text`. The
+        // recompute (EventStore::open runs rebuild_derived when migrating)
+        // backfills the value — the DEFAULT here is a placeholder, never
+        // trusted.
+        conn.execute_batch(HEATMAP_SCHEMA_SQL)?;
+        let has_column: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('image_journal_stats')
+             WHERE name = 'stroke_count'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_column {
+            conn.execute_batch(
+                "ALTER TABLE image_journal_stats
+                 ADD COLUMN stroke_count INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        run_pragma(conn, "PRAGMA user_version = 12")?;
     }
     Ok(version)
 }

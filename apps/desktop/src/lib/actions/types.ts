@@ -76,6 +76,13 @@ export interface ActionContext {
   /** A query scopes the grid (M3 search-as-scope): the sort menu offers the
    * `relevance` row ONLY then — it has no meaning over a folder/collection. */
   queryActive: boolean;
+  /** Grid heat-tint on (DESIGN-ATTENTION-HEATMAP.md): the sort menu offers the
+   * `attention` row ONLY then — sorting by engagement needs loaded intensity.
+   * Also drives the heat toggle's checked state. */
+  heatOn: boolean;
+  /** "All-time" recency switch (founder decision): OFF = recency-weighted, ON
+   * = flat all-time. Drives the all-time toggle's checked state. */
+  heatAllTime: boolean;
   thumbStep: number;
   surround: SurroundLevel;
   filmstrip: boolean;

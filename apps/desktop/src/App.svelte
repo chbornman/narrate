@@ -168,6 +168,16 @@
   // PencilOverlay releases hold-E on blur).
   function onWindowBlur() {
     void ui.micWindowBlur();
+    // Pause dwell capture (heatmap): the app backgrounded, so the current
+    // focus episode ends here — this + the backend 60 s cap handle a walk-away
+    // (DESIGN-ATTENTION-HEATMAP.md).
+    ui.dwellPause();
+  }
+
+  // visibilitychange is the other half of the blur-pause: a tab/window hidden
+  // by the OS (not just keyboard-focus loss) also ends the focus episode.
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") ui.dwellPause();
   }
 
   // ---- activity reporting (CAPTURE §2.1), throttled -------------------------
@@ -264,6 +274,8 @@
   onblur={onWindowBlur}
   onpointerdown={touchActivity}
 />
+<!-- Dwell-capture blur-pause, OS-hide half (DESIGN-ATTENTION-HEATMAP.md). -->
+<svelte:document onvisibilitychange={onVisibilityChange} />
 
 <div class="shell" data-surround={ui.shell.surround}>
   {#if !ui.shell.chromeHidden}
