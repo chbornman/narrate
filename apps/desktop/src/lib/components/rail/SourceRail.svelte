@@ -47,11 +47,40 @@
   let draft = $state("");
   let inputEl: HTMLInputElement | undefined = $state();
 
+  // The thumb menu's "New collection…" arms a mint-and-add: shell stashes
+  // the stack-expanded targets and flips us to this tab. We auto-open the
+  // SAME input the footer button opens (one create UX, the founder's ask) —
+  // committing then drops those targets into the fresh collection. Holding
+  // the targets in a local snapshot keeps the commit honest even if the
+  // stash is cleared mid-typing. null ⇒ a plain create (no add).
+  let pendingTargets = $state<string[] | null>(null);
+
+  // Watch the shell's stash: when it arms, mount + focus the input with an
+  // empty draft and remember the targets to add on commit. effect (not a
+  // derived) because opening the input is an imperative, one-shot action.
+  $effect(() => {
+    const pending = ui.shell.pendingNewCollection;
+    if (pending !== null && !creating) {
+      pendingTargets = pending;
+      void beginCreate();
+    }
+  });
+
   async function beginCreate() {
     creating = true;
     draft = "";
     await tick(); // the input mounts on the flag flip
     inputEl?.focus();
+  }
+
+  /** Tear the input down and clear BOTH the local target snapshot and the
+   * shell stash — every exit path (commit, Esc, blur) routes here so a
+   * stale pending-add can never linger to poison the next plain create. */
+  function endCreate() {
+    creating = false;
+    draft = "";
+    pendingTargets = null;
+    ui.shell.clearPendingNewCollection();
   }
 
   function onCreateKeydown(e: KeyboardEvent) {
@@ -61,12 +90,15 @@
     e.stopPropagation();
     if (e.key === "Enter") {
       const name = draft;
-      creating = false;
-      draft = "";
-      void ui.createCollection(name);
+      const targets = pendingTargets;
+      endCreate();
+      // Armed by the thumb menu ⇒ create-then-add in one step; otherwise
+      // the rail's plain create. Both flow through ui.createCollection, so
+      // there is exactly one create path.
+      if (targets !== null) void ui.createCollectionAndAdd(targets, name);
+      else void ui.createCollection(name);
     } else if (e.key === "Escape") {
-      creating = false;
-      draft = "";
+      endCreate();
     }
   }
 </script>
@@ -129,7 +161,7 @@
         placeholder="Collection name"
         aria-label="New collection name"
         onkeydown={onCreateKeydown}
-        onblur={() => (creating = false)}
+        onblur={endCreate}
       />
     {:else}
       <button class="footer-verb" onclick={() => void beginCreate()}>

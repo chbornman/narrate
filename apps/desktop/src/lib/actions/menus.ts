@@ -53,6 +53,10 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     // (B71: the app should encourage collecting). Remove rides directly
     // under Add — membership is reversible from the menu that gathers.
     "add-to-collection",
+    // "New collection…" rides directly under Add: with zero collections
+    // Add is absent and this is the ONLY collection path (the dogfood ask);
+    // with some present it sits beneath the names as "…or a new one".
+    "new-collection-add",
     "remove-from-collection",
     "stack-toggle-active",
     "flip-stack-member",

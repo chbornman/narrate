@@ -383,11 +383,33 @@ export class Ui {
    * (RETRIEVAL §10.2) — a real persistence failure must not vanish as if
    * the backend were merely a test mock (the rate() precedent; the
    * fire-and-forget swallow is reserved for OS verbs like reveal). */
-  async createCollection(name: string) {
+  async createCollection(name: string): Promise<string | null> {
     const trimmed = name.trim();
-    if (trimmed === "") return;
-    await ipc.createCollection(trimmed);
+    if (trimmed === "") return null;
+    // create_collection resolves to the new DTO — return its id so callers
+    // that need to chain a write (createCollectionAndAdd) can target the
+    // collection deterministically instead of guessing from the snapshot.
+    const created = await ipc.createCollection(trimmed);
     this.collections = (await ipc.listCollections()) ?? [];
+    return created?.id ?? null;
+  }
+
+  /** Mint a collection and drop `targets` into it in one evented step
+   * (founder, dogfood June 12 2026 — the thumb menu's "New collection…").
+   * The targets are passed IN (captured synchronously at menu-pick time, so
+   * a selection change while the user types the name cannot poison them).
+   * Order matters: the add must wait for the create's id, and a blank name
+   * (createCollection returns null) adds nothing — the new-empty-collection
+   * failure mode the founder flagged. NO catch: like createCollection and
+   * the add-to-collection sink, gathering is user truth (RETRIEVAL §10.2)
+   * and a real persistence failure must surface, not vanish as a test mock. */
+  async createCollectionAndAdd(targets: string[], name: string): Promise<void> {
+    const id = await this.createCollection(name);
+    if (id === null || targets.length === 0) return;
+    await ipc.addToCollection(id, targets);
+    // Same awaited direct refresh the add-to-collection sink uses — the
+    // collections-changed event is the cross-window catch-all.
+    await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
   }
 
   /** Incremental refresh during ingest: keeps selection/focus (UI §3.3).
@@ -1241,6 +1263,19 @@ export class Ui {
         // Direct refresh (awaited, deterministic for tests); the
         // collections-changed event is the cross-window catch-all.
         await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
+        break;
+      }
+      case "new-collection-add": {
+        // Capture the targets NOW, synchronously, before any await or UI
+        // round-trip — the same stack-expanded selection the add verb uses.
+        // With nothing to add there is no collection to mint for: bail (the
+        // def gates on hasSelection || activeHash, so this is belt-and-braces).
+        const targets = this.collectionTargets();
+        if (targets.length === 0) break;
+        // Hand the targets to the rail's inline creator (the ONE create UX);
+        // its commit calls createCollectionAndAdd, closing the create+add
+        // chain. The context menu is already closing around this dispatch.
+        this.shell.beginNewCollectionWithTargets(targets);
         break;
       }
       case "remove-from-collection": {

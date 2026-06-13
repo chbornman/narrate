@@ -194,6 +194,56 @@ describe("Add to collection (thumb seat submenu verb)", () => {
   });
 });
 
+describe("New collection… (mint + add the selection in one step)", () => {
+  it("perform arms the rail creator with the WHOLE stack-expanded selection", async () => {
+    // Founder, dogfood June 12 2026: works with ZERO collections (the dead
+    // end the ask is about). Wipe the seed list so this is the empty state.
+    ui.collections = [];
+    let s = sel.click(sel.EMPTY, ui.grid.unitHashes, 0);
+    s = sel.toggle(s, ui.grid.unitHashes, 2);
+    await ui.applySelection(s);
+    await ui.perform({ kind: "new-collection-add" });
+    // The targets are stashed (captured synchronously), the rail is opened
+    // on the Collections tab — no collection created yet (the rail's input
+    // names it). The create+add is the rail's commit, tested below.
+    expect(ui.shell.pendingNewCollection).toEqual(["a", "c"]);
+    expect(ui.shell.railTab).toBe("collections");
+    expect(ui.shell.railOpen).toBe(true);
+    expect(lastCall("create_collection")).toBeUndefined();
+  });
+
+  it("with no selection the active image is the armed target", async () => {
+    await ui.applySelection(sel.EMPTY);
+    ui.grid.sel = { order: [], focus: 1, anchor: 1 }; // active without selection
+    await ui.perform({ kind: "new-collection-add" });
+    expect(ui.shell.pendingNewCollection).toEqual(["b"]);
+  });
+
+  it("createCollectionAndAdd creates THEN adds the targets to the new id", async () => {
+    // The chain the rail's commit fires: one create, then one add to the
+    // freshly minted id (ordered — the add must wait for the id). The mock
+    // returns the new DTO from create_collection; we read its id back here
+    // rather than hard-code the counter so the assertion stays robust.
+    await ui.createCollectionAndAdd(["a", "c"], "Iceland");
+    expect(lastCall("create_collection")?.args).toEqual({ name: "Iceland" });
+    const newId = ui.collections.find((c) => c.name === "Iceland")?.id;
+    expect(newId).toBeDefined();
+    expect(lastCall("add_to_collection")?.args).toEqual({
+      id: newId,
+      hashes: ["a", "c"],
+    });
+    // The new collection is non-empty (the founder's "don't leave it empty"
+    // requirement): the awaited refresh landed the member count.
+    expect(ui.collections.find((c) => c.id === newId)?.memberCount).toBe(2);
+  });
+
+  it("a blank name creates nothing and adds nothing (no empty collection)", async () => {
+    await ui.createCollectionAndAdd(["a"], "   ");
+    expect(lastCall("create_collection")).toBeUndefined();
+    expect(lastCall("add_to_collection")).toBeUndefined();
+  });
+});
+
 describe("create + live snapshots", () => {
   it("createCollection trims, creates, and refreshes the list", async () => {
     await ui.createCollection("  Iceland  ");

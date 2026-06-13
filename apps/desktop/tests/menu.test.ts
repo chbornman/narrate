@@ -168,6 +168,40 @@ describe("menus.ts — seat models over the registry", () => {
     ).toBe(false);
   });
 
+  it("New collection… is present even with ZERO collections (the dogfood path)", () => {
+    // The whole point of the founder ask: a path to gather exists when no
+    // collection does. ctx has a selection (hasSelection true), so the def
+    // is available; it carries the id-less mint-and-add action and sits
+    // right under where Add-to-collection would be.
+    const noCollections = menuModel("thumb", ctx);
+    const fresh = noCollections.rows.find((r) => r.verb === "New collection…");
+    expect(fresh).toBeDefined();
+    expect(fresh?.action).toEqual({ kind: "new-collection-add" });
+    // With collections present it still appears, beneath the Add submenu.
+    const withCollections = menuModel("thumb", {
+      ...ctx,
+      collections: [{ id: "01A", name: "Quiet Hours" }],
+    });
+    const verbs = withCollections.rows.map((r) => r.verb);
+    expect(verbs).toContain("Add to collection");
+    expect(verbs).toContain("New collection…");
+    expect(verbs.indexOf("New collection…")).toBeGreaterThan(
+      verbs.indexOf("Add to collection"),
+    );
+  });
+
+  it("New collection… is absent with nothing to add (no selection, no active)", () => {
+    // Nothing to gather ⇒ no mint-and-add: the def gates on
+    // hasSelection || activeHash, mirroring the membership verbs' gates.
+    const empty = menuModel("thumb", {
+      ...ctx,
+      hasSelection: false,
+      selectionCount: 0,
+      activeHash: null,
+    });
+    expect(empty.rows.some((r) => r.verb === "New collection…")).toBe(false);
+  });
+
   it("membership marks: Add checkmarks current memberships; Remove lists only them", () => {
     const withMembership = {
       ...ctx,

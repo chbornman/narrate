@@ -64,6 +64,14 @@ export class ShellSlice {
    * are the point; folders are mechanical). Arrow/Enter routing follows the
    * visible tab (app.svelte.ts perform cases). */
   railTab = $state<prefs.RailTab>("folders");
+  /** Armed when the thumb menu's "New collection…" was picked (founder,
+   * dogfood June 12 2026): the stack-expanded targets to drop into the
+   * collection the rail's inline creator is about to mint. Holding the
+   * targets HERE (captured synchronously at pick time) is what keeps the
+   * create+add chain safe against the selection drifting while the user
+   * types the name. null whenever no add is pending; the rail reads it to
+   * auto-open its input and to route the commit through createCollectionAndAdd. */
+  pendingNewCollection = $state<string[] | null>(null);
 
   // -- overlays / hosts --------------------------------------------------------
   cheatsheetOpen = $state(false);
@@ -181,6 +189,26 @@ export class ShellSlice {
   setRailTab(tab: prefs.RailTab) {
     this.railTab = tab;
     prefs.saveRailTab(tab);
+  }
+
+  /** Arm the rail's inline creator to mint-and-add (thumb menu "New
+   * collection…"). Opens the rail, flips to the Collections tab so the
+   * input mounts in its footer, and stashes the targets captured at pick
+   * time. The rail watches `pendingNewCollection` to auto-open the input;
+   * its commit routes through createCollectionAndAdd, its cancel clears the
+   * stash. WHY summon the rail here rather than render an input in the
+   * menu: the menu model is pure data (rows carry Actions, never widgets),
+   * and the rail already owns the one collection-name input — reusing it
+   * keeps a single create UX (the founder's ask). */
+  beginNewCollectionWithTargets(targets: string[]) {
+    this.pendingNewCollection = targets;
+    this.railOpen = true;
+    this.setRailTab("collections");
+  }
+
+  /** Clear the pending mint-and-add stash (commit done, or cancelled). */
+  clearPendingNewCollection() {
+    this.pendingNewCollection = null;
   }
 
   /** Every dismissal path (the card's button AND Esc) lands here and

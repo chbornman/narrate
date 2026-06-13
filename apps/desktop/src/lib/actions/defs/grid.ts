@@ -159,6 +159,26 @@ export const GRID_DEFS: ActionDef[] = [
         checked: ctx.activeMemberships.includes(c.id),
       })),
   },
+  // "New collection…" (founder, dogfood June 12 2026): the path that
+  // exists when ZERO collections do — the whole point. It mints a fresh
+  // collection AND drops the WHOLE stack-expanded selection into it in one
+  // evented step (the perform sink captures the targets, then arms the
+  // rail's inline creator so there is ONE create UX, not two divergent
+  // ones). Sits at the bottom of the add path so it reads as "…or a new
+  // one" beneath the existing names. Available whenever there is anything
+  // to add (a selection, or the active cell the right-click just picked) —
+  // unlike Add-to-collection it does NOT gate on collections existing.
+  {
+    id: "new-collection-add",
+    verb: "New collection…",
+    keys: [], // pointer-only: the thumb seat
+    scope: "grid",
+    group: "grid",
+    seats: ["thumb"],
+    available: (ctx) => ctx.hasSelection || ctx.activeHash !== null,
+    // No toAction: id === the action kind and there is no arg, so the
+    // default { kind: def.id } is exactly right (the open-look precedent).
+  },
   // The reverse verb: collections are user truth (RETRIEVAL 10.2) and
   // gathering must be reversible from the same menu that gathers — a
   // one-way door on membership was the recorded P7.3-slice gap. The

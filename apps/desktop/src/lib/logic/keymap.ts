@@ -101,6 +101,11 @@ export type Action =
   | { kind: "collection-open"; id: string }
   // thumb seat submenu: add the WHOLE selection to the named collection
   | { kind: "add-to-collection"; id: string }
+  // thumb seat: mint a NEW collection AND add the WHOLE selection to it in
+  // one evented step (founder, dogfood June 12 2026 — the zero-collections
+  // dead end). Carries no id: the perform sink captures the targets, then
+  // arms the rail's inline creator (the ONE create UX) to name + commit.
+  | { kind: "new-collection-add" }
   // thumb seat submenu: close the WHOLE selection's open membership
   // intervals in the named collection (evented, never destructive —
   // RETRIEVAL §10.1; gathering must be reversible from the same menu)
