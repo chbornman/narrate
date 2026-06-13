@@ -108,6 +108,14 @@ pub struct HybridOptions {
     /// Defaults to [`SIM_BLEND_BETA`]; a per-search field (not a const) so the
     /// eval-gated tilt control can override it later without touching the loop.
     pub beta: f64,
+    /// §5.3 RRF rank constant `k` (`contribution = weight / (k + rank)`).
+    /// Defaults to [`RRF_K`] via the centralized tuning config. WHY a per-search
+    /// field and not a bare `tuning()` read in the loop: the §12 golden-set eval
+    /// (`pp-sweep`) sweeps `rrf_k` per config, and the process-global `OnceLock`
+    /// can hold only ONE value per run, so the sweep could not vary it. Threading
+    /// it through the options (exactly like `beta`) lets the loop try several `k`
+    /// in one process while the live app still gets the file value by default.
+    pub rrf_k: f64,
     /// §5.1: the parse must complete in < 1.5 s; a slower one is discarded
     /// in favor of the fallback even though it answered.
     pub parse_budget: Duration,
@@ -133,6 +141,7 @@ impl Default for HybridOptions {
             include_debug: false,
             weights: search.fusion,
             beta: search.beta,
+            rrf_k: search.rrf_k,
             parse_budget: PARSE_BUDGET,
             fuzzy: false,
         }
@@ -777,11 +786,13 @@ where
     // Which signals ranked each image — the per-result signal provenance
     // (§5.4 DebugScores): (signal, 1-based rank, raw score) in list order.
     let mut signals: HashMap<String, Vec<(SignalId, Option<u32>, f32)>> = HashMap::new();
-    // The LIVE RRF `k` from the centralized tuning config (file-overridable;
-    // its code default is `RRF_K` = 60). Read once outside the inner loop —
-    // β rides on `opts.beta`, already sourced from the same config via
-    // `HybridOptions::default()`.
-    let rrf_k = tuning().search.rrf_k;
+    // The RRF `k` rides on `opts.rrf_k` (its `HybridOptions::default()` reads
+    // the file-overridable `tuning().search.rrf_k`, code default `RRF_K` = 60),
+    // exactly as β rides on `opts.beta`. WHY off the options and not a bare
+    // `tuning()` read here: the §12 golden-set eval sweeps `rrf_k` per config in
+    // ONE process, and the global `OnceLock` can hold only a single value per
+    // run. Read once outside the inner loop.
+    let rrf_k = opts.rrf_k;
     for list in &lists {
         for (idx, (hash, score)) in list.images.iter().enumerate() {
             let rank = idx as f64 + 1.0;

@@ -284,6 +284,91 @@ impl EvalReport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Orchestration — run a query set through the real hybrid rig and score it.
+//
+// The scoring math above stays pure (no DB, no search). This thin driver is
+// the ONE place the search rig and the scorer meet, so the runner bin
+// (`pp-retrieval-eval`) and the sweep bin (`pp-sweep`) share it instead of
+// each duplicating the run->score loop. It is the only part of this module
+// that depends on `crate::search`; the metrics themselves never do.
+// ---------------------------------------------------------------------------
+
+use crate::search::{FusionWeights, HybridOptions, Searcher, keyword_only_rig};
+
+/// The per-config knobs a single eval run varies: the four fusion weights plus
+/// the two scalar dials (`rrf_k`, `beta`). One value object so the runner and
+/// the sweep pass exactly the same surface to [`evaluate`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EvalConfig {
+    /// §5.3 fusion weights (s1, s2, s3_each, s4).
+    pub weights: FusionWeights,
+    /// §5.3 RRF rank constant `k`.
+    pub rrf_k: f64,
+    /// §5.3 dense-signal similarity-tilt strength `β`.
+    pub beta: f64,
+}
+
+impl Default for EvalConfig {
+    /// The live baseline: fusion weights, `rrf_k`, and `β` from the active
+    /// tuning config (file-overridable; code defaults absent a `tuning.toml`).
+    fn default() -> Self {
+        let search = &crate::tuning::tuning().search;
+        Self {
+            weights: search.fusion,
+            rrf_k: search.rrf_k,
+            beta: search.beta,
+        }
+    }
+}
+
+/// Run every query in `query_set` through the keyword-only hybrid rig under
+/// `config`, score each ranked result against its relevant set at cutoff `k`,
+/// and return the mean-over-queries [`EvalReport`].
+///
+/// This is the shared entry point the `pp-retrieval-eval` runner and the
+/// `pp-sweep` orchestrator both call: ONE definition of the run->score loop,
+/// so a sweep can never silently diverge from the gate it tunes. Keyword-only
+/// (no models) by construction, matching the runner's documented rig — the
+/// `FusionWeights`/`β`/`rrf_k` still shape any query that reaches fusion
+/// through S2 + the SQL-only S3 sub-list.
+pub fn evaluate(
+    searcher: &Searcher,
+    query_set: &QuerySet,
+    config: EvalConfig,
+    k: usize,
+) -> Result<EvalReport, String> {
+    // One options value per run; weights/β/rrf_k are the swept knobs, the rest
+    // are the keyword-only defaults (no `now` override -> wall-clock for any
+    // relative-date filter, exactly as the runner did inline).
+    let opts = HybridOptions {
+        weights: config.weights,
+        beta: config.beta,
+        rrf_k: config.rrf_k,
+        ..HybridOptions::default()
+    };
+    let mut scored: Vec<NamedQueryMetrics> = Vec::with_capacity(query_set.queries.len());
+    for GoldenQuery {
+        query, relevant, ..
+    } in &query_set.queries
+    {
+        let out = searcher
+            .hybrid_search(query, &[], &keyword_only_rig(), &opts)
+            .map_err(|e| format!("search failed for {query:?}: {e}"))?;
+        let ranked: Vec<String> = out
+            .images
+            .iter()
+            .map(|r| r.image_hash.as_str().to_owned())
+            .collect();
+        let relevant_set: HashSet<String> = relevant.iter().cloned().collect();
+        scored.push(NamedQueryMetrics {
+            query: query.clone(),
+            metrics: QueryMetrics::score(&ranked, &relevant_set, k),
+        });
+    }
+    Ok(EvalReport::from_scored(k, scored))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

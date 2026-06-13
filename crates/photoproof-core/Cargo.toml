@@ -82,6 +82,18 @@ path = "src/bin/stub_child.rs"
 name = "pp-retrieval-eval"
 path = "src/bin/pp_retrieval_eval.rs"
 
+[[bin]]
+# The search-tuning sweep orchestrator (DESIGN-TUNING-LOOP.md). Runs the
+# SHARED retrieval eval (`retrieval_eval::evaluate`, the same loop
+# pp-retrieval-eval drives) once per config over a knob grid, ranks the
+# configs by a quality metric (default nDCG@10), and PROPOSES a tuning.toml
+# (K14: it proposes, the founder commits — it never writes tuning.toml). A
+# founder-machine tool like pp-retrieval-eval: needs a real DB + query set,
+# so the CI proof is the pp_sweep_sample integration test. Explicit [[bin]]
+# only to spell the name with hyphens (pp-sweep).
+name = "pp-sweep"
+path = "src/bin/pp_sweep.rs"
+
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }

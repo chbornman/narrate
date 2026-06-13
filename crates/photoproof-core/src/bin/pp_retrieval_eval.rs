@@ -60,14 +60,11 @@
 //! that feeds the same query set to the same scorer. The metrics + query-set
 //! format this binary ships are the instrument either path uses.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use photoproof_core::retrieval_eval::{
-    EvalReport, GoldenQuery, NamedQueryMetrics, QueryMetrics, QuerySet,
-};
-use photoproof_core::search::{FusionWeights, HybridOptions, Searcher, keyword_only_rig};
+use photoproof_core::retrieval_eval::{EvalConfig, EvalReport, QuerySet, evaluate};
+use photoproof_core::search::{FusionWeights, Searcher};
 
 /// Built-in @k default when neither the CLI nor the query set pins one.
 const DEFAULT_K: usize = 10;
@@ -165,29 +162,6 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// Run one query through the keyword-only hybrid rig and return the ranked
-/// image-hash list — the scorer's input. The `weights` shape any fused query;
-/// `now` defaults to wall-clock (relative date filters in a parsed query, if
-/// any, resolve against it). Keyword-only means no model is loaded here.
-fn ranked_hashes(
-    searcher: &Searcher,
-    query: &str,
-    weights: FusionWeights,
-) -> Result<Vec<String>, String> {
-    let opts = HybridOptions {
-        weights,
-        ..HybridOptions::default()
-    };
-    let out = searcher
-        .hybrid_search(query, &[], &keyword_only_rig(), &opts)
-        .map_err(|e| format!("search failed for {query:?}: {e}"))?;
-    Ok(out
-        .images
-        .iter()
-        .map(|r| r.image_hash.as_str().to_owned())
-        .collect())
-}
-
 fn run(args: &Args) -> Result<(), String> {
     let raw = std::fs::read_to_string(&args.queries)
         .map_err(|e| format!("reading query set {}: {e}", args.queries.display()))?;
@@ -206,24 +180,21 @@ fn run(args: &Args) -> Result<(), String> {
     // k precedence: --k > query-set default_k > built-in DEFAULT_K.
     let k = args.k.or(query_set.default_k).unwrap_or(DEFAULT_K);
     let weights = args.weights.apply();
+    // The `--s1..--s4` flags sweep the four fusion WEIGHTS on top of the file
+    // baseline (`apply` folds onto `FusionWeights::default()`, which reads the
+    // tuning config `init_from` just installed); `rrf_k`/β come from that same
+    // baseline via `EvalConfig::default()`.
+    let config = EvalConfig {
+        weights,
+        ..EvalConfig::default()
+    };
 
     let searcher = Searcher::open(&args.db)
         .map_err(|e| format!("opening library DB {}: {e}", args.db.display()))?;
 
-    let mut scored: Vec<NamedQueryMetrics> = Vec::with_capacity(query_set.queries.len());
-    for GoldenQuery {
-        query, relevant, ..
-    } in &query_set.queries
-    {
-        let ranked = ranked_hashes(&searcher, query, weights)?;
-        let relevant_set: HashSet<String> = relevant.iter().cloned().collect();
-        scored.push(NamedQueryMetrics {
-            query: query.clone(),
-            metrics: QueryMetrics::score(&ranked, &relevant_set, k),
-        });
-    }
-
-    let report = EvalReport::from_scored(k, scored);
+    // Shared run->score loop (`retrieval_eval::evaluate`): the SAME entry point
+    // pp-sweep drives, so the gate and the sweep can never diverge.
+    let report = evaluate(&searcher, &query_set, config, k)?;
     if args.json {
         print_json(&report, &weights, &args.db, &args.queries);
     } else {
