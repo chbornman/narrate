@@ -381,7 +381,7 @@ const gridItem = (relPath: string): GridItem => ({
 
 describe("multi-select header — anchor image + 'N selected' (grid only)", () => {
   it("renders the quiet count with several images selected", () => {
-    ui.surface = "grid";
+    ui.viewMode = "grid";
     ui.inspector.open = "journal";
     ui.grid.rawItems = [gridItem("a.jpg"), gridItem("b.jpg"), gridItem("c.jpg")];
     ui.grid.sel = { order: ["h:a.jpg", "h:b.jpg", "h:c.jpg"], focus: 0, anchor: 0 };
@@ -390,7 +390,7 @@ describe("multi-select header — anchor image + 'N selected' (grid only)", () =
   });
 
   it("stays silent for a single selection and outside the grid", () => {
-    ui.surface = "grid";
+    ui.viewMode = "grid";
     ui.inspector.open = "journal";
     ui.grid.rawItems = [gridItem("a.jpg"), gridItem("b.jpg")];
     ui.grid.sel = { order: ["h:a.jpg"], focus: 0, anchor: 0 };
@@ -398,7 +398,7 @@ describe("multi-select header — anchor image + 'N selected' (grid only)", () =
     expect(screen.queryByText(/selected/)).toBeNull();
 
     document.body.innerHTML = "";
-    ui.surface = "look";
+    ui.viewMode = "look";
     ui.grid.sel = { order: ["h:a.jpg", "h:b.jpg"], focus: 0, anchor: 0 };
     render(Inspector);
     expect(screen.queryByText(/selected/)).toBeNull();

@@ -12,7 +12,7 @@ import * as note from "../src/lib/logic/note";
 import type { ScopeView } from "../src/lib/types/dto";
 
 const base = {
-  surface: "grid" as const,
+  viewMode: "grid" as const,
   searchOpen: false,
   gridSelection: [] as string[],
   searchSelection: [] as string[],
@@ -40,7 +40,7 @@ describe("scope targets (CAPTURE §3 table)", () => {
     expect(
       scopeTargets({
         ...base,
-        surface: "look",
+        viewMode: "look",
         gridSelection: ["a", "b", "c"],
         lookTargets: ["b"],
       }),
@@ -59,40 +59,40 @@ describe("scope targets (CAPTURE §3 table)", () => {
   });
 });
 
-describe("Visualizer (topic-graph) scope precedence", () => {
-  // The graph, when open, OWNS the write scope: dictation/rating must target
-  // the SELECTED node, never the stale grid/Look selection underneath.
-  it("graph open + a node selected → that node, overriding grid/Look", () => {
+describe("Visualizer scope precedence (DESIGN-VIEW-MODES.md)", () => {
+  // The visualizer, when the active view, OWNS the write scope: dictation/rating
+  // must target the SELECTED node (viewSelection), never the stale grid/Look
+  // selection underneath. viewSelection is the R6 seed-from-active photo.
+  it("visualizer + a node selected → that node, overriding grid/Look", () => {
     expect(
       scopeTargets({
         ...base,
-        surface: "look",
+        viewMode: "visualizer",
         gridSelection: ["a", "b"],
         lookTargets: ["c"],
-        graphOpen: true,
-        graphSelection: "sel",
+        viewSelection: "sel",
       }),
     ).toEqual(["sel"]);
   });
 
-  it("graph open + nothing selected → NEUTRAL session scope (empty), not stale", () => {
+  it("visualizer + nothing selected → NEUTRAL session scope (empty), not stale", () => {
     expect(
       scopeTargets({
         ...base,
+        viewMode: "visualizer",
         gridSelection: ["a", "b"],
-        graphOpen: true,
-        graphSelection: null,
+        viewSelection: null,
       }),
     ).toEqual([]);
   });
 
-  it("graph CLOSED → the selection is ignored, normal grid/Look rules apply", () => {
+  it("NOT in the visualizer → viewSelection is ignored, normal grid/Look rules apply", () => {
     expect(
       scopeTargets({
         ...base,
+        viewMode: "grid",
         gridSelection: ["a"],
-        graphOpen: false,
-        graphSelection: "sel",
+        viewSelection: "sel",
       }),
     ).toEqual(["a"]);
   });
@@ -111,7 +111,7 @@ describe("collapsed RAW+JPEG stacks (D1 / CAPTURE conformance)", () => {
 
   it("a viewed collapsed pair in Look targets both members, display first", () => {
     expect(
-      scopeTargets({ ...base, surface: "look", lookTargets: ["jpegHash", "rawHash"] }),
+      scopeTargets({ ...base, viewMode: "look", lookTargets: ["jpegHash", "rawHash"] }),
     ).toEqual(["jpegHash", "rawHash"]);
   });
 

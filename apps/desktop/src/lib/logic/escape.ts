@@ -61,7 +61,11 @@ export interface EscapeContext {
   /** The header search bar holds focus: once any query scope is cleared,
    * the next Esc blurs the input (text-input-exits-first, §0). */
   searchBarFocused: boolean;
-  surface: "grid" | "look";
+  /** The active center view (DESIGN-VIEW-MODES.md): the look->Grid layer
+   * gates on `viewMode === "look"`. The visualizer's Esc ladder is
+   * component-local (TopicGraph: deselect-first, then leaveVisualizer), so it
+   * never reaches this table. */
+  viewMode: "grid" | "visualizer" | "look";
   hasSelection: boolean;
 }
 
@@ -98,7 +102,7 @@ export function escapeAction(ctx: EscapeContext): EscapeAction {
   if (ctx.rankingPopoverOpen) return "close-ranking-popover"; // 10b
   if (ctx.queryScopeActive) return "clear-query-scope"; // 11
   if (ctx.searchBarFocused) return "blur-search-bar"; // 11b
-  if (ctx.surface === "look") return "leave-look"; // 12 — inspector stays
+  if (ctx.viewMode === "look") return "leave-look"; // 12 — inspector stays
   if (ctx.inspectorOpen) return "close-inspector"; // 13
   if (ctx.hasSelection) return "clear-selection"; // 14
   return "none"; // 15 — never quits

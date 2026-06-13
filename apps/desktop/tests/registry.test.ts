@@ -36,7 +36,7 @@ function genContext(rnd: () => number): ActionContext {
   const bool = () => rnd() < 0.5;
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)];
   return withDefaults({
-    surface: pick(["grid", "look"] as const),
+    viewMode: pick(["grid", "look"] as const),
     searchOpen: bool(),
     inputFocused: bool(),
     searchInputFocused: bool(),
@@ -135,7 +135,7 @@ describe("chord-collision property sweep", () => {
 describe("cheatsheet completeness", () => {
   it("cheatsheet rows ≡ registry minus reserved (dimmed, never hidden)", () => {
     const ctx = withDefaults({
-      surface: "grid",
+      viewMode: "grid",
       searchOpen: false,
       inputFocused: false,
       searchInputFocused: false,
@@ -207,7 +207,7 @@ describe("pointer-reachability audit (dogfood round 1: visible UI for actions)",
 describe("seat coverage (menus can render every seated verb)", () => {
   it("every seated, non-reserved def appears in its seat's order table", () => {
     const ctx = withDefaults({
-      surface: "grid",
+      viewMode: "grid",
       searchOpen: false,
       inputFocused: false,
       searchInputFocused: false,
@@ -245,7 +245,7 @@ describe("seat coverage (menus can render every seated verb)", () => {
 
   it("the journal-row seat renders its verb (its arg is the entry's target list)", () => {
     const ctx = withDefaults({
-      surface: "grid",
+      viewMode: "grid",
       searchOpen: false,
       inputFocused: false,
       searchInputFocused: false,

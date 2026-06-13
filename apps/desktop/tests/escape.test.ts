@@ -41,7 +41,7 @@ const none: EscapeContext = {
   inspectorOpen: false,
   queryScopeActive: false,
   searchBarFocused: false,
-  surface: "grid",
+  viewMode: "grid",
   hasSelection: false,
 };
 
@@ -61,7 +61,7 @@ const everything: EscapeContext = {
   inspectorOpen: true,
   queryScopeActive: true,
   searchBarFocused: true,
-  surface: "look",
+  viewMode: "look",
   hasSelection: true,
 };
 
@@ -83,7 +83,7 @@ const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
   ["rankingPopoverOpen", "close-ranking-popover"],
   ["queryScopeActive", "clear-query-scope"],
   ["searchBarFocused", "blur-search-bar"],
-  ["surface", "leave-look"],
+  ["viewMode", "leave-look"],
   ["inspectorOpen", "close-inspector"],
   ["hasSelection", "clear-selection"],
 ];
@@ -94,7 +94,7 @@ describe("the 15-layer order, exhaustively", () => {
     for (const [flag, expected] of LAYERS) {
       expect(escapeAction(ctx)).toBe(expected);
       // Clear the layer the action would close and press Escape again.
-      ctx = { ...ctx, [flag]: flag === "surface" ? "grid" : false };
+      ctx = { ...ctx, [flag]: flag === "viewMode" ? "grid" : false };
     }
     expect(escapeAction(ctx)).toBe("none"); // layer 15 — NEVER quits
   });
@@ -105,7 +105,7 @@ describe("the 15-layer order, exhaustively", () => {
       let ctx: EscapeContext = { ...everything };
       for (let j = 0; j < i; j++) {
         const [flag] = LAYERS[j];
-        ctx = { ...ctx, [flag]: flag === "surface" ? "grid" : false };
+        ctx = { ...ctx, [flag]: flag === "viewMode" ? "grid" : false };
       }
       expect(escapeAction(ctx)).toBe(LAYERS[i][1]);
     }
@@ -166,16 +166,16 @@ describe("contract spot checks", () => {
   it("a query scope clears before Look; Look→Grid KEEPS the inspector (founder, June 2026)", () => {
     // M3: a committed query is the grid's scope, peeled before Look. With
     // the bar focused but no scope, the next Esc blurs it (also before Look).
-    expect(escapeAction({ ...none, queryScopeActive: true, surface: "look" })).toBe(
+    expect(escapeAction({ ...none, queryScopeActive: true, viewMode: "look" })).toBe(
       "clear-query-scope",
     );
-    expect(escapeAction({ ...none, searchBarFocused: true, surface: "look" })).toBe(
+    expect(escapeAction({ ...none, searchBarFocused: true, viewMode: "look" })).toBe(
       "blur-search-bar",
     );
     // The founder ask verbatim: Esc back to the grid must not close the
     // Journal/metadata sidebar — the still-active image's content stays.
     expect(
-      escapeAction({ ...none, surface: "look", inspectorOpen: true }),
+      escapeAction({ ...none, viewMode: "look", inspectorOpen: true }),
     ).toBe("leave-look");
     // In Grid the inspector then closes first, before the selection.
     expect(
@@ -184,7 +184,7 @@ describe("contract spot checks", () => {
   });
 
   it("leaves Look back to Grid, then clears the selection", () => {
-    expect(escapeAction({ ...none, surface: "look", hasSelection: true })).toBe(
+    expect(escapeAction({ ...none, viewMode: "look", hasSelection: true })).toBe(
       "leave-look",
     );
     expect(escapeAction({ ...none, hasSelection: true })).toBe("clear-selection");

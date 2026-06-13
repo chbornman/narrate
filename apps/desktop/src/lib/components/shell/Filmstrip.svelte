@@ -40,11 +40,11 @@
   /** The surface's shared order, as displayed hashes (the grid's units
    * and Look's entries already agree on order by construction). */
   const order = $derived(
-    ui.surface === "look"
+    ui.viewMode === "look"
       ? ui.look.order.map((e) => displayedHash(e, ui.look.flips))
       : ui.grid.unitHashes,
   );
-  const index = $derived(ui.surface === "look" ? ui.look.index : ui.grid.sel.focus);
+  const index = $derived(ui.viewMode === "look" ? ui.look.index : ui.grid.sel.focus);
   const gridByHash = $derived(new Map(ui.grid.items.map((i) => [i.hash, i])));
 
   // Scroll/size facts feeding the pure window math.
@@ -101,7 +101,7 @@
   }
 
   function onPick(absIndex: number) {
-    if (ui.surface === "look") {
+    if (ui.viewMode === "look") {
       ui.look.index = absIndex;
       void ui.reportScope();
     } else {

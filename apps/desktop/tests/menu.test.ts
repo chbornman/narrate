@@ -83,7 +83,7 @@ describe("menu.ts — pure keyboard navigation", () => {
 
 describe("menus.ts — seat models over the registry", () => {
   const ctx = withDefaults({
-    surface: "grid",
+    viewMode: "grid",
     searchOpen: false,
     inputFocused: false,
     searchInputFocused: false,

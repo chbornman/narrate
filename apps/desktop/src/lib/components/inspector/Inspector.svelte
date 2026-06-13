@@ -26,7 +26,7 @@
   import RedactionModal from "./RedactionModal.svelte";
 
   const multiNote = $derived(
-    ui.surface === "grid"
+    ui.viewMode === "grid"
       ? multiSelectLabel(ui.grid.selectionTargets.length)
       : null,
   );

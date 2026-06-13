@@ -27,7 +27,7 @@ import { describe, expect, it } from "vitest";
 import { dispatch, type KeyContext, type KeyInput } from "../src/lib/logic/keymap";
 
 const base: KeyContext = {
-  surface: "grid",
+  viewMode: "grid",
   searchOpen: false,
   inputFocused: false,
   searchInputFocused: false,
@@ -57,7 +57,7 @@ describe("global rows", () => {
     expect(dispatch(key("f", { ctrlOrMeta: true }), base)).toEqual({
       kind: "open-search",
     });
-    expect(dispatch(key("f", { ctrlOrMeta: true }), { ...base, surface: "look" })).toEqual(
+    expect(dispatch(key("f", { ctrlOrMeta: true }), { ...base, viewMode: "look" })).toEqual(
       { kind: "open-search" },
     );
   });
@@ -135,7 +135,7 @@ describe("rating keys 0–5 (CAPTURE §10, C6)", () => {
   });
 
   it("Look always rates the viewed image", () => {
-    expect(dispatch(key("5"), { ...base, surface: "look" })).toEqual({
+    expect(dispatch(key("5"), { ...base, viewMode: "look" })).toEqual({
       kind: "rate",
       value: 5,
     });
@@ -155,7 +155,7 @@ describe("grid rows", () => {
   // to `\` (featureset §0 supersedes the P3.2 Tab=rail binding).
   it("Tab toggles lights-out; \\ toggles the rail (D5)", () => {
     expect(dispatch(key("Tab"), base)).toEqual({ kind: "toggle-lights-out" });
-    expect(dispatch(key("Tab"), { ...base, surface: "look" })).toEqual({
+    expect(dispatch(key("Tab"), { ...base, viewMode: "look" })).toEqual({
       kind: "toggle-lights-out",
     });
     expect(dispatch(key("\\"), base)).toEqual({ kind: "toggle-rail" });
@@ -224,7 +224,7 @@ describe("grid rows", () => {
 describe("new P4.2 contract rows (featureset §0/§4/§6/§7)", () => {
   it("G goes home (Grid) from anywhere", () => {
     expect(dispatch(key("g"), base)).toEqual({ kind: "go-grid" });
-    expect(dispatch(key("g"), { ...base, surface: "look" })).toEqual({
+    expect(dispatch(key("g"), { ...base, viewMode: "look" })).toEqual({
       kind: "go-grid",
     });
   });
@@ -259,7 +259,7 @@ describe("new P4.2 contract rows (featureset §0/§4/§6/§7)", () => {
 });
 
 describe("look rows", () => {
-  const look = { ...base, surface: "look" as const };
+  const look = { ...base, viewMode: "look" as const };
   it("←/→ are prev/next", () => {
     expect(dispatch(key("ArrowLeft"), look)).toEqual({ kind: "look-nav", delta: -1 });
     expect(dispatch(key("ArrowRight"), look)).toEqual({ kind: "look-nav", delta: 1 });

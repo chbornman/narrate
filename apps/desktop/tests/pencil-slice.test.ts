@@ -84,7 +84,7 @@ beforeEach(() => {
     ],
     0,
   );
-  ui.surface = "look";
+  ui.viewMode = "look";
 });
 
 describe("pencil mode lifecycle (UI §4.4)", () => {
@@ -270,7 +270,7 @@ describe("journal-row flash (UI §8.2)", () => {
   it("the journal-flash-stroke action flashes on the Look overlay only in Look", async () => {
     await ui.perform({ kind: "journal-flash-stroke", eventId: "01S" });
     expect(ui.look.strokeFlash).toEqual({ id: "01S", seq: 1 });
-    ui.surface = "grid";
+    ui.viewMode = "grid";
     await ui.perform({ kind: "journal-flash-stroke", eventId: "01T" });
     expect(ui.look.strokeFlash).toEqual({ id: "01S", seq: 1 }); // unchanged
   });

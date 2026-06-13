@@ -172,7 +172,7 @@ describe("navigation set = entry selection (featureset §2)", () => {
     await ui.applySelection(s);
     await ui.openLook("r1");
     expect(ui.look.order.map((e) => e.display)).toEqual(["r1", "r3"]); // grid order
-    expect(ui.surface).toBe("look");
+    expect(ui.viewMode).toBe("look");
   });
 });
 
@@ -207,7 +207,7 @@ describe("collapsed RAW+JPEG pair — the ● 2 truth end to end (D1)", () => {
     await ui.openLook("jpegHash");
     await ui.perform({ kind: "flip-stack-member" }); // viewing the RAW now
     await ui.leaveLook();
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
     expect(ui.grid.unitHashes[ui.grid.sel.focus]).toBe("jpegHash"); // the cell
   });
 });

@@ -213,10 +213,10 @@
          no em-dashes in the tooltip (gate: check:emdash). -->
     <button
       class="quiet"
-      class:active={ui.graphOpen}
-      onclick={() => void ui.openGraph()}
+      class:active={ui.viewMode === "visualizer"}
+      onclick={() => void ui.perform({ kind: "toggle-graph" })}
       aria-label="Visualizer"
-      aria-pressed={ui.graphOpen}
+      aria-pressed={ui.viewMode === "visualizer"}
       {@attach tooltip({ actionId: "toggle-graph" })}
     >
       <Share2 size={14} />

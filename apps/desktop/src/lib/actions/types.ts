@@ -42,8 +42,20 @@ export interface MenuOption {
   checked?: boolean;
 }
 
+/**
+ * The center view "lens" (DESIGN-VIEW-MODES.md): one orthogonal axis that
+ * replaces the old `surface: "grid" | "look"` enum PLUS the bolted-on
+ * `graphOpen` overlay boolean. OPEN/extensible by design — a future `compare`
+ * member slots in additively (one token here, one App.svelte arm, one
+ * activeHash arm; no new boolean threaded through the call sites). Orthogonal
+ * to `gridScope` (the noun the grid shows), which is unchanged by this axis.
+ */
+export type ViewMode = "grid" | "visualizer" | "look";
+
 export interface ActionContext {
-  surface: "grid" | "look";
+  /** The active center view (DESIGN-VIEW-MODES.md). The visualizer is a PEER
+   * view now (renders instead of the grid), not an overlay boolean. */
+  viewMode: ViewMode;
   searchOpen: boolean;
   /** Any text input focused (note input, search input, inline correction). */
   inputFocused: boolean;

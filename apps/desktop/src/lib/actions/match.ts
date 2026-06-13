@@ -43,9 +43,13 @@ function scopeEligible(scope: ActionDef["scope"], ctx: ActionContext): boolean {
     case "search":
       return ctx.searchOpen;
     case "grid":
-      return !ctx.searchOpen && ctx.surface === "grid";
+      // Grid-scoped keys (arrows, select-all, …) are eligible ONLY in the
+      // grid view — NOT in the visualizer (DESIGN-VIEW-MODES.md: arrows must
+      // not move grid focus under the graph; the visualizer's own keys
+      // Esc/Enter stay component-local in TopicGraph).
+      return !ctx.searchOpen && ctx.viewMode === "grid";
     case "look":
-      return !ctx.searchOpen && ctx.surface === "look";
+      return !ctx.searchOpen && ctx.viewMode === "look";
     case "inspector":
       return !ctx.searchOpen && ctx.inspectorOpen !== false;
   }

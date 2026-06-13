@@ -59,8 +59,9 @@ import {
   sameFocus,
   type DwellEpisode,
 } from "../logic/dwell";
+import type { DwellSource } from "../ipc/commands";
 import type { Action } from "../logic/keymap";
-import type { ActionContext } from "../actions/types";
+import type { ActionContext, ViewMode } from "../actions/types";
 import type {
   AddRootOutcome,
   AppSettings,
@@ -137,29 +138,28 @@ export class Ui {
   look = new LookSlice();
   inspector = new InspectorSlice();
 
-  // -- surfaces (the whole app: Grid, Look — UI §2.1) -------------------------
+  // -- view mode: the center "lens" axis (DESIGN-VIEW-MODES.md) ----------------
+  // ONE orthogonal axis — grid / visualizer / look — replacing the old
+  // `surface: "grid" | "look"` enum PLUS the bolted-on `graphOpen` overlay
+  // boolean. The visualizer is a PEER view now (it renders instead of the
+  // grid, not over it), so adding a future `compare` view is additive (one
+  // ViewMode token, one activeHash arm, one App.svelte arm) rather than
+  // another boolean threaded through ~20 call sites. Orthogonal to
+  // `gridScope` (the noun the grid shows), which this axis never touches.
   // Search is no longer a surface (M3 search-as-scope): a query scopes the
-  // GRID in place, so there are only two surfaces again. `searchOpen` and the
-  // search-overlay return point are retired with the overlay.
-  surface = $state<"grid" | "look">("grid");
+  // GRID in place. OPEN enum so the litmus in the doc holds.
+  viewMode = $state<ViewMode>("grid");
 
-  // -- semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md) --------------------
-  // The graph is a force-directed OVERLAY over the grid, not a third surface:
-  // it opens on top, reads the current grid scope, and on interaction re-uses
-  // the grid's existing scope/Look machinery (a topic anchor scopes the grid
-  // like a query; an image node opens Look). One boolean gates it; the
-  // TopicGraph component owns all topic/affinity/sim state. Kept deliberately
-  // small + clearly named so the parallel heatmap merge stays mechanical.
-  graphOpen = $state(false);
-
-  /** The image node SELECTED on the Visualizer (its hash), or null when nothing
-   * is selected. A single click on an image node SELECTS it (glow + scope);
+  /** The image SELECTED in the visualizer (its hash), or null when nothing is
+   * selected. A single click on an image node SELECTS it (glow + scope);
    * double-click / Enter then OPENS it in Look. The selection drives the write
-   * scope while the graph is open (see reportScope): a selected node is the
-   * dictation/rating target, null is the NEUTRAL session scope. This lives in
-   * the composition root (not the TopicGraph component) because it must outlive
-   * the lens' {#if graphOpen} mount and gate reportScope. */
-  graphSelection = $state<string | null>(null);
+   * scope while the visualizer is the active view (see reportScope + the
+   * activeHash getter): a selected node is the dictation/rating target, null is
+   * the NEUTRAL session scope. This lives in the composition root (not the
+   * TopicGraph component) because it must outlive the lens' mount and gate
+   * reportScope. Renamed from `graphSelection` — no longer graph-specific
+   * (a future compare view could reuse it). */
+  viewSelection = $state<string | null>(null);
 
   /** The three-state Attention OVERLAY on the graph (heatmap x graph synthesis):
    * "off" (the plain graph) / "engaged" (where attention lives) / "overlooked"
@@ -499,18 +499,26 @@ export class Ui {
   // scope reporting (CAPTURE §3 — report, then render the echo)
   // ---------------------------------------------------------------------------
 
-  /** The ACTIVE image hash the inspector + membership marks follow. The graph,
-   * when open, makes the SELECTED node active (so the inspector follows a graph
-   * selection like it follows the grid focus); otherwise it is the Look image
-   * or the grid focus. */
+  /** The ACTIVE image hash — the single funnel the inspector, membership marks,
+   * dwell, and scope all read (DESIGN-VIEW-MODES.md). One arm per view: Look's
+   * current image, the visualizer's selected node, or the grid focus. Per-view
+   * cursors stay the source of truth for navigation; this getter just answers
+   * "what photo is active now", and a VIEW SWITCH seeds the target cursor from
+   * it so the photo carries across (see openVisualizer / leaveVisualizer). */
   private get activeHash(): string | null {
-    if (this.graphOpen) return this.graphSelection;
-    return this.surface === "look" ? this.look.currentHash : this.grid.activeHash;
+    switch (this.viewMode) {
+      case "look":
+        return this.look.currentHash;
+      case "visualizer":
+        return this.viewSelection;
+      case "grid":
+        return this.grid.activeHash;
+    }
   }
 
   async reportScope() {
     const targets = scopeTargets({
-      surface: this.surface,
+      viewMode: this.viewMode,
       // Search is no longer a separate selection surface (M3): query results
       // ARE grid cells, so the write scope is the grid selection in every
       // non-Look case. searchOpen/searchSelection are held false/empty to
@@ -519,11 +527,10 @@ export class Ui {
       gridSelection: this.grid.selectionTargets, // stack-expanded upstream
       searchSelection: [],
       lookTargets: this.look.currentTargets,
-      // The Visualizer, when open, OWNS the scope: the selected node (or
-      // session-neutral when none) takes precedence over grid/Look so graph
+      // The visualizer, when active, OWNS the scope: the selected node (or
+      // session-neutral when none) takes precedence over grid/Look so its
       // dictation/rating never targets a stale image (scope.ts comment).
-      graphOpen: this.graphOpen,
-      graphSelection: this.graphSelection,
+      viewSelection: this.viewSelection,
     });
     try {
       const echoed = await ipc.setScope(targets);
@@ -541,7 +548,7 @@ export class Ui {
     // menu's checkmarks must be honest at open time, not after a click.
     await this.refreshActiveMemberships();
     // Dwell capture (heatmap): reportScope is the ONE funnel every focus
-    // change flows through (selection, deselect, surface switch, Look enter /
+    // change flows through (selection, deselect, view switch, Look enter /
     // leave / nav), so refocusing the dwell tracker here covers them all with
     // one localized hook (DESIGN-ATTENTION-HEATMAP.md).
     this.dwellRefocus();
@@ -667,9 +674,11 @@ export class Ui {
   }
 
   async openFolder(rootId: string, folder: string) {
-    // Opening a folder always lands on the Grid: navigating sources while in
-    // Look exits the single-image view (founder dogfood, round 1).
-    if (this.surface === "look") await this.leaveLook();
+    // Opening a folder from the rail drops Look back to the grid (founder
+    // dogfood, round 1); the visualizer PERSISTS and re-points at the new
+    // scope via graphScope() (DESIGN-VIEW-MODES.md transition table). Only the
+    // look arm needs the leaveLook teardown — the visualizer is untouched.
+    if (this.viewMode === "look") await this.leaveLook();
     // The grid is now in folder scope (M3); switching source clears any live
     // query (D5: query scope is ephemeral per-source).
     this.gridScope = { kind: "folder", rootId, folder };
@@ -694,7 +703,7 @@ export class Ui {
    * grid leaves folder mode entirely: rootId goes null so folder-keyed
    * machinery (sort persistence, last-folder, ingest re-list) stands down. */
   async openCollection(id: string) {
-    if (this.surface === "look") await this.leaveLook();
+    if (this.viewMode === "look") await this.leaveLook();
     this.gridScope = { kind: "collection", id };
     this.clearQueryInput();
     this.grid.rootId = null;
@@ -842,7 +851,7 @@ export class Ui {
     if (nav === null) return;
     const { order, index: idx } = nav;
     this.look.open(order, idx);
-    this.surface = "look";
+    this.viewMode = "look";
     await this.reportScope();
   }
 
@@ -857,7 +866,7 @@ export class Ui {
     // match runs over primary AND alt. The grid restores its own scroll
     // anchor on mount and then scrolls the active cell into view.
     const hash = this.look.currentHash;
-    this.surface = "grid";
+    this.viewMode = "grid";
     this.look.close();
     if (hash !== null) {
       const idx = this.grid.units.findIndex(
@@ -872,11 +881,13 @@ export class Ui {
    * (query OR similar): home is the underlying folder/collection, not a
    * search result set or a similarity view. */
   async goHome() {
-    // The Visualizer lens is a grid-level overlay: "go grid" (G / goHome) must
-    // CLOSE it so the user actually lands back on the grid, not stay hidden
-    // behind the open lens (founder bug: pressing G ran but left the lens up).
-    if (this.graphOpen) await this.closeGraph();
-    if (this.surface === "look") {
+    // "go grid" (G / goHome): *->grid (DESIGN-VIEW-MODES.md). Leave the
+    // visualizer first (it seeds grid focus from the departing selection), then
+    // FALL THROUGH so a derived scope underneath the lens still clears to its
+    // source — G is "land me on the plain grid", not "just close the lens".
+    // The look arm keeps the image active and has nothing further to do.
+    if (this.viewMode === "visualizer") await this.leaveVisualizer();
+    if (this.viewMode === "look") {
       await this.leaveLook();
       return;
     }
@@ -1174,7 +1185,7 @@ export class Ui {
    * drives the grid surface), like openFolder. A phrase-only call (the graph
    * lens) scopes the grid without a note log. */
   async openTopic(phrase: string, topicId?: string): Promise<void> {
-    if (this.surface === "look") await this.leaveLook();
+    if (this.viewMode === "look") await this.leaveLook();
     await this.runTopicScope(phrase, topicId);
   }
 
@@ -1211,37 +1222,52 @@ export class Ui {
   }
 
   // ---------------------------------------------------------------------------
-  // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md) — a focused, clearly
-  // named region so the parallel heatmap merge into this file stays mechanical.
+  // The visualizer view (DESIGN-VIEW-MODES.md) — the force-directed topic-graph
+  // lens, now a PEER view on the viewMode axis (not an overlay boolean). A
+  // focused, clearly named region so the parallel heatmap merge stays
+  // mechanical.
   // ---------------------------------------------------------------------------
 
-  /** Open the force-directed topic-graph lens over the current grid scope.
-   * Leaves Look first (the lens is a grid-level overlay), like find-similar.
-   * Opens with NOTHING selected and NEUTRALIZES the scope (empty targets): a
-   * dictation on the freshly-opened graph becomes a session note, never a
-   * silent commit against the stale grid/Look image (founder decision). */
-  async openGraph() {
-    if (this.surface === "look") await this.leaveLook();
-    this.graphOpen = true;
-    this.graphSelection = null;
+  /** Open the visualizer over the current grid scope, like find-similar leaves
+   * Look first. R6 seed-from-active (DESIGN-VIEW-MODES.md): the visualizer
+   * SEEDS viewSelection from the photo you were just on (grid focus / Look
+   * current) so it carries across the switch and dictation/rating continue on
+   * it — NOT the old unconditional neutralize. When NOTHING was active (a fresh
+   * scope, nothing focused), it opens NEUTRAL (viewSelection null, scope []) so
+   * a dictation becomes a session note instead of mis-targeting. The seed is
+   * read BEFORE flipping viewMode, because activeHash's arm changes with it. */
+  async openVisualizer() {
+    if (this.viewMode === "look") await this.leaveLook();
+    const seed = this.activeHash; // read before the view switch changes the arm
+    this.viewMode = "visualizer";
+    this.viewSelection = seed;
     await this.reportScope();
   }
 
-  /** Single-click on a graph image node SELECTS it (glow + scope); pass null to
-   * DESELECT (Esc on a selection, or a click on empty canvas). Reporting scope
-   * here is the whole point: a selected node becomes the dictation/rating
-   * target, a deselect returns to the neutral session scope. */
+  /** Single-click on a visualizer image node SELECTS it (glow + scope); pass
+   * null to DESELECT (Esc on a selection, or a click on empty canvas).
+   * Reporting scope here is the whole point: a selected node becomes the
+   * dictation/rating target, a deselect returns to the neutral session scope.
+   * (Method name unchanged — TopicGraph calls it; it writes viewSelection.) */
   async selectGraphNode(hash: string | null) {
-    this.graphSelection = hash;
+    this.viewSelection = hash;
     await this.reportScope();
   }
 
-  /** Close the lens; clear any selection and report scope so the write scope
-   * returns to the grid/Look selection underneath (the lens never mutated that
-   * scope itself unless the user clicked a topic, which scopes explicitly). */
-  async closeGraph() {
-    this.graphOpen = false;
-    this.graphSelection = null;
+  /** Leave the visualizer back to the grid. Seeds grid focus from the departing
+   * viewSelection (the photo carries across the switch, DESIGN-VIEW-MODES.md)
+   * so the grid lands on the same image; then clears the selection and reports
+   * so the write scope returns to the grid selection underneath. */
+  async leaveVisualizer() {
+    const hash = this.viewSelection;
+    if (hash !== null) {
+      const idx = this.grid.units.findIndex(
+        (u) => u.primary.hash === hash || u.alt?.hash === hash,
+      );
+      if (idx >= 0) this.grid.sel = { ...this.grid.sel, focus: idx };
+    }
+    this.viewMode = "grid";
+    this.viewSelection = null;
     await this.reportScope();
   }
 
@@ -1269,24 +1295,29 @@ export class Ui {
     return { kind: "library" };
   }
 
-  /** Click a topic anchor → scope the grid to that topic. v1 reuses the query
-   * scope machinery: the topic phrase becomes a committed semantic query, so
-   * the grid shows the topic's strongest matches in fused order, with the
-   * residue + Escape-to-clear the query scope already provides. The lens closes
-   * so the user lands on the scoped grid (the find-similar pattern). */
+  /** Click a topic anchor → scope the grid to that topic (visualizer->grid +
+   * semantic query scope, DESIGN-VIEW-MODES.md). v1 reuses the query scope
+   * machinery: the topic phrase becomes a committed semantic query, so the grid
+   * shows the topic's strongest matches in fused order, with the residue +
+   * Escape-to-clear the query scope already provides. Dropping to the grid view
+   * (replacing the old closeGraph()) lands the user on the scoped grid. */
   async scopeToTopic(phrase: string) {
-    await this.closeGraph();
+    this.viewMode = "grid";
+    this.viewSelection = null;
     this.query = phrase;
     this.chips = [];
     await this.runQueryScope("semantic");
   }
 
-  /** Double-click / Enter on a selected image node → open it in Look. The lens
-   * closes; openLook builds the nav set over the grid units exactly as a grid
-   * click would. (Single click now SELECTS rather than opens — selectGraphNode.) */
+  /** Double-click / Enter on a selected image node → open it in Look. openLook
+   * sets viewMode="look" DIRECTLY, so there is no closeGraph-then-open flash
+   * through the grid (DESIGN-VIEW-MODES.md (iii)); the trailing viewSelection
+   * reset keeps the departed visualizer clean for its next open. openLook
+   * builds the nav set over the grid units exactly as a grid click would.
+   * (Single click now SELECTS rather than opens — selectGraphNode.) */
   async openFromGraph(hash: string) {
-    await this.closeGraph();
     await this.openLook(hash);
+    this.viewSelection = null;
   }
 
   /** Re-point the grid from a DERIVED scope (query OR similar) back to its
@@ -1528,11 +1559,12 @@ export class Ui {
     const hash = this.inspector.hash;
     if (this.inspector.open === false || hash === null) return;
     const targets = scopeTargets({
-      surface: this.surface,
+      viewMode: this.viewMode,
       searchOpen: false,
       gridSelection: this.grid.selectionTargets,
       searchSelection: [],
       lookTargets: this.look.currentTargets,
+      viewSelection: this.viewSelection,
     });
     if (targets.includes(hash)) await this.inspector.load(hash);
   }
@@ -1542,9 +1574,11 @@ export class Ui {
   private async advanceAfter(commit: "rating" | "note") {
     const outcome = afterCommit({
       autoAdvance: this.autoAdvance,
-      surface: this.surface,
+      // advance.ts keeps its "grid"|"look" field (minimal blast radius); the
+      // visualizer advances like the grid (DESIGN-VIEW-MODES.md).
+      surface: this.viewMode === "look" ? "look" : "grid",
       commit,
-      selectionCount: this.surface === "look" ? 1 : this.grid.sel.order.length,
+      selectionCount: this.viewMode === "look" ? 1 : this.grid.sel.order.length,
     });
     if (outcome === "look-next") await this.lookNav(1);
     else if (outcome === "grid-next" && this.grid.advanceActive())
@@ -1715,10 +1749,12 @@ export class Ui {
    * selectionTargets). Targets outside the current folder (multi-target
    * notes minted over search selections can span folders) are skipped. */
   async selectJournalTargets(targets: string[]) {
-    if (this.surface === "look") {
-      this.surface = "grid";
-      this.look.close();
-    }
+    // Select-from-note jumps HOME and selects in the grid (DESIGN-VIEW-MODES.md:
+    // viewMode="grid"). From Look we also tear down the single-image view; the
+    // visualizer just drops its view (its selection is replaced by the grid one).
+    if (this.viewMode === "look") this.look.close();
+    this.viewMode = "grid";
+    this.viewSelection = null;
     const order: string[] = [];
     for (const t of targets) {
       const unit = this.grid.units.find(
@@ -1763,7 +1799,7 @@ export class Ui {
         this.gridScope.kind === "similar" ||
         this.gridScope.kind === "topic",
       searchBarFocused: this.barFocused,
-      surface: this.surface,
+      viewMode: this.viewMode,
       hasSelection: this.grid.sel.order.length > 0,
     };
   }
@@ -1845,7 +1881,7 @@ export class Ui {
     searchInputFocused: boolean;
   }): ActionContext {
     return {
-      surface: this.surface,
+      viewMode: this.viewMode,
       // Search is no longer a surface/scope (M3): there is no "search open"
       // keymap mode. Held false so the frozen ActionContext contract still
       // type-checks for any residual reader. The header bar handles its own
@@ -1857,8 +1893,9 @@ export class Ui {
       queryEmpty: this.query === "",
       hasSelection: this.grid.sel.order.length > 0,
       selectionCount: this.grid.sel.order.length,
-      activeHash:
-        this.surface === "look" ? this.look.currentHash : this.grid.activeHash,
+      // The shared active image (DESIGN-VIEW-MODES.md): the one getter funnels
+      // all three view arms (Look current / visualizer selection / grid focus).
+      activeHash: this.activeHash,
       activeIsPair: this.grid.activeIsPair,
       activePairCollapsed: this.grid.activePairCollapsed,
       railOpen: this.shell.railOpen,
@@ -1911,8 +1948,12 @@ export class Ui {
         await this.goHome();
         break;
       case "toggle-graph":
-        if (this.graphOpen) await this.closeGraph();
-        else await this.openGraph();
+        // `l` toggles the visualizer (DESIGN-VIEW-MODES.md transition table):
+        // grid->visualizer, visualizer->grid, look->visualizer. From look,
+        // openVisualizer leaves Look first and seeds from look.currentHash, so
+        // the photo carries across.
+        if (this.viewMode === "visualizer") await this.leaveVisualizer();
+        else await this.openVisualizer();
         break;
       case "toggle-lights-out":
         await this.toggleLightsOut();
@@ -2046,7 +2087,7 @@ export class Ui {
         await this.reportScope();
         break;
       case "flip-stack-member":
-        if (this.surface === "look") this.look.flipMember();
+        if (this.viewMode === "look") this.look.flipMember();
         else this.grid.flipActiveMember();
         await this.reportScope();
         break;
@@ -2325,7 +2366,7 @@ export class Ui {
         // a quiet no-op like the sibling OS verbs — never a toast.
         const hash = this.actionContext().activeHash;
         if (hash !== null) {
-          if (this.surface === "look") await this.leaveLook();
+          if (this.viewMode === "look") await this.leaveLook();
           const filename = this.filenameFor(hash);
           try {
             await this.runSimilarScope(hash, filename);
@@ -2367,7 +2408,7 @@ export class Ui {
         await this.pencilUndo();
         break;
       case "journal-flash-stroke":
-        if (this.surface === "look") this.look.flashStroke(action.eventId);
+        if (this.viewMode === "look") this.look.flashStroke(action.eventId);
         break;
       // ---- voice capture (P6.4 — CAPTURE §6.4, §11; Space two-gesture) ---------
       case "toggle-mic":
@@ -2500,20 +2541,37 @@ export class Ui {
   // episode lifecycle and the IPC report.
 
   /** Refocus the dwell tracker on whatever the user is now attending to: the
-   * Look-viewed image (tier "look") or the grid selection (tier "grid"). Ends
-   * and flushes the previous episode when the focus actually changed, then
-   * begins a fresh one. A no-op re-report (same tier + hashes) keeps the
-   * current episode running, so a steady Look-open accrues one continuous span.
-   * Called from every cross-slice focus flow. */
+   * Look-viewed image (tier "look"), the visualizer's selected node (tier
+   * "look" too — a selected node is a focused single image, DESIGN-VIEW-MODES.md
+   * regression guard), or the grid selection (tier "grid"). Ends and flushes the
+   * previous episode when the focus actually changed, then begins a fresh one. A
+   * no-op re-report (same tier + hashes) keeps the current episode running, so a
+   * steady Look-open accrues one continuous span. Called from every cross-slice
+   * focus flow. */
   dwellRefocus() {
-    const next =
-      this.surface === "look"
-        ? this.look.currentHash === null
-          ? null
-          : { source: "look" as const, hashes: [this.look.currentHash] }
-        : this.grid.sel.order.length > 0
-          ? { source: "grid" as const, hashes: this.grid.selectionTargets }
-          : null;
+    let next: { source: DwellSource; hashes: string[] } | null;
+    switch (this.viewMode) {
+      case "look":
+        next =
+          this.look.currentHash === null
+            ? null
+            : { source: "look", hashes: [this.look.currentHash] };
+        break;
+      case "visualizer":
+        // Single-image dwell on the selected node (full "look" weight), or null
+        // when neutral (nothing selected — no attention to attribute).
+        next =
+          this.viewSelection === null
+            ? null
+            : { source: "look", hashes: [this.viewSelection] };
+        break;
+      case "grid":
+        next =
+          this.grid.sel.order.length > 0
+            ? { source: "grid", hashes: this.grid.selectionTargets }
+            : null;
+        break;
+    }
     // Unchanged focus: let the running episode keep accruing.
     if (sameFocus(this.dwellEpisode, next)) {
       this.armDwellIdle();
