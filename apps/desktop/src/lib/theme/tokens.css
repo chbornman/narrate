@@ -35,6 +35,16 @@
   /* The grease pencil's tool color — the ONLY saturated color in the UI
    * (I5). Pencil surfaces only; everything else stays achromatic. */
   --red-pencil: #e03131;
+  /* What's-Happening Station 2.0 (DESIGN-STATION.md): the collapsed pill's
+   * border = the most salient active state, by priority. These are a
+   * deliberate, NARROW exception to the achromatic-chrome rule — a status
+   * border the eye reads at a glance, scoped to the station alone (never a
+   * fill, never elsewhere). mic = recording red (distinct from the pencil's
+   * brand red so the two never read as the same thing); error/missing =
+   * amber; background work = a cool slate "working" hue. */
+  --station-mic: #d64545;
+  --station-error: #d79a3a;
+  --station-working: #5a7fa0;
   --font:
     system-ui,
     -apple-system,
@@ -68,6 +78,10 @@
   --text-dim: #8a8a8a;
   --text-faint: #5a5a5a;
   --focus: #cfcfcf;
+  /* Station border (restated so a swap back from light is one attribute). */
+  --station-mic: #d64545;
+  --station-error: #d79a3a;
+  --station-working: #5a7fa0;
 }
 
 /* LIGHT theme (BACKLOG "Full interface themes"): light chrome + grays. The
@@ -93,6 +107,11 @@
   --text-dim: #5a5a5a; /* secondary, comfortably readable */
   --text-faint: #8a8a8a; /* tertiary/hints, still legible */
   --focus: #404040; /* focus ring: dark on light, mirrors dark's light ring */
+  /* Station border, darkened for contrast against the light pill surface
+   * (the same hues, one step deeper so they read on white). */
+  --station-mic: #c23434;
+  --station-error: #b87b20;
+  --station-working: #41698c;
 }
 
 /* D6: image-surround luminance levels. Each block retunes the surround
