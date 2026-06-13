@@ -12,8 +12,11 @@ import { defaultToggles, type SignalToggles } from "../logic/ranking";
 import { DEFAULT_SORT, DEFAULT_THUMB_STEP, type SortMode } from "../logic/sort";
 import {
   DEFAULT_SURROUND,
+  DEFAULT_SURROUND_MODE,
   parseSurround,
+  parseSurroundMode,
   type SurroundLevel,
+  type SurroundMode,
 } from "../theme/surround";
 import { DEFAULT_THEME, parseTheme, type ThemeMode } from "../theme/theme";
 
@@ -225,6 +228,20 @@ export function loadSurround(): SurroundLevel {
 
 export function saveSurround(level: SurroundLevel) {
   safeSet("pp.surround", level);
+}
+
+/** Surround MODE (follow-theme | manual), default follow-theme: a fresh
+ * install derives the image backdrop from the active light/dark theme until
+ * the user pins a level. A malformed/absent value falls back to follow-theme
+ * (see theme/surround.ts). The pinned MANUAL level reuses the existing
+ * `pp.surround` key above, so an old install's level is honored the moment it
+ * switches to manual. */
+export function loadSurroundMode(): SurroundMode {
+  return parseSurroundMode(safeGet("pp.surroundMode")) ?? DEFAULT_SURROUND_MODE;
+}
+
+export function saveSurroundMode(mode: SurroundMode) {
+  safeSet("pp.surroundMode", mode);
 }
 
 // ---- interface theme (BACKLOG "Full interface themes") ----------------------

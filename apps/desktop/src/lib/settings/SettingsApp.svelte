@@ -21,6 +21,15 @@
   import AckButton from "../primitives/AckButton.svelte";
   import { theme } from "../theme/theme-store.svelte";
   import { THEME_LABELS, THEME_MODES, type ThemeMode } from "../theme/theme";
+  import { surround } from "../theme/surround-store.svelte";
+  import {
+    SURROUND_LABELS,
+    SURROUND_LEVELS,
+    SURROUND_MODE_LABELS,
+    SURROUND_MODES,
+    type SurroundLevel,
+    type SurroundMode,
+  } from "../theme/surround";
   import type {
     AppSettings,
     PreviewCacheStatsDto,
@@ -219,6 +228,19 @@
     theme.set(mode);
   }
 
+  /** Background surround (D6) lives beside the theme: follow-theme derives the
+   * image backdrop from the active light/dark theme; manual pins a level. Both
+   * write the shared surround store, so the main window's data-surround follows
+   * (and picking a level here flips the store to manual, exactly like the
+   * backdrop right-click). */
+  function setSurroundMode(mode: SurroundMode) {
+    surround.setMode(mode);
+  }
+
+  function setSurroundLevel(level: SurroundLevel) {
+    surround.pick(level);
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") void win.close();
   }
@@ -312,6 +334,42 @@
     </div>
     <p class="helper">
       System follows your operating system's light or dark setting.
+    </p>
+    <!-- Background surround (D6): the backdrop behind the photo. Follow theme
+         derives it from the active light/dark theme; Manual pins a level. -->
+    <div class="row pref">
+      <span class="name">Background surround</span>
+      <div class="segmented" role="radiogroup" aria-label="Background surround">
+        {#each SURROUND_MODES as mode (mode)}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={surround.mode === mode}
+            class:active={surround.mode === mode}
+            onclick={() => setSurroundMode(mode)}>{SURROUND_MODE_LABELS[mode]}</button
+          >
+        {/each}
+      </div>
+    </div>
+    {#if surround.mode === "manual"}
+      <div class="row pref">
+        <span class="name">Surround level</span>
+        <div class="segmented" role="radiogroup" aria-label="Surround level">
+          {#each SURROUND_LEVELS as level (level)}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={surround.manualLevel === level}
+              class:active={surround.manualLevel === level}
+              onclick={() => setSurroundLevel(level)}>{SURROUND_LABELS[level]}</button
+            >
+          {/each}
+        </div>
+      </div>
+    {/if}
+    <p class="helper">
+      Follow theme keeps the photo backdrop matched to the light or dark theme.
+      Manual pins a specific shade.
     </p>
   </section>
 

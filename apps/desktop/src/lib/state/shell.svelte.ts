@@ -10,6 +10,7 @@ import { transitionPops } from "../logic/station";
 import type { MenuSurface } from "../actions/menus";
 import type { IndicatorState, IngestStatus, RuntimeStatus, ScopeView } from "../types/dto";
 import type { SurroundLevel } from "../theme/surround";
+import { surround as surroundStore } from "../theme/surround-store.svelte";
 import * as prefs from "./prefs";
 
 export const SESSION_SCOPE: ScopeView = {
@@ -99,7 +100,14 @@ export class ShellSlice {
   #popSeq = 0;
 
   // -- viewing comfort (D6) ----------------------------------------------------
-  surround = $state<SurroundLevel>("black");
+  /** The active image-backdrop surround level. NOW OWNED by the surround store
+   * (theme/surround-store.svelte.ts), which composes the follow-theme | manual
+   * mode with the live resolved theme. This getter keeps the shell as the read
+   * seam (App.svelte's data-surround, the set-surround action's ctx.surround)
+   * so those callers are untouched. */
+  get surround(): SurroundLevel {
+    return surroundStore.level;
+  }
   fullscreen = $state(false);
 
   // -- UI scale (desktop conventions: Cmd+= / Cmd+− / Cmd+0) -------------------
@@ -168,7 +176,8 @@ export class ShellSlice {
   welcomeDontShowAgain = $state(true);
 
   loadPrefs() {
-    this.surround = prefs.loadSurround();
+    // Surround is owned by the surround store (loads its own prefs at
+    // construction); the shell reads it through the `surround` getter.
     this.railOpen = prefs.loadRailOpen();
     this.railTab = prefs.loadRailTab();
     this.uiZoom = prefs.loadUiZoom();
@@ -236,9 +245,10 @@ export class ShellSlice {
     prefs.saveRailOpen(this.railOpen);
   }
 
+  /** The set-surround action's sink (D6 backdrop/gutter right-click). Delegates
+   * to the surround store: picking a level implies MANUAL mode and persists. */
   setSurround(level: SurroundLevel) {
-    this.surround = level;
-    prefs.saveSurround(level);
+    surroundStore.pick(level);
   }
 
   toggleCheatsheet() {
