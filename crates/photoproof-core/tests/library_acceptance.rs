@@ -703,7 +703,8 @@ fn l13_03_interrupt_resume() {
     env.drain_queue();
 
     // Exactly one images row per unique hash; no misses vs the independent
-    // walk; every pass done (full-raw-decode skipped: plain JPEGs).
+    // walk; every pass done. NO full-raw-decode rows at ingest (June 2026:
+    // the develop pass is on-demand/view-time only, never eager-enqueued).
     assert_eq!(env.lib.image_count().unwrap(), n as i64);
     let conn = env.conn();
     for (rel, hash) in &expected {
@@ -726,7 +727,12 @@ fn l13_03_interrupt_resume() {
     assert_eq!(c("hash").done, n as u64);
     assert_eq!(c("exif").done, n as u64);
     assert_eq!(c("preview").done, n as u64);
-    assert_eq!(c("full-raw-decode").skipped, n as u64);
+    // On-demand: no full-raw-decode rows are created at ingest at all.
+    let frd = c("full-raw-decode");
+    assert_eq!(
+        frd.pending + frd.running + frd.done + frd.skipped + frd.error,
+        0
+    );
     assert_eq!(c("exif").pending + c("preview").pending, 0);
     assert_eq!(c("exif").running + c("preview").running, 0);
 
@@ -1306,14 +1312,19 @@ fn l13_10_embedded_preview_orientation_fixtures() {
         dims[1], dims[3],
         "display geometry identical across conventions"
     );
-    // Threshold met → the backfill skips these (stroke-substrate safety).
+    // On-demand: the develop pass is never enqueued at ingest, so there are
+    // NO full-raw-decode rows regardless of threshold (the develop is
+    // requested at view time). The threshold only sets needs_full_decode on
+    // the artifact (asserted above), which drives the UI label + the trigger.
     let counters = env.lib.pass_counters().unwrap();
     let frd = counters
         .get(&("full-raw-decode".to_string(), 1))
         .copied()
         .unwrap_or_default();
-    assert_eq!(frd.skipped, 2);
-    assert_eq!(frd.pending, 0);
+    assert_eq!(
+        frd.pending + frd.skipped + frd.done + frd.error + frd.running,
+        0
+    );
 }
 
 /// Backlog (founder, dogfood round 2): RAW 1:1 via the embedded full-res
@@ -1639,34 +1650,60 @@ fn l13_11_threshold_routing() {
     );
     assert!(a.needs_full_decode, "threshold miss flagged");
 
-    // Queued full-raw-decode: plain at P2, stroked promoted to P1, the
-    // no-preview case pending at elevated backfill priority with placeholder
-    // artifacts absent.
-    let prio = |hash: &ContentHash| -> i64 {
+    // ON-DEMAND (June 2026): NO full-raw-decode rows are created at ingest —
+    // not for the threshold miss, not for the stroked image, not for the
+    // no-embedded-preview case. The develop is requested at VIEW time. (This
+    // is what dissolves the 154-stuck-rows bug.)
+    let pending_frd = |hash: &ContentHash| -> i64 {
         conn.query_row(
-            "SELECT priority FROM ingest_passes
-             WHERE image_hash = ?1 AND pass_name = 'full-raw-decode' AND state = 'pending'",
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'full-raw-decode'",
             [hash.as_str()],
             |r| r.get(0),
         )
         .unwrap()
     };
-    assert_eq!(prio(&plain), 2, "plain threshold miss queues at P2");
+    assert_eq!(pending_frd(&plain), 0, "no eager develop row at ingest");
     assert_eq!(
-        prio(&stroked),
-        1,
-        "stroke promotion lifts the backfill to P1"
+        pending_frd(&stroked),
+        0,
+        "stroked RAW develops on view, not eager"
     );
-    assert_eq!(prio(&none), 1, "no embedded preview → elevated backfill");
+    assert_eq!(
+        pending_frd(&none),
+        0,
+        "no-embedded-preview stays on-demand too"
+    );
     assert!(
         env.lib
             .preview_artifact(&none, ArtifactKind::Thumb)
             .unwrap()
             .is_none(),
-        "no-preview RAW shows the UI placeholder until backfill"
+        "no-preview RAW shows the UI placeholder until first view"
     );
-    // "After backfill, full-quality, flag clear" — the `full-raw-decode`
-    // worker is the M1.5 packet; deferred there (the queue knows the pass).
+
+    // The view-time trigger creates exactly one row at the TOP interactive
+    // priority (above the watcher), since no develop artifact is cached.
+    drop(conn);
+    assert!(
+        env.lib.request_full_decode(&plain).unwrap(),
+        "first request enqueues a develop"
+    );
+    let conn = env.conn();
+    let (state, prio): (String, i64) = conn
+        .query_row(
+            "SELECT state, priority FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'full-raw-decode'",
+            [plain.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(
+        prio,
+        photoproof_core::library::PRIORITY_INTERACTIVE,
+        "view-time develop is the highest priority in the queue"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,14 +2198,16 @@ fn rebuild_previews_repends_the_whole_root_and_drain_regenerates() {
     );
 
     // The re-pended rows carry the exact recovery shape: pending, fresh
-    // attempt budget, no backoff, no stale error, backfill priority.
+    // attempt budget, no backoff, no stale error, backfill priority
+    // (PRIORITY_BACKFILL = 3 after the June 2026 interactive-priority
+    // renumber; it was 2).
     let conn = env.conn();
     let repended: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM ingest_passes
              WHERE pass_name = 'preview' AND state = 'pending'
                AND attempts = 0 AND not_before IS NULL AND error IS NULL
-               AND priority = 2",
+               AND priority = 3",
             [],
             |r| r.get(0),
         )

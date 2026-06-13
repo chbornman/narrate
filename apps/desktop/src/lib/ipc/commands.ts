@@ -189,6 +189,15 @@ export const rescanRoot = (rootId: string) =>
 export const rebuildPreviews = (rootId: string) =>
   invoke<number>("rebuild_previews", { rootId });
 
+/** On-demand full RAW develop trigger (OD-1): Look calls this when its
+ * resolution ladder reaches a RAW with no cached full-decode artifact. Resolves
+ * to `true` if a develop is now pending (show "developing..." and retry the
+ * /full-decode URL), `false` if the cache already had it (serve immediately) or
+ * the hash is not a RAW. The pump develops in the background; the developed
+ * artifact lands and `previews-changed` fires. */
+export const requestFullDecode = (hash: string) =>
+  invoke<boolean>("request_full_decode", { hash });
+
 // -- window plumbing ----------------------------------------------------------
 
 export const openSettingsWindow = () => invoke<void>("open_settings_window");

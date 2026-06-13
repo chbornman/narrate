@@ -54,17 +54,35 @@ export function needsOriginal(input: FullresInput): boolean {
   return input.scale * dpr > 1 + FULLRES_EPSILON;
 }
 
-/** A rung of the progressive source ladder past the display preview. */
-export type FullresSource = "original" | "embedded";
+/** A rung of the progressive source ladder past the display preview.
+ * `full-decode` is the DEEPEST rung (OD-1): the neutral RAW develop at native
+ * sensor resolution, served once the on-demand develop has run. */
+export type FullresSource = "original" | "embedded" | "full-decode";
 
 /** First rung for a freshly requested image. */
 export const FIRST_SOURCE: FullresSource = "original";
 
 /** Next rung after `source` refused (a protocol 404): /original → the
- * embedded-native JPEG (the RAW path); a refused /embedded exhausts the
- * ladder (`null` — the preview stands, never re-asked this session). */
+ * embedded-native JPEG (the RAW path) → /full-decode (the on-demand neutral
+ * develop at native resolution). A refused /full-decode exhausts the ladder
+ * (`null` — the preview stands).
+ *
+ * NOTE: a /full-decode 404 is special — it can mean "developing..." (the
+ * develop is in flight) rather than a permanent refusal. LookStage owns that
+ * distinction: it requests the develop and RETRIES /full-decode while a
+ * develop is pending, rather than advancing past it; only a develop the
+ * backend declines (non-RAW, unsupported CFA) exhausts the rung. */
 export function nextSource(source: FullresSource): FullresSource | null {
-  return source === "original" ? "embedded" : null;
+  if (source === "original") return "embedded";
+  if (source === "embedded") return "full-decode";
+  return null;
+}
+
+/** Whether `source` is the on-demand full-decode rung — the one LookStage
+ * triggers a develop for and retries while "developing...", rather than
+ * advancing past on a 404. */
+export function isFullDecodeRung(source: FullresSource): boolean {
+  return source === "full-decode";
 }
 
 /** THE SWAP GATE: a full-res <img> `load` event proves a usable source

@@ -17,6 +17,7 @@ mod metadata;
 mod paths;
 mod placeholder;
 mod preview;
+mod raw_develop;
 mod scan;
 mod volumes;
 mod watcher;
@@ -28,8 +29,8 @@ pub use exclusions::{
 };
 pub use hashing::{hash_file, hash_invocation_count, hashed_byte_count};
 pub use ingest::{
-    PASS_VERSION, PRIORITY_BACKFILL, PRIORITY_GPU, PRIORITY_SCAN, PRIORITY_WATCHER, PassCounters,
-    PassName, PassState, placeholder_sentinel,
+    PASS_VERSION, PRIORITY_BACKFILL, PRIORITY_GPU, PRIORITY_INTERACTIVE, PRIORITY_SCAN,
+    PRIORITY_WATCHER, PassCounters, PassName, PassState, placeholder_sentinel,
 };
 pub use paths::{Availability, BestPath, PathRow, StaleReason};
 pub use placeholder::{
@@ -37,10 +38,11 @@ pub use placeholder::{
 };
 pub use preview::{
     ArtifactKind, DISPLAY_EDGE, EMBEDDED_ACCEPT_EDGE, EmbeddedOrientationReason,
-    EmbeddedPreviewExtractor, ExtractedPreview, GENERATOR_VERSION, PreviewError, PreviewSource,
-    RawlerExtractor, THUMB_EDGE, apply_exif_orientation, artifact_path,
-    embedded_orientation_decision, oriented_dims,
+    EmbeddedPreviewExtractor, ExtractedPreview, FullDecodeFormat, GENERATOR_VERSION, PreviewError,
+    PreviewSource, RawlerExtractor, THUMB_EDGE, apply_exif_orientation, artifact_path,
+    embedded_orientation_decision, existing_full_artifact, full_artifact_path, oriented_dims,
 };
+pub use raw_develop::DevelopError;
 pub use scan::{ClockShiftReport, ScanOptions, ScanReport};
 pub use volumes::{
     FakeVolumeProbe, MARKER_FILENAME, PlatformIdKind, PlatformVolumeProbe, ProbedVolume,
@@ -1382,6 +1384,8 @@ impl Library {
             ImageFormat::Heic => {
                 // §9.5: HEIC preview generation is deferred to the
                 // libheif-capable backfill; placeholder until then.
+                // NO full-raw-decode row at ingest (June 2026, on-demand): the
+                // develop pass is view-time only now, never eager-enqueued.
                 ingest::enqueue(
                     tx,
                     hash,
@@ -1391,20 +1395,11 @@ impl Library {
                     Some("deferred-heic"),
                     now,
                 )?;
-                ingest::enqueue(
-                    tx,
-                    hash,
-                    PassName::FullRawDecode,
-                    PassState::Pending,
-                    PRIORITY_BACKFILL,
-                    None,
-                    now,
-                )?;
             }
             ImageFormat::Raw => {
-                // The preview pass routes full-raw-decode (§9.3): pending on
-                // threshold miss / no preview, skipped when the embedded
-                // preview suffices.
+                // The preview pass produces the embedded preview only; the
+                // full RAW develop is ON-DEMAND (view-time trigger), never
+                // enqueued here. No full-raw-decode row at ingest.
                 ingest::enqueue(
                     tx,
                     hash,
@@ -1416,6 +1411,10 @@ impl Library {
                 )?;
             }
             _ => {
+                // Non-RAW originals: the preview pass owns them; full-raw-
+                // decode is structurally inapplicable AND on-demand, so NO row
+                // is created here (June 2026 — the old `skipped`/`inapplicable`
+                // row is gone with the eager-enqueue removal).
                 ingest::enqueue(
                     tx,
                     hash,
@@ -1423,17 +1422,6 @@ impl Library {
                     PassState::Pending,
                     priority,
                     None,
-                    now,
-                )?;
-                // §10.1: `skipped` marks structurally inapplicable work so
-                // progress math stays honest.
-                ingest::enqueue(
-                    tx,
-                    hash,
-                    PassName::FullRawDecode,
-                    PassState::Skipped,
-                    PRIORITY_BACKFILL,
-                    Some("inapplicable"),
                     now,
                 )?;
             }
@@ -1770,18 +1758,17 @@ impl Library {
         let now = self.now();
         match extracted {
             None => {
-                // No embedded preview at all (§9.3): UI placeholder;
-                // full-raw-decode at elevated backfill priority.
+                // No embedded preview at all (§9.3): UI placeholder, and the
+                // RAW stays on-demand like any other — the develop runs only
+                // when the image is viewed (view-time trigger), never eager.
+                //
+                // TODO(review): no embedded preview means no substrate until
+                // first view. This is the one removal site the founder flagged
+                // for further review — an eager develop could be argued here
+                // (there is nothing to show meanwhile), but Phase 1 stays
+                // fully on-demand. Revisit if dogfood shows a no-embedded-
+                // preview RAW feels broken before its first view.
                 let conn = self.db.lock().expect("poisoned");
-                ingest::enqueue(
-                    &conn,
-                    &item.image_hash,
-                    PassName::FullRawDecode,
-                    PassState::Pending,
-                    PRIORITY_SCAN,
-                    None,
-                    now,
-                )?;
                 ingest::mark_skipped(&conn, item, "no-embedded-preview", now)?;
                 report.skipped += 1;
                 Ok(())
@@ -1822,38 +1809,17 @@ impl Library {
                         params![item.image_hash.as_str(), w, h],
                     )?;
                 }
-                if meets_threshold {
-                    // §9.4: never flagged, skipped by the backfill — doubly
-                    // load-bearing for images carrying journal strokes.
-                    ingest::enqueue(
-                        &conn,
-                        &item.image_hash,
-                        PassName::FullRawDecode,
-                        PassState::Skipped,
-                        PRIORITY_BACKFILL,
-                        Some("threshold-met"),
-                        now,
-                    )?;
-                } else {
-                    // Threshold miss: small artifacts now beat a placeholder;
-                    // flag and queue the upgrade (§9.3). Strokes promote it
-                    // above plain P2 backfills (§10.3).
-                    let priority = if self.image_has_strokes_locked(&conn, &item.image_hash)? {
-                        PRIORITY_SCAN
-                    } else {
-                        PRIORITY_BACKFILL
-                    };
-                    ingest::enqueue(
-                        &conn,
-                        &item.image_hash,
-                        PassName::FullRawDecode,
-                        PassState::Pending,
-                        priority,
-                        None,
-                        now,
-                    )?;
-                    ingest::promote(&conn, &item.image_hash, PassName::FullRawDecode, priority)?;
-                }
+                // ON-DEMAND (June 2026): the full RAW develop is NO LONGER
+                // enqueued here. `needs_full_decode = !meets_threshold` still
+                // rides on the artifact rows above — it drives the UI's "full
+                // decode pending" label and tells the view-time trigger a
+                // develop is worth requesting — but the develop pass row is
+                // created only when the image is actually viewed (the new
+                // `request_full_decode` command at PRIORITY_INTERACTIVE), not
+                // at ingest. This is what dissolves the 154-stuck-rows bug:
+                // with no eager enqueue there is no pending count to misread,
+                // and a stroked RAW develops when viewed like any other.
+                let _ = meets_threshold;
                 ingest::mark_done(&conn, item, now)?;
                 self.metrics.db_record.record(db_started.elapsed());
                 report.done += 1;
@@ -1883,6 +1849,200 @@ impl Library {
         } else {
             report.errors += 1;
         }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Full-raw-decode pass (§9.4 / OD-1): on-demand neutral develop to a
+    // native-resolution sRGB artifact, plus the 2560 display+thumb tiers.
+    // -----------------------------------------------------------------------
+
+    /// Drain the full-raw-decode queue on the SEPARATE decode pool (§10.3).
+    /// Modeled on `process_embedding_queue`: a per-item loop claiming only
+    /// `FullRawDecode` rows, honoring `opts.cancel` PER ITEM (so an armed mic
+    /// preempts between develops — one develop is seconds, the §10.3
+    /// politeness bound), reporting via `QueueReport`. The decode pool is net-
+    /// new (the M1 wave pool is memory-light; a full develop is not), so the
+    /// claim+develop for each item is `install`ed onto it.
+    pub fn process_raw_decode_queue(
+        &self,
+        opts: &QueueOptions,
+    ) -> Result<QueueReport, LibraryError> {
+        let mut report = QueueReport::default();
+        let allowed = [ingest::PassName::FullRawDecode];
+        loop {
+            if let Some(cancel) = &opts.cancel
+                && cancel.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                report.cancelled = true;
+                break;
+            }
+            if let Some(max) = opts.max_items
+                && report.processed >= max
+            {
+                break;
+            }
+            let item = {
+                let conn = self.db.lock().expect("poisoned");
+                ingest::claim_next_of(&conn, self.now(), &allowed)?
+            };
+            let Some(item) = item else { break };
+            report.processed += 1;
+            // The develop itself runs on the decode pool (one item at a time
+            // from this loop; the pool bounds peak memory across any parallel
+            // drains). DB touches stay on the connection mutex as everywhere.
+            decode_pool().install(|| self.run_full_raw_decode_pass(&item, &mut report))?;
+        }
+        Ok(report)
+    }
+
+    /// Develop ONE RAW to its full-resolution + display artifacts (§9.4).
+    /// Mirrors `run_preview_pass_raw`'s path resolution (best_path +
+    /// offline-defer, no attempt burned) and `run_preview_pass_original`'s
+    /// artifact-write + record shape, with the new develop in the middle.
+    ///
+    /// Best-effort discipline (PLAN): the embedded preview always stands, so
+    /// no surprise must crash the pool thread. The rawler decode + develop is
+    /// wrapped panic-safe (`catch_unwind`) because several rawler 0.7.2
+    /// methods are `todo!()` panics on unexpected formats; a panic marks the
+    /// row failed (non-transient), never unwinds the pool.
+    fn run_full_raw_decode_pass(
+        &self,
+        item: &ingest::QueueItem,
+        report: &mut QueueReport,
+    ) -> Result<(), LibraryError> {
+        let Some(image) = self.image(&item.image_hash)? else {
+            let conn = self.db.lock().expect("poisoned");
+            ingest::mark_failed(&conn, item, "missing-image-row", false, self.now())?;
+            report.errors += 1;
+            return Ok(());
+        };
+        // Resolve a readable ONLINE original; offline = ordinary transient
+        // defer (no attempt burned), exactly like run_pass.
+        let located = {
+            let conn = self.db.lock().expect("poisoned");
+            paths::best_path(&conn, &item.image_hash)?
+        };
+        let abs = located.as_ref().and_then(|bp| {
+            if bp.online {
+                bp.mount_point
+                    .as_deref()
+                    .map(|mp| join_rel(Path::new(mp), &bp.row.rel_path))
+            } else {
+                None
+            }
+        });
+        let Some(abs) = abs else {
+            let conn = self.db.lock().expect("poisoned");
+            ingest::defer_offline(&conn, item, self.now())?;
+            report.transient_retries += 1;
+            return Ok(());
+        };
+
+        // Decode + develop, panic-safe. The closure returns the develop
+        // RESULT; a panic inside rawler (an unimplemented sibling on a
+        // surprise format) is caught and turned into a permanent failure.
+        let exif_orientation = image.exif_orientation;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decode_and_develop(&abs, exif_orientation)
+        }));
+        let developed = match outcome {
+            Ok(Ok(img)) => img,
+            Ok(Err(DecodeDevelopError::Unsupported(reason))) => {
+                // A CFA we do not demosaic (X-Trans/RGBE/CYGM/mono): SKIP
+                // clean — the embedded preview is correct, just not 1:1.
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_skipped(
+                    &conn,
+                    item,
+                    &format!("unsupported-cfa: {reason}"),
+                    self.now(),
+                )?;
+                report.skipped += 1;
+                return Ok(());
+            }
+            Ok(Err(DecodeDevelopError::Io(e))) => {
+                // Transient: a mid-read volume hiccup. Retry with backoff.
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, &format!("io: {e}"), true, self.now())?;
+                report.transient_retries += 1;
+                return Ok(());
+            }
+            Ok(Err(DecodeDevelopError::Permanent(msg))) => {
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, &msg, false, self.now())?;
+                report.errors += 1;
+                return Ok(());
+            }
+            Err(_panic) => {
+                // rawler `todo!()`/panic on a surprising format: permanent,
+                // never crash the pool.
+                tracing::warn!(hash = %item.image_hash, "full-raw-decode panicked; marking failed");
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(&conn, item, "decode-panic", false, self.now())?;
+                report.errors += 1;
+                return Ok(());
+            }
+        };
+
+        use image::GenericImageView;
+        let (full_w, full_h) = developed.dimensions();
+
+        // OD-1: write the NATIVE-resolution artifact (the 100%-zoom surface),
+        // then the 2560 display+thumb tiers (grid/fit) from the same develop.
+        preview::write_full_decode_artifact(&self.cache_dir, &item.image_hash, &developed)
+            .map_err(|e| match e {
+                PreviewError::Io(io) => LibraryError::Io(io),
+                PreviewError::Decode(d) => LibraryError::Watch(format!("full-decode encode: {d}")),
+            })?;
+        let artifacts =
+            preview::write_artifacts(&self.cache_dir, &item.image_hash, &developed, &self.metrics)?;
+
+        // Geometry-safety (§9.4, OD-1): the native artifact's oriented aspect
+        // must agree with the display artifact's, or strokes drawn over the
+        // 2560 substrate would misplace at deep zoom. They come from the SAME
+        // develop so this is belt-and-braces, but the invariant is load-
+        // bearing enough to assert before the artifact can ever be served.
+        if let Some(display) = artifacts.iter().find(|a| a.kind == ArtifactKind::Display) {
+            let native_aspect = f64::from(full_w) / f64::from(full_h.max(1));
+            let disp_aspect = f64::from(display.width) / f64::from(display.height.max(1));
+            if ((native_aspect - disp_aspect) / disp_aspect).abs()
+                >= preview::EMBEDDED_NATIVE_ASPECT_TOLERANCE
+            {
+                // Should be impossible (one develop, one orientation); if it
+                // ever fires, drop the native artifact and fail rather than
+                // serve a geometry-mismatched 1:1.
+                let _ = std::fs::remove_file(preview::full_artifact_path(
+                    &self.cache_dir,
+                    &item.image_hash,
+                    preview::FullDecodeFormat::for_dimensions(full_w, full_h),
+                ));
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_failed(
+                    &conn,
+                    item,
+                    "full-decode geometry disagreement",
+                    false,
+                    self.now(),
+                )?;
+                report.errors += 1;
+                return Ok(());
+            }
+        }
+
+        let conn = self.db.lock().expect("poisoned");
+        // source='full-decode', needs_full_decode cleared: the metadata label
+        // flips from "full decode pending" to just the name (UI resolves it).
+        self.record_artifacts_locked(
+            &conn,
+            &item.image_hash,
+            &artifacts,
+            PreviewSource::FullDecode,
+            false,
+        )?;
+        ingest::mark_done(&conn, item, self.now())?;
+        report.done += 1;
+        report.completed_previews.push(item.image_hash.clone());
         Ok(())
     }
 
@@ -1918,23 +2078,6 @@ impl Library {
             )?;
         }
         Ok(())
-    }
-
-    /// Promotion-rule input (§10.3): live strokes from the events engine's
-    /// derived stats (P1.1's `image_journal_stats`).
-    fn image_has_strokes_locked(
-        &self,
-        conn: &Connection,
-        hash: &ContentHash,
-    ) -> rusqlite::Result<bool> {
-        let n: Option<i64> = conn
-            .query_row(
-                "SELECT has_strokes FROM image_journal_stats WHERE image_hash = ?1",
-                params![hash.as_str()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(n.unwrap_or(0) != 0)
     }
 
     pub fn pass_counters(
@@ -2084,7 +2227,75 @@ impl Library {
                 std::fs::remove_file(&p)?;
             }
         }
+        // Also drop the on-disk full-decode artifact (whichever format), so a
+        // re-develop is not short-circuited by a stale cache hit.
+        if let Some((p, _fmt)) = preview::existing_full_artifact(&self.cache_dir, hash) {
+            let _ = std::fs::remove_file(&p);
+        }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // On-demand full-raw-decode trigger (view-time, §9.4 / OD-1)
+    // -----------------------------------------------------------------------
+
+    /// Whether a cached full-decode artifact already exists for `hash` — the
+    /// view-time trigger's cache-hit signal. The artifact lives on disk only
+    /// (no DB row); its existence IS "developed". A cache hit means
+    /// `request_full_decode` can no-op and Look serves `/full-decode` straight
+    /// away.
+    pub fn full_decode_cached(&self, hash: &ContentHash) -> bool {
+        preview::existing_full_artifact(&self.cache_dir, hash).is_some()
+    }
+
+    /// Enqueue ONE full-raw-decode pass row at the top interactive priority
+    /// (a user is staring at a "developing..." spinner — §10.3). Idempotent:
+    /// a re-request is a no-op once the row exists (`enqueue` keeps the
+    /// existing row); a cached artifact means there is nothing to do. RAW
+    /// originals only — other formats have no develop to run. Returns whether
+    /// a develop is now pending (true) or the cache already had it (false).
+    ///
+    /// This is the SOLE creator of full-raw-decode rows now (the eager ingest
+    /// enqueues were removed): no row exists until the image is viewed.
+    pub fn request_full_decode(&self, hash: &ContentHash) -> Result<bool, LibraryError> {
+        if self.full_decode_cached(hash) {
+            return Ok(false);
+        }
+        let Some(record) = self.image(hash)? else {
+            return Ok(false);
+        };
+        if record.format != ImageFormat::Raw {
+            return Ok(false);
+        }
+        let now = self.now();
+        let conn = self.db.lock().expect("poisoned");
+        // If a prior attempt errored/skipped, re-pend it at the interactive
+        // priority — the user is asking again, explicitly. A `done` row whose
+        // artifact is missing also re-pends (the doctor pattern); a `done` row
+        // WITH the artifact was caught by the cache check above.
+        ingest::enqueue(
+            &conn,
+            hash,
+            PassName::FullRawDecode,
+            PassState::Pending,
+            ingest::PRIORITY_INTERACTIVE,
+            None,
+            now,
+        )?;
+        conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'pending', not_before = NULL, priority = ?2, error = NULL
+             WHERE image_hash = ?1 AND pass_name = 'full-raw-decode'
+               AND state IN ('error','skipped','done')",
+            params![hash.as_str(), ingest::PRIORITY_INTERACTIVE],
+        )?;
+        ingest::promote(
+            &conn,
+            hash,
+            PassName::FullRawDecode,
+            ingest::PRIORITY_INTERACTIVE,
+        )?;
+        Ok(true)
     }
 
     // -----------------------------------------------------------------------
@@ -2598,6 +2809,65 @@ fn worker_pool() -> &'static rayon::ThreadPool {
             .build()
             .expect("ingest worker pool")
     })
+}
+
+/// The full-raw-decode pool (LIBRARY §10.3): a SEPARATE, NARROWER pool than
+/// the M1 ingest `worker_pool()`. A full sensor develop holds the whole
+/// float image in flight (a 60 MP RAW is ~720 MB as f32 RGB mid-pipe), so
+/// memory — not CPU — is the cap; `max(2, cores/2)` keeps a couple of
+/// decodes parallel without letting N parallel develops multiply that
+/// buffer N times and thrash. `available_parallelism` reports LOGICAL cores
+/// (SMT-doubled), so halving it lands near physical-core count on the common
+/// SMT machines, which is the §10.3 intent.
+fn decode_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let width = (logical / 2).max(2);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(width)
+            .thread_name(|i| format!("pp-decode-{i}"))
+            .build()
+            .expect("raw decode pool")
+    })
+}
+
+/// Outcome taxonomy for one full-raw-decode attempt, mapping onto the queue's
+/// retry policy: `Io` is transient (volume hiccup → backoff retry),
+/// `Unsupported` is a clean skip (the embedded preview stands), `Permanent`
+/// is a hard failure (corrupt/undevelopable file → `error` at once).
+enum DecodeDevelopError {
+    Io(std::io::Error),
+    Unsupported(String),
+    Permanent(String),
+}
+
+/// Decode a RAW with rawler and develop it to a display-oriented sRGB image.
+/// A FREE function (not a method) so it is trivially `UnwindSafe` for the
+/// `catch_unwind` the worker wraps it in — rawler 0.7.2 has `todo!()` panic
+/// paths on unexpected formats, and a panic here must mark the row failed,
+/// never unwind the decode pool thread.
+fn decode_and_develop(
+    abs: &Path,
+    exif_orientation: u16,
+) -> Result<image::DynamicImage, DecodeDevelopError> {
+    let source = rawler::rawsource::RawSource::new(abs).map_err(DecodeDevelopError::Io)?;
+    let decoder = rawler::get_decoder(&source)
+        .map_err(|e| DecodeDevelopError::Permanent(format!("rawler: {e}")))?;
+    let params = rawler::decoders::RawDecodeParams::default();
+    // Full decode (dummy = false): the actual sensor mosaic, not metadata.
+    let raw = decoder
+        .raw_image(&source, &params, false)
+        .map_err(|e| DecodeDevelopError::Permanent(format!("raw_image: {e}")))?;
+    match raw_develop::develop_to_display_oriented(raw, exif_orientation) {
+        Ok(img) => Ok(img),
+        Err(raw_develop::DevelopError::UnsupportedCfa(r)) => {
+            Err(DecodeDevelopError::Unsupported(r))
+        }
+        Err(raw_develop::DevelopError::Decode(m)) => Err(DecodeDevelopError::Permanent(m)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

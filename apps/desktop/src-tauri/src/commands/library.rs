@@ -200,6 +200,23 @@ pub async fn rebuild_previews(app: S<'_>, root_id: String) -> CmdResult<usize> {
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// On-demand full RAW develop trigger (OD-1): Look calls this when its
+/// resolution ladder reaches a RAW with no cached full-decode artifact. It
+/// enqueues ONE develop pass at the top interactive priority (above the
+/// watcher) and returns whether a develop is now pending (true) or the cache
+/// already held it (false — Look serves `/full-decode` immediately). Idempotent
+/// and cheap: a cache hit or an existing row is a no-op. Non-RAW hashes return
+/// false. The develop runs on the pump's `drain_raw_decode` tick; the
+/// `/full-decode/<hash>` route 404s ("developing...") until it lands.
+#[tauri::command]
+pub async fn request_full_decode(app: S<'_>, hash: String) -> CmdResult<bool> {
+    let app = app.inner().clone();
+    let hash = super::parse_hash(&hash)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(app.library.request_full_decode(&hash)?))
+        .await
+        .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 /// Core badge row → wire shape — shared with the collection-members grid
 /// read (commands/collections.rs), so both grid listings stay one mapping.
 pub(crate) fn grid_item(i: photoproof_core::library::FolderImage) -> GridItem {

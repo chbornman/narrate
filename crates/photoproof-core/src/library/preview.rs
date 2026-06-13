@@ -114,6 +114,96 @@ pub fn artifact_path(cache_dir: &Path, hash: &ContentHash, kind: ArtifactKind) -
         .join(format!("{h}-{suffix}.webp"))
 }
 
+/// libwebp's hard maximum dimension on either axis (VP8L spec, 14-bit field
+/// → 16383). Full-sensor develops up to ~16k px on the long edge encode as
+/// WebP; anything wider (panorama stitches, future high-MP sensors) falls
+/// back to JPEG. See [`FullDecodeFormat`] and [`encode_full_decode`].
+pub const WEBP_MAX_DIMENSION: u32 = 16383;
+
+/// WebP quality for the full-resolution develop artifact. A touch above the
+/// 2560 display tier (87) because this IS the 100%-zoom surface — the founder
+/// reviews real resolution here, so compression artifacts at 1:1 matter more
+/// than the few extra KB on a cache that never evicts (§9.8 L5).
+pub const FULL_DECODE_WEBP_QUALITY: f32 = 90.0;
+
+/// JPEG quality for the full-resolution fallback (only when a dimension
+/// exceeds [`WEBP_MAX_DIMENSION`]). Matches the embedded-native route's 90 —
+/// the same "high-quality JPEG" tier Lightroom's 1:1 preview cache uses.
+pub const FULL_DECODE_JPEG_QUALITY: u8 = 90;
+
+/// Which container the full-resolution artifact landed in (WebP preferred for
+/// cache consistency; JPEG only when WebP's dimension cap bites). The serve
+/// route needs the content-type, and the file suffix differs, so the choice
+/// is surfaced rather than guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullDecodeFormat {
+    Webp,
+    Jpeg,
+}
+
+impl FullDecodeFormat {
+    /// File suffix WITHOUT the dot (`webp` / `jpg`).
+    pub fn ext(self) -> &'static str {
+        match self {
+            FullDecodeFormat::Webp => "webp",
+            FullDecodeFormat::Jpeg => "jpg",
+        }
+    }
+
+    pub fn content_type(self) -> &'static str {
+        match self {
+            FullDecodeFormat::Webp => "image/webp",
+            FullDecodeFormat::Jpeg => "image/jpeg",
+        }
+    }
+
+    /// Pick the format for an image of these (already display-oriented)
+    /// dimensions: WebP unless an axis exceeds libwebp's cap.
+    pub fn for_dimensions(width: u32, height: u32) -> Self {
+        if width > WEBP_MAX_DIMENSION || height > WEBP_MAX_DIMENSION {
+            FullDecodeFormat::Jpeg
+        } else {
+            FullDecodeFormat::Webp
+        }
+    }
+}
+
+/// `<app_data>/previews/<h[0..2]>/<h[2..4]>/<hash>-full.{webp,jpg}` — the
+/// NATIVE-resolution full-decode artifact (OD-1). Distinct from the
+/// `-disp`/`-thumb` slots: those hard-resize to 2560/512, this holds the
+/// full sensor resolution that Look's 100%-zoom rung serves. It lives ON
+/// DISK ONLY (not in `preview_artifacts`) so its mere existence is the
+/// view-time trigger's cache-hit signal — no schema migration, no second
+/// table to keep coherent with the file.
+pub fn full_artifact_path(
+    cache_dir: &Path,
+    hash: &ContentHash,
+    format: FullDecodeFormat,
+) -> PathBuf {
+    let h = hash.as_str();
+    cache_dir
+        .join("previews")
+        .join(&h[0..2])
+        .join(&h[2..4])
+        .join(format!("{h}-full.{}", format.ext()))
+}
+
+/// Locate an existing full-decode artifact for `hash`, whichever format it
+/// was written in (WebP first — the common case; JPEG only for over-cap
+/// dimensions). Returns the path and its content-type for the serve route.
+pub fn existing_full_artifact(
+    cache_dir: &Path,
+    hash: &ContentHash,
+) -> Option<(PathBuf, FullDecodeFormat)> {
+    for format in [FullDecodeFormat::Webp, FullDecodeFormat::Jpeg] {
+        let p = full_artifact_path(cache_dir, hash, format);
+        if p.exists() {
+            return Some((p, format));
+        }
+    }
+    None
+}
+
 const TMP_PREFIX: &str = ".pp-tmp-";
 
 fn atomic_write(dest: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -276,6 +366,25 @@ pub fn to_srgb(img: DynamicImage, icc: Option<&[u8]>, adobe_rgb_hint: bool) -> D
     DynamicImage::ImageRgba8(rgba)
 }
 
+/// Encode one linear-light [0,1] component to an 8-bit sRGB value using the
+/// IEC 61966-2-1 transfer function (the 12.92 linear toe + 2.4 power curve).
+///
+/// WHY this is a shared `pub(crate)` helper: the raw-develop pipeline
+/// (`raw_develop.rs`, OD-1) and the AdobeRGB→sRGB conversion below both need
+/// the EXACT same encode — a divergent gamma curve between the two would make
+/// a full-decode artifact tonally disagree with its embedded preview, which
+/// the §9.4 "neutral but plausible" contract forbids. Centralizing it keeps
+/// one transfer function for every sRGB artifact the cache holds.
+pub(crate) fn srgb_encode_u8(v: f64) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    let e = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (e * 255.0).round() as u8
+}
+
 /// AdobeRGB (1998, D65, gamma 563/256) → sRGB, via linear-light matrix.
 fn adobe_rgb_to_srgb_in_place(rgba: &mut [u8]) {
     const ADOBE_GAMMA: f64 = 563.0 / 256.0;
@@ -290,21 +399,12 @@ fn adobe_rgb_to_srgb_in_place(rgba: &mut [u8]) {
     for (i, d) in decode.iter_mut().enumerate() {
         *d = (i as f64 / 255.0).powf(ADOBE_GAMMA);
     }
-    let srgb_encode = |v: f64| -> u8 {
-        let v = v.clamp(0.0, 1.0);
-        let e = if v <= 0.003_130_8 {
-            12.92 * v
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        };
-        (e * 255.0).round() as u8
-    };
     for px in rgba.chunks_exact_mut(4) {
         let r = decode[px[0] as usize];
         let g = decode[px[1] as usize];
         let b = decode[px[2] as usize];
         for (i, row) in M.iter().enumerate() {
-            px[i] = srgb_encode(row[0] * r + row[1] * g + row[2] * b);
+            px[i] = srgb_encode_u8(row[0] * r + row[1] * g + row[2] * b);
         }
     }
 }
@@ -384,6 +484,49 @@ pub fn write_artifacts(
         });
     }
     Ok(out)
+}
+
+/// Encode a display-oriented image at its NATIVE resolution for the
+/// full-decode artifact (OD-1). WebP unless a dimension exceeds libwebp's cap
+/// ([`WEBP_MAX_DIMENSION`]), then high-quality JPEG. NO resize — the whole
+/// point of this slot is real 1:1 pixels (the `-disp`/`-thumb` slots already
+/// carry the down-scaled tiers). Returns the encoded bytes and the format so
+/// the caller writes the correct file suffix and the route serves the right
+/// content-type.
+pub fn encode_full_decode(img: &DynamicImage) -> Result<(Vec<u8>, FullDecodeFormat), PreviewError> {
+    let (w, h) = img.dimensions();
+    let format = FullDecodeFormat::for_dimensions(w, h);
+    match format {
+        FullDecodeFormat::Webp => Ok((encode_webp(img, FULL_DECODE_WEBP_QUALITY), format)),
+        FullDecodeFormat::Jpeg => {
+            // Reuse the native-JPEG encoder (drops alpha — a develop output is
+            // always opaque RGB) at the full-decode quality.
+            let rgb = img.to_rgb8();
+            let mut out = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut std::io::Cursor::new(&mut out),
+                FULL_DECODE_JPEG_QUALITY,
+            )
+            .encode_image(&rgb)
+            .map_err(|e| PreviewError::Decode(e.to_string()))?;
+            Ok((out, format))
+        }
+    }
+}
+
+/// Encode and atomically write the native-resolution full-decode artifact,
+/// returning the format written (so the worker records which container the
+/// serve route will find). The `-disp`/`-thumb` tiers are written separately
+/// by [`write_artifacts`]; this is the additional 1:1 slot (OD-1).
+pub fn write_full_decode_artifact(
+    cache_dir: &Path,
+    hash: &ContentHash,
+    display_oriented: &DynamicImage,
+) -> Result<FullDecodeFormat, PreviewError> {
+    let (bytes, format) = encode_full_decode(display_oriented)?;
+    let dest = full_artifact_path(cache_dir, hash, format);
+    atomic_write(&dest, &bytes)?;
+    Ok(format)
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +783,9 @@ pub const EMBEDDED_NATIVE_QUALITY: u8 = 90;
 /// Aspect agreement tolerance between the oriented native image and the
 /// cached display artifact. Resize rounding on a 2560-edge artifact moves
 /// the aspect by well under 1%; a 90° disagreement inverts it entirely.
-const EMBEDDED_NATIVE_ASPECT_TOLERANCE: f64 = 0.02;
+/// `pub(crate)`: the full-decode pass reuses it as the geometry-safety
+/// assertion threshold against the display artifact (OD-1).
+pub(crate) const EMBEDDED_NATIVE_ASPECT_TOLERANCE: f64 = 0.02;
 
 /// The serve decision for the embedded-native route, pure: serve only when
 /// the display-oriented embedded preview actually ADDS pixels over the

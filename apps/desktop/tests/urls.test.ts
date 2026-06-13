@@ -7,7 +7,7 @@
  * pixels for a frame on fast scroll.
  */
 import { describe, expect, it } from "vitest";
-import { srcHash, thumbUrl } from "../src/lib/ipc/urls";
+import { fullDecodeUrl, srcHash, thumbUrl } from "../src/lib/ipc/urls";
 
 const HASH = "ab".repeat(32);
 const OTHER = "cd".repeat(32);
@@ -20,6 +20,12 @@ describe("srcHash — which hash a preview URL names", () => {
   it("strips the retry/ping cache-busting query (Thumb's r= and p= params)", () => {
     expect(srcHash(`${thumbUrl(HASH)}?r=3`)).toBe(HASH);
     expect(srcHash(`${thumbUrl(HASH)}?r=3&p=7`)).toBe(HASH);
+  });
+
+  it("strips the full-decode cache-bust token (LookStage's ?v= retry)", () => {
+    // The /full-decode rung re-fetches past the immutable-cached 404 by
+    // bumping ?v=; srcHash must still resolve the bare hash.
+    expect(srcHash(`${fullDecodeUrl(HASH)}?v=3`)).toBe(HASH);
   });
 
   it("distinguishes the previous occupant's URL from the new hash", () => {
