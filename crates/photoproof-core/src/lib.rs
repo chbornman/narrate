@@ -15,6 +15,8 @@
 //! - `voice_wer`: word-error-rate scoring for the voice stress harness (BACKLOG)
 //! - `retrieval_eval`: pure IR metrics + golden-query-set format for the M3
 //!   retrieval-quality gate (RETRIEVAL §12; the `pp-retrieval-eval` runner)
+//! - `tuning`: centralized, file-overridable tuning config — ONE home for the
+//!   scattered ranking/preview weights (DESIGN-TUNING-CONFIG.md, docs/tuning.html)
 
 pub mod canonical;
 pub mod capture;
@@ -29,6 +31,7 @@ pub mod runtime;
 pub mod search;
 pub mod sidecar;
 pub mod store;
+pub mod tuning;
 pub mod voice_wer;
 
 pub use canonical::{CanonicalParseError, canonical_json, parse_canonical};

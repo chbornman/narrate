@@ -151,6 +151,11 @@ impl Drop for ScanGuard<'_> {
 impl App {
     pub fn init(app_data: PathBuf) -> Result<Self, CmdError> {
         std::fs::create_dir_all(&app_data)?;
+        // Install the centralized tuning config BEFORE any search or preview
+        // work: reads `<app-data>/tuning.toml` if present (else ship-defaults),
+        // range-validating every field so a hand edit can never inject a silent
+        // bad number. One process-global init; hybrid.rs and preview.rs read it.
+        photoproof_core::tuning::init_from(&app_data);
         let db_path = app_data.join("photoproof.db");
         let cache_dir = app_data.join("previews");
 

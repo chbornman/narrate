@@ -40,11 +40,14 @@ pub use paths::{Availability, BestPath, PathRow, StaleReason};
 pub use placeholder::{
     PlaceholderDetector, PlatformPlaceholderDetector, SharedSetPlaceholderDetector,
 };
+// DISPLAY_EDGE / EMBEDDED_ACCEPT_EDGE no longer live here: they moved to the
+// centralized tuning config (`crate::tuning`, file-overridable). Their consume
+// sites read `tuning().preview.*` directly.
 pub use preview::{
-    ArtifactKind, DISPLAY_EDGE, EMBEDDED_ACCEPT_EDGE, EmbeddedOrientationReason,
-    EmbeddedPreviewExtractor, ExtractedPreview, FullDecodeFormat, GENERATOR_VERSION, PreviewError,
-    PreviewSource, RawlerExtractor, THUMB_EDGE, apply_exif_orientation, artifact_path,
-    embedded_orientation_decision, existing_full_artifact, full_artifact_path, oriented_dims,
+    ArtifactKind, EmbeddedOrientationReason, EmbeddedPreviewExtractor, ExtractedPreview,
+    FullDecodeFormat, GENERATOR_VERSION, PreviewError, PreviewSource, RawlerExtractor, THUMB_EDGE,
+    apply_exif_orientation, artifact_path, embedded_orientation_decision, existing_full_artifact,
+    full_artifact_path, oriented_dims,
 };
 pub use raw_develop::DevelopError;
 pub use scan::{ClockShiftReport, ScanOptions, ScanReport};
@@ -1789,7 +1792,10 @@ impl Library {
                 }
                 use image::GenericImageView;
                 let (pw, ph) = oriented.dimensions();
-                let meets_threshold = pw.max(ph) >= EMBEDDED_ACCEPT_EDGE;
+                // Embedded-preview accept threshold from the centralized tuning
+                // config (code default 2048; file-overridable via tuning.toml).
+                let accept_edge = crate::tuning::tuning().preview.embedded_accept_edge;
+                let meets_threshold = pw.max(ph) >= accept_edge;
                 let artifacts = preview::write_artifacts(
                     &self.cache_dir,
                     &item.image_hash,

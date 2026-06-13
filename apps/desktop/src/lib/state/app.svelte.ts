@@ -60,6 +60,7 @@ import type {
   StrokePayloadWire,
 } from "../types/dto";
 import type { Filter } from "../types/search";
+import { MIN_QUERY_CHARS } from "../tuning";
 import { copyKey, copyToClipboard } from "../primitives/copyflash.svelte";
 import * as prefs from "./prefs";
 import { ShellSlice } from "./shell.svelte";
@@ -74,13 +75,9 @@ import { InspectorSlice } from "./inspector.svelte";
  * shared export keeps the two paths from drifting apart silently. */
 export const INGEST_RELIST_MS = 2_000;
 
-/** Minimum free-text query length before a search runs: a single
- * character matches nearly everything and burns the <100 ms budget
- * (UI §5.1) on a result set nobody asked for. Shorter queries with no
- * chips clear the results instead. Module-local on purpose: nothing
- * outside this file consumes it, and exporting would invite UI copy to
- * couple to search-gating policy without review. */
-const MIN_QUERY_CHARS = 2;
+// MIN_QUERY_CHARS (the minimum free-text query length before a search runs)
+// now lives in the centralized UI tuning module (lib/tuning.ts) — imported
+// above. The gating policy it encodes is unchanged.
 
 /**
  * What the grid is currently showing (M3 search-as-scope, Phase 1). The old

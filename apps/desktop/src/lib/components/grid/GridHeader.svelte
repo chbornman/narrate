@@ -24,6 +24,9 @@
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
+  // Search-bar keystroke debounce now lives in the centralized UI tuning
+  // module (lib/tuning.ts), the frontend half of the tuning registry.
+  import { SEARCH_DEBOUNCE_MS } from "../../tuning";
   import { THUMB_STEPS } from "../../logic/sort";
   import { laneStatus } from "../../logic/searchmode";
   import { tooltip } from "../../primitives/tooltip";
@@ -33,10 +36,6 @@
   // The ⚙ "Ranking signals" popover anchor (Phase 3). The popover itself reads
   // ui.rankingPopoverOpen; this only holds the element it floats from.
   let signalBtn: HTMLButtonElement | undefined = $state();
-
-  // Keystroke debounce. UI §5.1 allows a debounce of at most 50 ms inside
-  // the <100 ms results budget — this value sits AT that spec ceiling.
-  const SEARCH_DEBOUNCE_MS = 50;
 
   let sortBtn: HTMLButtonElement | undefined = $state();
   let inputEl: HTMLInputElement | undefined = $state();
