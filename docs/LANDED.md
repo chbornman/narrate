@@ -140,6 +140,26 @@ their original wording.
   June 13 2026 — blocked-item advance: instrument built, query set is the
   founder's to supply.)
 
+- [x] **Foreign-edit sidecar reader (portable subset)** — landed `15d88fb`
+  (merge) + `0396581` (gate fix): a READ-ONLY backend reader for Lightroom /
+  darktable XMP sidecars extracting only the PORTABLE subset — rating (0..5,
+  -1 reject), label/color, orientation, and (Lightroom-only) the normalized
+  crop rect + angle. darktable crop lives in opaque base64 IOP params and is
+  NOT decoded; a `<darktable:history>` block sets `has_unreadable_edits` so the
+  UI can later flag "edited in darktable, we can't reproduce it." `quick-xml`
+  (default-features off, pulls only memchr) parses both compact-attribute and
+  expanded-element RDF; malformed input returns None, never panics; our own
+  `.photoproof.json` sidecar is never mistaken for a foreign one. Public API
+  `library::read_foreign_edit(path)` / `read_foreign_edit_from_str(xmp)`, 14
+  unit tests. HONEST SCOPE: faithful edit RENDER is out (= reimplementing the
+  editors); this is the advisory portable seam. FOLLOW-ON (out of scope here):
+  surface rating/label/orientation + draw the LR crop overlay on our neutral
+  develop + a "has edits we don't reproduce" badge, behind a Tauri command.
+  NOTE: this one's gate could not run at merge time (the build disk filled
+  mid-night); the coordinator fixed two real bugs (darktable history detection;
+  a clippy collapsible_if + a dead helper) and re-gated green before pushing.
+  (Coordinator, June 13 2026 — design-round item, backend foundation built.)
+
 ## June 12 2026 — the evening waves (two parallel-agent builds + inline fixes)
 
 - [x] **B summons the overlay** — landed `c13f09b`: the key was dead
