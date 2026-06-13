@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "check:emdash": "../../scripts/check-no-emdash.sh",
     "test": "vitest run",
     "tauri": "tauri"
   },
