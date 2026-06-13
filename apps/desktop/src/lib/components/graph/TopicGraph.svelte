@@ -38,6 +38,7 @@
     type OverlayMode,
     type TopicAttention,
   } from "../../logic/synthesis";
+  import { GraphThumbCache, nodeBaseSizePx } from "../../logic/graphthumbs";
 
   // -- topic + scope state ----------------------------------------------------
   let topics = $state<string[]>([]);
@@ -111,6 +112,45 @@
   let panX = 0;
   let panY = 0;
 
+  // -- thumbnail cache --------------------------------------------------------
+  // Each image node draws as its TINY preview thumbnail instead of a plain dot
+  // (founder: "the node graph should show tiny previews as the markers"). The
+  // cache owns the lazy-load + bounded-concurrency (logic/graphthumbs.ts): the
+  // draw loop requests the thumbs nearest the viewport first and draws the cached
+  // image when ready; until then the node's placeholder DOT stands in (no layout
+  // jump). A completed load notifies us to repaint OFF the render path (it does
+  // not run mid-frame), so cache hits keep per-frame drawImage cheap. A LOD
+  // super-node loads ONE representative member's thumb (not all members), so the
+  // load budget stays bounded at scale.
+  let thumbReadyTick = $state(0);
+  const thumbs = new GraphThumbCache(() => {
+    // A thumb finished loading: bump a tick so a settled (non-ticking) sim still
+    // repaints to swap the placeholder for the image, and request a frame.
+    thumbReadyTick++;
+    requestAnimationFrame(() => draw());
+  });
+
+  /** The hash whose thumbnail REPRESENTS a node on the canvas: a single image is
+   * itself; a LOD super-node shows its highest-affinity member (its strongest
+   * exemplar — the most on-topic image of the cluster), falling back to the first
+   * member, so a cluster still reads as a real photo, not an abstract blob. */
+  function repHash(n: ImageNode): string {
+    if (n.members === undefined || n.members.length === 0) return n.hash;
+    let best = n.members[0];
+    let bestAff = -Infinity;
+    for (const h of n.members) {
+      const row = affinity.get(h);
+      // Peak per-image affinity = how strongly this image holds to its dominant
+      // topic; the strongest exemplar best represents the cluster.
+      const peak = row ? Math.max(...row) : 0;
+      if (peak > bestAff) {
+        bestAff = peak;
+        best = h;
+      }
+    }
+    return best;
+  }
+
   // The LOD threshold comes from GraphTuning (graph.lod_threshold, default
   // 1500). Past it the lens AGGREGATES images into super-nodes so the live sim +
   // O(N^2) repulsion stay within the budget the v1 scale spike measured, instead
@@ -175,6 +215,12 @@
       scaleNote = null;
     }
     nodeCount = nodes.length;
+
+    // A fresh node set (scope/topic/alpha change): drop stale PENDING thumb
+    // requests so the new layout's nearest nodes load first. Already-loaded
+    // thumbs stay cached (content-addressed by hash), so a return to a prior
+    // scope is instant.
+    thumbs.clearPending();
 
     loading = false;
     // The overlay reads per-image intensity; a fresh affinity set means a fresh
@@ -351,69 +397,199 @@
     };
   }
 
+  /** Trace a rounded-rectangle path (the thumbnail clip + ring shape). Kept here
+   * (not Path2D round-rect) so it works across the webview without a polyfill. */
+  function roundedRectPath(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number,
+  ) {
+    const rad = Math.min(r, w / 2, h / 2);
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad);
+    ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);
+    ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+  }
+
+  /** Two offset rounded squares BEHIND a super-node's thumbnail, so a cluster
+   * reads as a pile of images (a subtle stacked-card look). */
+  function drawCardBack(
+    ctx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    half: number,
+    fill: string,
+    stroke: string,
+  ) {
+    for (const off of [6, 3]) {
+      ctx.beginPath();
+      roundedRectPath(
+        ctx,
+        sx - half + off,
+        sy - half - off,
+        half * 2,
+        half * 2,
+        Math.min(8, half),
+      );
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  /** A small member-count pill at a super-node's top-right corner. */
+  function drawCountBadge(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    count: number,
+    c: CanvasColors,
+  ) {
+    ctx.save();
+    const label = count.toLocaleString();
+    const padX = 4;
+    ctx.font = "10px system-ui, sans-serif";
+    const w = ctx.measureText(label).width + padX * 2;
+    const h = 14;
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    roundedRectPath(ctx, x - w, y, w, h, 7);
+    ctx.fillStyle = c.anchorFill;
+    ctx.fill();
+    ctx.strokeStyle = c.stroke;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = c.text;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, x - w / 2, y + h / 2);
+    ctx.restore();
+  }
+
   function draw() {
+    // A finished thumb load bumps thumbReadyTick; reference it so a settled sim's
+    // reactive redraw path observes new thumbnails (read is intentional).
+    void thumbReadyTick;
     const ctx = canvasEl?.getContext("2d");
     if (!ctx) return;
     const c = canvasColors();
     const mode = overlay();
     const overlayOn = mode !== "off";
     ctx.clearRect(0, 0, width, height);
-    // image nodes. A LOD super-node (members present) draws as a larger disc
-    // sized by member count, labeled with that count, so the aggregation is
-    // legible (DESIGN: "a super-node's size reflects its member count"). With the
-    // Attention overlay ON each node also tints/sizes by its synthesis mapping:
-    // Engaged glows where attention lives; Overlooked glows coherent-but-cold.
+    // image nodes. Each draws as its TINY preview thumbnail (founder: "tiny
+    // previews as the markers"); until the thumb loads, the old colored DOT is
+    // the placeholder (no layout jump on swap). A LOD super-node draws its
+    // representative member's thumb with a stacked-card backing + a member-count
+    // badge, so a cluster still reads as images sized by how many it stands for.
+    // The Attention overlay COMPOSITES onto the thumbnail: a hotter node is a
+    // bigger thumb with a stronger colored halo/ring; Engaged glows where
+    // attention lives, Overlooked glows coherent-but-cold, the rest recedes.
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = "12px system-ui, sans-serif";
+    ctx.font = "11px system-ui, sans-serif";
+    // The viewport center in sim-space, so thumb loads are requested
+    // NEAREST-FIRST (the visible region fills before off-screen nodes).
+    const [cx, cy] = fromScreen(width / 2, height / 2);
     for (const n of nodes) {
       const [sx, sy] = toScreen(n.x, n.y);
       const isSuper = n.members !== undefined;
-      const baseRadius = isSuper
-        ? Math.min(22, 5 + Math.sqrt(n.members!.length) * 1.5)
-        : n.fixed === true
-          ? 5
-          : 3.2;
+      // Base drawn SIDE (px) from the pure mapping; the overlay scales it, and
+      // its half is the hit radius — one source of truth for draw + pick.
+      const baseSide = nodeBaseSizePx({
+        isSuper,
+        memberCount: isSuper ? n.members!.length : 0,
+        isDragged: n.fixed === true,
+      });
       // The per-node overlay mapping (glow + size). Off mode is a no-op
-      // (glow 0, sizeScale 1) so the plain graph is unchanged.
+      // (glow 0, sizeScale 1) so the plain graph sizing is unchanged.
       const ov = overlayOn
         ? nodeOverlay(n, intensity, mode, overlookedByTopic)
         : { glow: 0, sizeScale: 1, intensity: 0 };
-      const radius = baseRadius * ov.sizeScale;
+      const side = baseSide * ov.sizeScale;
+      const half = side / 2;
 
-      // A glowing node gets a soft halo + the saturated accent fill, scaled by
-      // its glow weight; a dimmed node fades toward the faint node fill.
+      // Request this node's representative thumbnail, prioritized by squared
+      // distance to the viewport center (nearest loads first). A super-node only
+      // requests ITS ONE rep, never all members, so the budget stays bounded.
+      const rh = repHash(n);
+      const dx = n.x - cx;
+      const dy = n.y - cy;
+      thumbs.request(rh, dx * dx + dy * dy);
+      const img = thumbs.get(rh);
+
+      // Overlay alpha: a glowing node is bright, an out-of-focus node recedes,
+      // the plain (no-overlay) node is fully opaque.
+      const bodyAlpha =
+        overlayOn && ov.glow > 0 ? 0.6 + 0.4 * ov.glow : overlayOn ? 0.45 : 1;
+
+      ctx.save();
+      // The Engaged/Overlooked GLOW becomes a soft colored HALO behind the
+      // thumbnail, scaled by glow weight (a hotter node halos stronger).
       if (overlayOn && ov.glow > 0) {
-        ctx.save();
         ctx.shadowColor = c.glow;
-        ctx.shadowBlur = 4 + 12 * ov.glow;
-        ctx.globalAlpha = 0.5 + 0.5 * ov.glow;
-      } else if (overlayOn) {
-        ctx.save();
-        // Recede the out-of-focus nodes so the highlighted bodies of work stand
-        // out (the "rest dims" half of the overlay).
-        ctx.globalAlpha = 0.35;
+        ctx.shadowBlur = 6 + 16 * ov.glow;
+      }
+      ctx.globalAlpha = bodyAlpha;
+
+      // A LOD super-node gets a subtle STACKED-CARD backing (two offset
+      // rounded squares) so it reads as a pile of images, not a single one.
+      if (isSuper) {
+        drawCardBack(ctx, sx, sy, half, c.superFill, c.stroke);
       }
 
+      // The thumbnail, clipped to a rounded square centered on the node. Until
+      // it loads, the placeholder DOT (the old marker) fills the same box.
       ctx.beginPath();
-      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
-      ctx.fillStyle =
+      roundedRectPath(ctx, sx - half, sy - half, side, side, Math.min(8, half));
+      if (img !== null) {
+        ctx.save();
+        ctx.clip();
+        // Cover-fit: scale the (square-ish) thumb to fill the box, center-cropped.
+        ctx.drawImage(img, sx - half, sy - half, side, side);
+        ctx.restore();
+      } else {
+        // Placeholder: the prior dot, tinted by overlay/super/drag state.
+        ctx.fillStyle =
+          overlayOn && ov.glow > 0
+            ? c.glow
+            : isSuper
+              ? c.superFill
+              : n.fixed === true
+                ? c.dragFill
+                : c.nodeFill;
+        ctx.fill();
+      }
+
+      // The affinity/selection BORDER RING on the thumbnail. In an overlay mode
+      // a glowing node rings in the accent (agreeing with the halo); otherwise a
+      // super-node / dragged node rings to read as distinct, a plain node gets a
+      // hairline so the thumbnail has a crisp edge in both themes.
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = Math.min(1, bodyAlpha + 0.2);
+      ctx.beginPath();
+      roundedRectPath(ctx, sx - half, sy - half, side, side, Math.min(8, half));
+      ctx.strokeStyle =
         overlayOn && ov.glow > 0
           ? c.glow
-          : isSuper
-            ? c.superFill
-            : n.fixed === true
-              ? c.dragFill
-              : c.nodeFill;
-      ctx.fill();
+          : isSuper || n.fixed === true
+            ? c.stroke
+            : c.nodeFill;
+      ctx.lineWidth = isSuper || (overlayOn && ov.glow > 0) ? 2 : 1;
+      ctx.stroke();
+      ctx.restore();
+
+      // The member-count badge on a super-node, so the aggregation stays legible
+      // even as a thumbnail (DESIGN: "a super-node's size reflects its count").
       if (isSuper) {
-        ctx.strokeStyle = c.stroke;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.fillStyle = c.text;
-        ctx.fillText(String(n.members!.length), sx, sy);
+        drawCountBadge(ctx, sx + half - 2, sy - half + 2, n.members!.length, c);
       }
-      if (overlayOn) ctx.restore();
     }
     // topic anchors (drawn on top, with labels). In an overlay mode an anchor
     // glows by its ranked attention score, so the readout and the ring agree.
@@ -454,20 +630,37 @@
 
   // -- pointer interaction ----------------------------------------------------
   let dragging: ImageNode | null = null;
-  const HIT_R = 10; // screen-space pick radius
+
+  /** A node's drawn half-side in SCREEN px (its hit radius): the same base-size
+   * mapping the draw loop uses, times the overlay size scale, times zoom — so
+   * the pickable area matches exactly what is drawn, thumbnail and all. */
+  function nodeHitHalf(n: ImageNode): number {
+    const isSuper = n.members !== undefined;
+    const base = nodeBaseSizePx({
+      isSuper,
+      memberCount: isSuper ? n.members!.length : 0,
+      isDragged: n.fixed === true,
+    });
+    const ov =
+      overlay() !== "off"
+        ? nodeOverlay(n, intensity, overlay(), overlookedByTopic)
+        : { sizeScale: 1 };
+    // Drawn side is in screen px already (the box is not scaled by zoom in the
+    // draw loop); use half-side as the square's pick radius.
+    return (base * ov.sizeScale) / 2;
+  }
 
   function pickNode(sx: number, sy: number): ImageNode | null {
-    let best: ImageNode | null = null;
-    let bestD = HIT_R * HIT_R;
-    for (const n of nodes) {
+    // Topmost-drawn wins on overlap: iterate in reverse draw order and take the
+    // first node whose drawn box contains the point (square hit-test matching the
+    // rounded-square thumbnail).
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
       const [px, py] = toScreen(n.x, n.y);
-      const d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
-      if (d < bestD) {
-        bestD = d;
-        best = n;
-      }
+      const half = nodeHitHalf(n);
+      if (Math.abs(px - sx) <= half && Math.abs(py - sy) <= half) return n;
     }
-    return best;
+    return null;
   }
   function pickAnchor(sx: number, sy: number): TopicAnchor | null {
     for (const a of anchors) {
@@ -583,7 +776,12 @@
       await loadSuggestions();
       await recompute();
     })();
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      // Detach in-flight thumb loads so a completing load can't repaint a dead
+      // canvas after teardown.
+      thumbs.dispose();
+    };
   });
 
   // Re-blend live when the alpha slider moves (DESIGN: "re-blend affinities
