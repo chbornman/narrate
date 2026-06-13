@@ -48,6 +48,10 @@ type SeatEntry =
 const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
   thumb: [
     "open-look",
+    // "More like this" (B69): a primary review verb — pivot from one image to
+    // its visual neighbors in place. Seated near open-look, the other "go look
+    // at images" verb, not down with the OS/file utilities.
+    "find-similar",
     "rate",
     // Collections sit beside Rate: both are gather-while-reviewing verbs
     // (B71: the app should encourage collecting). Remove rides directly
@@ -118,6 +122,9 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "toggle-filmstrip",
     "toggle-histogram",
     "flip-stack-member",
+    // "More like this" (B69): pivot from the reviewed image to its visual
+    // neighbors — leaves Look and re-scopes the grid to the result set.
+    "find-similar",
     "—",
     "set-surround",
     "—",

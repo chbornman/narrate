@@ -31,6 +31,7 @@
 //! discards any compaction the crash interrupted, so remapped pointers are
 //! never paired with the pre-compaction file.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -486,6 +487,164 @@ impl PpvecStore {
                 .map_err(db_err)?;
         }
         Ok(stale.len())
+    }
+
+    /// Read back the stored vector for one key, dequantized to f32, or
+    /// `None` when no live row exists. WHY this exists: the bare trait
+    /// `search()` takes a query Embedding but the store has no "give me the
+    /// vector I already have" accessor, and "more like this" needs exactly
+    /// that — the query image's OWN stored CLIP vector to search from. The
+    /// returned vector is the int8 round-trip of the original (the only form
+    /// on disk; §1.3 keeps nothing f32), which is precisely what `search()`
+    /// re-quantizes anyway, so the self-as-query path carries no extra loss.
+    /// Mirrors `search()`'s critical-section discipline (connection lock
+    /// then file lock) so a compaction remap can't pair a stale `file_row`
+    /// with rewritten bytes.
+    pub fn fetch(&self, key: &VecKey) -> VectorStoreResult<Option<Embedding>> {
+        let conn = self.db.lock().expect("poisoned");
+        let _io = file_io_lock();
+        let (sql, p1, p2) = unit_filter(&key.unit);
+        let file_row: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT file_row FROM vectors
+                     WHERE vec_kind = ?1 AND model_id = ?2 AND {sql} AND deleted = 0"
+                ),
+                params![vec_kind_str(key.space.vec_kind), key.space.model_id, p1, p2],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some(file_row) = file_row else {
+            return Ok(None);
+        };
+        let path = self.file_path(&key.space);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut f = File::open(&path)?;
+        let header = read_header(&mut f)?;
+        let dims = header.dims as usize;
+        let mmap = unsafe { memmap2::Mmap::map(&f)? };
+        let data = &mmap[header.data_offset() as usize..];
+        let start = file_row as usize * dims;
+        let Some(row) = data.get(start..start + dims) else {
+            return Err(VectorStoreError::Corrupt(format!(
+                "{}: file_row {file_row} beyond file end",
+                path.display()
+            )));
+        };
+        let vector: Vec<f32> = row
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| dequantize(b as i8, i, &header))
+            .collect();
+        Ok(Some(Embedding {
+            vector,
+            model_id: key.space.model_id.clone(),
+        }))
+    }
+
+    /// The `image_clip` model id under which `image_hash` has a live stored
+    /// vector, or `None` when it has none. WHY query the table rather than
+    /// take the active embedder's model id: "more like this" reads vectors
+    /// that ALREADY exist on disk, so it must work even when the CLIP model
+    /// is not loaded into memory on this machine (the embedder is a write-
+    /// side concern; retrieval over stored vectors is not). One image carries
+    /// at most one live `image_clip` row (the §1.2 `vectors_image` unique
+    /// index), so a single row is the answer.
+    pub fn image_clip_model_id(&self, image_hash: &str) -> VectorStoreResult<Option<String>> {
+        let conn = self.db.lock().expect("poisoned");
+        conn.query_row(
+            "SELECT model_id FROM vectors
+             WHERE vec_kind = ?1 AND image_hash = ?2 AND deleted = 0
+             LIMIT 1",
+            params![vec_kind_str(VecKind::ImageClip), image_hash],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)
+    }
+
+    /// "More like this": the nearest OTHER images to `image_hash` by cosine
+    /// similarity over the `image_clip` space, in descending-similarity order
+    /// with the query image itself excluded. Returns `(image_hash, score)`
+    /// pairs, at most `limit` of them.
+    ///
+    /// Reuses the existing brute-force `search()` the S4 hybrid path uses —
+    /// no second kNN implementation. The query is the image's OWN stored
+    /// vector (via `fetch`), so the top hit is always self at cosine ~1.0;
+    /// we over-fetch by one and drop the self row to keep `limit` neighbors.
+    /// Graceful on an un-embedded machine: an image with no stored vector,
+    /// or an empty space, yields an empty list rather than an error — the
+    /// mechanism is correct even before any embedding pass has run.
+    pub fn similar_images(
+        &self,
+        image_hash: &str,
+        limit: usize,
+    ) -> VectorStoreResult<Vec<(String, f32)>> {
+        // No stored vector for this image (not yet embedded, or scrubbed):
+        // an honest empty result, not a failure.
+        let Some(model_id) = self.image_clip_model_id(image_hash)? else {
+            return Ok(Vec::new());
+        };
+        let space = VecSpace {
+            vec_kind: VecKind::ImageClip,
+            model_id: model_id.clone(),
+        };
+        let key = VecKey {
+            space: space.clone(),
+            unit: VecUnit::Image {
+                image_hash: image_hash.to_owned(),
+            },
+        };
+        let Some(query) = self.fetch(&key)? else {
+            return Ok(Vec::new());
+        };
+        // Over-fetch by one: the query image ranks first against itself, so
+        // we drop it below and still return up to `limit` true neighbors.
+        let hits = self.search(&query, space, limit.saturating_add(1))?;
+        if hits.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Resolve hit rowids → image hashes in one statement, then walk the
+        // hits in similarity order (the map is unordered; `search` already
+        // sorted) excluding self. WHY exclude by hash, not by rowid: robust
+        // even if a future re-embed changes the self row's id between fetch
+        // and search.
+        let conn = self.db.lock().expect("poisoned");
+        let marks = vec!["?"; hits.len()].join(",");
+        let mut by_id: HashMap<i64, String> = HashMap::new();
+        {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT id, image_hash FROM vectors WHERE id IN ({marks})"
+                ))
+                .map_err(db_err)?;
+            let params: Vec<i64> = hits.iter().map(|h| h.vector_id).collect();
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(params))
+                .map_err(db_err)?;
+            while let Some(row) = rows.next().map_err(db_err)? {
+                let id: i64 = row.get(0).map_err(db_err)?;
+                let hash: Option<String> = row.get(1).map_err(db_err)?;
+                if let Some(hash) = hash {
+                    by_id.insert(id, hash);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(limit.min(hits.len()));
+        for hit in &hits {
+            if out.len() >= limit {
+                break;
+            }
+            if let Some(hash) = by_id.get(&hit.vector_id)
+                && hash != image_hash
+            {
+                out.push((hash.clone(), hit.score));
+            }
+        }
+        Ok(out)
     }
 }
 

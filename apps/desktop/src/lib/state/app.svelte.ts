@@ -96,7 +96,15 @@ const MIN_QUERY_CHARS = 2;
 export type GridScope =
   | { kind: "folder"; rootId: string; folder: string }
   | { kind: "collection"; id: string }
-  | { kind: "query"; query: string; chips: Filter[]; within: GridScope };
+  | { kind: "query"; query: string; chips: Filter[]; within: GridScope }
+  // "More like this" (B69 retrieval-stays-additive): the grid shows the
+  // visual neighbors of one image. A fourth scope variant rendered EXACTLY
+  // like a query — ordinary cells in similarity (relevance) order — so it
+  // reuses the query scope's whole feeder/residue/clear machinery. `hash` is
+  // the query image; `filename` is captured at dispatch so the residue can
+  // say "similar to <name>" without a later lookup; `within` records the
+  // source one-key clear returns to (the query scope's `within` precedent).
+  | { kind: "similar"; hash: string; filename: string; within: GridScope };
 
 export class Ui {
   // -- slices (contracts frozen by FOUNDATIONS) -------------------------------
@@ -127,12 +135,15 @@ export class Ui {
 
   /** Back-compat read of the old collection-mode flag: the rail's
    * current-selection highlight and the empty-collection copy still ask "is
-   * a collection open?". A query scoped OVER a collection counts as that
-   * collection being open (the residue still points there). null otherwise. */
+   * a collection open?". A query or similar scope OVER a collection counts as
+   * that collection being open (the residue still points there). A derived
+   * scope's `within` is always a folder/collection (never another derived
+   * scope), so one level of unwrap suffices. null otherwise. */
   collectionId = $derived<string | null>(
     this.gridScope.kind === "collection"
       ? this.gridScope.id
-      : this.gridScope.kind === "query" && this.gridScope.within.kind === "collection"
+      : (this.gridScope.kind === "query" || this.gridScope.kind === "similar") &&
+          this.gridScope.within.kind === "collection"
         ? this.gridScope.within.id
         : null,
   );
@@ -288,6 +299,17 @@ export class Ui {
       return this.grid.folder.split("/").pop() ?? this.grid.folder;
     const root = this.roots.find((r) => r.rootId === this.grid.rootId);
     return root?.displayName ?? "Photoproof";
+  }
+
+  /** Display filename for a hash, read from the currently-loaded grid items
+   * (the image is on screen when "find similar" fires, in the grid OR as a
+   * collapsed pair member). Used to label the similarity residue at dispatch
+   * time so the residue needs no async lookup. Falls back to a generic
+   * "image" when the hash is not among the loaded items (defensive — the
+   * residue stays readable). */
+  filenameFor(hash: string): string {
+    const item = this.grid.rawItems.find((i) => i.hash === hash);
+    return item?.fileName ?? "image";
   }
 
   // ---------------------------------------------------------------------------
@@ -526,6 +548,13 @@ export class Ui {
       await this.runQueryScope("lexical", false);
       return;
     }
+    if (scope.kind === "similar") {
+      // A live re-list under a similarity view re-runs the SAME neighbor
+      // search so newly-embedded images can enter the set. The source folder
+      // and filename are unchanged — re-feed against the same query image.
+      await this.runSimilarScope(scope.hash, scope.filename);
+      return;
+    }
     if (this.grid.rootId === null) return;
     const load = ++this.gridLoad;
     const items = await ipc.listFolder(this.grid.rootId, this.grid.folder);
@@ -604,14 +633,15 @@ export class Ui {
     await this.reportScope();
   }
 
-  /** G — universal "go home" (featureset §0). Clears any query scope too:
-   * home is the underlying folder/collection, not a search result set. */
+  /** G — universal "go home" (featureset §0). Clears any DERIVED scope too
+   * (query OR similar): home is the underlying folder/collection, not a
+   * search result set or a similarity view. */
   async goHome() {
     if (this.surface === "look") {
       await this.leaveLook();
       return;
     }
-    if (this.gridScope.kind === "query") {
+    if (this.gridScope.kind === "query" || this.gridScope.kind === "similar") {
       await this.clearQueryScope();
       return;
     }
@@ -641,12 +671,21 @@ export class Ui {
     this.searchLane = nextLane(this.searchLane, "clear");
   }
 
-  /** The source a NEW query scopes over: when the grid already shows a
-   * query, re-typing keeps the SAME underlying source (`within`) — a query
-   * is never scoped over another query. Otherwise the current folder/
-   * collection scope is the source. */
+  /** The underlying folder/collection source the current scope rests on —
+   * the thing one-key clear returns to. A query or a similar scope is never
+   * the source for a new derived scope (you return PAST it, not to it), so
+   * both unwrap to their own `within`; a plain folder/collection IS the
+   * source. Shared by `runQueryScope` and `runSimilarScope`. */
+  private scopeSource(): GridScope {
+    return this.gridScope.kind === "query" || this.gridScope.kind === "similar"
+      ? this.gridScope.within
+      : this.gridScope;
+  }
+
+  /** Back-compat alias kept for the query feeder's call site (same rule as
+   * `scopeSource`, named for the query path it has always served). */
   private queryWithin(): GridScope {
-    return this.gridScope.kind === "query" ? this.gridScope.within : this.gridScope;
+    return this.scopeSource();
   }
 
   /**
@@ -741,17 +780,59 @@ export class Ui {
     await this.reportScope();
   }
 
-  /** Re-point the grid from a query scope back to its underlying source and
-   * re-list, WITHOUT clearing the bar input or leaving Look.
+  /**
+   * "More like this": re-scope the grid to the visual neighbors of `hash`.
+   * The fifth `setItems` feeder, deliberately the same two-step shape as
+   * `runQueryScope` — `find_similar` returns neighbor hashes in similarity
+   * order, then `list_images` enriches them into the same GridItems folders
+   * and queries render. Guarded by the SAME monotone `gridLoad` token so a
+   * slow neighbor search can't overwrite a newer scope.
    *
-   * Surface-safe: a query can be committed and then a result opened in Look,
-   * so this swaps the grid scope UNDERNEATH Look (Look has its own Esc layer
-   * below). It re-points gridScope at the source, restores its sort, and
-   * re-lists via refreshItems (the scope-aware feeder) — never through
-   * openFolder/openCollection, which would leaveLook and peel two Esc layers
-   * at once. No-op when not in a query scope. */
+   * `within` is the source one-key clear returns to: when invoked from a
+   * query or another similar scope, we keep THAT scope's underlying source
+   * (a similarity view is never the thing you "return to" — you return past
+   * it), mirroring `queryWithin`. Relevance is the backend's similarity
+   * order, pass-through (the grid's relevance sort preserves it). An
+   * un-embedded image or empty index yields an empty grid, never an error —
+   * the command resolves to [] in that case.
+   *
+   * Surface-safe like returnToSource: a neighbor search can be triggered
+   * from Look (the look-backdrop seat), so it swaps the grid scope
+   * UNDERNEATH Look; the caller leaves Look first when that is the intent.
+   */
+  async runSimilarScope(hash: string, filename: string) {
+    const within = this.scopeSource();
+    // Set the discriminator BEFORE the await: the residue and the sort menu
+    // key off it immediately; a stale async result is fenced by gridLoad.
+    this.gridScope = { kind: "similar", hash, filename, within };
+    // Similarity order IS the relevance order — the same pass-through the
+    // query scope uses (sortItems preserves the fed order under "relevance").
+    this.grid.sort = "relevance";
+    // A fresh similarity view clears the bar's live input: the bar is not the
+    // scope here, and a stale lexical/semantic lane label would mislead.
+    this.clearQueryInput();
+    const load = ++this.gridLoad;
+    const hashes = (await ipc.findSimilar(hash)) ?? [];
+    if (load !== this.gridLoad) return; // a newer scope owns the grid now
+    const items = hashes.length === 0 ? [] : ((await ipc.listImages(hashes)) ?? []);
+    if (load !== this.gridLoad) return;
+    this.grid.setItems(items);
+    await this.reportScope();
+  }
+
+  /** Re-point the grid from a DERIVED scope (query OR similar) back to its
+   * underlying source and re-list, WITHOUT clearing the bar input or leaving
+   * Look.
+   *
+   * Surface-safe: a query can be committed (or a neighbor search triggered)
+   * and then a result opened in Look, so this swaps the grid scope UNDERNEATH
+   * Look (Look has its own Esc layer below). It re-points gridScope at the
+   * source, restores its sort, and re-lists via refreshItems (the scope-aware
+   * feeder) — never through openFolder/openCollection, which would leaveLook
+   * and peel two Esc layers at once. No-op when the scope is not derived (a
+   * plain folder/collection has nowhere to return to). */
   private async returnToSource() {
-    if (this.gridScope.kind !== "query") return;
+    if (this.gridScope.kind !== "query" && this.gridScope.kind !== "similar") return;
     const within = this.gridScope.within;
     this.gridScope = within;
     if (within.kind === "folder") {
@@ -766,16 +847,18 @@ export class Ui {
     await this.reportScope();
   }
 
-  /** First Escape / one-key residue clear / G: drop the query scope and
-   * return the grid to its underlying source. The bar input clears too — an
-   * EXPLICIT clear is the only thing that wipes the text, and the residue's
-   * whole point is that you SEE where you land. */
+  /** First Escape / one-key residue clear / G: drop a DERIVED scope (query
+   * OR similar) and return the grid to its underlying source. The bar input
+   * clears too — an EXPLICIT clear is the only thing that wipes the text, and
+   * the residue's whole point is that you SEE where you land. */
   async clearQueryScope() {
-    const wasQuery = this.gridScope.kind === "query";
+    const wasDerived =
+      this.gridScope.kind === "query" || this.gridScope.kind === "similar";
     this.clearQueryInput();
-    // returnToSource re-lists AND reports when it was a query; when it wasn't
-    // (defensive — callers gate) the input still cleared, so report directly.
-    if (wasQuery) await this.returnToSource();
+    // returnToSource re-lists AND reports when it was a derived scope; when it
+    // wasn't (defensive — callers gate) the input still cleared, so report
+    // directly.
+    if (wasDerived) await this.returnToSource();
     else await this.reportScope();
   }
 
@@ -1177,7 +1260,11 @@ export class Ui {
       debugPanelOpen: this.shell.debugOpen,
       rankingPopoverOpen: this.rankingPopoverOpen,
       inspectorOpen: this.inspector.open !== false,
-      queryScopeActive: this.gridScope.kind === "query",
+      // A derived scope (query OR similar) is what first Esc / the residue
+      // peels back to source — the similar scope shares the query residue's
+      // one-key clear layer.
+      queryScopeActive:
+        this.gridScope.kind === "query" || this.gridScope.kind === "similar",
       searchBarFocused: this.barFocused,
       surface: this.surface,
       hasSelection: this.grid.sel.order.length > 0,
@@ -1287,7 +1374,11 @@ export class Ui {
       debugEnabled: this.debugEnabled,
       asrReady: this.shell.asrReady, // live from runtime-status (P6.2, §8.3)
       sort: this.grid.sort,
-      queryActive: this.gridScope.kind === "query",
+      // The `relevance` sort row is offered for any RELEVANCE-ORDERED scope:
+      // a query (fused order) OR a similar scope (similarity order). Both feed
+      // the grid in a backend-chosen order that "relevance" preserves.
+      queryActive:
+        this.gridScope.kind === "query" || this.gridScope.kind === "similar",
       thumbStep: this.grid.thumbStep,
       surround: this.shell.surround,
       filmstrip: this.look.filmstrip,
@@ -1686,6 +1777,26 @@ export class Ui {
           } catch {
             /* offline volume / unreachable backend: quiet no-op */
           }
+        break;
+      }
+      case "find-similar": {
+        // "More like this": re-scope the grid to the active image's visual
+        // neighbors. Triggered from the grid thumb menu OR the Look backdrop;
+        // leave Look first so the user lands back on the grid looking at the
+        // result set (the same surface the query scope renders in). The
+        // filename is captured here for the residue; an empty/absent name
+        // still reads fine ("similar to image"). A failed neighbor search is
+        // a quiet no-op like the sibling OS verbs — never a toast.
+        const hash = this.actionContext().activeHash;
+        if (hash !== null) {
+          if (this.surface === "look") await this.leaveLook();
+          const filename = this.filenameFor(hash);
+          try {
+            await this.runSimilarScope(hash, filename);
+          } catch {
+            /* unreachable backend / empty index: quiet no-op */
+          }
+        }
         break;
       }
       // ---- search bar (M3 search-as-scope) ------------------------------------

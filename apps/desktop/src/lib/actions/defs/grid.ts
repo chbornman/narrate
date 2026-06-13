@@ -355,4 +355,19 @@ export const GRID_DEFS: ActionDef[] = [
     available: always,
     enabled: (ctx) => ctx.activeHash !== null,
   },
+  // "More like this" (B69 retrieval-stays-additive): nearest visual neighbors
+  // of the active image, re-scoping the grid in place. NO key — pointer-seated
+  // like the OS verbs (free single-letter keys are scarce). Grid and Look need
+  // SEPARATE defs because id is unique per (id, scope) — the flip-stack-member
+  // pattern. Needs an active image to search FROM.
+  {
+    id: "find-similar",
+    verb: "Find similar images",
+    keys: [],
+    scope: "grid",
+    group: "grid",
+    seats: ["thumb"],
+    available: always,
+    enabled: (ctx) => ctx.activeHash !== null,
+  },
 ];
