@@ -111,7 +111,12 @@ work lives here.
   at the TOP of the cell). Touches the grid layout math (cell height
   becomes image + info-strip when active) and the gridlayout row-height
   calc, not just Thumb CSS. (Founder, June 12 2026.)
-- [ ] **No em-dashes in UI copy** (founder, emphatic: "no emdashes in the
+- [x] **No em-dashes in UI copy** — landed `ddb0e86`: 41 visible
+  strings across 22 files de-dashed (spaced hyphen or clean range);
+  residual dashes all non-visible (comments + the menus.ts separator
+  sentinel rendering as <hr/>). Recorded as a rule in CLAUDE.md. NOT
+  done: a CI grep-gate to stop creep. ORIGINAL ASK: (founder, emphatic:
+  "no emdashes in the
   UI!!!"). Sweep user-VISIBLE strings (EmptyState lines, button labels,
   settings copy, station/indicator text, welcome/consent cards,
   tooltips) and replace `—` with " - " or a rephrase. ~408 `—` occur in
