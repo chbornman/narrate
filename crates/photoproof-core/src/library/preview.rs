@@ -140,6 +140,22 @@ pub const FULL_DECODE_WEBP_QUALITY: f32 = 90.0;
 /// the same "high-quality JPEG" tier Lightroom's 1:1 preview cache uses.
 pub const FULL_DECODE_JPEG_QUALITY: u8 = 90;
 
+/// Cache-busting version stamp EMBEDDED in the full-decode artifact's filename
+/// (`<hash>-full-v<N>.{webp,jpg}`). The full-resolution analog of
+/// [`GENERATOR_VERSION`]: it versions the DEVELOP algorithm (`raw_develop.rs`),
+/// not the encode tier. Bumping it is the SANCTIONED way to force every cached
+/// 1:1 to re-develop after a develop change — a new `RAW_DEVELOP_VERSION` makes
+/// the current name a cache MISS ([`existing_full_artifact`] only looks for the
+/// current version), so the view-time trigger re-develops in the corrected
+/// pipeline and [`write_full_decode_artifact`] sweeps the stale file away.
+///
+/// WHY it starts at 2 (not 1): the pre-fix artifacts were written UNVERSIONED
+/// (`<hash>-full.{webp,jpg}`) by the black-develop bug (degenerate colour
+/// matrix). Treating those as "v1" and shipping the post-fix develop as v2 means
+/// every black artifact on disk is now a miss and re-develops in colour, with no
+/// manual cache clear. Any future develop-algorithm change MUST bump this.
+pub const RAW_DEVELOP_VERSION: i64 = 2;
+
 /// Which container the full-resolution artifact landed in (WebP preferred for
 /// cache consistency; JPEG only when WebP's dimension cap bites). The serve
 /// route needs the content-type, and the file suffix differs, so the choice
@@ -177,13 +193,28 @@ impl FullDecodeFormat {
     }
 }
 
-/// `<app_data>/previews/<h[0..2]>/<h[2..4]>/<hash>-full.{webp,jpg}` — the
-/// NATIVE-resolution full-decode artifact (OD-1). Distinct from the
-/// `-disp`/`-thumb` slots: those hard-resize to 2560/512, this holds the
-/// full sensor resolution that Look's 100%-zoom rung serves. It lives ON
-/// DISK ONLY (not in `preview_artifacts`) so its mere existence is the
-/// view-time trigger's cache-hit signal — no schema migration, no second
-/// table to keep coherent with the file.
+/// The full-decode artifact's filename for the CURRENT develop version:
+/// `<hash>-full-v<N>.{webp,jpg}` (N = [`RAW_DEVELOP_VERSION`]). The `-v<N>`
+/// stamp is what auto-invalidates the cache when the develop changes: a bump
+/// changes this name, so the old file is no longer found and a re-develop runs.
+fn full_artifact_filename(hash: &ContentHash, format: FullDecodeFormat) -> String {
+    format!(
+        "{}-full-v{}.{}",
+        hash.as_str(),
+        RAW_DEVELOP_VERSION,
+        format.ext()
+    )
+}
+
+/// `<app_data>/previews/<h[0..2]>/<h[2..4]>/<hash>-full-v<N>.{webp,jpg}` — the
+/// NATIVE-resolution full-decode artifact (OD-1) at the CURRENT develop version
+/// (`-v<N>`, see [`RAW_DEVELOP_VERSION`]). Distinct from the `-disp`/`-thumb`
+/// slots: those hard-resize to 2560/512, this holds the full sensor resolution
+/// that Look's 100%-zoom rung serves. It lives ON DISK ONLY (not in
+/// `preview_artifacts`) so its mere existence is the view-time trigger's
+/// cache-hit signal — no schema migration, no second table to keep coherent
+/// with the file. The version stamp in the name is the cache-bust: change the
+/// develop, bump the version, and this path stops matching the stale file.
 pub fn full_artifact_path(
     cache_dir: &Path,
     hash: &ContentHash,
@@ -194,12 +225,16 @@ pub fn full_artifact_path(
         .join("previews")
         .join(&h[0..2])
         .join(&h[2..4])
-        .join(format!("{h}-full.{}", format.ext()))
+        .join(full_artifact_filename(hash, format))
 }
 
-/// Locate an existing full-decode artifact for `hash`, whichever format it
-/// was written in (WebP first — the common case; JPEG only for over-cap
-/// dimensions). Returns the path and its content-type for the serve route.
+/// Locate an existing full-decode artifact for `hash` AT THE CURRENT DEVELOP
+/// VERSION, whichever format it was written in (WebP first — the common case;
+/// JPEG only for over-cap dimensions). Returns the path and its content-type
+/// for the serve route. An OLD-version (or unversioned, pre-fix) file is
+/// deliberately NOT a hit: it does not carry the current `-v<N>` stamp, so the
+/// caller re-develops in the corrected pipeline instead of serving the stale
+/// (e.g. black) artifact.
 pub fn existing_full_artifact(
     cache_dir: &Path,
     hash: &ContentHash,
@@ -211,6 +246,48 @@ pub fn existing_full_artifact(
         }
     }
     None
+}
+
+/// Delete every STALE full-decode file for `hash`: any `<hash>-full*.{webp,jpg}`
+/// that is not the current-version name. Covers both old-version artifacts
+/// (`<hash>-full-v1.*` from a prior develop) and the unversioned pre-fix files
+/// (`<hash>-full.*` the black-develop bug wrote). Called when the new-version
+/// artifact is written so the stale (black) file does not linger and waste cache
+/// budget. Cheap + safe: it touches ONLY this one hash's `previews/<h0..2>/<h2..4>/`
+/// shard, matches only this hash's full-decode prefix, and never the
+/// `-disp`/`-thumb` tiers. Best-effort — a removal failure is not worth failing
+/// a develop over (the evictor/clear will still reap it later).
+fn remove_stale_full_artifacts(cache_dir: &Path, hash: &ContentHash) {
+    let h = hash.as_str();
+    // The hash's two-level shard; full-decode files for a hash live ONLY here.
+    let shard = cache_dir.join("previews").join(&h[0..2]).join(&h[2..4]);
+    let Ok(entries) = std::fs::read_dir(&shard) else {
+        return;
+    };
+    // Names we must keep: the current-version file in either container.
+    let keep_webp = full_artifact_filename(hash, FullDecodeFormat::Webp);
+    let keep_jpg = full_artifact_filename(hash, FullDecodeFormat::Jpeg);
+    // This hash's full-decode prefix; only files starting with it are ours.
+    let full_prefix = format!("{h}-full");
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        // Must be THIS hash's full-decode artifact (the prefix gate keeps us off
+        // every other hash and off the small tiers), AND a full-decode container.
+        if !name.starts_with(&full_prefix) {
+            continue;
+        }
+        if !(name.ends_with(".webp") || name.ends_with(".jpg")) {
+            continue;
+        }
+        // Keep the current version; remove everything else (old `-v*` + the
+        // unversioned pre-fix `-full.*`).
+        if name == keep_webp || name == keep_jpg {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
 
 const TMP_PREFIX: &str = ".pp-tmp-";
@@ -274,11 +351,30 @@ pub fn sweep_temp_files(cache_dir: &Path) -> io::Result<usize> {
 // so "least-recently-modified" tracks "least-recently-VIEWED" reliably,
 // independent of the OS atime policy.
 
-/// Whether a directory entry is a full-decode 1:1 artifact (`<hash>-full.webp`
-/// or `<hash>-full.jpg`). The tier the cache policy governs — the small
-/// `-thumb`/`-disp` tiers are always kept and are never matched here.
+/// Whether a directory entry is a full-decode 1:1 artifact OF ANY VERSION:
+/// the current versioned name (`<hash>-full-v<N>.{webp,jpg}`), an old-version
+/// one (`<hash>-full-v1.*`), or the unversioned pre-fix shape
+/// (`<hash>-full.{webp,jpg}`). The cache policy (stats/evict/clear) governs the
+/// WHOLE 1:1 tier regardless of develop version — a stale old-version file still
+/// costs disk and must be counted and reapable — while the small `-thumb`/`-disp`
+/// tiers are always kept and are never matched here.
+///
+/// The match is "contains `-full` immediately before the extension", which
+/// covers `-full.webp`, `-full-v2.webp`, etc. without enumerating versions.
 fn is_full_artifact(name: &str) -> bool {
-    name.ends_with("-full.webp") || name.ends_with("-full.jpg")
+    let stem = name
+        .strip_suffix(".webp")
+        .or_else(|| name.strip_suffix(".jpg"));
+    match stem {
+        // `<hash>-full` (unversioned) or `<hash>-full-v<N>` (any version).
+        Some(stem) => {
+            stem.ends_with("-full")
+                || stem
+                    .rsplit_once("-full-v")
+                    .is_some_and(|(_, v)| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        }
+        None => false,
+    }
 }
 
 /// One full-decode artifact on disk: its path, byte size, and last-VIEWED
@@ -757,6 +853,12 @@ pub fn write_full_decode_artifact(
     let (bytes, format) = encode_full_decode(display_oriented)?;
     let dest = full_artifact_path(cache_dir, hash, format);
     atomic_write(&dest, &bytes)?;
+    // Write-then-sweep: the new-version artifact is on disk, so now drop any
+    // OLD-version / unversioned full file for this hash (e.g. the black v1 the
+    // pre-fix develop wrote). Done AFTER the atomic rename so a crash never
+    // leaves the hash with neither the new nor the old artifact. Best-effort and
+    // scoped to this hash's shard (see `remove_stale_full_artifacts`).
+    remove_stale_full_artifacts(cache_dir, hash);
     Ok(format)
 }
 
@@ -1490,6 +1592,151 @@ mod tests {
             !new.exists(),
             "the un-served 1:1 is now least-recently-viewed"
         );
+    }
+
+    // ---- full-decode develop versioning (cache auto-invalidation) ---------
+
+    /// The versioned path round-trips: writing at the CURRENT develop version
+    /// is found by `existing_full_artifact`, and the name carries the `-v<N>`
+    /// stamp (the cache-bust hook).
+    #[test]
+    fn versioned_full_artifact_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let img =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 6, image::Rgb([10, 20, 30])));
+        let fmt = write_full_decode_artifact(dir.path(), &ContentHash::from_bytes_of(b"v"), &img)
+            .unwrap();
+        assert_eq!(fmt, FullDecodeFormat::Webp);
+        let h = ContentHash::from_bytes_of(b"v");
+        let (found, found_fmt) =
+            existing_full_artifact(dir.path(), &h).expect("current-version artifact is a hit");
+        assert_eq!(found_fmt, FullDecodeFormat::Webp);
+        // The on-disk name carries the version stamp.
+        let name = found.file_name().unwrap().to_str().unwrap();
+        assert_eq!(
+            name,
+            format!("{}-full-v{}.webp", h.as_str(), RAW_DEVELOP_VERSION)
+        );
+    }
+
+    /// An OLD-version (or unversioned, pre-fix) artifact is NOT a cache hit —
+    /// the develop FIX must force a re-develop, not serve the stale black file.
+    #[test]
+    fn old_or_unversioned_full_artifact_is_not_a_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = ContentHash::from_bytes_of(b"stale");
+        let shard = dir
+            .path()
+            .join("previews")
+            .join(&h.as_str()[0..2])
+            .join(&h.as_str()[2..4]);
+        std::fs::create_dir_all(&shard).unwrap();
+        // The unversioned pre-fix black file…
+        std::fs::write(shard.join(format!("{}-full.webp", h.as_str())), b"old").unwrap();
+        // …and an explicit older version.
+        std::fs::write(shard.join(format!("{}-full-v1.webp", h.as_str())), b"older").unwrap();
+        // Neither is the CURRENT version: no cache hit, the caller re-develops.
+        assert!(
+            existing_full_artifact(dir.path(), &h).is_none(),
+            "a stale-version full artifact must not satisfy the cache check"
+        );
+        // But the cache policy still SEES them as 1:1 cache (so the evictor and
+        // stats account for the disk they cost).
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(
+            stats.full_files, 2,
+            "stale full artifacts still count as 1:1"
+        );
+    }
+
+    /// Writing the new-version artifact sweeps the stale old-version + the
+    /// unversioned pre-fix file for that SAME hash, and leaves other hashes and
+    /// the small tiers untouched.
+    #[test]
+    fn writing_new_version_removes_stale_full_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = ContentHash::from_bytes_of(b"sweep");
+        let shard = dir
+            .path()
+            .join("previews")
+            .join(&h.as_str()[0..2])
+            .join(&h.as_str()[2..4]);
+        std::fs::create_dir_all(&shard).unwrap();
+        // Pre-fix unversioned + an older version, both for our hash.
+        std::fs::write(shard.join(format!("{}-full.webp", h.as_str())), b"black").unwrap();
+        std::fs::write(shard.join(format!("{}-full-v1.jpg", h.as_str())), b"older").unwrap();
+        // A DIFFERENT hash's stale file must survive (scoped cleanup).
+        let other = ContentHash::from_bytes_of(b"other");
+        let other_shard = dir
+            .path()
+            .join("previews")
+            .join(&other.as_str()[0..2])
+            .join(&other.as_str()[2..4]);
+        std::fs::create_dir_all(&other_shard).unwrap();
+        let other_stale = other_shard.join(format!("{}-full.webp", other.as_str()));
+        std::fs::write(&other_stale, b"keep-me").unwrap();
+        // The small tiers for our hash must survive (never full-decode files).
+        write_small(dir.path(), b"sweep", ArtifactKind::Display, 100);
+
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])));
+        write_full_decode_artifact(dir.path(), &h, &img).unwrap();
+
+        // Stale full files for OUR hash are gone…
+        assert!(!shard.join(format!("{}-full.webp", h.as_str())).exists());
+        assert!(!shard.join(format!("{}-full-v1.jpg", h.as_str())).exists());
+        // …the new current-version file is present…
+        assert!(existing_full_artifact(dir.path(), &h).is_some());
+        // …a different hash's stale file is untouched…
+        assert!(other_stale.exists(), "cleanup must not cross hash shards");
+        // …and the small display tier survives.
+        assert!(
+            artifact_path(dir.path(), &h, ArtifactKind::Display).exists(),
+            "the small tiers are never swept by full-decode cleanup"
+        );
+    }
+
+    /// The cache policy (stats/evict/clear) counts and reaps VERSIONED full
+    /// artifacts, not just the legacy unversioned shape.
+    #[test]
+    fn cache_policy_handles_versioned_full_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two current-version 1:1s via the real writer (distinct hashes).
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(6, 6, image::Rgb([5, 5, 5])));
+        write_full_decode_artifact(dir.path(), &ContentHash::from_bytes_of(b"p1"), &img).unwrap();
+        write_full_decode_artifact(dir.path(), &ContentHash::from_bytes_of(b"p2"), &img).unwrap();
+        // Stats see both versioned files as the 1:1 cache.
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats.full_files, 2, "versioned full artifacts are counted");
+        assert!(stats.full_bytes > 0);
+        // A Full clear removes the versioned files (the glob matches `-full-v*`).
+        assert_eq!(
+            clear_preview_cache(dir.path(), ClearKind::Full).unwrap(),
+            2,
+            "clear removes versioned full artifacts"
+        );
+        assert_eq!(preview_cache_stats(dir.path()).full_files, 0);
+        // And the evictor reaps a versioned file when over budget.
+        write_full_decode_artifact(dir.path(), &ContentHash::from_bytes_of(b"p3"), &img).unwrap();
+        assert_eq!(
+            evict_preview_cache(dir.path(), 0),
+            1,
+            "evictor reaps versioned full artifacts"
+        );
+    }
+
+    #[test]
+    fn is_full_artifact_matches_versioned_and_legacy() {
+        assert!(is_full_artifact("abc-full.webp"));
+        assert!(is_full_artifact("abc-full.jpg"));
+        assert!(is_full_artifact("abc-full-v1.webp"));
+        assert!(is_full_artifact("abc-full-v2.jpg"));
+        assert!(is_full_artifact("abc-full-v17.webp"));
+        // Small tiers and non-full names never match.
+        assert!(!is_full_artifact("abc-disp.webp"));
+        assert!(!is_full_artifact("abc-thumb.webp"));
+        assert!(!is_full_artifact("abc-full-vX.webp"), "non-numeric version");
+        assert!(!is_full_artifact("abc-full-v.webp"), "empty version");
+        assert!(!is_full_artifact("abc-fullish.webp"));
     }
 
     #[test]
