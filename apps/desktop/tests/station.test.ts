@@ -498,3 +498,52 @@ describe("transient icons — active while live, then retire", () => {
     expect(m.missingModels).toEqual([]);
   });
 });
+
+describe("every transient is its own click target (founder, June 13 2026)", () => {
+  // The whole live set in one snapshot: ingest (work) + an embedding backlog
+  // (embed) + an active download + a needed-but-missing model (missing).
+  const live = stationModel({
+    ...base,
+    ingest: {
+      running: true,
+      done: 10,
+      total: 100,
+      errors: 0,
+      passes: [{ name: "image-embedding", remaining: 50 }],
+      scanning: false,
+      discovered: 100,
+    },
+    runtime: runtime([
+      model({ id: "dfn5b", role: "embedder", state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
+      model({ id: "txt", role: "text-embedder", state: "not-downloaded" }),
+    ]),
+  });
+
+  it("work, embed, download, and missing all carry a registry actionId", () => {
+    // No transient may be left as read-only chrome — each is clickable.
+    for (const t of live.transients) expect(t.actionId).toBe("toggle-station-detail");
+    expect(new Set(live.transients.map((t) => t.id))).toEqual(
+      new Set(["work", "embed", "download", "missing"]),
+    );
+  });
+
+  it("each transient's verb pins the detail panel open (where its row resolves)", () => {
+    // The verb is the SAME registry row the info seat uses — one action table,
+    // zero new verbs (the missing-model prompt lives in that detail panel).
+    const infoVerb = stationModel({
+      ...base,
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+    }).seats.find((s) => s.id === "info")?.actionId;
+    expect(infoVerb).toBe("toggle-station-detail");
+    for (const t of live.transients) expect(t.actionId).toBe(infoVerb);
+  });
+
+  it("titles invite the click and never name a key (resolved from the registry)", () => {
+    for (const t of live.transients) {
+      expect(t.title).toMatch(/click/i);
+      expect(t.title).not.toMatch(/\bM\b|Space|Ctrl|⌘/);
+      // No em-dashes in user-visible copy (gate: check:emdash).
+      expect(t.title).not.toContain("—");
+    }
+  });
+});

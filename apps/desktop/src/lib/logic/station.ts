@@ -67,16 +67,24 @@ export interface StationActivity {
 /**
  * Station 2.0 transient icons (DESIGN-STATION.md): icons that fade in and
  * gently pulse ONLY while their thing is live, then retire. Distinct from
- * the always-on seats — these come and go with the work. Each is read-only
- * (no registry action): the seats are the click targets, transients are
- * pure status the eye reads at a glance. The optional `count`/`fraction`
- * drive the ingest/digest badge + progress arc.
+ * the always-on seats — these come and go with the work. Founder feedback
+ * (June 13 2026): every transient is ALSO an individual click target with a
+ * sensible verb — each carries a registry `actionId` (the one-action-table
+ * rule, exactly like a seat). The progress transients (work/embed/download)
+ * and the missing-model warning all expand/PIN the detail panel, where
+ * their per-pass row (or the first-class download prompt) lives. The
+ * optional `count`/`fraction` drive the ingest/digest badge + progress arc.
  */
 export interface StationTransient {
   /** One per source: ingest/digest collapse to a single "work" transient
    * (with the count badge + arc); embed, download, and missing-model are
    * their own icons. Stable id keys the {#each} so a fade-out animates. */
   id: "work" | "embed" | "download" | "missing";
+  /** The registry row a click on this transient dispatches (founder, June
+   * 13 2026: every icon is clickable). All transients open/pin the detail
+   * panel where their row resolves — the progress detail for work/embed/
+   * download, the inline download prompt for the missing-model warning. */
+  actionId: "toggle-station-detail";
   /** Lucide glyph name (no emoji, ever — founder rule). */
   icon: "loader" | "sparkles" | "download" | "triangle-alert";
   /** Accessible label / hover line (no key names). */
@@ -405,13 +413,14 @@ export function stationModel(input: StationInput): StationModel {
     const sized = ing.running && ing.total > 0;
     transients.push({
       id: "work",
+      actionId: "toggle-station-detail", // click → pin the per-pass progress detail
       icon: "loader",
       title:
         ing.running && ing.total > 0
-          ? `Indexing - ${ing.done.toLocaleString()} of ${ing.total.toLocaleString()}`
+          ? `Indexing - ${ing.done.toLocaleString()} of ${ing.total.toLocaleString()} - click to see details`
           : ing.running
-            ? "Indexing - scanning…"
-            : "Finishing up the library",
+            ? "Indexing - scanning… - click to see details"
+            : "Finishing up the library - click to see details",
       // Badge: the still-to-go count the eye wants at a glance — the
       // discovered total while scanning, the remaining digest backlog after.
       count: sized
@@ -431,8 +440,9 @@ export function stationModel(input: StationInput): StationModel {
   if (embedRemaining > 0) {
     transients.push({
       id: "embed",
+      actionId: "toggle-station-detail", // click → pin the embedding-pass detail
       icon: "sparkles",
-      title: `Embedding for search - ${embedRemaining.toLocaleString()} remaining`,
+      title: `Embedding for search - ${embedRemaining.toLocaleString()} remaining - click to see details`,
       count: embedRemaining,
     });
   }
@@ -441,8 +451,9 @@ export function stationModel(input: StationInput): StationModel {
   if (downloading) {
     transients.push({
       id: "download",
+      actionId: "toggle-station-detail", // click → pin the download-progress detail
       icon: "download",
-      title: "Downloading a model",
+      title: "Downloading a model - click to see details",
       fraction: dlTotal > 0 ? dlDone / dlTotal : undefined,
     });
   }
@@ -453,11 +464,15 @@ export function stationModel(input: StationInput): StationModel {
   if (missing.length > 0) {
     transients.push({
       id: "missing",
+      // Click → pin the detail panel, where the first-class download prompt
+      // (Accept license, then Download) resolves the gap inline. Routing to
+      // the prompt (not a blind download) honors the license gate.
+      actionId: "toggle-station-detail",
       icon: "triangle-alert",
       title:
         missing.length === 1
-          ? missing[0].feature
-          : `${missing.length} models needed for full search`,
+          ? `${missing[0].feature} - click to fix`
+          : `${missing.length} models needed for full search - click to fix`,
       count: missing.length > 1 ? missing.length : undefined,
       warn: true,
     });

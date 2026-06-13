@@ -94,6 +94,23 @@
   // Hover opens, pointer-leave shrinks; the info seat's pin holds it.
   const expanded = $derived(ui.shell.popoverOpen || ui.shell.stationPinned);
 
+  // Hover intent (founder, June 13 2026): the detail panel now floats ABOVE
+  // the pill with an 8px gap, so the pointer crosses empty space travelling
+  // from an icon up into the panel. A short close delay bridges that gap —
+  // re-entering (the panel or the pill) inside the window cancels the close,
+  // so the panel never flickers shut mid-traverse. Pinned stays open
+  // regardless; this only governs the hover lifetime.
+  const HOVER_CLOSE_MS = 140;
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  function openHover() {
+    clearTimeout(closeTimer);
+    ui.shell.popoverOpen = true;
+  }
+  function scheduleClose() {
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => (ui.shell.popoverOpen = false), HOVER_CLOSE_MS);
+  }
+
   /** Every seat dispatches its registry row — availability and enablement
    * gate on the def (resolveAction), never here. The optional arg is the
    * seat's spelling of a parametrized row (mic-press + "toggle": a click
@@ -147,8 +164,8 @@
   class="station"
   role="status"
   aria-label="What's-happening station"
-  onpointerenter={() => (ui.shell.popoverOpen = true)}
-  onpointerleave={() => (ui.shell.popoverOpen = false)}
+  onpointerenter={openHover}
+  onpointerleave={scheduleClose}
 >
   <!-- the pop move: short rising chips, retired when their animation ends -->
   {#each ui.shell.pops as pop, i (pop.id)}
@@ -273,10 +290,19 @@
     {/each}
     {#each model.transients as t (t.id)}
       <!-- transient icons (DESIGN-STATION.md): fade in + gently pulse only
-           while their thing is live, then retire. Read-only status (no
-           registry action) — the seats are the click targets. A count badge
-           + a progress arc ride the ingest/digest "work" icon. -->
-      <span class="transient" class:warn={t.warn} title={t.title} aria-label={t.title}>
+           while their thing is live, then retire. Founder, June 13 2026:
+           every transient is ALSO an individual click target — its registry
+           verb (toggle-station-detail) pins the detail panel open, where its
+           progress row or the missing-model download prompt resolves. A count
+           badge + a progress arc ride the ingest/digest "work" icon. -->
+      <button
+        class="transient"
+        class:warn={t.warn}
+        title={t.title}
+        aria-label={t.title}
+        onclick={() => seatClick(t.actionId)}
+        {@attach tooltip({ actionId: t.actionId })}
+      >
         {#if t.fraction !== undefined}
           <!-- progress arc: a conic ring whose swept angle is the fraction,
                sitting behind the glyph (no SVG, token-colored). -->
@@ -299,7 +325,7 @@
         {#if t.count !== undefined}
           <span class="badge">{t.count > 999 ? "999+" : t.count.toLocaleString()}</span>
         {/if}
-      </span>
+      </button>
     {/each}
     {#each modeSegs as seg (seg.id)}
       <!-- visible modes (auto-advance, pencil) — status text, not seats;
@@ -433,10 +459,23 @@
     width: 22px;
     height: 22px;
     margin: 0 1px;
+    /* now a button (each transient is its own click target): strip the chrome
+     * but keep the icon look. A click pins the detail panel open. */
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
     color: var(--text-dim);
     animation:
       transient-in 240ms ease-out,
       transient-pulse 2.6s ease-in-out 240ms infinite;
+  }
+  /* hover brightens the glyph (the seats do the same) so the affordance reads */
+  .transient:hover {
+    color: var(--text);
+  }
+  .transient.warn:hover {
+    color: var(--station-error);
   }
   /* The missing-model warning reads in the error/amber hue, not the cool
    * working gray — it is a call to act, not just "work in progress". */
