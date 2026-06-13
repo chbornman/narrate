@@ -268,6 +268,31 @@ pub async fn list_folder(app: S<'_>, root_id: String, folder: String) -> CmdResu
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// Grid listing for an explicit hash list, in the SAME order given
+/// (M3 search-as-scope, Phase 1): the `search` command returns result
+/// hashes in fused/relevance order, and the query grid renders them as
+/// ordinary cells — so it needs the same badge-bearing `GridItem` rows the
+/// folder and collection grids get. Reuses `Library::list_images` (the
+/// collection-members read uses it too), which preserves input order and
+/// silently skips hashes the library never indexed (a result whose file
+/// isn't in THIS library has nothing to render); the frontend keeps the
+/// fused order by feeding these straight to the grid under `relevance`
+/// sort (a pass-through).
+#[tauri::command]
+pub async fn list_images(app: S<'_>, hashes: Vec<String>) -> CmdResult<Vec<GridItem>> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = hashes
+            .iter()
+            .map(|h| super::parse_hash(h))
+            .collect::<CmdResult<Vec<_>>>()?;
+        let items = app.library.list_images(&parsed)?;
+        Ok(items.into_iter().map(grid_item).collect())
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 #[tauri::command]
 pub fn ingest_status(app: S<'_>) -> IngestStatus {
     pump::ingest_status(&app)

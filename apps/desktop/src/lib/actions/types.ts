@@ -73,6 +73,9 @@ export interface ActionContext {
   asrReady: boolean;
   // radio state for menus
   sort: SortMode;
+  /** A query scopes the grid (M3 search-as-scope): the sort menu offers the
+   * `relevance` row ONLY then — it has no meaning over a folder/collection. */
+  queryActive: boolean;
   thumbStep: number;
   surround: SurroundLevel;
   filmstrip: boolean;

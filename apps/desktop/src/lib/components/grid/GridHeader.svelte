@@ -1,17 +1,43 @@
 <script lang="ts">
   /**
-   * Grid header (extracted from the old App.svelte): folder name, sort ▾
-   * (opens the ONE context-menu machinery — SortMenu.svelte is deleted),
-   * thumb-size slider synced with Ctrl+wheel and -/=. Tooltips resolve
-   * from the registry (tooltip.ts).
+   * Grid header (extracted from the old App.svelte): folder name, the
+   * always-visible search bar (M3 search-as-scope), sort ▾ (opens the ONE
+   * context-menu machinery), thumb-size slider synced with Ctrl+wheel and
+   * -/=. Tooltips resolve from the registry (tooltip.ts).
+   *
+   * THE BAR (M3): the query is a grid scope, not a destination — the search
+   * input lives HERE, always present (the header owns "what is this grid").
+   * As-you-type runs the LEXICAL keyword lane (50 ms debounce, the budget
+   * floor); Enter commits the SEMANTIC full-hybrid lane. On focus-with-text
+   * a thin detail row shows the `within:` residue (the folder/collection the
+   * query is scoped over, with one-key clear) and the active chips. The old
+   * SearchOverlay's entry/canvas two-stage model is gone: results render in
+   * place as ordinary grid cells.
    */
-  // Lucide chevron replaces the text ▾ (BACKLOG "Adopt Lucide icons").
+  // Lucide (BACKLOG "Adopt Lucide icons").
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import Search from "@lucide/svelte/icons/search";
+  import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
   import { THUMB_STEPS } from "../../logic/sort";
   import { tooltip } from "../../primitives/tooltip";
+  import type { Filter } from "../../types/search";
+
+  // Keystroke debounce. UI §5.1 allows a debounce of at most 50 ms inside
+  // the <100 ms results budget — this value sits AT that spec ceiling.
+  const SEARCH_DEBOUNCE_MS = 50;
 
   let sortBtn: HTMLButtonElement | undefined = $state();
+  let inputEl: HTMLInputElement | undefined = $state();
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // `/` and Cmd+F focus the bar by bumping ui.focusBarRequest; this effect
+  // re-runs on every bump (even when the value is otherwise unchanged) and
+  // pulls DOM focus to the input.
+  $effect(() => {
+    void ui.focusBarRequest; // tracked dependency
+    if (ui.focusBarRequest > 0) inputEl?.focus();
+  });
 
   function openSort() {
     if (ui.shell.contextMenu?.seat === "sort") {
@@ -21,45 +47,199 @@
     const r = sortBtn?.getBoundingClientRect();
     ui.shell.openContextMenu("sort", r ? { x: r.left, y: r.bottom + 2 } : null);
   }
+
+  // As-you-type: the LEXICAL lane (forced keyword, <100 ms budget). The
+  // per-keystroke debounce keeps the grid re-scoping live without a query
+  // per keystroke; the backend's interrupt() cancels any in-flight one.
+  function onInput() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => void ui.runQueryScope("lexical"), SEARCH_DEBOUNCE_MS);
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      // Commit: the SEMANTIC full-hybrid lane (auto-selects relevance sort).
+      e.preventDefault();
+      clearTimeout(debounceTimer);
+      void ui.runQueryScope("semantic");
+      return;
+    }
+    if (e.key === "Backspace" && ui.query === "" && ui.chips.length > 0) {
+      // Empty input + chips: drop the last chip and re-scope live (the old
+      // overlay's remove-last-chip rule, now owned by the focused input).
+      e.preventDefault();
+      void ui.perform({ kind: "remove-last-chip" });
+    }
+    // Escape is NOT handled here: it routes through the global escape ladder
+    // (clear-query-scope, then blur-search-bar) so it cannot fight the
+    // layer ownership (logic/escape.ts).
+  }
+
+  // The detail row appears only while the bar is focused AND there is text
+  // or chips to refine against — a quiet, queryless header otherwise.
+  const showDetail = $derived(
+    ui.barFocused && (ui.query.trim().length > 0 || ui.chips.length > 0),
+  );
+
+  /** The folder/collection a query is scoped over (the `within:` residue),
+   * or null when no query is active. */
+  const withinLabel = $derived.by(() => {
+    if (ui.gridScope.kind !== "query") return null;
+    const within = ui.gridScope.within;
+    if (within.kind === "collection")
+      return ui.collections.find((c) => c.id === within.id)?.name ?? "collection";
+    // A query is never scoped over another query (queryWithin enforces it),
+    // so the remaining case is a folder: the leaf name, or the root's
+    // display name at the root.
+    if (within.kind !== "folder") return null;
+    if (within.folder !== "") return within.folder.split("/").pop() ?? within.folder;
+    return ui.roots.find((r) => r.rootId === within.rootId)?.displayName ?? "library";
+  });
+
+  function chipLabel(f: Filter): string {
+    switch (f.type) {
+      case "date":
+        return f.relative !== undefined
+          ? `date: ${f.relative.season ?? f.relative.unit}`
+          : `date: ${f.absolute?.start ?? "…"} - ${f.absolute?.end ?? "…"}`;
+      case "camera":
+        return `camera: ${f.value}`;
+      case "lens":
+        return `lens: ${f.value}`;
+      case "folder":
+        return `folder: ${f.value}`;
+      case "root":
+        return `root: ${f.value}`;
+      case "rating":
+        return `rating ${f.op === "gte" ? "≥" : f.op === "lte" ? "≤" : "="} ${f.value}`;
+      case "collection":
+        return `collection: ${f.name}`;
+      case "volume":
+        return f.value;
+      case "has_strokes":
+        return f.value ? "has strokes" : "no strokes";
+      case "source":
+        return f.values.join("/");
+    }
+  }
 </script>
 
-<header class="grid-header">
-  <span class="folder-name">▍{ui.folderName}</span>
-  <span class="spacer"></span>
-  <button
-    bind:this={sortBtn}
-    class="quiet"
-    onclick={openSort}
-    {@attach tooltip({ actionId: "open-sort-menu", verb: "Sort" })}
-  >
-    sort <ChevronDown size={12} />
-  </button>
-  <input
-    class="thumb-slider"
-    type="range"
-    min="0"
-    max={THUMB_STEPS.length - 1}
-    step="1"
-    value={ui.grid.thumbStep}
-    aria-label="Thumbnail size"
-    oninput={(e) => ui.grid.setThumbStep(Number(e.currentTarget.value))}
-    {@attach tooltip({ actionId: "thumb-size", verb: "Thumbnail size" })}
-  />
+<header class="grid-header" class:detail={showDetail}>
+  <div class="row">
+    <span class="folder-name">▍{ui.folderName}</span>
+
+    <div class="bar">
+      <span class="glyph" aria-hidden="true"><Search size={14} /></span>
+      <input
+        bind:this={inputEl}
+        bind:value={ui.query}
+        oninput={onInput}
+        onkeydown={onKeydown}
+        onfocus={() => (ui.barFocused = true)}
+        onblur={() => (ui.barFocused = false)}
+        placeholder="Search"
+        spellcheck="false"
+        autocomplete="off"
+        aria-label="Search"
+        data-search-input
+      />
+    </div>
+
+    <button
+      bind:this={sortBtn}
+      class="quiet"
+      onclick={openSort}
+      {@attach tooltip({ actionId: "open-sort-menu", verb: "Sort" })}
+    >
+      sort <ChevronDown size={12} />
+    </button>
+    <input
+      class="thumb-slider"
+      type="range"
+      min="0"
+      max={THUMB_STEPS.length - 1}
+      step="1"
+      value={ui.grid.thumbStep}
+      aria-label="Thumbnail size"
+      oninput={(e) => ui.grid.setThumbStep(Number(e.currentTarget.value))}
+      {@attach tooltip({ actionId: "thumb-size", verb: "Thumbnail size" })}
+    />
+  </div>
+
+  {#if showDetail}
+    <!-- The thin detail row: the `within:` residue (one-key clear) + chips.
+         "within:" is the M3 query-residue indicator. -->
+    <div class="detail-row">
+      {#if withinLabel !== null}
+        <button
+          class="residue"
+          onclick={() => void ui.clearQueryScope()}
+          aria-label="Clear search, return to source"
+        >
+          within: {withinLabel} <X size={11} />
+        </button>
+      {/if}
+      {#each ui.chips as chip, i (i)}
+        <span class="chip">
+          {chipLabel(chip)}
+          <button aria-label="Remove filter" onclick={() => void ui.removeChip(i)}
+            ><X size={11} /></button
+          >
+        </span>
+      {/each}
+      <span class="lane-hint">lexical · Enter for semantic</span>
+    </div>
+  {/if}
 </header>
 
 <style>
   .grid-header {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    justify-content: center;
     height: 30px;
     padding: 0 12px;
   }
+  /* The header grows to seat the detail row when the bar is engaged. */
+  .grid-header.detail {
+    height: 52px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
   .folder-name {
     color: var(--text-dim);
+    white-space: nowrap;
   }
-  .spacer {
+  .bar {
     flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 460px;
+    margin: 0 auto;
+    padding: 2px 8px;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome);
+    border-radius: 6px;
+  }
+  .bar:focus-within {
+    border-color: var(--text-faint);
+  }
+  .glyph {
+    color: var(--text-faint);
+    display: inline-flex;
+  }
+  .bar input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    padding: 2px 0;
+    font-size: 13px;
   }
   .quiet {
     border: none;
@@ -78,5 +258,52 @@
     background: transparent;
     border: none;
     padding: 0;
+  }
+  .detail-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0 0;
+    flex-wrap: wrap;
+    font-size: 12px;
+  }
+  .residue {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: 1px solid var(--chrome);
+    border-radius: 10px;
+    padding: 1px 8px;
+    color: var(--text-dim);
+  }
+  .residue:hover {
+    color: var(--text);
+    border-color: var(--text-faint);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome);
+    border-radius: 10px;
+    padding: 1px 4px 1px 9px;
+    color: var(--text-dim);
+  }
+  .chip button {
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    padding: 0 2px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .chip button:hover {
+    color: var(--text);
+  }
+  .lane-hint {
+    margin-left: auto;
+    color: var(--text-faint);
   }
 </style>

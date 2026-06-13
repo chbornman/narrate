@@ -21,7 +21,15 @@
  *   8  cheatsheet
  *   9  indicator popover
  *  10  debug panel
- *  11  search (back to the surface it was invoked from)
+ *  11  clear query scope (M3 search-as-scope): a committed query is the
+ *      grid's SCOPE now, not a surface — first Esc drops it and returns the
+ *      grid to its underlying folder/collection (the `within:` residue
+ *      tells you which). This is the "query-residue one-key clear."
+ *  11b blur the search bar: the bar is always docked in the header, so once
+ *      the scope is gone (or there was only an uncommitted query) the second
+ *      Esc just exits the input's focus (§0 text-input-exits-first). Ordered
+ *      right after clear-query-scope so the two-press sequence the design
+ *      specifies — first clears, second blurs — falls out of the ladder.
  *  12  Look → Grid (same image active; the INSPECTOR STAYS — founder,
  *      June 2026: "when we return to the grid, an image will still be
  *      selected", its panel content with it. This moved the inspector
@@ -44,7 +52,11 @@ export interface EscapeContext {
   indicatorPopoverOpen: boolean;
   debugPanelOpen: boolean;
   inspectorOpen: boolean;
-  searchOpen: boolean;
+  /** A committed query scopes the grid (M3): first Esc clears it. */
+  queryScopeActive: boolean;
+  /** The header search bar holds focus: once any query scope is cleared,
+   * the next Esc blurs the input (text-input-exits-first, §0). */
+  searchBarFocused: boolean;
   surface: "grid" | "look";
   hasSelection: boolean;
 }
@@ -61,7 +73,8 @@ export type EscapeAction =
   | "close-indicator-popover"
   | "close-debug-panel"
   | "close-inspector"
-  | "leave-search"
+  | "clear-query-scope"
+  | "blur-search-bar"
   | "leave-look"
   | "clear-selection"
   | "none";
@@ -77,7 +90,8 @@ export function escapeAction(ctx: EscapeContext): EscapeAction {
   if (ctx.cheatsheetOpen) return "close-cheatsheet"; // 8
   if (ctx.indicatorPopoverOpen) return "close-indicator-popover"; // 9
   if (ctx.debugPanelOpen) return "close-debug-panel"; // 10
-  if (ctx.searchOpen) return "leave-search"; // 11
+  if (ctx.queryScopeActive) return "clear-query-scope"; // 11
+  if (ctx.searchBarFocused) return "blur-search-bar"; // 11b
   if (ctx.surface === "look") return "leave-look"; // 12 — inspector stays
   if (ctx.inspectorOpen) return "close-inspector"; // 13
   if (ctx.hasSelection) return "clear-selection"; // 14

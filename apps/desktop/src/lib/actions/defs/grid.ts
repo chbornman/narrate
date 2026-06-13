@@ -14,7 +14,7 @@
  * nature (logic/marquee.ts; Ctrl-additive is a modifier, not a chord).
  */
 import type { ActionDef } from "../types";
-import { SORT_MODES, THUMB_STEPS, type SortMode } from "../../logic/sort";
+import { RELEVANCE_SORT, SORT_MODES, THUMB_STEPS, type SortMode } from "../../logic/sort";
 
 type Dir = "up" | "down" | "left" | "right";
 
@@ -263,12 +263,17 @@ export const GRID_DEFS: ActionDef[] = [
     seats: ["gutter"],
     available: always,
     toAction: (_ctx, arg) => ({ kind: "set-sort", mode: arg as SortMode }),
+    // The `relevance` row appears ONLY while a query scopes the grid (M3):
+    // it preserves the backend's fused order and is meaningless over a
+    // folder/collection. The other rows re-order the same result hashes.
     options: (ctx) =>
-      SORT_MODES.map(({ mode, label }) => ({
-        arg: mode,
-        label,
-        checked: ctx.sort === mode,
-      })),
+      (ctx.queryActive ? [RELEVANCE_SORT, ...SORT_MODES] : SORT_MODES).map(
+        ({ mode, label }) => ({
+          arg: mode,
+          label,
+          checked: ctx.sort === mode,
+        }),
+      ),
   },
   {
     id: "thumb-size",

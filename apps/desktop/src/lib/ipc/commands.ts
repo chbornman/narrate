@@ -74,8 +74,25 @@ export const addStroke = (hash: string, payload: StrokePayloadWire) =>
 
 // -- search (RETRIEVAL §4 / §5.4) -------------------------------------------
 
-export const search = (query: string, filters: Filter[]) =>
-  invoke<SearchResults>("search", { query, filters });
+/** Which search lane to run (M3 search-as-scope, Phase 1). `lexical` forces
+ * the M1 keyword rig even on a warm machine — the <100 ms as-you-type lane;
+ * `semantic` runs the full hybrid rig (commit on Enter). Omitting it keeps
+ * today's auto behavior (the backend default), so non-scope callers are
+ * unchanged. */
+export type SearchMode = "lexical" | "semantic";
+
+export const search = (query: string, filters: Filter[], mode?: SearchMode) =>
+  invoke<SearchResults>(
+    "search",
+    mode === undefined ? { query, filters } : { query, filters, mode },
+  );
+
+/** Grid rows for an explicit hash list, IN THE ORDER GIVEN (M3): the query
+ * grid runs `search` for fused-order result hashes, then this enriches them
+ * into the same badge-bearing GridItems the folder/collection grids use.
+ * Hashes the library never indexed are silently skipped (nothing to show). */
+export const listImages = (hashes: string[]) =>
+  invoke<GridItem[]>("list_images", { hashes });
 
 // -- roots & grid -----------------------------------------------------------
 

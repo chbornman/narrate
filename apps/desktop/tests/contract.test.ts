@@ -62,6 +62,24 @@ vi.mock("@tauri-apps/api/core", () => ({
         return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
       case "image_journal":
         return [];
+      case "search":
+        // A committed query (M3 search-as-scope) returns one fused-order hit.
+        return {
+          query: { raw: args?.query, filters: args?.filters ?? [], dropped: [], fallback: false },
+          images: [{ image_hash: "a", preview: "a", score: 1, provenance: { type: "filter_only" }, last_annotated_ts: null, debug: null }],
+          session_hits: [],
+        };
+      case "list_images":
+        return ((args?.hashes ?? []) as string[]).map((h) => ({
+          hash: h,
+          fileName: `${h}.jpg`,
+          relPath: `${h}.jpg`,
+          captureTs: null,
+          addedTs: "2026-02-01T00:00:00Z",
+          hasJournal: false,
+          rating: null,
+          offline: false,
+        }));
       default:
         return null;
     }
@@ -122,10 +140,14 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
       rating: null,
       offline: false,
     }));
-    // Open EVERYTHING.
+    // Open EVERYTHING. A committed query scopes the grid and the bar holds
+    // focus, so both M3 search layers (clear-query-scope, blur-search-bar)
+    // are live for the peel.
     await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 0));
-    await ui.openLook("a", false);
-    await ui.openSearch();
+    ui.query = "fog";
+    await ui.runQueryScope("lexical");
+    ui.barFocused = true;
+    await ui.openLook("a");
     ui.inspector.openTab("journal");
     ui.shell.debugOpen = true;
     ui.shell.popoverOpen = true;
@@ -149,7 +171,10 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
       [() => !ui.shell.cheatsheetOpen, "cheatsheet"],
       [() => !ui.shell.popoverOpen, "indicator popover"],
       [() => !ui.shell.debugOpen, "debug panel"],
-      [() => !ui.searchOpen, "search"],
+      // M3 search-as-scope: the single search layer split in two — first Esc
+      // clears the query SCOPE, the next blurs the always-visible bar.
+      [() => ui.gridScope.kind !== "query", "clear query scope"],
+      [() => !ui.barFocused, "blur search bar"],
       // Founder, June 2026: Look→Grid keeps the inspector open.
       [() => ui.surface === "grid", "Look → Grid"],
       [() => ui.inspector.open === false, "inspector"],
@@ -173,7 +198,7 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
 // ---------------------------------------------------------------------------
 
 describe("G goes home from everywhere", () => {
-  it("from Look, from Search-over-Look, from Grid (no-op)", async () => {
+  it("from Look, from a query-over-Look, from Grid (no-op)", async () => {
     ui.grid.rawItems = ["a", "b"].map((h) => ({
       hash: h,
       fileName: `${h}.jpg`,
@@ -184,10 +209,15 @@ describe("G goes home from everywhere", () => {
       rating: null,
       offline: false,
     }));
-    await ui.openLook("b", false);
-    await ui.openSearch();
+    await ui.openLook("b");
     await ui.perform({ kind: "go-grid" });
-    expect(ui.searchOpen).toBe(false);
+    expect(ui.surface).toBe("grid");
+    // G from a query scope returns to the underlying source (M3).
+    ui.query = "fog";
+    await ui.runQueryScope("lexical");
+    expect(ui.gridScope.kind).toBe("query");
+    await ui.perform({ kind: "go-grid" });
+    expect(ui.gridScope.kind).not.toBe("query");
     expect(ui.surface).toBe("grid");
     await ui.perform({ kind: "go-grid" }); // already home: stays home
     expect(ui.surface).toBe("grid");
@@ -243,7 +273,7 @@ describe("Tab lights-out hides every chrome region (rendered App)", () => {
     const { container } = render(App);
     await tick();
     await tick();
-    await ui.openLook("a", false);
+    await ui.openLook("a");
     ui.look.filmstrip = true;
     await tick();
     expect(container.querySelector(".filmstrip")).not.toBeNull();

@@ -24,6 +24,41 @@ impl From<SearchError> for CmdError {
     }
 }
 
+/// Which lane the `search` command runs (M3 search-as-scope, Phase 1).
+///
+/// The frontend's as-you-type path is held to a <100 ms budget (RETRIEVAL
+/// §13.1). On a warm machine the auto lane (below) would pay vector latency
+/// on EVERY keystroke; `Lexical` lets the live path FORCE the M1 keyword
+/// rig even when embedders are ready — that is the guardrail mechanism.
+/// `Semantic` is the commit-on-Enter full-hybrid lane. `Auto` preserves
+/// today's behavior exactly (keyword when no embedder is ready, hybrid when
+/// one is) and is the default for callers that pass no mode (the debug
+/// search command, older tests) so this arg can never silently change them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Today's behavior: keyword when degraded, hybrid when embedders warm.
+    #[default]
+    Auto,
+    /// Force the M1 keyword-only rig — the <100 ms as-you-type lane.
+    Lexical,
+    /// The full hybrid rig — the commit-on-Enter lane.
+    Semantic,
+}
+
+impl SearchMode {
+    /// Parse the wire string. `None`/absent ⇒ `Auto` (back-compat default).
+    /// An unknown string is a hard error: a typo in the lane name must not
+    /// silently fall back and quietly bust the keystroke budget.
+    pub fn from_wire(s: Option<&str>) -> CmdResult<Self> {
+        Ok(match s {
+            None | Some("auto") => SearchMode::Auto,
+            Some("lexical") => SearchMode::Lexical,
+            Some("semantic") => SearchMode::Semantic,
+            Some(other) => return Err(invalid(format!("unknown search mode '{other}'"))),
+        })
+    }
+}
+
 /// Execute a search and translate the result contract for IPC.
 ///
 /// Runs the §5 hybrid pipeline. P7.4 decision 6: when an embedder is ready
@@ -37,14 +72,25 @@ pub fn run_search(
     app: &crate::state::App,
     raw: String,
     filters: Vec<dto::Filter>,
+    mode: SearchMode,
 ) -> CmdResult<dto::SearchResults> {
+    // The lexical lane forces the keyword rig REGARDLESS of embedder warmth
+    // — this is the <100 ms guardrail: a warm machine must not pay vector
+    // latency on the as-you-type path (RETRIEVAL §13.1). Identical to the
+    // degraded branch below; routed first so warmth can never override it.
+    if mode == SearchMode::Lexical {
+        return run_search_keyword(&app.searcher, raw, filters);
+    }
+
     let text = app.runtime.embedders.text();
     let clip = app.runtime.embedders.clip();
 
     if text.is_none() && clip.is_none() {
         // Degraded posture: no embedder ready ⇒ the exact M1 keyword path,
         // byte-for-byte (`run_search_keyword`). This branch must never
-        // diverge from P7.2 behavior — the search tests pin it.
+        // diverge from P7.2 behavior — the search tests pin it. (Auto and
+        // Semantic both land here when nothing is warm — the rig is the
+        // same degenerate keyword pipeline either way.)
         return run_search_keyword(&app.searcher, raw, filters);
     }
 
@@ -376,6 +422,32 @@ mod tests {
             err.to_string().contains("'zzz qqq' not found"),
             "unresolvable chip errors instead of broadening: {err}"
         );
+    }
+
+    /// The `mode` wire arg (M3 search-as-scope, Phase 1): an omitted mode
+    /// is `Auto` (back-compat — every pre-Phase-1 caller is unchanged), the
+    /// two named lanes parse, and a typo is a HARD error (never a silent
+    /// fallback that could bust the keystroke budget by running the wrong
+    /// lane). This is the parse half of the guardrail; the routing half
+    /// (lexical forcing the keyword rig regardless of embedder warmth) is
+    /// the early return at the top of `run_search`.
+    #[test]
+    fn search_mode_parses_from_wire_strictly() {
+        assert_eq!(SearchMode::from_wire(None).unwrap(), SearchMode::Auto);
+        assert_eq!(
+            SearchMode::from_wire(Some("auto")).unwrap(),
+            SearchMode::Auto
+        );
+        assert_eq!(
+            SearchMode::from_wire(Some("lexical")).unwrap(),
+            SearchMode::Lexical
+        );
+        assert_eq!(
+            SearchMode::from_wire(Some("semantic")).unwrap(),
+            SearchMode::Semantic
+        );
+        assert!(SearchMode::from_wire(Some("hybrid")).is_err());
+        assert!(SearchMode::from_wire(Some("")).is_err());
     }
 
     /// Filter DTO → core AST translation: untranslatable input errors,

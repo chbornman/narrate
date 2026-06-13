@@ -31,24 +31,25 @@
   {#if !ui.shell.chromeHidden}
     <GridHeader />
   {/if}
-  <div class="grid-area" class:full={ui.shell.chromeHidden}>
+  <div class="grid-area">
     <Grid />
   </div>
 </div>
 
 <style>
+  /* Flex column so the grid area fills whatever space the header leaves —
+   * the M3 search bar's detail row grows the header on focus, and an
+   * absolute top:30px would overlap it. The header is content-sized; the
+   * grid takes the rest. */
   .grid-surface {
     position: absolute;
     inset: 0;
+    display: flex;
+    flex-direction: column;
   }
   .grid-area {
-    position: absolute;
-    top: 30px;
-    left: 0;
-    right: 0;
-    bottom: 0;
-  }
-  .grid-area.full {
-    top: 0;
+    position: relative;
+    flex: 1;
+    min-height: 0;
   }
 </style>

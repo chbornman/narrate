@@ -56,9 +56,11 @@
   import GridSurface from "./lib/components/grid/GridSurface.svelte";
   import LookSurface from "./lib/components/look/LookSurface.svelte";
   import Inspector from "./lib/components/inspector/Inspector.svelte";
-  import SearchOverlay from "./lib/components/search/SearchOverlay.svelte";
   import EmptyState from "./lib/primitives/EmptyState.svelte";
   import ToastHost from "./lib/primitives/ToastHost.svelte";
+  // The zero-results line (UI §5.2) — reused from the search render module
+  // now that a committed query renders into the grid (M3 search-as-scope).
+  import { ZERO_RESULTS_LINE } from "./lib/search/render";
 
   // Debug panel: compile-time gated (UI §10.1). With the define off, this
   // whole branch — and the chunk behind the dynamic import — is dead code.
@@ -71,7 +73,8 @@
   });
 
   const title = $derived.by(() => {
-    if (ui.searchOpen) return "Search";
+    // Search is a grid scope now (M3), not a surface — the title follows the
+    // grid's source/folder name (folderName), the same as any other scope.
     if (ui.surface === "look") {
       const item = ui.grid.items.find((i) => i.hash === ui.look.currentHash);
       return item?.fileName ?? "Photoproof";
@@ -284,7 +287,13 @@
               <!-- empty folder: say the next action (featureset §6); during
                    ingest photographs stream in, so the line stays honest -->
               <div class="grid-empty">
-                {#if ui.collectionId !== null}
+                {#if ui.gridScope.kind === "query"}
+                  <!-- A committed query that matched nothing (M3 search-as-
+                       scope): the honest zero-results line (UI §5.2), NOT the
+                       empty-folder copy. Checked FIRST because a query over a
+                       collection still has a non-null collectionId. -->
+                  <EmptyState line={ZERO_RESULTS_LINE} />
+                {:else if ui.collectionId !== null}
                   {@const memberCount =
                     ui.collections.find((c) => c.id === ui.collectionId)?.memberCount ?? 0}
                   {#if memberCount > 0}
@@ -331,10 +340,6 @@
           {/if}
         {:else}
           <LookSurface />
-        {/if}
-
-        {#if ui.searchOpen}
-          <SearchOverlay />
         {/if}
       </div>
 

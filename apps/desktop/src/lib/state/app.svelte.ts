@@ -1,14 +1,23 @@
 /**
  * Composition root (Svelte 5 runes): exports `ui` — the shell/grid/look/
- * inspector slices plus search state — the perform(Action) router, and the
- * actionContext() snapshot the keymap/menus/cheatsheet read. Slices never
- * import each other; CROSS-SLICE FLOWS LIVE ONLY HERE: openLook (entry
+ * inspector slices plus the search-bar state — the perform(Action) router,
+ * and the actionContext() snapshot the keymap/menus/cheatsheet read. Slices
+ * never import each other; CROSS-SLICE FLOWS LIVE ONLY HERE: openLook (entry
  * selection → LookEntry order via looknav.navigationSet), leaveLook (same
  * image active, flip-aware; the grid restores its own scroll anchor on
  * mount), goHome (G), auto-advance wiring (logic/advance.ts), the
  * inspector following the active image, the drag-folder drop-confirm
  * (featureset §6), and scope reporting (report, then render the echo —
  * UI §3.4; the backend owns scope semantics).
+ *
+ * SEARCH-AS-SCOPE (M3, Phase 1): the grid's image set is arbitrated by one
+ * `gridScope` discriminated union — folder | collection | query — and four
+ * `setItems` feeders (openFolder / openCollection / runQueryScope /
+ * refreshItems), all guarded by the monotone `gridLoad` token. A committed
+ * query is just a third scope; results render in place as ordinary grid
+ * cells, so there is ONE selection system (grid.sel). The old overlay,
+ * `searchSel`/`searchFocus`/`resultHashes`, and openLook's fromSearch branch
+ * are retired.
  */
 import * as ipc from "../ipc/commands";
 import * as sel from "../logic/selection";
@@ -42,8 +51,7 @@ import type {
   RootDto,
   StrokePayloadWire,
 } from "../types/dto";
-import type { LookEntry } from "../types/display";
-import type { Filter, SearchResults } from "../types/search";
+import type { Filter } from "../types/search";
 import { copyKey, copyToClipboard } from "../primitives/copyflash.svelte";
 import * as prefs from "./prefs";
 import { ShellSlice } from "./shell.svelte";
@@ -66,6 +74,22 @@ export const INGEST_RELIST_MS = 2_000;
  * couple to search-gating policy without review. */
 const MIN_QUERY_CHARS = 2;
 
+/**
+ * What the grid is currently showing (M3 search-as-scope, Phase 1). The old
+ * two-mode arbitration (a folder, OR a collection when `collectionId` is
+ * non-null) generalizes into ONE discriminated union with a third `query`
+ * variant — a committed search is now just another grid scope, rendered in
+ * place as ordinary cells. `within` records the folder/collection the query
+ * is scoped over so the bar can show the `within:` residue and one-key
+ * clear returns there. (Phase 1 always scopes a query over the WHOLE
+ * library; `within` carries the source the user returns to, not a backend
+ * constraint — that lands with a later phase.)
+ */
+export type GridScope =
+  | { kind: "folder"; rootId: string; folder: string }
+  | { kind: "collection"; id: string }
+  | { kind: "query"; query: string; chips: Filter[]; within: GridScope };
+
 export class Ui {
   // -- slices (contracts frozen by FOUNDATIONS) -------------------------------
   shell = new ShellSlice();
@@ -73,11 +97,11 @@ export class Ui {
   look = new LookSlice();
   inspector = new InspectorSlice();
 
-  // -- surfaces (the whole app: Grid, Look, Search — UI §2.1) -----------------
+  // -- surfaces (the whole app: Grid, Look — UI §2.1) -------------------------
+  // Search is no longer a surface (M3 search-as-scope): a query scopes the
+  // GRID in place, so there are only two surfaces again. `searchOpen` and the
+  // search-overlay return point are retired with the overlay.
   surface = $state<"grid" | "look">("grid");
-  searchOpen = $state(false);
-  /** Search remembers its return point (UI §2.2, I1). */
-  searchReturn: "grid" | "look" = "grid";
 
   // -- roots & folder tree (shared by rail + grid) ----------------------------
   roots = $state<RootDto[]>([]);
@@ -87,10 +111,23 @@ export class Ui {
   /** Full snapshot, backend list order; replaced whole on every
    * `collections-changed` event (never reconciled as deltas). */
   collections = $state<CollectionDto[]>([]);
-  /** The grid is showing this collection's current members instead of a
-   * folder (the two are exclusive: openFolder/openCollection clear each
-   * other). null = folder mode. */
-  collectionId = $state<string | null>(null);
+  /** What the grid is showing (M3 search-as-scope): folder, collection, or a
+   * committed query. The single arbiter the feeders (openFolder /
+   * openCollection / runQueryScope / refreshItems) set and read. Boots into
+   * an empty-folder scope; init() opens the real one. */
+  gridScope = $state<GridScope>({ kind: "folder", rootId: "", folder: "" });
+
+  /** Back-compat read of the old collection-mode flag: the rail's
+   * current-selection highlight and the empty-collection copy still ask "is
+   * a collection open?". A query scoped OVER a collection counts as that
+   * collection being open (the residue still points there). null otherwise. */
+  collectionId = $derived<string | null>(
+    this.gridScope.kind === "collection"
+      ? this.gridScope.id
+      : this.gridScope.kind === "query" && this.gridScope.within.kind === "collection"
+        ? this.gridScope.within.id
+        : null,
+  );
   /** Collection ids the ACTIVE image is CURRENTLY in (open intervals) —
    * the thumb menu's Add-to-collection checkmarks and the
    * Remove-from-collection submenu. Follows the active image through
@@ -107,15 +144,18 @@ export class Ui {
    * while the mode fields already describe the newer view. */
   private gridLoad = 0;
 
-  // -- search ------------------------------------------------------------------
+  // -- search bar (M3 search-as-scope) ----------------------------------------
+  // The bar's live input state. `query`/`chips` drive the always-visible bar
+  // in the grid header; committing them re-scopes the grid (runQueryScope).
+  // The parallel search selection system (searchSel/searchFocus/resultHashes)
+  // is RETIRED — results are ordinary grid cells now, so grid.sel is the one
+  // selection. `barFocused` lets Escape's first press clear the query scope
+  // while focused (the residue tells you where you return to).
   query = $state("");
   chips = $state<Filter[]>([]);
-  results = $state<SearchResults | null>(null);
-  searchFocus = $state(-1);
-  searchSel = $state<sel.SelState>(sel.EMPTY);
-  resultHashes = $derived(
-    this.results === null ? [] : this.results.images.map((i) => i.image_hash),
-  );
+  /** True while the header search input holds focus (set by the bar's
+   * focus/blur). Escape layer ordering reads it; the grid keymap does not. */
+  barFocused = $state(false);
 
   // -- drag-folder drop (featureset §6: register-root confirmation) -----------
   /** Paths dropped onto the window awaiting confirmation; null = closed. */
@@ -217,9 +257,13 @@ export class Ui {
   async reportScope() {
     const targets = scopeTargets({
       surface: this.surface,
-      searchOpen: this.searchOpen,
+      // Search is no longer a separate selection surface (M3): query results
+      // ARE grid cells, so the write scope is the grid selection in every
+      // non-Look case. searchOpen/searchSelection are held false/empty to
+      // keep scope.ts's pure contract satisfied without a search surface.
+      searchOpen: false,
       gridSelection: this.grid.selectionTargets, // stack-expanded upstream
-      searchSelection: this.searchSel.order,
+      searchSelection: [],
       lookTargets: this.look.currentTargets,
     });
     try {
@@ -293,9 +337,14 @@ export class Ui {
    * the grid never sits on a dead folder. */
   async onRootsChanged(roots: RootDto[]) {
     this.applyRootsSnapshot(roots);
-    // A collection view has rootId null BY DESIGN — never yank it to a
-    // folder just because a roots snapshot landed.
-    if (this.collectionId === null && this.grid.rootId === null && roots.length > 0)
+    // A collection or query view has rootId null BY DESIGN — never yank it
+    // to a folder just because a roots snapshot landed. Only an empty
+    // FOLDER scope with no root falls back to the first root.
+    if (
+      this.gridScope.kind === "folder" &&
+      this.grid.rootId === null &&
+      roots.length > 0
+    )
       await this.openFolder(roots[0].rootId, "");
   }
 
@@ -332,7 +381,10 @@ export class Ui {
     // Opening a folder always lands on the Grid: navigating sources while in
     // Look exits the single-image view (founder dogfood, round 1).
     if (this.surface === "look") await this.leaveLook();
-    this.collectionId = null; // folder mode and collection mode are exclusive
+    // The grid is now in folder scope (M3); switching source clears any live
+    // query (D5: query scope is ephemeral per-source).
+    this.gridScope = { kind: "folder", rootId, folder };
+    this.clearQueryInput();
     this.grid.rootId = rootId;
     this.grid.folder = folder;
     this.grid.sort = prefs.loadSort(rootId, folder);
@@ -354,7 +406,8 @@ export class Ui {
    * machinery (sort persistence, last-folder, ingest re-list) stands down. */
   async openCollection(id: string) {
     if (this.surface === "look") await this.leaveLook();
-    this.collectionId = id;
+    this.gridScope = { kind: "collection", id };
+    this.clearQueryInput();
     this.grid.rootId = null;
     this.grid.folder = "";
     this.grid.sel = sel.EMPTY;
@@ -416,10 +469,19 @@ export class Ui {
    * The token is taken only when something will actually load — a no-op
    * call must not cancel an in-flight open. */
   async refreshItems() {
-    if (this.collectionId !== null) {
+    const scope = this.gridScope;
+    if (scope.kind === "collection") {
       const load = ++this.gridLoad;
-      const items = (await ipc.listCollectionMembers(this.collectionId)) ?? [];
+      const items = (await ipc.listCollectionMembers(scope.id)) ?? [];
       if (load === this.gridLoad) this.grid.setItems(items);
+      return;
+    }
+    if (scope.kind === "query") {
+      // A live re-list under a query re-runs the SAME lane the scope was
+      // committed with (the bar's commit state owns the lane choice). Phase
+      // 1: re-run lexical — a background ingest refresh must never silently
+      // upgrade a lexical scope to semantic (or pay vector latency for it).
+      await this.runQueryScope("lexical");
       return;
     }
     if (this.grid.rootId === null) return;
@@ -464,30 +526,17 @@ export class Ui {
   // Look (cross-slice flow; INTEGRATION finishes nav-set + anchor restore)
   // ---------------------------------------------------------------------------
 
-  async openLook(hash: string, fromSearch: boolean) {
+  async openLook(hash: string) {
     // Navigation set = entry selection (featureset §2): a ≥2 selection
     // including the entry cycles within it (GRID order — looknav.ts);
-    // otherwise the whole folder / result list. Search results carry no
-    // pairs, so the same rule applies over bare result hashes.
-    let order: LookEntry[];
-    let idx: number;
-    if (fromSearch) {
-      const selSet = new Set(this.searchSel.order);
-      const scoped =
-        selSet.size >= 2 && selSet.has(hash)
-          ? this.resultHashes.filter((h) => selSet.has(h))
-          : this.resultHashes;
-      idx = scoped.indexOf(hash);
-      if (idx < 0) return;
-      order = scoped.map((h) => ({ display: h, alt: null }));
-    } else {
-      const nav = navigationSet(this.grid.units, this.grid.sel.order, hash);
-      if (nav === null) return;
-      ({ order, index: idx } = nav);
-    }
+    // otherwise the whole grid. Query results are ordinary grid cells now
+    // (M3 search-as-scope), so there is ONE path — the old fromSearch branch
+    // over a parallel result/selection list is retired with the overlay.
+    const nav = navigationSet(this.grid.units, this.grid.sel.order, hash);
+    if (nav === null) return;
+    const { order, index: idx } = nav;
     this.look.open(order, idx);
     this.surface = "look";
-    if (fromSearch) this.searchOpen = false;
     await this.reportScope();
   }
 
@@ -513,60 +562,140 @@ export class Ui {
     await this.reportScope();
   }
 
-  /** G — universal "go home" (featureset §0). */
+  /** G — universal "go home" (featureset §0). Clears any query scope too:
+   * home is the underlying folder/collection, not a search result set. */
   async goHome() {
-    this.searchOpen = false;
     if (this.surface === "look") {
       await this.leaveLook();
       return;
     }
-    await this.reportScope();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Search overlay
-  // ---------------------------------------------------------------------------
-
-  async openSearch() {
-    if (this.searchOpen) return;
-    this.searchReturn = this.surface;
-    this.searchOpen = true;
-    // `/` ALWAYS starts at the entry overlay (backlog ruling: a floating
-    // input over the dimmed surface). The overlay's stage is derived from
-    // result state, so stale query/results from the previous search would
-    // reopen straight into the canvas — and Enter→Look (openLook with
-    // fromSearch) closes search without passing through closeSearch, so
-    // the reset has to live HERE, on open, to cover every close path.
-    this.query = "";
-    this.chips = [];
-    this.results = null;
-    this.searchFocus = -1;
-    this.searchSel = sel.EMPTY;
-    await this.reportScope();
-  }
-
-  async closeSearch() {
-    this.searchOpen = false;
-    this.searchSel = sel.EMPTY;
-    // Returns to the invoking surface (I1) — surface was never changed.
-    await this.reportScope();
-  }
-
-  async runSearch() {
-    const trimmed = this.query.trim();
-    if (this.chips.length === 0 && trimmed.length < MIN_QUERY_CHARS) {
-      this.results = null;
-      this.searchFocus = -1;
+    if (this.gridScope.kind === "query") {
+      await this.clearQueryScope();
       return;
     }
-    this.results = await ipc.search(this.query, this.chips);
-    this.searchFocus = this.results.images.length > 0 ? 0 : -1;
-    this.searchSel = sel.EMPTY;
+    await this.reportScope();
   }
 
+  // ---------------------------------------------------------------------------
+  // Search-as-scope (M3): the always-visible bar re-scopes the grid in place
+  // ---------------------------------------------------------------------------
+
+  /** `/` and Cmd+F: focus the header bar (no overlay). The bar component
+   * owns the actual DOM focus via this token; bumping it re-fires its focus
+   * effect even when the value is unchanged. */
+  focusBarRequest = $state(0);
+  focusBar() {
+    this.focusBarRequest += 1;
+  }
+
+  /** Clear the bar's live input without touching the grid scope (used when
+   * switching source: the scope is already being replaced). */
+  private clearQueryInput() {
+    this.query = "";
+    this.chips = [];
+  }
+
+  /** The source a NEW query scopes over: when the grid already shows a
+   * query, re-typing keeps the SAME underlying source (`within`) — a query
+   * is never scoped over another query. Otherwise the current folder/
+   * collection scope is the source. */
+  private queryWithin(): GridScope {
+    return this.gridScope.kind === "query" ? this.gridScope.within : this.gridScope;
+  }
+
+  /**
+   * Run the bar's query and re-scope the grid to the results, in place.
+   * The fourth `setItems` feeder (next to openFolder/openCollection/
+   * refreshItems): `search` returns result hashes in fused order, then
+   * `list_images` enriches them into GridItems; we feed them in that order
+   * and the grid renders them as ordinary cells. Guarded by the SAME
+   * monotone `gridLoad` token as the other feeders so a slow query can't
+   * overwrite a newer scope.
+   *
+   * `mode` picks the lane (the <100 ms guardrail): "lexical" for as-you-type
+   * (forced keyword, the budget floor), "semantic" on Enter (full hybrid).
+   * An empty bar (no query, no chips) is NOT a scope — it returns the grid
+   * to its underlying source (the quiet zero-config default).
+   */
+  async runQueryScope(mode: ipc.SearchMode) {
+    const trimmed = this.query.trim();
+    if (this.chips.length === 0 && trimmed.length < MIN_QUERY_CHARS) {
+      // Below the threshold with no chips: not a query (yet). Return the grid
+      // to its underlying source WITHOUT touching the bar input — the user is
+      // mid-type (e.g. the first character of a fresh query), and clearing
+      // this.query here would erase it under them (the input is bind:value'd).
+      // Only an EXPLICIT clear (Esc / G / the residue button) wipes the text.
+      if (this.gridScope.kind === "query") await this.returnToSource();
+      return;
+    }
+    const within = this.queryWithin();
+    const wasQuery = this.gridScope.kind === "query";
+    // Set the scope discriminator BEFORE the await: folderName, the bar's
+    // residue, and the sort menu all key off it, and a stale async result is
+    // already fenced by gridLoad below.
+    this.gridScope = { kind: "query", query: this.query, chips: [...this.chips], within };
+    // Entering query mode defaults the sort to relevance — the backend's
+    // fused order, which sortItems preserves as a pass-through (this is the
+    // spec's "committing a search auto-selects relevance"). A semantic commit
+    // re-asserts it. But a user who picked date/filename WHILE already in a
+    // query keeps it across further keystrokes — re-scoping the same hashes
+    // must not yank a chosen ordering out from under them.
+    if (!wasQuery || mode === "semantic") this.grid.sort = "relevance";
+    const load = ++this.gridLoad;
+    const results = await ipc.search(this.query, this.chips, mode);
+    if (load !== this.gridLoad) return; // a newer scope owns the grid now
+    const hashes = results.images.map((i) => i.image_hash);
+    // Enrich result hashes → GridItems (in fused order; list_images
+    // preserves the order given). The grid's relevance sort keeps it.
+    const items = hashes.length === 0 ? [] : ((await ipc.listImages(hashes)) ?? []);
+    if (load !== this.gridLoad) return;
+    this.grid.setItems(items);
+    await this.reportScope();
+  }
+
+  /** Re-point the grid from a query scope back to its underlying source and
+   * re-list, WITHOUT clearing the bar input or leaving Look.
+   *
+   * Surface-safe: a query can be committed and then a result opened in Look,
+   * so this swaps the grid scope UNDERNEATH Look (Look has its own Esc layer
+   * below). It re-points gridScope at the source, restores its sort, and
+   * re-lists via refreshItems (the scope-aware feeder) — never through
+   * openFolder/openCollection, which would leaveLook and peel two Esc layers
+   * at once. No-op when not in a query scope. */
+  private async returnToSource() {
+    if (this.gridScope.kind !== "query") return;
+    const within = this.gridScope.within;
+    this.gridScope = within;
+    if (within.kind === "folder") {
+      this.grid.rootId = within.rootId;
+      this.grid.folder = within.folder;
+      this.grid.sort = prefs.loadSort(within.rootId, within.folder);
+    } else {
+      this.grid.rootId = null;
+      this.grid.folder = "";
+    }
+    await this.refreshItems();
+    await this.reportScope();
+  }
+
+  /** First Escape / one-key residue clear / G: drop the query scope and
+   * return the grid to its underlying source. The bar input clears too — an
+   * EXPLICIT clear is the only thing that wipes the text, and the residue's
+   * whole point is that you SEE where you land. */
+  async clearQueryScope() {
+    const wasQuery = this.gridScope.kind === "query";
+    this.clearQueryInput();
+    // returnToSource re-lists AND reports when it was a query; when it wasn't
+    // (defensive — callers gate) the input still cleared, so report directly.
+    if (wasQuery) await this.returnToSource();
+    else await this.reportScope();
+  }
+
+  /** Bar edit removed the last chip (Backspace on an empty input). Re-runs
+   * the live lexical lane so the grid re-scopes immediately. */
   async removeChip(index: number) {
     this.chips = this.chips.filter((_, i) => i !== index);
-    await this.runSearch();
+    await this.runQueryScope("lexical");
   }
 
   // ---------------------------------------------------------------------------
@@ -691,9 +820,9 @@ export class Ui {
     if (this.inspector.open === false || hash === null) return;
     const targets = scopeTargets({
       surface: this.surface,
-      searchOpen: this.searchOpen,
+      searchOpen: false,
       gridSelection: this.grid.selectionTargets,
-      searchSelection: this.searchSel.order,
+      searchSelection: [],
       lookTargets: this.look.currentTargets,
     });
     if (targets.includes(hash)) await this.inspector.load(hash);
@@ -877,7 +1006,6 @@ export class Ui {
    * selectionTargets). Targets outside the current folder (multi-target
    * notes minted over search selections can span folders) are skipped. */
   async selectJournalTargets(targets: string[]) {
-    this.searchOpen = false;
     if (this.surface === "look") {
       this.surface = "grid";
       this.look.close();
@@ -917,7 +1045,8 @@ export class Ui {
       indicatorPopoverOpen: this.shell.popoverOpen || this.shell.stationPinned,
       debugPanelOpen: this.shell.debugOpen,
       inspectorOpen: this.inspector.open !== false,
-      searchOpen: this.searchOpen,
+      queryScopeActive: this.gridScope.kind === "query",
+      searchBarFocused: this.barFocused,
       surface: this.surface,
       hasSelection: this.grid.sel.order.length > 0,
     };
@@ -963,8 +1092,17 @@ export class Ui {
       case "close-inspector":
         this.inspector.close();
         break;
-      case "leave-search":
-        await this.closeSearch();
+      case "clear-query-scope":
+        // First Esc with a query active: drop the scope, return to source.
+        // The bar keeps focus — a second Esc then blurs (the design's
+        // two-press sequence). The grid is the same surface throughout.
+        await this.clearQueryScope();
+        break;
+      case "blur-search-bar":
+        // Second Esc (or first when there was only an uncommitted query):
+        // exit the input's focus (§0). The blur handler flips barFocused.
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        this.barFocused = false;
         break;
       case "leave-look":
         await this.leaveLook();
@@ -987,16 +1125,17 @@ export class Ui {
   }): ActionContext {
     return {
       surface: this.surface,
-      searchOpen: this.searchOpen,
+      // Search is no longer a surface/scope (M3): there is no "search open"
+      // keymap mode. Held false so the frozen ActionContext contract still
+      // type-checks for any residual reader. The header bar handles its own
+      // input keys (Enter/Backspace) locally, the way a focused text input
+      // should — not through a search-scope keymap layer.
+      searchOpen: false,
       inputFocused: input?.inputFocused ?? false,
       searchInputFocused: input?.searchInputFocused ?? false,
       queryEmpty: this.query === "",
-      hasSelection: this.searchOpen
-        ? this.searchSel.order.length > 0
-        : this.grid.sel.order.length > 0,
-      selectionCount: this.searchOpen
-        ? this.searchSel.order.length
-        : this.grid.sel.order.length,
+      hasSelection: this.grid.sel.order.length > 0,
+      selectionCount: this.grid.sel.order.length,
       activeHash:
         this.surface === "look" ? this.look.currentHash : this.grid.activeHash,
       activeIsPair: this.grid.activeIsPair,
@@ -1011,6 +1150,7 @@ export class Ui {
       debugEnabled: this.debugEnabled,
       asrReady: this.shell.asrReady, // live from runtime-status (P6.2, §8.3)
       sort: this.grid.sort,
+      queryActive: this.gridScope.kind === "query",
       thumbStep: this.grid.thumbStep,
       surround: this.shell.surround,
       filmstrip: this.look.filmstrip,
@@ -1049,7 +1189,10 @@ export class Ui {
         this.shell.toggleCheatsheet();
         break;
       case "open-search":
-        await this.openSearch();
+        // `/` and Cmd+F FOCUS the always-visible header bar now (M3) — no
+        // overlay to open. The bar's source is whatever the grid currently
+        // shows; a query scopes within it.
+        this.focusBar();
         break;
       case "summon-note":
         this.summonNote();
@@ -1092,13 +1235,11 @@ export class Ui {
         break;
       // ---- grid -------------------------------------------------------------
       case "open-look": {
-        if (this.searchOpen) {
-          const hash = this.resultHashes[this.searchFocus];
-          if (hash !== undefined) await this.openLook(hash, true);
-        } else {
-          const hash = this.grid.unitHashes[this.grid.sel.focus];
-          if (hash !== undefined) await this.openLook(hash, false);
-        }
+        // ONE path now (M3): query results are grid cells, so Enter on the
+        // focused cell opens Look over the grid units — whatever scope the
+        // grid is in.
+        const hash = this.grid.unitHashes[this.grid.sel.focus];
+        if (hash !== undefined) await this.openLook(hash);
         break;
       }
       case "focus-move":
@@ -1391,20 +1532,19 @@ export class Ui {
           }
         break;
       }
-      // ---- search -------------------------------------------------------------
-      case "search-nav": {
-        const delta = action.dir === "up" || action.dir === "left" ? -1 : 1;
-        const n = this.resultHashes.length;
-        if (n > 0)
-          this.searchFocus = Math.max(0, Math.min(n - 1, this.searchFocus + delta));
+      // ---- search bar (M3 search-as-scope) ------------------------------------
+      // search-nav / search-open-result are RETIRED: results are grid cells,
+      // so grid focus-move + Enter (open-look) drive them — there is no
+      // parallel result cursor. The union members stay (frozen, never
+      // narrowed) but dispatch to nothing; their defs are gone, so no key
+      // reaches them.
+      case "search-nav":
+      case "search-open-result":
         break;
-      }
-      case "search-open-result": {
-        const hash = this.resultHashes[this.searchFocus];
-        if (hash !== undefined) await this.openLook(hash, true);
-        break;
-      }
       case "remove-last-chip":
+        // Backspace on an empty bar input drops the last chip and re-scopes
+        // live (the bar component dispatches this; the empty-input guard is
+        // in the bar's keydown, mirroring the old def's `enabled`).
         if (this.query === "" && this.chips.length > 0)
           await this.removeChip(this.chips.length - 1);
         break;
