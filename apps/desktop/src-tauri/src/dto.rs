@@ -402,3 +402,27 @@ pub struct CollectionNoteDto {
     pub ts: String,
     pub text: String,
 }
+
+/// One saved manual topic (DESIGN-TOPICS-COLLECTIONS.md) as the Topics rail
+/// tab renders it. A topic is a saved phrase, like a saved search; its images
+/// are always computed affinity (`topic_ranked_images`), never stored here.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDto {
+    pub id: String,
+    pub phrase: String,
+    /// "blend" (both spaces at the configured alpha — the default) | "annotation"
+    /// (what you SAID) | "clip" (what it LOOKS like).
+    pub space: String,
+    pub created_ts: String,
+}
+
+/// One in-scope image and its blended affinity to a selected topic phrase, for
+/// the Topics tab's ranked grid and the threshold slider. Descending `score`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedImageDto {
+    pub hash: String,
+    /// Blended affinity (a cosine, roughly [-1, 1]); the slider thresholds on it.
+    pub score: f32,
+}

@@ -14,6 +14,7 @@ use photoproof_core::library::{Library, RootWatcherHandle};
 use photoproof_core::retrieval::PpvecStore;
 use photoproof_core::search::Searcher;
 use photoproof_core::sidecar::SidecarEngine;
+use photoproof_core::topics::Topics;
 use photoproof_core::{EventStore, SessionContext, SessionId, UtcMillis};
 
 use crate::error::CmdError;
@@ -57,6 +58,11 @@ pub struct App {
     /// Collections (RETRIEVAL §10, P7.3): user truth mirrored to
     /// `collections.photoproof.json` by the sidecar pump's tick.
     pub collections: Arc<Collections>,
+    /// Manual topics (DESIGN-TOPICS-COLLECTIONS.md): saved phrases (like saved
+    /// searches). Its own lightweight connection over the shared db; NO
+    /// portability mirror — a topic's images are always computed affinity, so a
+    /// saved phrase is rebuildable-index state, not user truth.
+    pub topics: Arc<Topics>,
     pub app_data: PathBuf,
     pub scope: Mutex<ScopeTracker>,
     pub session: Mutex<SessionManager>,
@@ -170,6 +176,10 @@ impl App {
         // rebuild_from_sidecars, which imports the collections file it
         // finds beside the manifest (RETRIEVAL 10.2).
         let collections = Arc::new(Collections::open(&db_path, &app_data)?);
+        // Manual topics: opened after the schema exists (the same throwaway-open
+        // migration the collections engine relies on); no portability file.
+        let topics =
+            Arc::new(Topics::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?);
         let searcher = Searcher::open(&db_path).map_err(|e| CmdError::Invalid(e.to_string()))?;
         // PPVEC store beside the journal db (RETRIEVAL §1.3:
         // appdata/vectors/). Opening it is cheap (it lazily mmaps spaces on
@@ -253,6 +263,7 @@ impl App {
             library,
             engine,
             collections,
+            topics,
             app_data,
             scope: Mutex::new(ScopeTracker::new()),
             session: Mutex::new(session),

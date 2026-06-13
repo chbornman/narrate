@@ -213,6 +213,78 @@ pub fn topic_affinities<TE: Embedder, CE: Embedder>(
 }
 
 // ---------------------------------------------------------------------------
+// topic_ranked_images — the single-topic ranked grid (Topics tab + the slider)
+// ---------------------------------------------------------------------------
+
+/// One in-scope image's blended affinity to ONE topic phrase, for the Topics
+/// tab's ranked grid and the threshold slider. This is the single-topic
+/// projection of [`AffinityReport`]: the tab selects a topic, this scores the
+/// scope against just that phrase, and the grid renders the result descending.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankedImage {
+    pub hash: String,
+    /// Blended affinity `α·visual + (1−α)·annotation` (a cosine, roughly
+    /// [-1, 1]). The slider thresholds on this value; the bake keeps images at
+    /// or above the chosen threshold.
+    pub score: f32,
+}
+
+/// `topic_ranked_images` (DESIGN-TOPICS-COLLECTIONS.md): the in-scope images
+/// ranked by blended affinity to ONE topic phrase, descending. The Topics tab
+/// selects a topic and shows THIS list in the grid; the slider thresholds on
+/// `score`.
+///
+/// REUSES [`topic_affinities`] wholesale with a single-element topics slice
+/// (one embed + one space scan per space, the cheap shape) — the topic is just
+/// a different reference vector, exactly as the graph's multi-topic scoring is.
+/// No second similarity definition.
+///
+/// GRACEFUL like the rest of the lens: an un-embedded scope, absent embedders,
+/// or an empty scope all yield a well-formed (possibly all-zero, possibly
+/// empty) ranked list, never an error. Ordering is STABLE: descending score,
+/// then ascending hash as a deterministic tie-break so the grid never reshuffles
+/// equal-score images between runs.
+pub fn topic_ranked_images<TE: Embedder, CE: Embedder>(
+    scope: &[String],
+    phrase: &str,
+    alpha: f64,
+    vectors: &PpvecStore,
+    text: Option<&TE>,
+    clip: Option<&CE>,
+) -> Vec<RankedImage> {
+    // One topic → one column of the dense report; pull that column out as the
+    // per-image score. (A single-element slice keeps the per-topic-not-per-image
+    // cost shape — one embed + one scan, not one per image.)
+    let report = topic_affinities(
+        scope,
+        std::slice::from_ref(&phrase.to_owned()),
+        alpha,
+        vectors,
+        text,
+        clip,
+    );
+    let mut ranked: Vec<RankedImage> = report
+        .images
+        .into_iter()
+        .map(|img| RankedImage {
+            // Exactly one topic was scored, so `scores[0]` is this phrase's
+            // affinity for the image (the dense report always lists every topic).
+            score: img.scores.first().map(|s| s.affinity).unwrap_or(0.0),
+            hash: img.image_hash,
+        })
+        .collect();
+    // Descending score; ascending hash tie-break for a fully deterministic order
+    // (NaN cannot arise — score_images yields finite cosines — but total_cmp is
+    // total regardless, so the sort is panic-free even on a degenerate value).
+    ranked.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.hash.cmp(&b.hash))
+    });
+    ranked
+}
+
+// ---------------------------------------------------------------------------
 // suggest_topics — cheap v1 candidates (note n-grams + collection names)
 // ---------------------------------------------------------------------------
 
@@ -811,6 +883,142 @@ mod tests {
             None,
         );
         assert!(no_imgs.images.is_empty());
+    }
+
+    // ---- topic_ranked_images (the single-topic ranked grid) ---------------
+
+    /// A fixed-direction embedder for the ranked-grid tests: every phrase maps
+    /// to the SAME unit vector (the topic anchor sits at a known direction), so
+    /// a planted image's affinity is purely a function of where IT sits. Mirrors
+    /// the `NoEmbedder` test-double shape but actually returns a vector.
+    struct FixedEmbedder {
+        vector: Vec<f32>,
+        model: String,
+    }
+
+    impl Embedder for FixedEmbedder {
+        async fn embed_text(
+            &self,
+            _text: &str,
+        ) -> photoproof_connectors::ConnectorResult<Embedding> {
+            Ok(Embedding {
+                vector: self.vector.clone(),
+                model_id: self.model.clone(),
+            })
+        }
+        async fn embed_image(
+            &self,
+            _img: &photoproof_connectors::embedder::DecodedImage,
+        ) -> photoproof_connectors::ConnectorResult<Embedding> {
+            unreachable!("ranked-grid tests embed text only")
+        }
+        fn dimensions(&self) -> usize {
+            self.vector.len()
+        }
+        fn model_id(&self) -> &str {
+            &self.model
+        }
+    }
+
+    /// Plant an image_clip vector for `hash` in `store` under `model`.
+    fn plant_clip(store: &PpvecStore, hash: &str, model: &str, vector: Vec<f32>) {
+        use photoproof_connectors::vector_store::{VecKey, VecSpace, VecUnit, VectorStore};
+        store
+            .upsert(
+                VecKey {
+                    space: VecSpace {
+                        vec_kind: VecKind::ImageClip,
+                        model_id: model.to_owned(),
+                    },
+                    unit: VecUnit::Image {
+                        image_hash: hash.to_owned(),
+                    },
+                },
+                &Embedding {
+                    vector,
+                    model_id: model.to_owned(),
+                },
+            )
+            .expect("plant clip vector");
+    }
+
+    /// `topic_ranked_images` ranks the scope by blended affinity descending,
+    /// over PLANTED clip vectors: the topic anchor points along +x, and three
+    /// images sit at decreasing cosine to it, so the ranked order is exactly
+    /// that decreasing order. α = 1 isolates the visual half (the only space
+    /// planted here), making the assertion about ranking, not blending.
+    #[test]
+    fn ranked_images_orders_by_descending_affinity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            PpvecStore::open(dir.path().join("photoproof.db"), dir.path().join("vectors")).unwrap();
+        let model = "clip-test";
+        // Topic anchor along +x; images at angles 0° < 45° < 90° from it, so
+        // cos affinity is 1 > ~0.707 > 0 — a strict ranking the sort must honor.
+        plant_clip(&store, &"a".repeat(64), model, vec![1.0, 0.0]); // cos 1.0
+        plant_clip(&store, &"b".repeat(64), model, vec![1.0, 1.0]); // cos ~.707
+        plant_clip(&store, &"c".repeat(64), model, vec![0.0, 1.0]); // cos 0.0
+        let scope = vec!["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+        let clip = FixedEmbedder {
+            vector: vec![1.0, 0.0],
+            model: model.to_owned(),
+        };
+        // α = 1 → pure visual; no text embedder (annotation half is empty).
+        let ranked = topic_ranked_images::<NoEmbedder, FixedEmbedder>(
+            &scope,
+            "anything",
+            1.0,
+            &store,
+            None,
+            Some(&clip),
+        );
+        let order: Vec<&str> = ranked.iter().map(|r| r.hash.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "a".repeat(64).as_str(),
+                "b".repeat(64).as_str(),
+                "c".repeat(64).as_str()
+            ],
+            "descending affinity: a (cos1) > b (cos.707) > c (cos0)"
+        );
+        // Scores are descending and finite.
+        assert!(ranked[0].score > ranked[1].score);
+        assert!(ranked[1].score > ranked[2].score);
+
+        // THRESHOLD semantics (what the bake commits): the images at or above a
+        // threshold are a prefix of this descending list. A 0.5 cut keeps a and
+        // b (cos 1, .707) and drops c (cos 0) — the >= semantics the bake uses.
+        let kept: Vec<&str> = ranked
+            .iter()
+            .filter(|r| r.score >= 0.5)
+            .map(|r| r.hash.as_str())
+            .collect();
+        assert_eq!(kept, vec!["a".repeat(64).as_str(), "b".repeat(64).as_str()]);
+    }
+
+    /// Graceful: an un-embedded scope (vectors planted under a DIFFERENT model
+    /// than the embedder reports) and absent embedders both yield a well-formed
+    /// ranked list (every scope image at score 0), never an error. The order is
+    /// still deterministic (ascending hash on the all-equal scores).
+    #[test]
+    fn ranked_images_unembedded_and_degraded_are_graceful() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            PpvecStore::open(dir.path().join("photoproof.db"), dir.path().join("vectors")).unwrap();
+        let scope = vec!["b".repeat(64), "a".repeat(64)];
+        // No embedders at all → every image scores 0, but the list is dense and
+        // deterministically ordered (ascending hash).
+        let ranked =
+            topic_ranked_images::<NoEmbedder, NoEmbedder>(&scope, "x", 0.5, &store, None, None);
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked.iter().all(|r| r.score == 0.0));
+        assert_eq!(ranked[0].hash, "a".repeat(64), "tie-break ascending hash");
+        // Empty scope → empty list, never an error.
+        assert!(
+            topic_ranked_images::<NoEmbedder, NoEmbedder>(&[], "x", 0.5, &store, None, None)
+                .is_empty()
+        );
     }
 
     // ---- suggest_topics (cheap candidates) --------------------------------

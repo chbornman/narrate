@@ -561,6 +561,30 @@ CREATE TABLE IF NOT EXISTS image_dwell (
 ) STRICT, WITHOUT ROWID;
 "#;
 
+/// Migration slot for manual topics (DESIGN-TOPICS-COLLECTIONS.md). Only the
+/// topics packet edits this constant.
+///
+/// A `topic` is a SAVED PHRASE (like a saved search), not stored membership:
+/// its images are ALWAYS computed affinity at read time (`topic_ranked_images`),
+/// which is precisely what distinguishes a topic (continuous, fuzzy, a lens)
+/// from a collection (discrete, evented, durable). So this table holds ONLY the
+/// phrase + which embedding space to pull it in + when it was saved. No member
+/// rows, no notes, no portability mirror: a topic is cheap, regenerable intent,
+/// not user truth that must survive a rebuild (unlike collections, which ARE
+/// mirrored to collections.photoproof.json). Losing a saved phrase costs the
+/// user one retype, not a curated decision.
+const TOPICS_SCHEMA_SQL: &str = r#"
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test) and a saved phrase must survive that re-run.
+CREATE TABLE IF NOT EXISTS topics (
+  id          TEXT PRIMARY KEY,               -- ULID
+  phrase      TEXT NOT NULL,
+  space       TEXT,                           -- NULL = blend both (the default);
+                                              --   'annotation' | 'clip' to pin one
+  created_ts  TEXT NOT NULL                   -- RFC 3339 UTC
+);
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -649,6 +673,13 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
             )?;
         }
         run_pragma(conn, "PRAGMA user_version = 12")?;
+    }
+    if version < 13 {
+        // v13: manual topics (DESIGN-TOPICS-COLLECTIONS.md). A saved phrase
+        // table only — a topic's images are always computed affinity, never
+        // stored membership (that is what distinguishes it from a collection).
+        conn.execute_batch(TOPICS_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 13")?;
     }
     Ok(version)
 }

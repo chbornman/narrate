@@ -22,6 +22,9 @@ pub mod journal;
 pub mod library;
 pub mod os;
 pub mod search;
+// Topics + autosuggest + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md):
+// manual saved-phrase CRUD, the single-topic ranked grid, and the one-way bake.
+pub mod topics;
 
 use std::sync::Arc;
 

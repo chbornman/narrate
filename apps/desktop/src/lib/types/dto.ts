@@ -311,6 +311,27 @@ export interface CollectionNoteDto {
   text: string;
 }
 
+/** One saved manual topic (DESIGN-TOPICS-COLLECTIONS.md) as the Topics rail
+ * tab renders it. A topic is a saved phrase, like a saved search; its images
+ * are ALWAYS computed affinity (`topicRankedImages`), never stored membership —
+ * which is precisely what distinguishes a topic from a collection. */
+export interface TopicDto {
+  id: string;
+  phrase: string;
+  /** "blend" (both spaces at the configured alpha — the default) | "annotation"
+   * (what you SAID) | "clip" (what it LOOKS like). */
+  space: string;
+  createdTs: string;
+}
+
+/** One in-scope image + its blended affinity to a selected topic phrase, for
+ * the Topics tab's ranked grid and the threshold slider (descending `score`). */
+export interface RankedImageDto {
+  hash: string;
+  /** Blended affinity (a cosine, roughly [-1, 1]); the slider thresholds on it. */
+  score: number;
+}
+
 /** image_abs_path result (D4: reveal / copy path / open-default). */
 export interface ImagePathsDto {
   /** Best online absolute path, null when every path is offline. */

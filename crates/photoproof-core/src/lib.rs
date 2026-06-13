@@ -19,6 +19,8 @@
 //!   scattered ranking/preview weights (DESIGN-TUNING-CONFIG.md, docs/tuning.html)
 //! - `topic`: semantic topic-graph backend — per-image affinity to named topic
 //!   anchors (visual/said blend) + cheap topic suggestions (DESIGN-SEMANTIC-GRAPH.md)
+//! - `topics`: manual saved-topic CRUD store — a topic is a saved phrase, like a
+//!   saved search; its images are always computed affinity (DESIGN-TOPICS-COLLECTIONS.md)
 
 pub mod canonical;
 pub mod capture;
@@ -34,6 +36,7 @@ pub mod search;
 pub mod sidecar;
 pub mod store;
 pub mod topic;
+pub mod topics;
 pub mod tuning;
 pub mod voice_wer;
 
