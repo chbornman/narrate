@@ -155,7 +155,34 @@ already enforced by the skip-met routing — full-decode only ever touches
 FLAGGED (`needs_full_decode=1`) images, which by construction had no
 acceptable substrate.
 
-## How it plugs into the ingest queue
+## ON-DEMAND, not eager (founder decision, June 12 2026)
+
+**Do NOT develop a full-res 1:1 for every RAW on ingest.** Developing every
+RAW up front burns compute and disk on photos the user may never zoom into
+(hundreds of MB per develop). The full-res develop is **lazy**: triggered
+only when the user *asks* — opening a RAW in Look / zooming past fit — then
+the result is written to the disk cache and every later view of that image
+serves from cache instantly (Lightroom's "build 1:1 previews on demand"
+default, the model we already chose under "Memory & concurrency").
+
+Consequences for the queue design below:
+- **No auto-enqueue at ingest.** `preview.rs` must STOP enqueuing
+  `full-raw-decode` rows during the preview pass — that is what created the
+  154 permanently-pending rows the founder saw. Ingest produces only the
+  cheap embedded preview/thumbnail (unchanged); the RAW stays at
+  `source='embedded'`.
+- **A view-time trigger.** When Look opens a RAW whose full-decode artifact
+  isn't cached, the shell enqueues a single `full-raw-decode` row at a NEW
+  top interactive priority (above scan/backfill) and shows a "developing…"
+  state until it lands; the develop worker (below) is otherwise identical.
+  Optionally pre-warm the next/prev image in the Look navigation set, but
+  never the whole library.
+- **Cache hit = no work.** A cached full-decode artifact serves directly;
+  the trigger no-ops. The pass row is the unit of "develop this one now."
+- The honesty bug (154 "stuck") dissolves: with no eager enqueue there is no
+  pending count to misread.
+
+## How the on-demand worker plugs in
 
 1. **Teach a worker the pass.** Do NOT widen `claim_next` (`ingest.rs:228`)
    — that drains on the M1 CPU wave pool and full-decode is memory-hungry
@@ -179,12 +206,14 @@ acceptable substrate.
    via `write_artifacts`. No new table, no new path scheme. `source` flips
    `embedded`→`full-decode`; the UI route at `mod.rs:2045` already maps it.
 
-4. **Priority/backfill:** the rows are already enqueued at
-   `PRIORITY_BACKFILL` (P2), promoted to `PRIORITY_SCAN` (P1) when the image
-   carries strokes (`run_preview_pass_raw`, `mod.rs:1841-1855`) and the
-   no-preview case enqueues at P1 (`mod.rs:1781`). No change needed — the
-   worker just honors the existing `(priority, enqueued_at)` order via
-   `claim_next_of`.
+4. **Priority — interactive, not backfill (revised for on-demand).** The
+   view-time trigger enqueues at a NEW top priority above `PRIORITY_SCAN`
+   (the user is staring at a spinner — this is the most urgent work in the
+   queue). REMOVE the eager enqueue in the preview pass
+   (`run_preview_pass_raw`, `mod.rs:1841-1855` / `:1781`) so no rows are
+   created at ingest. The stroke-promotion case becomes moot (a stroked RAW
+   develops when viewed like any other). The worker still honors
+   `(priority, enqueued_at)` via `claim_next_of`.
 
 5. **Cancellation / politeness:** wire `opts.cancel` to `capture_live`
    exactly like the embedding drain (`embedding.rs:124-148`) — an armed mic

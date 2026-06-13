@@ -74,7 +74,11 @@ work lives here.
   quality = typical neutral decode, "just need real resolution"; (3)
   memory = Lightroom's model (develop once → cache full-res artifact to
   disk → serve zoom from cache; one develop in flight, tiled-demosaic
-  fallback on low RAM). READY TO BUILD. ORIGINAL DIAGNOSIS:
+  fallback on low RAM). (4) ON-DEMAND not eager — do NOT develop every
+  RAW on ingest; develop lazily when the user opens/zooms an image in
+  Look (the "ask"), cache to disk, serve from cache after. Removes the
+  eager enqueue that created the 154 stuck rows. READY TO BUILD.
+  ORIGINAL DIAGNOSIS:
   "154 RAWs left to decode" reads as stuck — it's an UNBUILT pass,
   not a stall: (founder: "154 raws left to decode that seem stuck").
   DIAGNOSED: `ingest_passes` has 154 `full-raw-decode` rows in state
