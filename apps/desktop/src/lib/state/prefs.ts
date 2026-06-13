@@ -8,6 +8,7 @@
  * push-persistent — D5/DECISIONS 3).
  */
 import { clampSize } from "../primitives/panel";
+import { defaultToggles, type SignalToggles } from "../logic/ranking";
 import { DEFAULT_SORT, DEFAULT_THUMB_STEP, type SortMode } from "../logic/sort";
 import {
   DEFAULT_SURROUND,
@@ -208,6 +209,35 @@ export function loadSurround(): SurroundLevel {
 
 export function saveSurround(level: SurroundLevel) {
   safeSet("pp.surround", level);
+}
+
+// ---- ranking signals (search-as-scope Phase 3) ------------------------------
+
+/** The ⚙ "Ranking signals" on/off state, persisted across the session like
+ * every other UI pref. Default = all signals checked (the B75 defaults); a
+ * malformed or absent value falls back to that. The keys mirror the
+ * FusionWeights fields so the mapping in logic/ranking.ts can read them. */
+export function loadSignalToggles(): SignalToggles {
+  const fallback = defaultToggles();
+  const v = safeGet("pp.signalToggles");
+  if (v === null) return fallback;
+  try {
+    const parsed = JSON.parse(v) as Partial<Record<keyof SignalToggles, unknown>>;
+    // Read each key defensively: an old/partial blob keeps the on default for
+    // any missing or non-boolean signal — a signal is never silently dropped.
+    return {
+      s1: typeof parsed.s1 === "boolean" ? parsed.s1 : fallback.s1,
+      s2: typeof parsed.s2 === "boolean" ? parsed.s2 : fallback.s2,
+      s3_each: typeof parsed.s3_each === "boolean" ? parsed.s3_each : fallback.s3_each,
+      s4: typeof parsed.s4 === "boolean" ? parsed.s4 : fallback.s4,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export function saveSignalToggles(t: SignalToggles) {
+  safeSet("pp.signalToggles", JSON.stringify(t));
 }
 
 // ---- first-run welcome card (BACKLOG: how your data is stored) ---------------

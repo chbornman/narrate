@@ -10,8 +10,8 @@ use photoproof_connectors::OrtEmbedder;
 use photoproof_connectors::vector_store::VectorStore;
 use photoproof_core::search::{
     self as core_search, CollectionRef, Comparison, DateField, DateRange, Filter as CoreFilter,
-    PathMatch, RelativeRange as CoreRelativeRange, SearchError, Searcher, Season, StringMatch,
-    VolumeFilter,
+    FusionWeights, HybridOptions, PathMatch, RelativeRange as CoreRelativeRange, SearchError,
+    Searcher, Season, StringMatch, VolumeFilter,
 };
 use photoproof_core::{Source, UtcMillis};
 
@@ -73,11 +73,16 @@ pub fn run_search(
     raw: String,
     filters: Vec<dto::Filter>,
     mode: SearchMode,
+    weights: Option<dto::FusionWeightsWire>,
+    include_debug: bool,
 ) -> CmdResult<dto::SearchResults> {
     // The lexical lane forces the keyword rig REGARDLESS of embedder warmth
     // — this is the <100 ms guardrail: a warm machine must not pay vector
     // latency on the as-you-type path (RETRIEVAL §13.1). Identical to the
     // degraded branch below; routed first so warmth can never override it.
+    // The popover's `weights` payload is SEMANTIC-LANE ONLY by construction —
+    // it cannot reach this lexical early return, so tuning can never tax the
+    // keystroke budget.
     if mode == SearchMode::Lexical {
         return run_search_keyword(&app.searcher, raw, filters);
     }
@@ -108,13 +113,35 @@ pub fn run_search(
         clip: clip.as_deref(),
         vectors: Some(app.vectors.as_ref() as &dyn VectorStore),
     };
-    let results = app.searcher.hybrid_search(
-        &raw,
-        &core_filters,
-        &rig,
-        &core_search::HybridOptions::default(),
-    )?;
+    // Build the per-search options from the (optional) popover payload: no
+    // payload preserves today's `HybridOptions::default()` exactly; a payload
+    // overrides the fusion weights and lights up per-signal debug while the
+    // ⚙ popover is open (so the weights become VISIBLE, not just tuned).
+    let opts = hybrid_options(weights, include_debug);
+    let results = app
+        .searcher
+        .hybrid_search(&raw, &core_filters, &rig, &opts)?;
     Ok(results_to_dto(results, filters))
+}
+
+/// Build `HybridOptions` from the optional popover payload (Phase 3). PURE and
+/// total so the on/off → `FusionWeights` mapping is unit-testable: `None`
+/// weights yield `FusionWeights::default()` (today's behavior, byte-identical
+/// to `HybridOptions::default()` when `include_debug` is also false); a present
+/// payload maps field-for-field, where an unchecked signal arrives as `0.0`
+/// (excluded from the fusion) and a checked one as its B75 default. `beta`
+/// stays the promoted default — Phase 3 ships no tilt control (Phase 4).
+fn hybrid_options(weights: Option<dto::FusionWeightsWire>, include_debug: bool) -> HybridOptions {
+    HybridOptions {
+        include_debug,
+        weights: weights.map_or_else(FusionWeights::default, |w| FusionWeights {
+            s1: w.s1,
+            s2: w.s2,
+            s3_each: w.s3_each,
+            s4: w.s4,
+        }),
+        ..HybridOptions::default()
+    }
 }
 
 /// The M1 keyword-only path (the shipping degraded posture): the §5 hybrid
@@ -448,6 +475,52 @@ mod tests {
         );
         assert!(SearchMode::from_wire(Some("hybrid")).is_err());
         assert!(SearchMode::from_wire(Some("")).is_err());
+    }
+
+    /// The Phase 3 weights payload → `FusionWeights` mapping (the ⚙ popover's
+    /// on/off checkboxes). No payload preserves today's behavior exactly
+    /// (`FusionWeights::default()`, debug off); a payload maps field-for-field,
+    /// where an unchecked signal is `0.0` (excluded from the fusion). `beta`
+    /// stays the promoted default in both cases — Phase 3 ships no tilt control.
+    #[test]
+    fn weights_payload_builds_fusion_weights() {
+        // No payload: byte-identical to HybridOptions::default().
+        let none = hybrid_options(None, false);
+        assert_eq!(none.weights, FusionWeights::default());
+        assert!(!none.include_debug);
+        assert_eq!(none.beta, core_search::SIM_BLEND_BETA);
+
+        // All checked at the B75 defaults: same weights, but the popover is
+        // open so debug is lit.
+        let all_on = hybrid_options(
+            Some(dto::FusionWeightsWire {
+                s1: 1.0,
+                s2: 1.0,
+                s3_each: 0.5,
+                s4: 1.0,
+            }),
+            true,
+        );
+        assert_eq!(all_on.weights, FusionWeights::default());
+        assert!(all_on.include_debug);
+
+        // S4 unchecked (visual match excluded): its weight is 0.0, the rest
+        // hold their defaults — the fusion drops that signal entirely.
+        let s4_off = hybrid_options(
+            Some(dto::FusionWeightsWire {
+                s1: 1.0,
+                s2: 1.0,
+                s3_each: 0.5,
+                s4: 0.0,
+            }),
+            true,
+        );
+        assert_eq!(s4_off.weights.s4, 0.0);
+        assert_eq!(s4_off.weights.s1, 1.0);
+        assert_eq!(s4_off.weights.s2, 1.0);
+        assert_eq!(s4_off.weights.s3_each, 0.5);
+        // beta is never touched by the weights payload (no Phase 3 tilt control).
+        assert_eq!(s4_off.beta, core_search::SIM_BLEND_BETA);
     }
 
     /// Filter DTO → core AST translation: untranslatable input errors,

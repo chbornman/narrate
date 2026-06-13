@@ -3,7 +3,7 @@
 
 use super::S;
 use crate::error::CmdResult;
-use crate::search_types::{Filter, SearchResults};
+use crate::search_types::{Filter, FusionWeightsWire, SearchResults};
 use crate::search_wire::SearchMode;
 
 /// M1 search over the journal (RETRIEVAL §4 engine, packet P3.1).
@@ -17,17 +17,34 @@ use crate::search_wire::SearchMode;
 /// FORCES the M1 keyword rig even on a warm machine — the as-you-type path
 /// passes it to stay under the <100 ms budget (RETRIEVAL §13.1); `semantic`
 /// runs the full hybrid rig (the commit-on-Enter lane).
+///
+/// `weights` + `include_debug` (Phase 3 — the ⚙ "Ranking signals" popover):
+/// both optional and SEMANTIC-LANE ONLY. `weights` overrides the fusion's
+/// per-signal weights (an unchecked signal arrives as `0.0`, excluded);
+/// omitted, the rig fuses with the B75 defaults exactly as before.
+/// `include_debug` lights up `ImageResult::debug` so the popover can SHOW each
+/// result's per-signal contribution while open. Neither reaches the lexical
+/// keystroke lane, so the <100 ms budget is untouched.
 #[tauri::command]
 pub fn search(
     app: S<'_>,
     query: String,
     filters: Vec<Filter>,
     mode: Option<String>,
+    weights: Option<FusionWeightsWire>,
+    include_debug: Option<bool>,
 ) -> CmdResult<SearchResults> {
     app.touch()?;
     app.searcher.interrupt();
     let mode = SearchMode::from_wire(mode.as_deref())?;
-    let results = crate::search_wire::run_search(&app, query, filters, mode)?;
+    let results = crate::search_wire::run_search(
+        &app,
+        query,
+        filters,
+        mode,
+        weights,
+        include_debug.unwrap_or(false),
+    )?;
     *app.last_search.lock().expect("last_search mutex") = Some(results.query.clone());
     Ok(results)
 }

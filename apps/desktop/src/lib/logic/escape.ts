@@ -51,6 +51,10 @@ export interface EscapeContext {
   cheatsheetOpen: boolean;
   indicatorPopoverOpen: boolean;
   debugPanelOpen: boolean;
+  /** The ⚙ "Ranking signals" popover (M3 search-as-scope Phase 3): a floating
+   * tuning layer over the bar — Esc closes it before it reaches the query
+   * scope below, the way every other transient popover peels first. */
+  rankingPopoverOpen: boolean;
   inspectorOpen: boolean;
   /** A committed query scopes the grid (M3): first Esc clears it. */
   queryScopeActive: boolean;
@@ -72,6 +76,7 @@ export type EscapeAction =
   | "close-cheatsheet"
   | "close-indicator-popover"
   | "close-debug-panel"
+  | "close-ranking-popover"
   | "close-inspector"
   | "clear-query-scope"
   | "blur-search-bar"
@@ -90,6 +95,7 @@ export function escapeAction(ctx: EscapeContext): EscapeAction {
   if (ctx.cheatsheetOpen) return "close-cheatsheet"; // 8
   if (ctx.indicatorPopoverOpen) return "close-indicator-popover"; // 9
   if (ctx.debugPanelOpen) return "close-debug-panel"; // 10
+  if (ctx.rankingPopoverOpen) return "close-ranking-popover"; // 10b
   if (ctx.queryScopeActive) return "clear-query-scope"; // 11
   if (ctx.searchBarFocused) return "blur-search-bar"; // 11b
   if (ctx.surface === "look") return "leave-look"; // 12 — inspector stays

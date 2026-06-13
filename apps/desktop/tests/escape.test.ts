@@ -37,6 +37,7 @@ const none: EscapeContext = {
   cheatsheetOpen: false,
   indicatorPopoverOpen: false,
   debugPanelOpen: false,
+  rankingPopoverOpen: false,
   inspectorOpen: false,
   queryScopeActive: false,
   searchBarFocused: false,
@@ -56,6 +57,7 @@ const everything: EscapeContext = {
   cheatsheetOpen: true,
   indicatorPopoverOpen: true,
   debugPanelOpen: true,
+  rankingPopoverOpen: true,
   inspectorOpen: true,
   queryScopeActive: true,
   searchBarFocused: true,
@@ -78,6 +80,7 @@ const LAYERS: [keyof EscapeContext, ReturnType<typeof escapeAction>][] = [
   ["cheatsheetOpen", "close-cheatsheet"],
   ["indicatorPopoverOpen", "close-indicator-popover"],
   ["debugPanelOpen", "close-debug-panel"],
+  ["rankingPopoverOpen", "close-ranking-popover"],
   ["queryScopeActive", "clear-query-scope"],
   ["searchBarFocused", "blur-search-bar"],
   ["surface", "leave-look"],
@@ -146,6 +149,18 @@ describe("contract spot checks", () => {
     expect(
       escapeAction({ ...none, contextMenuOpen: true, inspectorOpen: true }),
     ).toBe("close-context-menu");
+  });
+
+  it("the ⚙ ranking popover (Phase 3) peels before the query scope it tunes", () => {
+    // The popover floats over the bar: Esc closes it before clearing the
+    // query scope underneath, the way every transient popover peels first.
+    expect(
+      escapeAction({ ...none, rankingPopoverOpen: true, queryScopeActive: true }),
+    ).toBe("close-ranking-popover");
+    // It is still below the debug panel (its declared layer order).
+    expect(
+      escapeAction({ ...none, rankingPopoverOpen: true, debugPanelOpen: true }),
+    ).toBe("close-debug-panel");
   });
 
   it("a query scope clears before Look; Look→Grid KEEPS the inspector (founder, June 2026)", () => {

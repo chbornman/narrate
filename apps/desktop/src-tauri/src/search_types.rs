@@ -97,6 +97,24 @@ pub struct SessionHit {
     pub quote: Quote,
 }
 
+/// Per-signal fusion weights from the ⚙ "Ranking signals" popover
+/// (search-as-scope Phase 3 — making the B75 weights user-visible).
+///
+/// An optional payload on the `search` command: omitted entirely (the common
+/// case) preserves today's behavior exactly. When present, each field is the
+/// weight for one signal (S1/S2/S3-each/S4); the on/off checkboxes ship as
+/// either the B75 default (checked) or `0.0` (unchecked, excluded from the
+/// fusion). Continuous values are accepted on the wire so the eval-gated
+/// sliders (Phase 4) need no contract change, but only the SEMANTIC lane reads
+/// them — the lexical keystroke path never carries weights.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct FusionWeightsWire {
+    pub s1: f64,
+    pub s2: f64,
+    pub s3_each: f64,
+    pub s4: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DebugScores {
     pub per_signal: Vec<(String, Option<u32>, f32)>,

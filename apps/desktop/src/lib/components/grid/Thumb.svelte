@@ -17,7 +17,9 @@
   import Unplug from "@lucide/svelte/icons/unplug";
   import { srcHash, thumbUrl } from "../../ipc/urls";
   import { infoLine } from "../../logic/cellinfo";
+  import { signalHint } from "../../logic/ranking";
   import type { CellInfoLevel } from "../../state/grid.svelte";
+  import { ui } from "../../state/app.svelte";
   import StackChevron from "./StackChevron.svelte";
 
   let {
@@ -68,6 +70,17 @@
   } = $props();
 
   const info = $derived(infoLine(cellInfo, { fileName, rating, hasJournal }));
+
+  // Per-signal provenance hint (search-as-scope Phase 3, "show, don't just
+  // tune"): ONLY while the ⚙ "Ranking signals" popover is open, name which
+  // fusion signals voted for THIS image (their short codes, e.g. "S1 S2 S4").
+  // Quiet and tuning-scoped: the resultDebug map is empty unless the popover
+  // asked for debug, so this is "" (and renders nothing) in the common case.
+  const signals = $derived.by(() => {
+    if (!ui.rankingPopoverOpen) return "";
+    const dbg = ui.resultDebug.get(hash);
+    return dbg === undefined ? "" : signalHint(dbg.per_signal);
+  });
 
   // Per-cell shimmer phase: a stable negative animation-delay (0..1 of the
   // cycle) derived from the hash desyncs neighbours so a wall of placeholders
@@ -224,6 +237,9 @@
         onerror={handleError}
       />
     {/if}
+    <!-- Signal-provenance hint (Phase 3): only while the ⚙ popover tunes, a
+         quiet per-cell breakdown of which signals contributed to this match. -->
+    {#if signals !== ""}<span class="signal-hint">{signals}</span>{/if}
     <!-- badges anchor to the IMAGE box, top/bottom edges of the thumbnail -->
     {#if hasJournal}<span class="journal-dot"></span>{/if}
     {#if offline}<span class="offline-badge"><Unplug size={11} /></span>{/if}
@@ -344,6 +360,21 @@
     top: 3px;
     color: var(--text-dim);
     display: flex; /* size the badge box to the svg, no baseline gap */
+    pointer-events: none;
+  }
+  /* Phase 3 signal-provenance hint: a quiet bottom-left pill, only while the
+     ⚙ popover tunes — never a standing badge (UI §3.5 keeps cells quiet). */
+  .signal-hint {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+    background: var(--bg-overlay);
+    color: var(--text-faint);
     pointer-events: none;
   }
   /* T cell-info strip (logic/cellinfo.ts) — IN-FLOW at the TOP of the cell,

@@ -60,6 +60,8 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "search":
         // Fused-order result hashes; the test seeds them via failSearch-free
         // default of three results r1..r3 (overridable per-test isn't needed).
+        // When the ⚙ popover asks for it (includeDebug), echo a DebugScores so
+        // the Phase 3 per-cell provenance path has data to surface.
         return {
           query: { raw: args?.query, filters: args?.filters ?? [], dropped: [], fallback: false },
           images: ["r1", "r2", "r3"].map((h) => ({
@@ -68,7 +70,10 @@ vi.mock("@tauri-apps/api/core", () => ({
             score: 1,
             provenance: { type: "filter_only" },
             last_annotated_ts: null,
-            debug: null,
+            debug:
+              args?.includeDebug === true
+                ? { per_signal: [["S1AnnotationChunk", 1, 0.9]], fused: 1 }
+                : null,
           })),
           session_hits: [],
         };
@@ -444,5 +449,55 @@ describe("mid-scan grid re-list (founder, SMB, June 2026)", () => {
     await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
     expect(calls()).toBe(before + 3); // already idle: indicator only
     nowSpy.mockRestore();
+  });
+});
+
+describe("ranking-signal toggles plumb to the semantic search (Phase 3)", () => {
+  const searchArgs = () => lastCall("search")?.args;
+
+  it("all-on omits the weights payload (today's default fusion preserved)", async () => {
+    ui.query = "fog";
+    await ui.runQueryScope("semantic");
+    // Default all-on: no weights key, no includeDebug (popover closed).
+    expect(searchArgs()).not.toHaveProperty("weights");
+    expect(searchArgs()).not.toHaveProperty("includeDebug");
+  });
+
+  it("an unchecked signal sends weight 0 in the payload; semantic lane only", async () => {
+    ui.query = "fog";
+    // Turn S4 off (no live scope yet, so this does not re-run).
+    await ui.setSignal("s4", false);
+    await ui.runQueryScope("semantic");
+    expect(searchArgs()?.weights).toEqual({ s1: 1.0, s2: 1.0, s3_each: 0.5, s4: 0.0 });
+    expect(searchArgs()?.mode).toBe("semantic");
+  });
+
+  it("the LEXICAL lane never carries weights (the <100ms budget is untouched)", async () => {
+    ui.query = "fog";
+    await ui.setSignal("s4", false); // a non-default toggle is set
+    await ui.runQueryScope("lexical");
+    expect(searchArgs()?.mode).toBe("lexical");
+    expect(searchArgs()).not.toHaveProperty("weights");
+    expect(searchArgs()).not.toHaveProperty("includeDebug");
+  });
+
+  it("opening the ⚙ popover lights include_debug and surfaces per-signal debug", async () => {
+    ui.query = "fog";
+    await ui.runQueryScope("semantic"); // commit a semantic scope first
+    // Opening the popover re-runs the live semantic scope WITH debug.
+    await ui.setRankingPopover(true);
+    expect(searchArgs()?.includeDebug).toBe(true);
+    expect(ui.resultDebug.get("r1")?.per_signal?.[0]?.[0]).toBe("S1AnnotationChunk");
+    // Closing it drops debug again (only paid while tuning).
+    await ui.setRankingPopover(false);
+    expect(ui.resultDebug.size).toBe(0);
+  });
+
+  it("toggling a signal does NOT re-run when no semantic scope is live", async () => {
+    // A fresh ui in a plain folder scope: flipping a toggle persists but runs
+    // no search (semantic-lane-only; the lexical path stays untouched).
+    ipcLog.calls.length = 0;
+    await ui.setSignal("s2", false);
+    expect(ipcLog.calls.some((c) => c.cmd === "search")).toBe(false);
   });
 });

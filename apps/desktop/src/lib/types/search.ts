@@ -77,6 +77,18 @@ export interface DebugScores {
   fused: number;
 }
 
+/** Per-signal fusion weights (search-as-scope Phase 3 — the ⚙ "Ranking
+ * signals" popover). The optional `weights` payload on the `search` command;
+ * TS twin of `src-tauri/src/search_types.rs::FusionWeightsWire`. Each field is
+ * the weight for one signal: an unchecked checkbox sends 0.0 (excluded from the
+ * fusion), a checked one sends its B75 default. */
+export interface FusionWeights {
+  s1: number;
+  s2: number;
+  s3_each: number;
+  s4: number;
+}
+
 // ---------------------------------------------------------------------------
 // Filters — RETRIEVAL §5.1 JSON shapes; M1 chips construct these directly.
 // ---------------------------------------------------------------------------

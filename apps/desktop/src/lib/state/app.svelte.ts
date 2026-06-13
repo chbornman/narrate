@@ -34,6 +34,13 @@ import {
 } from "../logic/michold";
 import { scopeLabel, scopeTargets } from "../logic/scope";
 import { nextLane, type SearchLane } from "../logic/searchmode";
+import {
+  defaultToggles,
+  isDefault,
+  togglesToWeights,
+  type SignalKey,
+  type SignalToggles,
+} from "../logic/ranking";
 import { afterCommit } from "../logic/advance";
 import {
   collectionRows,
@@ -168,6 +175,27 @@ export class Ui {
    * disagree with the lane that actually fed the grid. */
   searchLane = $state<SearchLane>("none");
 
+  // -- ranking signals (search-as-scope Phase 3: B75 weights made visible) ----
+  // The ⚙ "Ranking signals" popover's on/off state — one boolean per fusion
+  // signal (S1/S2/S3/S4). Checked = the signal's B75 default weight; unchecked
+  // = excluded from the fusion (weight 0). SEMANTIC-LANE ONLY by construction:
+  // these toggles only ride a committed semantic search, never the lexical
+  // keystroke path, so they can never tax the <100 ms budget. Persisted across
+  // the session like every other UI pref (prefs.signalToggles). Default all-on
+  // (the quiet B75 default) means the semantic search OMITS the weights payload
+  // entirely, so the backend takes its own default fusion (today's behavior).
+  signalToggles = $state<SignalToggles>(defaultToggles());
+  /** Whether the ⚙ popover is open. Default-closed (the quiet discipline).
+   * While OPEN the semantic search sets `include_debug` so each result's
+   * per-signal contribution can be SHOWN, making the weights visible while
+   * tuning; closing it drops debug again (it is only paid while tuning). */
+  rankingPopoverOpen = $state(false);
+  /** Per-result signal provenance from the LAST semantic search, keyed by
+   * image hash (only populated while the popover was open and asked for debug).
+   * The grid cells read it for the quiet per-cell contribution hint. Cleared
+   * whenever the popover is closed or a non-debug search re-scopes the grid. */
+  resultDebug = $state<Map<string, import("../types/search").DebugScores>>(new Map());
+
   // -- drag-folder drop (featureset §6: register-root confirmation) -----------
   /** Paths dropped onto the window awaiting confirmation; null = closed. */
   dropPaths = $state<string[] | null>(null);
@@ -195,6 +223,7 @@ export class Ui {
     // leaves the design size; the next Cmd+=/− re-applies).
     if (this.shell.uiZoom !== 1) void this.applyUiZoom();
     this.autoAdvance = prefs.loadAutoAdvance();
+    this.signalToggles = prefs.loadSignalToggles();
     try {
       this.applySettings(await ipc.settingsGet());
     } catch {
@@ -675,9 +704,34 @@ export class Ui {
     // query keeps it across further keystrokes — re-scoping the same hashes
     // must not yank a chosen ordering out from under them.
     if (!wasQuery || mode === "semantic") this.grid.sort = "relevance";
+    // Phase 3 tuning rides the SEMANTIC lane only. Non-default toggles send an
+    // explicit `weights` payload (an unchecked signal -> 0.0, excluded from the
+    // fusion); all-on omits it so the backend takes its own default fusion
+    // (today's exact behavior). `includeDebug` is set only while the ⚙ popover
+    // is open, so each result's per-signal contribution can be SHOWN. The
+    // lexical lane carries neither — the toggles can never tax the keystroke
+    // budget.
+    const tuning =
+      mode === "semantic"
+        ? {
+            weights: isDefault(this.signalToggles)
+              ? undefined
+              : togglesToWeights(this.signalToggles),
+            includeDebug: this.rankingPopoverOpen,
+          }
+        : undefined;
     const load = ++this.gridLoad;
-    const results = await ipc.search(this.query, this.chips, mode);
+    const results = await ipc.search(this.query, this.chips, mode, tuning);
     if (load !== this.gridLoad) return; // a newer scope owns the grid now
+    // Retain per-result signal provenance for the cells' contribution hint —
+    // only while the popover asked for it; otherwise keep the map empty so the
+    // hints stay quiet (and a lexical re-list never leaves stale debug behind).
+    this.resultDebug =
+      mode === "semantic" && this.rankingPopoverOpen
+        ? new Map(
+            results.images.flatMap((i) => (i.debug !== null ? [[i.image_hash, i.debug]] : [])),
+          )
+        : new Map();
     const hashes = results.images.map((i) => i.image_hash);
     // Enrich result hashes → GridItems (in fused order; list_images
     // preserves the order given). The grid's relevance sort keeps it.
@@ -730,6 +784,49 @@ export class Ui {
   async removeChip(index: number) {
     this.chips = this.chips.filter((_, i) => i !== index);
     await this.runQueryScope("lexical");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ranking signals (search-as-scope Phase 3): the ⚙ popover's on/off toggles
+  // ---------------------------------------------------------------------------
+
+  /** Open/close the ⚙ "Ranking signals" popover. Opening it asks the NEXT
+   * semantic search for per-signal debug (so the weights become VISIBLE while
+   * tuning); closing it drops that debug — it is only paid while tuning. When
+   * a semantic scope is already active, a re-commit applies the change so the
+   * provenance hints appear (or vanish) immediately. */
+  async setRankingPopover(open: boolean) {
+    if (this.rankingPopoverOpen === open) return;
+    this.rankingPopoverOpen = open;
+    if (!open) this.resultDebug = new Map(); // stop showing debug once closed
+    // Re-run only when a committed semantic scope is live: opening/closing the
+    // popover must never touch the lexical keystroke path or kick off a query
+    // where there is no scope (the quiet, queryless default stays quiet).
+    if (this.gridScope.kind === "query" && this.searchLane === "semantic")
+      await this.runQueryScope("semantic", false);
+  }
+
+  /** Flip one signal's checkbox and persist. A change re-runs the live
+   * semantic scope so the new weights (and the excluded-signal effect) land
+   * immediately — but ONLY for a committed semantic scope: toggles are
+   * semantic-lane only and must never re-run the lexical as-you-type path. */
+  async setSignal(key: SignalKey, on: boolean) {
+    if (this.signalToggles[key] === on) return;
+    this.signalToggles = { ...this.signalToggles, [key]: on };
+    prefs.saveSignalToggles(this.signalToggles);
+    if (this.gridScope.kind === "query" && this.searchLane === "semantic")
+      await this.runQueryScope("semantic", false);
+  }
+
+  /** "Reset to defaults": every signal back on (the B75 defaults). Re-runs a
+   * live semantic scope so the grid returns to the default fusion order. */
+  async resetSignals() {
+    const def = defaultToggles();
+    if (isDefault(this.signalToggles)) return;
+    this.signalToggles = def;
+    prefs.saveSignalToggles(def);
+    if (this.gridScope.kind === "query" && this.searchLane === "semantic")
+      await this.runQueryScope("semantic", false);
   }
 
   // ---------------------------------------------------------------------------
@@ -1078,6 +1175,7 @@ export class Ui {
       // expansion, one peel — hover-open and pin-open close on the same Esc.
       indicatorPopoverOpen: this.shell.popoverOpen || this.shell.stationPinned,
       debugPanelOpen: this.shell.debugOpen,
+      rankingPopoverOpen: this.rankingPopoverOpen,
       inspectorOpen: this.inspector.open !== false,
       queryScopeActive: this.gridScope.kind === "query",
       searchBarFocused: this.barFocused,
@@ -1122,6 +1220,11 @@ export class Ui {
         break;
       case "close-debug-panel":
         this.shell.debugOpen = false;
+        break;
+      case "close-ranking-popover":
+        // Esc peels the ⚙ popover like every other transient — through the
+        // same funnel as its dismiss, so debug + state clean up together.
+        await this.setRankingPopover(false);
         break;
       case "close-inspector":
         this.inspector.close();

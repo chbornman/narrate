@@ -83,6 +83,12 @@ pub const RRF_K: f64 = 60.0;
 /// not to dominate. It is a DEFAULT, not a finding — it lives beside the
 /// data-shaped `FusionWeights` because the §12 golden-set eval owns retuning
 /// it, never a magic constant in the loop.
+///
+/// Now the DEFAULT for the [`HybridOptions::beta`] field rather than a value
+/// read directly in the fusion loop: promoting it to a per-search knob sets up
+/// the eval-gated similarity-tilt control (search-as-scope Phase 4) without
+/// changing today's behavior — every caller that takes
+/// `HybridOptions::default()` still fuses with beta = 0.5.
 pub const SIM_BLEND_BETA: f64 = 0.5;
 
 /// §5.2 candidate depth for the vector signals.
@@ -141,6 +147,11 @@ pub struct HybridOptions {
     /// Populates [`ImageResult::debug`] (dev builds only).
     pub include_debug: bool,
     pub weights: FusionWeights,
+    /// §5.3 similarity-tilt strength: the multiplier on a dense signal's
+    /// centered cosine spans [1 - beta, 1 + beta] around its RRF baseline.
+    /// Defaults to [`SIM_BLEND_BETA`]; a per-search field (not a const) so the
+    /// eval-gated tilt control can override it later without touching the loop.
+    pub beta: f64,
     /// §5.1: the parse must complete in < 1.5 s; a slower one is discarded
     /// in favor of the fallback even though it answered.
     pub parse_budget: Duration,
@@ -152,6 +163,7 @@ impl Default for HybridOptions {
             now: None,
             include_debug: false,
             weights: FusionWeights::default(),
+            beta: SIM_BLEND_BETA,
             parse_budget: PARSE_BUDGET,
         }
     }
@@ -794,7 +806,7 @@ where
                 // cosine lands above baseline (can BEAT a same-rank sparse
                 // hit), a near-miss below it. See `SIM_BLEND_BETA`.
                 let centered = 2.0 * norm_cosine(*score) - 1.0;
-                let blend = 1.0 + SIM_BLEND_BETA * centered;
+                let blend = 1.0 + opts.beta * centered;
                 rrf * blend
             } else {
                 rrf

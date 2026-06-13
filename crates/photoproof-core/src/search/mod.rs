@@ -42,7 +42,9 @@ use thiserror::Error;
 use crate::id::{ContentHash, EventId, SessionId, UtcMillis};
 use crate::store::schema;
 
-pub use hybrid::{FusionWeights, HybridOptions, HybridRig, NoModel, RRF_K, keyword_only_rig};
+pub use hybrid::{
+    FusionWeights, HybridOptions, HybridRig, NoModel, RRF_K, SIM_BLEND_BETA, keyword_only_rig,
+};
 pub use query::fts_match_query;
 pub use snippet::render_with_sentinels;
 
