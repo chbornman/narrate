@@ -203,7 +203,7 @@
       onclick={() => void ui.setFuzzyMode(!ui.fuzzyMode)}
       aria-label="Fuzzy search"
       aria-pressed={ui.fuzzyMode}
-      title="fuzzy: typo-tolerant camera/lens/filename matching"
+      {@attach tooltip({ text: "Fuzzy search: typo-tolerant camera, lens and filename matching" })}
     >
       ~
     </button>
@@ -217,7 +217,7 @@
       onclick={() => void ui.openGraph()}
       aria-label="Visualizer"
       aria-pressed={ui.graphOpen}
-      title="Visualizer: a force-directed map of this scope"
+      {@attach tooltip({ actionId: "toggle-graph" })}
     >
       <Share2 size={14} />
     </button>
@@ -231,7 +231,7 @@
       onclick={() => void ui.setRankingPopover(!ui.rankingPopoverOpen)}
       aria-label="Ranking signals"
       aria-pressed={ui.rankingPopoverOpen}
-      title="Ranking signals"
+      {@attach tooltip({ text: "Ranking signals: see and tune how results are scored" })}
     >
       <Settings2 size={14} />
     </button>
@@ -246,7 +246,7 @@
       onclick={() => ui.toggleHeat()}
       aria-label="Attention heat"
       aria-pressed={ui.heatOn}
-      title="attention heat: warm glow scaled by engagement"
+      {@attach tooltip({ actionId: "toggle-heat" })}
     >
       <Flame size={14} />
     </button>
@@ -260,9 +260,7 @@
         onclick={() => ui.toggleAllTime()}
         aria-label="All-time attention"
         aria-pressed={ui.heatAllTime}
-        title={ui.heatAllTime
-          ? "all-time (what mattered most ever)"
-          : "recent (what you are working on now)"}
+        {@attach tooltip({ actionId: "toggle-attention-all-time" })}
       >
         {ui.heatAllTime ? "all-time" : "recent"}
       </button>
@@ -272,7 +270,7 @@
       bind:this={sortBtn}
       class="quiet"
       onclick={openSort}
-      {@attach tooltip({ actionId: "open-sort-menu", verb: "Sort" })}
+      {@attach tooltip({ actionId: "open-sort-menu" })}
     >
       sort <ChevronDown size={12} />
     </button>
@@ -285,7 +283,7 @@
       value={ui.grid.thumbStep}
       aria-label="Thumbnail size"
       oninput={(e) => ui.grid.setThumbStep(Number(e.currentTarget.value))}
-      {@attach tooltip({ actionId: "thumb-size", verb: "Thumbnail size" })}
+      {@attach tooltip({ actionId: "thumb-size" })}
     />
   </div>
 

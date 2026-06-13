@@ -28,6 +28,7 @@
     visibleRows,
   } from "../../logic/journal";
   import EmptyState from "../../primitives/EmptyState.svelte";
+  import { tooltip } from "../../primitives/tooltip";
   import JournalEntry from "./JournalEntry.svelte";
 
   const groups = $derived(sessionGroups(ui.inspector.entries));
@@ -82,8 +83,12 @@
       <span class="compose-rate" role="group" aria-label="Rate this image">
         {#each [0, 1, 2, 3, 4, 5] as v (v)}
           <button
-            title={v === 0 ? "Clear rating" : `Rate ${v}`}
             onclick={() => void ui.composeRating(v)}
+            {@attach tooltip({
+              actionId: "rate",
+              verb: v === 0 ? "Clear rating" : `Rate ${v}`,
+              arg: v,
+            })}
           >
             {v}
           </button>

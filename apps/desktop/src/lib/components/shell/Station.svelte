@@ -266,8 +266,7 @@
         class="seat"
         onclick={() => seatClick(seat.actionId, seat.arg)}
         aria-label={seat.title}
-        title={seat.title}
-        {@attach tooltip({ actionId: seat.actionId, arg: seat.arg })}
+        {@attach tooltip({ actionId: seat.actionId, text: seat.title, arg: seat.arg })}
       >
         <span
           class="segment glyph"
@@ -298,10 +297,9 @@
       <button
         class="transient"
         class:warn={t.warn}
-        title={t.title}
         aria-label={t.title}
         onclick={() => seatClick(t.actionId)}
-        {@attach tooltip({ actionId: t.actionId })}
+        {@attach tooltip({ actionId: t.actionId, text: t.title })}
       >
         {#if t.fraction !== undefined}
           <!-- progress arc: a conic ring whose swept angle is the fraction,

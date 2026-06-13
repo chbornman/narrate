@@ -18,6 +18,7 @@
   import { ui } from "../../state/app.svelte";
   import * as ipc from "../../ipc/commands";
   import { collectionKey } from "../../logic/sources";
+  import { tooltip } from "../../primitives/tooltip";
 
   // The current grid scope's note-grounded cluster suggestions (the same
   // clusterTopics command the graph rail uses). Fetched on mount + whenever the
@@ -87,8 +88,8 @@
       <button
         class="remove"
         aria-label={`Remove topic ${topic.phrase}`}
-        title="Remove topic"
         onclick={() => void ui.removeTopic(topic.id)}
+        {@attach tooltip({ text: "Remove this saved topic" })}
       >
         x
       </button>
