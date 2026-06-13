@@ -399,6 +399,12 @@
       each one rebuilds the next time you view it, and your marks are never
       stored in a preview.
     </p>
+    <p class="helper">
+      Clear 1:1 cache reclaims just the large full-resolution files; they
+      redevelop on next view. Rebuild all previews clears every cached preview
+      and regenerates them in the background, so thumbnails repopulate as they
+      finish.
+    </p>
     {#if cacheStats !== null}
       <p class="dim">
         1:1 cache: {formatBytes(cacheStats.fullBytes)} in {cacheStats.fullFiles}
@@ -416,8 +422,8 @@
       />
       <AckButton
         quiet
-        label="Clear all previews"
-        doneLabel="Cleared"
+        label="Rebuild all previews"
+        doneLabel="Rebuilding"
         verb={() => clearCache("all")}
       />
     </div>

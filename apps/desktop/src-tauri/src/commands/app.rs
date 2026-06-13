@@ -124,22 +124,39 @@ pub async fn preview_cache_stats(app: S<'_>) -> CmdResult<crate::dto::PreviewCac
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
-/// Settings → Previews "Clear 1:1 cache" / "Clear all previews"
+/// Settings → Previews "Clear 1:1 cache" / "Rebuild all previews"
 /// (DESIGN-PREVIEW-POLICY.md). `kind` = `"full"` (just the 1:1 tier) | `"all"`
-/// (1:1 + display + thumb). SAFE — every removed artifact re-derives on next
-/// view; strokes live in vector coords, never in an artifact. Returns the
-/// number of files removed. An unknown `kind` is rejected so a typo cannot
-/// silently nuke the whole cache.
+/// (1:1 + display + thumb; this one ALSO re-pends the preview pass for every
+/// active root so the grid regenerates). SAFE — every removed artifact
+/// re-derives on next view; strokes live in vector coords, never in an
+/// artifact. Returns the number of files removed. An unknown `kind` is rejected
+/// so a typo cannot silently nuke the whole cache.
+///
+/// After the sweep we emit a GLOBAL `previews-changed` (empty `hashes`). WHY:
+/// the `photoproof://` protocol serves content-addressed artifacts with an
+/// `immutable` cache header, so after the bytes are deleted on disk the webview
+/// keeps serving its CACHED copy for the same stable URL until a restart. The
+/// only live cache-bust is the `?p=<seq>` query param the grid/Look bump on
+/// `previews-changed`. A hash-less ping means "bump EVERY visible thumb": a
+/// `Full` clear makes any open Look re-request (and re-develop on-demand); an
+/// `All` clear makes the grid immediately show truthful "?" then heal per hash
+/// as each regenerated artifact lands (founder dogfood, June 2026).
 #[tauri::command]
-pub async fn clear_preview_cache(app: S<'_>, kind: String) -> CmdResult<u64> {
+pub async fn clear_preview_cache(app: S<'_>, handle: AppHandle, kind: String) -> CmdResult<u64> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let removed = tauri::async_runtime::spawn_blocking(move || {
         let kind = photoproof_core::library::ClearKind::parse(&kind)
             .ok_or_else(|| CmdError::Invalid(format!("unknown clear kind: {kind}")))?;
-        Ok(app.library.clear_preview_cache_kind(kind)?)
+        Ok::<u64, CmdError>(app.library.clear_preview_cache_kind(kind)?)
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))??;
+    // Empty `hashes` = the global "bump every thumb" signal (see doc note).
+    let _ = handle.emit(
+        "previews-changed",
+        crate::dto::PreviewsChanged { hashes: vec![] },
+    );
+    Ok(removed)
 }
 
 /// The RUNTIME contract (P6.2): tier, consent, per-model rows with

@@ -13,10 +13,11 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use image::{DynamicImage, RgbImage};
 use photoproof_core::library::{
-    ArtifactKind, DebounceConfig, EmbeddedPreviewExtractor, ExtractedPreview, FakeVolumeProbe,
-    Library, LibraryOptions, MARKER_FILENAME, Observed, PipelineEffect, PlatformIdKind,
-    PreviewError, PreviewSource, ProbedVolume, QueueOptions, RawWatchEvent, ScanOptions,
-    SharedSetPlaceholderDetector, hash_invocation_count,
+    ArtifactKind, ClearKind, DebounceConfig, EmbeddedPreviewExtractor, ExtractedPreview,
+    FakeVolumeProbe, FullDecodeFormat, Library, LibraryOptions, MARKER_FILENAME, Observed,
+    PipelineEffect, PlatformIdKind, PreviewError, PreviewSource, ProbedVolume, QueueOptions,
+    RawWatchEvent, ScanOptions, SharedSetPlaceholderDetector, full_artifact_path,
+    hash_invocation_count,
 };
 use photoproof_core::{
     ContentHash, EventDraft, EventStore, RemarkSource, SessionContext, SessionId, StrokePayload,
@@ -2337,6 +2338,127 @@ fn rebuild_previews_repends_the_whole_root_and_drain_regenerates() {
             assert!(
                 photoproof_core::library::artifact_path(&env.cache, &hash, kind).exists(),
                 "artifact regenerated for {kind:?}"
+            );
+        }
+    }
+    let pending_after: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name = 'preview' AND state != 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_after, 0);
+}
+
+/// Settings → Previews "Rebuild all previews" (`ClearKind::All`): the disk
+/// sweep removes EVERY tier and then re-pends the preview pass for every active
+/// root so the grid is not stranded on "?" placeholders (founder dogfood, June
+/// 2026). The 1:1-only sweep (`ClearKind::Full`) removes ONLY `-full-v*` and
+/// does NOT touch the queue (that tier is on-demand by design).
+#[test]
+fn clear_kind_all_repends_active_roots_full_does_not() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    let elsewhere = env.register("other");
+    env.write("photos/a.jpg", &unique_jpeg(7501));
+    env.write("photos/b.jpg", &unique_jpeg(7502));
+    env.write("other/c.jpg", &unique_jpeg(7503));
+    env.scan(&root);
+    env.scan(&elsewhere);
+    env.drain_queue();
+
+    // After a clean drain every preview pass is done, and the `-thumb`/`-disp`
+    // tiers exist on disk. Drop a fake `-full-v*` artifact beside each image's
+    // thumb so the tier-selectivity assertions below have something to remove
+    // (the 1:1 tier is only ever produced by a RAW develop, which this fixture
+    // does not exercise — a hand-written file stands in for the bytes).
+    let hashes = env.lib.image_hashes().unwrap();
+    assert_eq!(hashes.len(), 3);
+    for h in &hashes {
+        let full = full_artifact_path(&env.cache, h, FullDecodeFormat::Webp);
+        std::fs::write(&full, b"fake-full-decode").unwrap();
+        assert!(full.exists());
+    }
+
+    // -- ClearKind::Full: removes ONLY the 1:1 tier, queue untouched ----------
+    let removed_full = env.lib.clear_preview_cache_kind(ClearKind::Full).unwrap();
+    assert_eq!(
+        removed_full as usize,
+        hashes.len(),
+        "full clear removes exactly the three -full-v* files"
+    );
+    for h in &hashes {
+        // The 1:1 file is gone, but the grid tiers survive.
+        assert!(
+            !full_artifact_path(&env.cache, h, FullDecodeFormat::Webp).exists(),
+            "-full-v* removed by ClearKind::Full"
+        );
+        for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+            assert!(
+                photoproof_core::library::artifact_path(&env.cache, h, kind).exists(),
+                "{kind:?} survives a 1:1-only clear"
+            );
+        }
+    }
+    // The on-demand tier never re-pends: every preview pass is still done.
+    let not_done_after_full: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name = 'preview' AND state != 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        not_done_after_full, 0,
+        "ClearKind::Full must NOT re-pend the preview pass"
+    );
+
+    // -- ClearKind::All: removes EVERY tier and re-pends every active root ----
+    let removed_all = env.lib.clear_preview_cache_kind(ClearKind::All).unwrap();
+    assert!(
+        removed_all as usize >= hashes.len() * 2,
+        "all clear removes at least the thumb + display of each image"
+    );
+    for h in &hashes {
+        for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+            assert!(
+                !photoproof_core::library::artifact_path(&env.cache, h, kind).exists(),
+                "{kind:?} removed by ClearKind::All"
+            );
+        }
+    }
+    // Every active-root preview pass is back to the recovery shape — including
+    // the sibling root's image (the all-roots re-pend drops the per-root
+    // filter). PRIORITY_BACKFILL = 3 (the June 2026 interactive renumber).
+    let repended: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_passes
+             WHERE pass_name = 'preview' AND state = 'pending'
+               AND attempts = 0 AND not_before IS NULL AND error IS NULL
+               AND priority = 3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        repended, 3,
+        "all three images (both roots) re-pend after ClearKind::All"
+    );
+
+    // Drain heals: every grid tier regenerates and no pass is left pending.
+    env.drain_queue();
+    for h in &hashes {
+        for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+            assert!(
+                photoproof_core::library::artifact_path(&env.cache, h, kind).exists(),
+                "{kind:?} regenerated after the rebuild"
             );
         }
     }

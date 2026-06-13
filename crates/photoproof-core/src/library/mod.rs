@@ -267,16 +267,57 @@ impl Library {
         preview::evict_preview_cache(&self.cache_dir, budget_bytes)
     }
 
-    /// Settings → Previews "Clear 1:1 cache" / "Clear all previews": remove the
+    /// Settings → Previews "Clear 1:1 cache" / "Rebuild all previews": remove the
     /// full-res 1:1 tier ([`preview::ClearKind::Full`]) or every preview
     /// artifact ([`preview::ClearKind::All`]). Returns the number of files
-    /// removed. SAFE — every removed artifact re-derives on next view. Distinct
-    /// from the per-hash [`Library::clear_preview_cache`] below (that one also
-    /// re-pends the preview pass for a single image; this one is the whole-cache
-    /// disk sweep with no DB touch — the 1:1 tier has no DB rows, and the
-    /// thumb/display rows re-derive on next view via the doctor pattern).
+    /// removed. SAFE — every removed artifact re-derives on next view.
+    ///
+    /// WHY the `All` re-pend: the grid's `-thumb`/`-disp` artifacts are only
+    /// ever (re)produced by the preview pass; deleting them with no DB touch
+    /// would strand the grid on permanent "?" placeholders with nothing to heal
+    /// them (founder dogfood, June 2026). So after an `All` sweep we re-pend the
+    /// preview pass for every active root — the ingest pump drains them and each
+    /// landed artifact heals its thumb off `previews-changed`. The `Full` sweep
+    /// does NOT re-pend: the 1:1 full-res tier is on-demand by design (it
+    /// redevelops on next view/zoom), and re-pending it would defeat the
+    /// disk-reclaim purpose of the button.
     pub fn clear_preview_cache_kind(&self, kind: preview::ClearKind) -> std::io::Result<u64> {
-        preview::clear_preview_cache(&self.cache_dir, kind)
+        let removed = preview::clear_preview_cache(&self.cache_dir, kind)?;
+        if kind == preview::ClearKind::All {
+            // The disk sweep just removed every `-thumb`/`-disp`; without a
+            // re-pend the grid is stranded. Map a DB error onto io::Error so the
+            // single-Result signature holds (the removal already happened).
+            self.repend_all_previews()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(removed)
+    }
+
+    /// Re-pend the preview pass for EVERY active root — the all-roots analog of
+    /// [`Library::rebuild_previews`] (which scopes to one root). Same recovery
+    /// shape (pending, fresh attempt budget, no backoff, no stale error,
+    /// backfill priority; `running` rows left in flight so a second worker
+    /// cannot claim an image mid-regenerate). A SINGLE UPDATE: it drops the
+    /// per-root filter and matches any image with at least one active path.
+    /// Returns the number of rows re-pended. Used by the "Rebuild all previews"
+    /// clear so the grid heals after a full sweep.
+    pub fn repend_all_previews(&self) -> Result<usize, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let n = conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'pending', attempts = 0, not_before = NULL,
+                 error = NULL,
+                 priority = CASE WHEN state = 'pending'
+                                 THEN MIN(priority, ?1) ELSE ?1 END
+             WHERE pass_name = 'preview' AND state != 'running'
+               AND image_hash IN (SELECT image_hash FROM paths
+                                  WHERE state = 'active')",
+            params![ingest::PRIORITY_BACKFILL],
+        )?;
+        if n > 0 {
+            self.log(format!("rebuild all previews: {n} passes re-pended"));
+        }
+        Ok(n)
     }
 
     fn now(&self) -> UtcMillis {

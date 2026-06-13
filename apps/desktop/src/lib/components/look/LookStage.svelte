@@ -195,11 +195,18 @@
 
   // The develop landed (or any preview changed for this hash): re-load the
   // /full-decode URL past its immutable-cached 404.
+  //
+  // An EMPTY `hashes` is the GLOBAL signal the manual cache clear emits: bump
+  // the bust unconditionally so an open Look re-requests /full-decode. After a
+  // "Clear 1:1 cache" the bytes are gone, so the re-fetch 404s on the
+  // full-decode rung and (for a RAW) re-develops on-demand, exactly as the
+  // on-demand 1:1 tier is meant to heal.
   $effect(() => {
     const stop = listen<{ hashes: string[] }>("previews-changed", (e) => {
+      const global = e.payload.hashes.length === 0;
       if (
-        developingHash !== null &&
-        e.payload.hashes.includes(developingHash)
+        global ||
+        (developingHash !== null && e.payload.hashes.includes(developingHash))
       ) {
         developBust += 1; // force the <img> to re-fetch /full-decode
       }
