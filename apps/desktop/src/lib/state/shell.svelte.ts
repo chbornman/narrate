@@ -60,6 +60,16 @@ export class ShellSlice {
   railFocused = $state(false);
   railFocusKey = $state<string | null>(null);
   railCollapsed = $state<ReadonlySet<string>>(new Set());
+  /** Deep-tree ergonomics (folder-tree improvements): keys the user has
+   * EXPLICITLY expanded past the auto-collapse depth, so a hand-opened deep
+   * branch survives re-renders. Paired with railCollapsed in toggleExpand. */
+  railExpanded = $state<ReadonlySet<string>>(new Set());
+  /** The Folders-tab filter / jump input text. Empty ⇒ the full tree shows;
+   * non-empty narrows the current root's tree to matching folders + their
+   * ancestors (logic/sources.filterTree). Local UI state, never persisted. */
+  railFolderFilter = $state("");
+  /** Archived roots shown (the collapsed "Archived" affordance is open). */
+  railArchivedOpen = $state(false);
   /** Folders | Collections — two PEER tabs (founder, June 2026: collections
    * are the point; folders are mechanical). Arrow/Enter routing follows the
    * visible tab (app.svelte.ts perform cases). */

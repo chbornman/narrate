@@ -7,6 +7,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AddRootOutcome,
   AppSettings,
   CollectionDto,
   CollectionNoteDto,
@@ -246,9 +247,18 @@ export const graphTuning = () => invoke<GraphTuning>("graph_tuning");
 // -- roots & grid -----------------------------------------------------------
 
 export const listRoots = () => invoke<RootDto[]>("list_roots");
-export const addRoot = (path: string) => invoke<RootDto>("add_root", { path });
+export const addRoot = (path: string) =>
+  invoke<AddRootOutcome>("add_root", { path });
 export const removeRoot = (rootId: string) =>
   invoke<void>("remove_root", { rootId });
+// Archive lifecycle (folder-tree improvements): non-destructive hide/restore
+// of a root, plus the archived snapshot for the rail's "Archived" affordance.
+export const archiveRoot = (rootId: string) =>
+  invoke<void>("archive_root", { rootId });
+export const unarchiveRoot = (rootId: string) =>
+  invoke<RootDto>("unarchive_root", { rootId });
+export const listArchivedRoots = () =>
+  invoke<RootDto[]>("list_archived_roots");
 export const folderTree = (rootId: string) =>
   invoke<FolderNode[]>("folder_tree", { rootId });
 export const listFolder = (rootId: string, folder: string) =>

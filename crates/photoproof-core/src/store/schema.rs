@@ -294,7 +294,12 @@ CREATE TABLE roots (
   volume_id     TEXT NOT NULL REFERENCES volumes(volume_id),
   rel_path      TEXT NOT NULL,                  -- '' = volume root; '/'-separated UTF-8
   display_name  TEXT,
-  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','removed')),
+  -- 'archived' (v14): a lifecycle resting state, hidden from the active rail
+  -- but NON-DESTRUCTIVE — unlike 'removed' it leaves `paths` and every image
+  -- journal/collection membership untouched, so an archived root restores
+  -- whole. The new value is on the constraint here for fresh DBs; existing
+  -- DBs get it through the v14 table-rebuild migration.
+  state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','archived','removed')),
   created_at TEXT NOT NULL, removed_at TEXT,
   UNIQUE (volume_id, rel_path)
 );
@@ -681,5 +686,113 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
         conn.execute_batch(TOPICS_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 13")?;
     }
+    if version < 14 {
+        // v14: the root 'archived' lifecycle state (folder-tree improvements).
+        // SQLite cannot widen a column CHECK in place, so the constraint is
+        // rebuilt the canonical way: build the new table, copy rows, swap. The
+        // copy is non-destructive — every existing root keeps its id, state,
+        // and timestamps, so journals and collection memberships (keyed off the
+        // image hash, never the root) are wholly untouched. Guarded by a column
+        // probe so a fresh DB (already carrying the widened CHECK from the v1
+        // DDL) skips the rebuild.
+        let already_widened: bool = conn.query_row(
+            // The fresh-DDL `roots` table's CHECK text contains 'archived';
+            // the pre-v14 one does not. sqlite_master holds the creating SQL.
+            "SELECT count(*) > 0 FROM sqlite_master
+             WHERE type = 'table' AND name = 'roots' AND sql LIKE '%archived%'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !already_widened {
+            conn.execute_batch(
+                "CREATE TABLE roots_v14 (
+                   root_id       TEXT PRIMARY KEY,
+                   volume_id     TEXT NOT NULL REFERENCES volumes(volume_id),
+                   rel_path      TEXT NOT NULL,
+                   display_name  TEXT,
+                   state         TEXT NOT NULL DEFAULT 'active'
+                                   CHECK (state IN ('active','archived','removed')),
+                   created_at TEXT NOT NULL, removed_at TEXT,
+                   UNIQUE (volume_id, rel_path)
+                 );
+                 INSERT INTO roots_v14
+                   SELECT root_id, volume_id, rel_path, display_name, state,
+                          created_at, removed_at
+                   FROM roots;
+                 DROP TABLE roots;
+                 ALTER TABLE roots_v14 RENAME TO roots;",
+            )?;
+        }
+        run_pragma(conn, "PRAGMA user_version = 14")?;
+    }
     Ok(version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// The v14 migration widens `roots.state` to admit 'archived' by rebuilding
+    /// the table, and it must do so NON-DESTRUCTIVELY: a pre-v14 database's
+    /// rows survive verbatim, and the new state is accepted afterwards.
+    #[test]
+    fn v14_widens_roots_state_check_and_preserves_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Stand up the schema, then recreate `roots` in its PRE-v14 shape (the
+        // narrow CHECK) so we exercise the table-rebuild branch a real upgrade
+        // would take.
+        migrate(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE roots;
+             CREATE TABLE roots (
+               root_id TEXT PRIMARY KEY,
+               volume_id TEXT NOT NULL REFERENCES volumes(volume_id),
+               rel_path TEXT NOT NULL,
+               display_name TEXT,
+               state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','removed')),
+               created_at TEXT NOT NULL, removed_at TEXT,
+               UNIQUE (volume_id, rel_path)
+             );
+             INSERT INTO volumes (volume_id, state, first_seen_at, last_seen_at)
+               VALUES ('vol1', 'offline', 'x', 'x');
+             INSERT INTO roots (root_id, volume_id, rel_path, display_name, state, created_at)
+               VALUES ('r1', 'vol1', 'photos', 'Photos', 'active', 'x');",
+        )
+        .unwrap();
+        run_pragma(&conn, "PRAGMA user_version = 13").unwrap();
+
+        // 'archived' is rejected by the narrow CHECK before the migration.
+        assert!(
+            conn.execute(
+                "UPDATE roots SET state = 'archived' WHERE root_id = 'r1'",
+                []
+            )
+            .is_err(),
+            "pre-v14 CHECK forbids 'archived'"
+        );
+
+        migrate(&conn).unwrap();
+
+        // Row preserved verbatim through the rebuild.
+        let (rel, name): (String, String) = conn
+            .query_row(
+                "SELECT rel_path, display_name FROM roots WHERE root_id = 'r1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rel.as_str(), name.as_str()), ("photos", "Photos"));
+
+        // 'archived' now accepted.
+        conn.execute(
+            "UPDATE roots SET state = 'archived' WHERE root_id = 'r1'",
+            [],
+        )
+        .expect("v14 CHECK admits 'archived'");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+    }
 }

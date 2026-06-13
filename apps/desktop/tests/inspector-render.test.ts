@@ -267,6 +267,7 @@ describe("RedactionModal — the app's ONE modal (R5, §8.4)", () => {
         volumeId: "v1",
         online: false,
         absPath: null,
+        archived: false,
       },
     ];
     ui.inspector.entries = [entry("01A")];

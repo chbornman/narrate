@@ -106,6 +106,9 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "rescan-root",
     "rebuild-previews",
     "—",
+    // Archive sits with the lifecycle verbs (ROOT rows only — its def's
+    // toAction declines for subfolders, so the row self-hides there).
+    "archive-root",
     "add-root",
   ],
   // Journal entry rows (select-from-note): the seat arg is the entry's

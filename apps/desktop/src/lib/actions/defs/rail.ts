@@ -105,6 +105,26 @@ export const RAIL_DEFS: ActionDef[] = [
       return a === null ? null : { kind: "rebuild-previews", rootId: a.rootId };
     },
   },
+  // Archive (folder-tree improvements): non-destructive lifecycle verb,
+  // ROOT rows only. A root's journal + collection memberships are kept (the
+  // backend flips state only); the row leaves the active rail for the
+  // collapsed "Archived" affordance, restorable. toAction declines for
+  // subfolder rows (folder !== "") — archive is a root-scoped act.
+  {
+    id: "archive-root",
+    verb: "Archive folder",
+    keys: [],
+    scope: "global",
+    group: "panels",
+    seats: ["rail-folder"],
+    available: always,
+    toAction: (_ctx, arg) => {
+      const a = railArg(arg);
+      return a === null || a.folder !== ""
+        ? null
+        : { kind: "archive-root", rootId: a.rootId };
+    },
+  },
   // The rail's own verb (footer button + this seat): the OS folder picker
   // → add_root, no Settings round-trip (founder, dogfood rounds 1+2).
   {

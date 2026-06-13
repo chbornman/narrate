@@ -7,7 +7,19 @@ export interface RootDto {
   volumeId: string;
   online: boolean;
   absPath: string | null;
+  /** Archived (lifecycle): hidden from the active rail, kept whole.
+   * `listRoots` returns only active roots (false); the archived snapshot
+   * from `listArchivedRoots` carries the archived ones (true). */
+  archived: boolean;
 }
+
+/** Outcome of an `addRoot` attempt — the refuse + alias contract (twin of
+ * `AddRootOutcome` in dto.rs). A clean add returns `added`; a folder that
+ * overlaps an existing active root returns `overlap` carrying that root's id
+ * so the rail can NAVIGATE there instead of double-ingesting. */
+export type AddRootOutcome =
+  | { kind: "added"; root: RootDto }
+  | { kind: "overlap"; existingRootId: string };
 
 export interface FolderNode {
   name: string;

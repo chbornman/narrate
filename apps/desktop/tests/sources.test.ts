@@ -8,6 +8,8 @@ import { describe, expect, it } from "vitest";
 import {
   collectionKey,
   collectionRows,
+  filterTree,
+  firstMatchKey,
   flatRows,
   folderSection,
   moveFocus,
@@ -25,6 +27,7 @@ const root = (rootId: string, online = true): RootDto => ({
   volumeId: "v1",
   online,
   absPath: online ? `/mnt/${rootId}` : null,
+  archived: false,
 });
 
 const node = (name: string, relPath: string, children: FolderNode[] = []): FolderNode => ({
@@ -33,11 +36,16 @@ const node = (name: string, relPath: string, children: FolderNode[] = []): Folde
   children,
 });
 
+// autoExpandDepth 99 + no explicit-expanded set keeps the legacy
+// "everything expanded" behavior for the shared fixture; the depth-cap and
+// filter behaviors get their own dedicated inputs below.
 const input: SourcesInput = {
   roots: [root("Active"), root("Archive", false)],
   tree: [node("2026", "2026", [node("01-iceland", "2026/01-iceland")]), node("inbox", "inbox")],
   treeRootId: "Active",
   collapsed: new Set(),
+  expanded: new Set(),
+  autoExpandDepth: 99,
 };
 
 describe("folders provider", () => {
@@ -128,12 +136,86 @@ describe("keyboard navigation", () => {
     expect(moveFocus(rows, last, "down")).toBe(last);
   });
 
-  it("←/→ collapse/expand the focused row", () => {
+  it("←/→ collapse/expand the focused row, tracking both sets", () => {
     const row = rows.find((r) => r.label === "2026");
     if (row === undefined) throw new Error("fixture");
-    let collapsed = toggleExpand(new Set(), row, "left");
-    expect(collapsed.has(row.key)).toBe(true);
-    collapsed = toggleExpand(collapsed, row, "right");
-    expect(collapsed.has(row.key)).toBe(false);
+    let s = toggleExpand(new Set(), new Set(), row, "left");
+    expect(s.collapsed.has(row.key)).toBe(true);
+    expect(s.expanded.has(row.key)).toBe(false);
+    s = toggleExpand(s.collapsed, s.expanded, row, "right");
+    expect(s.collapsed.has(row.key)).toBe(false);
+    // Expanding records the key so a deep branch survives the depth cap.
+    expect(s.expanded.has(row.key)).toBe(true);
+  });
+});
+
+describe("lazy deep-tree (auto-collapse past a depth)", () => {
+  // A deep root: root → a → b → c. A row at `depth` auto-expands only while
+  // depth < autoExpandDepth, so with cap 2 the rows at depths 0 and 1 expand
+  // (showing through depth 2), and depth 2 stays collapsed until opened.
+  const deep: SourcesInput = {
+    roots: [root("Deep")],
+    tree: [node("a", "a", [node("b", "a/b", [node("c", "a/b/c")])])],
+    treeRootId: "Deep",
+    collapsed: new Set(),
+    expanded: new Set(),
+    autoExpandDepth: 2,
+  };
+
+  it("does not render the whole deep tree eagerly", () => {
+    const rows = folderSection(deep).rows;
+    // Deep(0), a(1), b(2) shown; b is at the cap so its child c is NOT shown.
+    expect(rows.map((r) => r.label)).toEqual(["Deep", "a", "b"]);
+    expect(rows.find((r) => r.label === "b")?.expanded).toBe(false);
+    expect(rows.find((r) => r.label === "a")?.expanded).toBe(true);
+  });
+
+  it("an explicitly expanded deep branch shows past the cap", () => {
+    const expanded = new Set([rowKey("Deep", "a/b")]);
+    const rows = folderSection({ ...deep, expanded }).rows;
+    // Opening b (depth 2) reveals c (depth 3).
+    expect(rows.map((r) => r.label)).toEqual(["Deep", "a", "b", "c"]);
+    expect(rows.find((r) => r.label === "b")?.expanded).toBe(true);
+  });
+});
+
+describe("folder filter / jump-to-folder", () => {
+  const tree: FolderNode[] = [
+    node("2026", "2026", [
+      node("01-iceland", "2026/01-iceland"),
+      node("02-norway", "2026/02-norway"),
+    ]),
+    node("inbox", "inbox"),
+  ];
+
+  it("a blank query returns the tree unchanged", () => {
+    expect(filterTree(tree, "")).toBe(tree);
+    expect(filterTree(tree, "   ")).toBe(tree);
+  });
+
+  it("keeps matches AND their ancestors so the path stays reachable", () => {
+    const out = filterTree(tree, "iceland");
+    // 2026 kept as the ancestor of the match; norway and inbox pruned.
+    expect(out.map((n) => n.name)).toEqual(["2026"]);
+    expect(out[0].children.map((n) => n.name)).toEqual(["01-iceland"]);
+  });
+
+  it("matching a parent keeps it but prunes non-matching children", () => {
+    const out = filterTree(tree, "2026");
+    // The parent matches; with no child matching, children are pruned.
+    expect(out.map((n) => n.name)).toEqual(["2026"]);
+    expect(out[0].children).toEqual([]);
+  });
+
+  it("is case-insensitive", () => {
+    expect(filterTree(tree, "INBOX").map((n) => n.name)).toEqual(["inbox"]);
+  });
+
+  it("firstMatchKey returns the first match depth-first for jump", () => {
+    expect(firstMatchKey("R", tree, "norway")).toBe(rowKey("R", "2026/02-norway"));
+    // Parent before child: a query hitting the parent jumps to the parent.
+    expect(firstMatchKey("R", tree, "2026")).toBe(rowKey("R", "2026"));
+    expect(firstMatchKey("R", tree, "nope")).toBeNull();
+    expect(firstMatchKey("R", tree, "")).toBeNull();
   });
 });

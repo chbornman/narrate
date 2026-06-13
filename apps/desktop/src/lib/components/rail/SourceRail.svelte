@@ -14,7 +14,7 @@
    */
   import { tick } from "svelte";
   import { ui } from "../../state/app.svelte";
-  import { collectionKey } from "../../logic/sources";
+  import { collectionKey, toggleExpand } from "../../logic/sources";
   import type { CollectionRow, SourceRow } from "../../logic/sources";
   import Panel from "../../primitives/Panel.svelte";
   import SourceList from "./SourceList.svelte";
@@ -25,6 +25,7 @@
   const secs = $derived(ui.railSections());
   const collectionRows = $derived(ui.railCollectionRows());
   const tab = $derived(ui.shell.railTab);
+  const archived = $derived(ui.archivedRoots);
 
   function onOpen(row: SourceRow) {
     ui.shell.railFocusKey = row.key;
@@ -37,6 +38,33 @@
       rootId: row.rootId,
       folder: row.folder,
     });
+  }
+
+  // Twist click (deep-tree ergonomics): expand/collapse in place. Mirrors the
+  // ←/→ keyboard path in app.svelte.ts — both sets move together so a
+  // hand-opened deep branch survives the auto-collapse depth.
+  function onToggle(row: SourceRow) {
+    const next = toggleExpand(
+      ui.shell.railCollapsed,
+      ui.shell.railExpanded,
+      row,
+      row.expanded ? "left" : "right",
+    );
+    ui.shell.railCollapsed = next.collapsed;
+    ui.shell.railExpanded = next.expanded;
+  }
+
+  // ---- folder filter / jump-to-folder (Folders tab) ----------------------
+  // Type to narrow the current root's tree; Enter jumps to (opens) the first
+  // match. Esc clears and is contained (the WelcomeCard idiom) so it does not
+  // peel a global escape layer.
+  function onFilterKeydown(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      void ui.jumpToFilteredFolder();
+    } else if (e.key === "Escape") {
+      ui.setFolderFilter("");
+    }
   }
 
   function onOpenCollection(row: CollectionRow) {
@@ -168,6 +196,20 @@
       </button>
     </div>
 
+    {#if tab === "folders"}
+      <!-- Type-to-filter / jump (deep-tree ergonomics): narrows the current
+           root's tree; Enter opens the first match. Sits above the rows so a
+           30-root or deep library stays navigable. -->
+      <input
+        class="filter-input"
+        placeholder="Filter folders"
+        aria-label="Filter folders"
+        value={ui.shell.railFolderFilter}
+        oninput={(e) => ui.setFolderFilter(e.currentTarget.value)}
+        onkeydown={onFilterKeydown}
+      />
+    {/if}
+
     <div class="rows">
       {#if tab === "folders"}
         <SourceList
@@ -178,7 +220,34 @@
             : `folders:${ui.grid.rootId}:${ui.grid.folder}`}
           onopen={onOpen}
           oncontextmenu={onContextMenu}
+          ontoggle={onToggle}
         />
+        {#if archived.length > 0}
+          <!-- Archived roots (lifecycle): a collapsed affordance below the
+               active rows. Non-destructive; each restores to active. -->
+          <div class="archived">
+            <button
+              class="archived-head"
+              aria-expanded={ui.shell.railArchivedOpen}
+              onclick={() =>
+                (ui.shell.railArchivedOpen = !ui.shell.railArchivedOpen)}
+            >
+              {ui.shell.railArchivedOpen ? "▾" : "▸"} Archived ({archived.length})
+            </button>
+            {#if ui.shell.railArchivedOpen}
+              {#each archived as r (r.rootId)}
+                <button
+                  class="archived-row"
+                  title="Restore to active"
+                  onclick={() => void ui.unarchiveRoot(r.rootId)}
+                >
+                  <span class="archived-label">{r.displayName}</span>
+                  <span class="archived-restore">Restore</span>
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
       {:else if tab === "collections"}
         <CollectionList
           rows={collectionRows}
@@ -292,5 +361,71 @@
     border-radius: 4px;
     color: var(--text);
     font-size: 12px;
+  }
+  /* Folder filter / jump input: sits above the rows, token-only so it tracks
+     the live theme (light + dark). */
+  .filter-input {
+    flex: 0 0 auto;
+    margin: 6px 8px 2px;
+    padding: 5px 9px;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome-strong);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .filter-input::placeholder {
+    color: var(--text-faint);
+  }
+  /* Archived affordance: quiet, collapsed by default; dimmer than active rows
+     so it reads as a resting place, not a peer of the live folders. */
+  .archived {
+    margin-top: 6px;
+    border-top: 1px solid var(--chrome-strong);
+  }
+  .archived-head {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 6px 10px;
+  }
+  .archived-head:hover {
+    color: var(--text-dim);
+  }
+  .archived-row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 4px 10px 4px 18px;
+  }
+  .archived-row:hover {
+    background: var(--bg-raised);
+    color: var(--text);
+  }
+  .archived-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .archived-restore {
+    flex: 0 0 auto;
+    color: var(--text-faint);
+    font-size: 11px;
+  }
+  .archived-row:hover .archived-restore {
+    color: var(--text-dim);
   }
 </style>

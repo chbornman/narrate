@@ -45,6 +45,8 @@ import {
 import { afterCommit } from "../logic/advance";
 import {
   collectionRows,
+  filterTree,
+  firstMatchKey,
   flatRows,
   moveFocus as railMoveFocus,
   sections,
@@ -60,6 +62,7 @@ import {
 import type { Action } from "../logic/keymap";
 import type { ActionContext } from "../actions/types";
 import type {
+  AddRootOutcome,
   AppSettings,
   CollectionDto,
   FolderNode,
@@ -154,6 +157,15 @@ export class Ui {
   // -- roots & folder tree (shared by rail + grid) ----------------------------
   roots = $state<RootDto[]>([]);
   tree = $state<FolderNode[]>([]);
+  /** Archived roots (folder-tree improvements): the rail's collapsed
+   * "Archived" affordance lists these, restorable. Loaded lazily and
+   * refreshed alongside the active snapshot. */
+  archivedRoots = $state<RootDto[]>([]);
+  /** Lazy deep-tree cap: folders deeper than this auto-collapse so a deep
+   * root never renders its whole tree eagerly. A filter raises it past any
+   * depth (every surviving match shows). The constant is a deliberate small
+   * default; the user expands the branch they want. */
+  static readonly AUTO_EXPAND_DEPTH = 2;
 
   // -- collections (B71 — rail Collections tab, P7.3 store) -------------------
   /** Full snapshot, backend list order; replaced whole on every
@@ -339,6 +351,13 @@ export class Ui {
       /* backend unavailable (tests/dev): defaults stand */
     }
     this.roots = await ipc.listRoots();
+    // Archived snapshot for the rail's "Archived" affordance (folder-tree
+    // improvements). Tolerant of an older backend without the command.
+    try {
+      this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
+    } catch {
+      /* backend unavailable / pre-archive build: no archived roots shown */
+    }
     const last = prefs.loadLastFolder();
     if (last && this.roots.some((r) => r.rootId === last.rootId)) {
       await this.openFolder(last.rootId, last.folder);
@@ -537,6 +556,9 @@ export class Ui {
 
   async refreshRoots() {
     this.applyRootsSnapshot(await ipc.listRoots());
+    // Keep the archived snapshot fresh too (folder-tree improvements): the
+    // rail's "Archived" affordance reads it. Cheap; only changes on lifecycle.
+    this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
   }
 
   /** Apply a roots snapshot: a vanished current root resets the grid. */
@@ -588,15 +610,23 @@ export class Ui {
     // the empty state must read "indexing", never "no photographs".
     // Optimistic; the first real status event clears it (onIngestProgress).
     this.shell.ingestExpecting = true;
-    let root: RootDto;
+    let outcome: AddRootOutcome;
     try {
-      root = await ipc.addRoot(dir);
+      outcome = await ipc.addRoot(dir);
     } catch (e) {
       this.shell.ingestExpecting = false; // terminal: no scan will run
       throw e;
     }
+    // Refuse + alias (folder-tree improvements): a folder that overlaps an
+    // existing active root is NOT re-ingested. Navigate to the root the user
+    // already has instead, and stand the optimistic bridge down (no scan).
+    if (outcome.kind === "overlap") {
+      this.shell.ingestExpecting = false;
+      await this.openFolder(outcome.existingRootId, "");
+      return;
+    }
     await this.refreshRoots();
-    await this.openFolder(root.rootId, "");
+    await this.openFolder(outcome.root.rootId, "");
   }
 
   async openFolder(rootId: string, folder: string) {
@@ -1334,8 +1364,14 @@ export class Ui {
     let first: string | null = null;
     for (const path of paths) {
       try {
-        const root = await ipc.addRoot(path);
-        first ??= root.rootId;
+        const outcome = await ipc.addRoot(path);
+        // Refuse + alias (folder-tree improvements): a dropped folder that
+        // overlaps an existing active root is NOT re-ingested. Treat it as a
+        // navigation target (the first one opens below) rather than an error.
+        first ??=
+          outcome.kind === "added"
+            ? outcome.root.rootId
+            : outcome.existingRootId;
       } catch (e) {
         this.dropError = e instanceof Error ? e.message : String(e);
         // Only a FULLY refused drop stands the bridge down — once one
@@ -2002,12 +2038,18 @@ export class Ui {
           );
         } else {
           const row = rows.find((r) => r.key === this.shell.railFocusKey);
-          if (row !== undefined)
-            this.shell.railCollapsed = toggleExpand(
+          if (row !== undefined) {
+            // toggleExpand now tracks BOTH sets (deep-tree ergonomics): an
+            // explicit expand survives the auto-collapse depth.
+            const next = toggleExpand(
               this.shell.railCollapsed,
+              this.shell.railExpanded,
               row,
               action.dir,
             );
+            this.shell.railCollapsed = next.collapsed;
+            this.shell.railExpanded = next.expanded;
+          }
         }
         break;
       }
@@ -2099,6 +2141,23 @@ export class Ui {
         // the ingest indicator already shows queue depth).
         try {
           await ipc.rebuildPreviews(action.rootId);
+        } catch {
+          /* unreachable backend in tests */
+        }
+        break;
+      case "archive-root":
+        // Non-destructive hide (folder-tree improvements): the root leaves
+        // the active rail but its journal + memberships stay; restorable
+        // from the Archived affordance.
+        try {
+          await this.archiveRoot(action.rootId);
+        } catch {
+          /* unreachable backend in tests */
+        }
+        break;
+      case "unarchive-root":
+        try {
+          await this.unarchiveRoot(action.rootId);
         } catch {
           /* unreachable backend in tests */
         }
@@ -2306,14 +2365,61 @@ export class Ui {
     if (intent === "disarm") this.shell.onIndicatorState(await ipc.setMic(false));
   }
 
-  /** Rail rows over the shared roots/tree (logic/sources.ts providers). */
+  /** Rail rows over the shared roots/tree (logic/sources.ts providers).
+   * Folder-tree improvements wire in here: the current root's tree is
+   * FILTERED by the jump input (filterTree) and a filter raises the
+   * auto-expand depth so every surviving match is reachable; without a
+   * filter, deep folders auto-collapse past AUTO_EXPAND_DEPTH (lazy). */
   railSections() {
+    const filter = this.shell.railFolderFilter;
+    const filtering = filter.trim() !== "";
+    const tree = filtering ? filterTree(this.tree, filter) : this.tree;
     return sections({
       roots: this.roots,
-      tree: this.tree,
+      tree,
       treeRootId: this.grid.rootId,
       collapsed: this.shell.railCollapsed,
+      expanded: this.shell.railExpanded,
+      // While filtering, show every match (Infinity beats any depth); else
+      // honor the lazy cap so a deep root does not render its whole tree.
+      autoExpandDepth: filtering ? Number.POSITIVE_INFINITY : Ui.AUTO_EXPAND_DEPTH,
     });
+  }
+
+  /** Type-to-filter the Folders tree + jump-to-folder. Sets the filter text
+   * and, when there is a match, focuses the first one (and opens it so the
+   * grid follows) — the "jump" half of the ergonomic win. A blank filter
+   * just clears. Pure matching lives in logic/sources (filterTree /
+   * firstMatchKey); this owns only the focus/open side effect. */
+  setFolderFilter(text: string) {
+    this.shell.railFolderFilter = text;
+    const key = firstMatchKey(this.grid.rootId ?? "", this.tree, text);
+    if (key !== null) this.shell.railFocusKey = key;
+  }
+
+  /** Enter in the filter input: jump to (open) the first matching folder. */
+  async jumpToFilteredFolder() {
+    const rows = flatRows(this.railSections());
+    const row = rows.find((r) => r.key === this.shell.railFocusKey);
+    if (row !== undefined) await this.openFolder(row.rootId, row.folder);
+  }
+
+  /** Archive a root (folder-tree improvements): non-destructive hide. The
+   * `roots-changed` event refreshes the active list; we refresh the archived
+   * snapshot here so the "Archived" affordance shows it immediately. */
+  async archiveRoot(rootId: string) {
+    await ipc.archiveRoot(rootId);
+    await this.refreshRoots();
+    this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
+  }
+
+  /** Restore an archived root to active, then open it (the rail drives the
+   * grid surface, like a folder open). */
+  async unarchiveRoot(rootId: string) {
+    const root = await ipc.unarchiveRoot(rootId);
+    await this.refreshRoots();
+    this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
+    await this.openFolder(root.rootId, "");
   }
 
   /** Rail rows for the Collections tab (logic/sources.ts provider). */

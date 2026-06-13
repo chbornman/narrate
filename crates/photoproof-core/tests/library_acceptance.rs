@@ -1117,6 +1117,112 @@ fn l13_09_root_removal() {
 }
 
 // ---------------------------------------------------------------------------
+// 9b. Root archive lifecycle + overlapping-root refusal (folder-tree work)
+// ---------------------------------------------------------------------------
+
+/// Archive is NON-DESTRUCTIVE: the root drops out of the active list but its
+/// images stay available, their journals intact, and the path rows are never
+/// marked stale (the whole point that distinguishes archive from remove).
+/// Restoring brings everything back active.
+#[test]
+fn archive_root_hides_from_active_keeps_journal_then_restores() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    for i in 0..3 {
+        env.write(&format!("photos/img{i}.jpg"), &unique_jpeg(1200 + i));
+    }
+    env.scan(&root);
+    env.drain_queue();
+    let hash = env.lib.image_hashes().unwrap()[0].clone();
+    let (store, session) = env.store();
+    store
+        .append(&session, d_remark("kept through archive", &hash), None)
+        .unwrap();
+
+    // Archive: gone from the active list, present in the archived list.
+    env.lib.archive_root(&root).unwrap();
+    assert!(
+        env.lib
+            .roots()
+            .unwrap()
+            .iter()
+            .all(|r| !(r.root_id == root && r.state == "active")),
+        "archived root is no longer active"
+    );
+    assert!(
+        env.lib
+            .archived_roots()
+            .unwrap()
+            .iter()
+            .any(|r| r.root_id == root),
+        "archived root shows in the archived list"
+    );
+
+    // Non-destructive: journal intact, paths NOT stale (unlike remove_root),
+    // image still available.
+    assert_eq!(store.folded_journal(&hash).unwrap().len(), 1);
+    let conn = env.conn();
+    let stale: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE state = 'stale'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "archive leaves path rows active");
+    assert_eq!(
+        env.lib.availability(&hash).unwrap(),
+        photoproof_core::library::Availability::Available
+    );
+
+    // Restore: active again, journal still the one event.
+    env.lib.unarchive_root(&root).unwrap();
+    assert!(
+        env.lib
+            .roots()
+            .unwrap()
+            .iter()
+            .any(|r| r.root_id == root && r.state == "active"),
+        "unarchived root is active again"
+    );
+    assert!(env.lib.archived_roots().unwrap().is_empty());
+    assert_eq!(store.folded_journal(&hash).unwrap().len(), 1);
+}
+
+/// Adding a folder INSIDE an existing active root (or a parent of one) is
+/// refused with the overlapping root's id, so the UI can alias/navigate to
+/// the root the user already has rather than double-ingesting. An ARCHIVED
+/// root does not block the add (it is not active).
+#[test]
+fn overlapping_root_is_refused_with_the_existing_root_id() {
+    use photoproof_core::library::LibraryError;
+    let _g = guard();
+    let env = Env::new();
+    let parent = env.register("photos");
+    std::fs::create_dir_all(env.mount.join("photos/2026")).unwrap();
+
+    // A child of the existing root: refused, carrying the parent's id.
+    let err = env
+        .lib
+        .register_root(&env.mount.join("photos/2026"), Some("2026"))
+        .unwrap_err();
+    match err {
+        LibraryError::OverlappingRoot {
+            existing_root_id, ..
+        } => assert_eq!(existing_root_id, parent, "refusal names the existing root"),
+        other => panic!("expected OverlappingRoot, got {other:?}"),
+    }
+
+    // Once the overlapping root is archived it no longer blocks: the child
+    // can register cleanly (archived roots are not active overlaps).
+    env.lib.archive_root(&parent).unwrap();
+    env.lib
+        .register_root(&env.mount.join("photos/2026"), Some("2026"))
+        .expect("archived root no longer overlaps");
+}
+
+// ---------------------------------------------------------------------------
 // 10. Orientation correctness (P9)
 // ---------------------------------------------------------------------------
 

@@ -4,17 +4,15 @@
    * an Add Folder button (EmptyState primitive — empty states say the next
    * action, featureset §6). No tour, no carousel, no sample library.
    */
-  import { open } from "@tauri-apps/plugin-dialog";
-  import * as ipc from "../../ipc/commands";
   import { ui } from "../../state/app.svelte";
   import EmptyState from "../../primitives/EmptyState.svelte";
 
+  // Route through the one add-root flow on the root (folder-tree
+  // improvements): it owns the picker, the optimistic ingest bridge, AND the
+  // refuse + alias handling for an overlapping folder — duplicating it here
+  // would re-open the overlap-double-ingest hole.
   async function addFolder() {
-    const dir = await open({ directory: true, multiple: false });
-    if (typeof dir !== "string") return;
-    const root = await ipc.addRoot(dir);
-    await ui.refreshRoots();
-    await ui.openFolder(root.rootId, "");
+    await ui.addRootFromPicker();
   }
 </script>
 
