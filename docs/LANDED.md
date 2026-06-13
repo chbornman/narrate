@@ -108,6 +108,16 @@ discrete BACKLOG checkboxes; recorded here for the changelog.
   A future `compare` mode now slots in additively (the litmus in the design doc).
   Reconciled the earlier neutralize-on-open: the visualizer seeds from the active
   photo (not stale), neutral only when nothing is focused. (Founder, June 13 2026.)
+- [x] **Voice dictation to a collection/topic note log** — merge `d2ed7be` (work
+  `b42cabb`); design `docs/DESIGN-VOICE-SUBJECTS.md`. The capture scope gained an
+  optional `ScopeSubject` (Collection|Topic id). Routing rule: a focused image
+  always wins (image note); dictation appends to the subject's note log only when a
+  collection/topic detail is open AND no image is focused; nothing focused + no
+  subject = session note. `on_final` routes via a `SubjectNoteSink` trait (engine
+  stays decoupled; existing `CaptureEngine::new` untouched), appending verbatim text
+  to `collection_notes`/`topic_notes`. The scope pill names the subject ("noting:
+  <name>"). Subject is onset-bound and frozen for the utterance; the spanning-swap
+  union stays image-only. (Founder, June 13 2026.)
 
 ## June 13 2026 — Visualization lenses
 
