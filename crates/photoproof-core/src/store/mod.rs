@@ -1191,9 +1191,9 @@ impl Drop for EventStore {
         // (bounded, inside checkpoint_truncate) and then reported loudly.
         if let Ok(w) = self.writer.lock() {
             if matches!(checkpoint_truncate(&w), Err(StoreError::CheckpointBlocked)) {
-                eprintln!(
-                    "photoproof-core: wal_checkpoint(TRUNCATE) at shutdown blocked \
-                     by a concurrent reader; the WAL was not truncated (spec/EVENTS.md §5.1)"
+                tracing::warn!(
+                    "wal_checkpoint(TRUNCATE) at shutdown blocked by a concurrent \
+                     reader; the WAL was not truncated (spec/EVENTS.md §5.1)"
                 );
             }
             let _ = schema::run_pragma(&w, "PRAGMA optimize");

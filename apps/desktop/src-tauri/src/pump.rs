@@ -326,16 +326,16 @@ pub fn spawn_sidecar_pump(handle: AppHandle) {
                     return;
                 }
                 if let Err(e) = app.engine.pump(UtcMillis::now()) {
-                    eprintln!("photoproof: sidecar pump error: {e}");
+                    tracing::error!(error = %e, "sidecar pump error");
                 }
                 // Collections ride the same tick (RETRIEVAL §10.2: "the
                 // same debounced writer that maintains sidecars"); a write
                 // failure backs off inside the core writer and retries here.
                 if let Err(e) = app.collections.pump(UtcMillis::now()) {
-                    eprintln!("photoproof: collections pump error: {e}");
+                    tracing::error!(error = %e, "collections pump error");
                 }
                 if let Err(e) = app.run_close_processing() {
-                    eprintln!("photoproof: close processing error: {e}");
+                    tracing::error!(error = %e, "close processing error");
                 }
             }
         })

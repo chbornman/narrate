@@ -294,10 +294,10 @@ impl Minter {
                     if prev_ms.saturating_sub(now_ms) > 60_000
                         && !self.warned_regression.swap(true, Ordering::Relaxed)
                     {
-                        eprintln!(
-                            "photoproof-core: wall clock regressed {} ms; \
-                             event ids remain monotonic (spec/EVENTS.md §1.3)",
-                            prev_ms - now_ms
+                        tracing::warn!(
+                            regression_ms = prev_ms - now_ms,
+                            "wall clock regressed; event ids remain monotonic \
+                             (spec/EVENTS.md §1.3)"
                         );
                     }
                     prev + 1

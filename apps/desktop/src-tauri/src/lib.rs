@@ -165,9 +165,10 @@ pub fn run() {
                         Ok(h) => {
                             watchers.insert(r.root_id.clone(), h);
                         }
-                        Err(e) => eprintln!(
-                            "photoproof: watcher for {} unavailable at launch: {e}",
-                            r.root_id
+                        Err(e) => tracing::warn!(
+                            root_id = %r.root_id,
+                            error = %e,
+                            "watcher unavailable at launch"
                         ),
                     }
                 }
