@@ -344,6 +344,23 @@ export interface RankedImageDto {
   score: number;
 }
 
+/** One proposed candidate GROUPING (DESIGN-TOPICS-COLLECTIONS.md, autosuggest
+ * Phase 3) the Topics tab can offer the human to bake into a collection. K14:
+ * the machine PROPOSES, the human commits via the existing bake. Computed on the
+ * fly from existing signals (co-annotation, repeated phrases, time+folder
+ * bursts); never stored. */
+export interface CollectionCandidateDto {
+  /** Human-readable name for the proposed grouping. */
+  label: string;
+  /** Candidate member image hashes (lowercase hex), capped + sorted. */
+  members: string[];
+  /** "co_annotation" | "repeated_phrase" | "time_folder" — the signal that
+   * proposed this (the rail can style each source differently). */
+  source: string;
+  /** A coherence/size signal for ranking (bigger / tighter groupings first). */
+  score: number;
+}
+
 /** image_abs_path result (D4: reveal / copy path / open-default). */
 export interface ImagePathsDto {
   /** Best online absolute path, null when every path is offline. */

@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AddRootOutcome,
   AppSettings,
+  CollectionCandidateDto,
   CollectionDto,
   CollectionNoteDto,
   ExportReportDto,
@@ -346,6 +347,13 @@ export const createCollectionFromTopic = (
  * (provenance "from topic graph selection"). Emits `collections-changed`. */
 export const createCollectionFromSelection = (hashes: string[], name: string) =>
   invoke<CollectionDto>("create_collection_from_selection", { hashes, name });
+/** Autosuggest Phase 3 (DESIGN-TOPICS-COLLECTIONS.md): propose candidate
+ * GROUPINGS the human might bake into collections, computed on the fly from
+ * existing signals (co-annotation in a session, repeated note phrases, time +
+ * folder bursts). K14: it PROPOSES, never auto-creates. Graceful: an
+ * empty/sparse scope returns []. */
+export const suggestCollections = (scope: GraphScope) =>
+  invoke<CollectionCandidateDto[]>("suggest_collections", { scope });
 
 // -- ingest / settings / export ---------------------------------------------
 

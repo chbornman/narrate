@@ -23,24 +23,21 @@
 //! Autosuggested topics: the cluster-derived ones already come from v2's
 //! `cluster_topics` (commands/graph.rs::cluster_topics) — the Topics tab calls
 //! that for a scope. The EXTRA candidate signals from the design (co-annotation
-//! in a session, repeated phrases across notes, time+folder affinity) are
-//! PHASE 3 and deliberately NOT built here (kept this slice to manual topics +
-//! cluster suggestions + the bake).
-//
-// TODO(autosuggest phase 3): co-annotation-in-session, repeated-phrase, and
-// time+folder-affinity candidate groupings feed the suggestion rail alongside
-// the v2 cluster topics. Each yields candidate groupings the human commits via
-// the same bake (K14: the machine proposes, never authors into the store).
+//! in a session, repeated phrases across notes, time+folder bursts) are PHASE 3
+//! and land in `suggest_collections` below — candidate GROUPINGS proposed from
+//! signals the app already has, computed on the fly (K14: it proposes, the human
+//! commits via the same bake).
 
 use photoproof_connectors::OrtEmbedder;
 use photoproof_core::topic::{self, RankedImage};
 use photoproof_core::topics::TopicSpace;
 use photoproof_core::tuning::tuning;
+use rusqlite::OpenFlags;
 use tauri::{AppHandle, Runtime};
 
 use super::graph::{GraphScope, enumerate_scope};
 use super::{S, parse_hash};
-use crate::dto::{CollectionDto, RankedImageDto, TopicDto};
+use crate::dto::{CollectionCandidateDto, CollectionDto, RankedImageDto, TopicDto};
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -300,6 +297,83 @@ pub async fn create_collection_from_selection<R: Runtime>(
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+// ---------------------------------------------------------------------------
+// 4. suggest_collections — Phase 3 candidate GROUPINGS (autosuggest)
+// ---------------------------------------------------------------------------
+
+/// `suggest_collections(scope)` (DESIGN-TOPICS-COLLECTIONS.md, autosuggest
+/// Phase 3): propose candidate GROUPINGS the human might bake into collections,
+/// from signals the app already has, computed on the fly. Three sources:
+///   - CO-ANNOTATION: images touched together in one session (a session that
+///     worked a coherent set of photos).
+///   - REPEATED PHRASE: a salient note n-gram recurring across multiple images.
+///   - TIME + FOLDER: a capture-time burst within one folder (a shoot).
+///
+/// K14 / quiet by construction: it PROPOSES, never auto-creates. Read-only over
+/// EXISTING tables (no schema migration, no write). GRACEFUL: an empty/sparse
+/// scope returns few/none, never an error.
+///
+/// Runs on a blocking thread (the journal + metadata scans can take real time on
+/// a large scope), mirroring `suggest_topics`. The DB reads happen on a fresh
+/// read-only connection over the shared WAL db (the debug-readq pattern the
+/// other suggestion commands use); the candidate logic itself is the pure
+/// `topic::suggest_collections` reducer.
+#[tauri::command]
+pub async fn suggest_collections(
+    app: S<'_>,
+    scope: GraphScope,
+) -> CmdResult<Vec<CollectionCandidateDto>> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        let hashes = enumerate_scope(&app, &scope)?;
+
+        // Gather every candidate source's raw rows on ONE read-only connection
+        // (a short projection has no business holding a write lock — the same
+        // posture suggest_topics/cluster_topics take).
+        let db_path = app.app_data.join("photoproof.db");
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| CmdError::Invalid(format!("open suggest-collections read: {e}")))?;
+
+        // 1. Co-annotation: (session, image) links + each session's start time.
+        let session_links = topic::scope_session_image_links(&conn, &hashes)
+            .map_err(|e| CmdError::Invalid(format!("session links: {e}")))?;
+        let session_started = topic::session_start_millis(&conn, &session_links)
+            .map_err(|e| CmdError::Invalid(format!("session starts: {e}")))?;
+
+        // 2. Repeated phrase: per-image note text (the same projection the v2
+        //    cluster labeling mines, grouped by image).
+        let notes_by_hash = topic::scope_note_texts_by_hash(&conn, &hashes)
+            .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?;
+
+        // 3. Time + folder: (folder_key, capture_ms, hash) for dated, located
+        //    images.
+        let folder_time_rows = topic::scope_folder_time_rows(&conn, &hashes)
+            .map_err(|e| CmdError::Invalid(format!("folder/time rows: {e}")))?;
+
+        let candidates = topic::suggest_collections(
+            &session_links,
+            &session_started,
+            &notes_by_hash,
+            &folder_time_rows,
+        );
+        Ok(candidates
+            .into_iter()
+            .map(|c| CollectionCandidateDto {
+                label: c.label,
+                members: c.members,
+                source: c.source,
+                score: c.score,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -404,6 +478,19 @@ mod tests {
         .expect("collections_for_image");
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].id, coll.id);
+    }
+
+    /// `suggest_collections` over an empty/fresh library returns an empty rail,
+    /// not an error — the K14 quiet posture through the real command path (no
+    /// sessions, notes, or dated images to propose anything from).
+    #[test]
+    fn suggest_collections_command_empty_library() {
+        let (_tmp, tauri_app) = mock_app();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let out =
+            tauri::async_runtime::block_on(suggest_collections(state.clone(), GraphScope::Library))
+                .expect("suggest_collections");
+        assert!(out.is_empty(), "empty library ⇒ empty candidate rail");
     }
 
     /// `create_collection_from_topic` bakes the `>= threshold` images. Over a

@@ -74,7 +74,7 @@ signature moment.
 2. The slider-to-collection bake (graph + tab) + `create_collection_from_selection`.
 3. The extra autosuggest signals (co-annotation, repeated-phrase, time/folder).
 
-> Backend status (June 13 2026): phases 1 + 2 landed. Manual-topic CRUD
+> Backend status (June 13 2026): phases 1 + 2 + 3 landed. Manual-topic CRUD
 > (`add_topic` / `list_topics` / `remove_topic`) over a `topics` table (schema
 > v13: `id, phrase, space?, created_ts`); `topic_ranked_images(phrase, scope,
 > alpha?)` reuses the graph's `topic_affinities` for the ranked grid + the
@@ -82,9 +82,21 @@ signature moment.
 > `create_collection_from_selection`) commits through the existing evented
 > collection create+add path, recording provenance in the collection
 > description. The cluster autosuggestions are the v2 `cluster_topics` command.
-> Phase 3 (co-annotation / repeated-phrase / time+folder candidate signals) is
-> NOT yet built (a `TODO(autosuggest phase 3)` marks the seam in
-> `commands/topics.rs`).
+>
+> Phase 3 (the extra candidate signals) LANDED: `suggest_collections(scope)` in
+> `commands/topics.rs` proposes candidate GROUPINGS from three signals computed
+> on the fly over EXISTING tables (no schema migration) -- co-annotation in a
+> session (a session that touched >= 3 distinct images), repeated phrases across
+> notes (a salient n-gram spanning >= 3 distinct images, reusing the v2
+> `mine_ngrams` miner), and time + folder bursts (>= 4 images within one folder
+> whose consecutive capture times stay within a 30 min gap). It returns
+> `[{ label, members[], source, score }]` where `source` is
+> `co_annotation | repeated_phrase | time_folder`, ranked by score (a
+> coherence/size signal), capped (24 candidates, 500 members each). K14: it
+> PROPOSES, never auto-creates; quiet by construction (read-only). The per-source
+> pure reducers + the SQL projections live in `topic.rs`; the Topics-tab UI that
+> consumes them is a later task. The DTO twin is `CollectionCandidateDto`
+> (`dto.rs` + `types/dto.ts`); the IPC wrapper is `suggestCollections`.
 
 ## Why this is on-thesis
 Collections are the core of helping the photographer think/plan/organize
