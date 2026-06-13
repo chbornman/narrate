@@ -171,9 +171,21 @@
   // writes it BEFORE emitting). Reload immediately with a fresh retry
   // budget — a capped 404 loop otherwise blanked the cell until restart
   // (founder dogfood, June 2026).
+  //
+  // An EMPTY `hashes` set is the GLOBAL signal the manual cache clear emits:
+  // it applies to EVERY thumb, even one already `loaded`. WHY ignore `loaded`
+  // here: the protocol serves content-addressed URLs with an `immutable`
+  // cache header, so after a clear deletes the bytes the webview keeps
+  // painting its cached copy for the same stable URL — only a NOVEL URL
+  // (a bumped `?p=` seq) forces a re-request. Bumping `applied.seq` rewrites
+  // the src so the grid re-fetches: a 1:1-only clear re-validates (thumbs
+  // survive), a full clear lands a truthful "?" that then heals per hash as
+  // the re-pended preview pass regenerates each artifact.
   $effect(() => {
     const ping = previewPing;
-    if (ping.seq === 0 || loaded || !ping.hashes.has(hash)) return;
+    if (ping.seq === 0) return;
+    const global = ping.hashes.size === 0;
+    if (!global && (loaded || !ping.hashes.has(hash))) return;
     clearTimeout(retryTimer);
     retry = { hash, n: 0 };
     applied = { hash, seq: ping.seq };

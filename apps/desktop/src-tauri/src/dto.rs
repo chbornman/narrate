@@ -130,6 +130,10 @@ pub struct JournalChanged {
 /// in an ingest drain. Thumbs that exhausted their 404 retry budget heal
 /// off this (the journal-changed seam, applied to previews) — without it,
 /// any ingest outlasting the retry cap left permanent blanks.
+///
+/// An EMPTY `hashes` is the GLOBAL signal: every visible thumb bumps its
+/// cache-bust param and re-requests. The manual cache clear emits it so the
+/// webview's immutable-cached bytes are dropped for the deleted artifacts.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewsChanged {

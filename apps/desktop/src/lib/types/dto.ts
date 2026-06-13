@@ -79,7 +79,11 @@ export interface JournalChanged {
 
 /** `previews-changed` payload: the images whose preview artifacts landed
  * in an ingest drain. Thumbs that exhausted their 404 retry budget heal
- * off this instead of staying blank until restart. */
+ * off this instead of staying blank until restart.
+ *
+ * An EMPTY `hashes` is the GLOBAL signal (manual cache clear emits it):
+ * every visible thumb bumps its cache-bust param and re-requests, dropping
+ * the webview's immutable-cached bytes for the just-deleted artifacts. */
 export interface PreviewsChanged {
   hashes: string[];
 }
