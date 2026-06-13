@@ -37,7 +37,7 @@ use tauri::{AppHandle, Runtime};
 
 use super::graph::{GraphScope, enumerate_scope};
 use super::{S, parse_hash};
-use crate::dto::{CollectionCandidateDto, CollectionDto, RankedImageDto, TopicDto};
+use crate::dto::{CollectionCandidateDto, CollectionDto, RankedImageDto, TopicDto, TopicNoteDto};
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -51,6 +51,14 @@ fn topic_dto(rec: photoproof_core::topics::TopicRecord) -> TopicDto {
         phrase: rec.phrase,
         space: rec.space.as_str().to_owned(),
         created_ts: rec.created_ts,
+    }
+}
+
+fn topic_note_dto(n: photoproof_core::topics::TopicNote) -> TopicNoteDto {
+    TopicNoteDto {
+        id: n.id,
+        ts: n.ts,
+        text: n.text,
     }
 }
 
@@ -98,6 +106,46 @@ pub async fn remove_topic(app: S<'_>, id: String) -> CmdResult<()> {
         app.topics
             .remove(&id)
             .map_err(|e| CmdError::Invalid(format!("remove topic: {e}")))
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// `add_topic_note(id, text)` — append a note to a topic (founder decision:
+/// topics get their own append-only running note, mirroring the collection
+/// note log). Append-only — there is no edit or delete, exactly like
+/// `add_collection_note`. Resolves to the freshly appended note. No event
+/// emit: unlike collections (whose snapshot carries note_count), a topic note
+/// is a local note log the rail reloads on demand, so there is nothing in a
+/// topic snapshot to refresh.
+#[tauri::command]
+pub async fn add_topic_note(app: S<'_>, id: String, text: String) -> CmdResult<TopicNoteDto> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        let note = app
+            .topics
+            .add_note(&id, &text, photoproof_core::UtcMillis::now())
+            .map_err(|e| CmdError::Invalid(format!("add topic note: {e}")))?;
+        Ok(topic_note_dto(note))
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// `topic_notes(id)` — a topic's append-only notes in id order (ULID order =
+/// time order), the `collection_notes` read mirrored for topics.
+#[tauri::command]
+pub async fn topic_notes(app: S<'_>, id: String) -> CmdResult<Vec<TopicNoteDto>> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(app
+            .topics
+            .notes(&id)
+            .map_err(|e| CmdError::Invalid(format!("topic notes: {e}")))?
+            .into_iter()
+            .map(topic_note_dto)
+            .collect())
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -425,6 +473,60 @@ mod tests {
 
         // Removing the already-removed id errors.
         assert!(tauri::async_runtime::block_on(remove_topic(state.clone(), saved.id)).is_err());
+    }
+
+    /// Topic notes through the REAL command path: append + list round-trip in
+    /// time order, and a note for a missing topic errors (the FK guard) — the
+    /// collection-notes command contract mirrored for topics.
+    #[test]
+    fn topic_notes_through_the_command_layer() {
+        let (_tmp, tauri_app) = mock_app();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+
+        let topic = tauri::async_runtime::block_on(add_topic(state.clone(), "harbor".into(), None))
+            .expect("add_topic");
+
+        tauri::async_runtime::block_on(add_topic_note(
+            state.clone(),
+            topic.id.clone(),
+            "what this topic is for".into(),
+        ))
+        .expect("add_topic_note");
+        tauri::async_runtime::block_on(add_topic_note(
+            state.clone(),
+            topic.id.clone(),
+            "refine toward dusk shots".into(),
+        ))
+        .expect("add_topic_note");
+
+        let listed = tauri::async_runtime::block_on(topic_notes(state.clone(), topic.id.clone()))
+            .expect("topic_notes");
+        assert_eq!(listed.len(), 2);
+        // The ordering guarantee: ascending id (= time order). The note id is a
+        // fresh ULID (wall clock), so assert the list is sorted and both notes
+        // round-tripped, not which won the same-millisecond random tail.
+        let ids: Vec<&str> = listed.iter().map(|n| n.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "notes list ascending by id");
+        let texts: std::collections::HashSet<&str> =
+            listed.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["what this topic is for", "refine toward dusk shots"]
+                .into_iter()
+                .collect()
+        );
+
+        // A note for a topic that does not exist is an error (the FK guard).
+        assert!(
+            tauri::async_runtime::block_on(add_topic_note(
+                state.clone(),
+                "01MISSING".into(),
+                "orphan".into(),
+            ))
+            .is_err()
+        );
     }
 
     /// `topic_ranked_images` over an empty/un-embedded library returns an empty

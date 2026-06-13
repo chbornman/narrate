@@ -30,6 +30,7 @@ import type {
   StrokeCommitDto,
   StrokePayloadWire,
   TopicDto,
+  TopicNoteDto,
 } from "../types/dto";
 import type { Filter, FusionWeights, SearchResults } from "../types/search";
 
@@ -315,6 +316,16 @@ export const listTopics = () => invoke<TopicDto[]>("list_topics");
 /** Remove a saved topic by id (errors if already gone). */
 export const removeTopic = (id: string) =>
   invoke<void>("remove_topic", { id });
+/** A topic's append-only notes, chronological (the collection-notes mirror).
+ * A topic note is the user's authored text ABOUT the topic (its definition,
+ * what it is for, the refinement intent), keyed to the topic id. */
+export const topicNotes = (id: string) =>
+  invoke<TopicNoteDto[]>("topic_notes", { id });
+/** Append a note to the topic (append-only — no edit/delete, the collection
+ * note's event model mirrored for topics). Resolves to the freshly appended
+ * note; the rail reloads its note log on demand (no snapshot event). */
+export const addTopicNote = (id: string, text: string) =>
+  invoke<TopicNoteDto>("add_topic_note", { id, text });
 /** The in-scope images ranked by blended affinity to one topic phrase,
  * descending — the Topics-tab grid; the slider thresholds on `score`. `alpha`
  * omitted uses the graph default. Graceful: an un-embedded scope returns []. */

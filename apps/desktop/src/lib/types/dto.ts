@@ -327,6 +327,17 @@ export interface CollectionNoteDto {
   text: string;
 }
 
+/** One topic note (append-only, never edited or deleted) as the Topics rail
+ * tab's note pane renders it. The CollectionNoteDto shape mirrored for topics:
+ * a topic note is the user's authored text ABOUT the topic (its definition,
+ * what it is for, the refinement intent), keyed to the topic id. */
+export interface TopicNoteDto {
+  id: string;
+  /** RFC 3339. */
+  ts: string;
+  text: string;
+}
+
 /** One saved manual topic (DESIGN-TOPICS-COLLECTIONS.md) as the Topics rail
  * tab renders it. A topic is a saved phrase, like a saved search; its images
  * are ALWAYS computed affinity (`topicRankedImages`), never stored membership —

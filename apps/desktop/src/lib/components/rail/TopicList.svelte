@@ -81,7 +81,7 @@
       <button
         class="open"
         title={topic.phrase}
-        onclick={() => void ui.openTopic(topic.phrase)}
+        onclick={() => void ui.openTopic(topic.phrase, topic.id)}
       >
         <span class="label">{topic.phrase}</span>
       </button>

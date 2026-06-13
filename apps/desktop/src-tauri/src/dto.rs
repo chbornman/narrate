@@ -423,6 +423,18 @@ pub struct CollectionNoteDto {
     pub text: String,
 }
 
+/// One topic note (append-only, never edited or deleted) as the Topics rail
+/// tab's note pane renders it. The CollectionNoteDto shape mirrored for topics:
+/// a topic note is the user's authored text ABOUT the topic (its definition,
+/// what it is for), keyed to the topic id.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicNoteDto {
+    pub id: String,
+    pub ts: String,
+    pub text: String,
+}
+
 /// One saved manual topic (DESIGN-TOPICS-COLLECTIONS.md) as the Topics rail
 /// tab renders it. A topic is a saved phrase, like a saved search; its images
 /// are always computed affinity (`topic_ranked_images`), never stored here.

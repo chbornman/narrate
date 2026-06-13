@@ -122,7 +122,13 @@ export type GridScope =
   // <phrase>", one-key clear / Escape returns to `within`). A topic is fuzzy
   // (computed affinity, never stored membership); the bake gesture commits a
   // threshold of it into a durable collection (createCollectionFromTopic).
-  | { kind: "topic"; phrase: string; within: GridScope };
+  //
+  // `topicId` is the SAVED topic record this scope was opened from, when it
+  // came from the Topics rail tab (so its append-only note log can surface,
+  // mirroring how a `collection` scope carries the id its notes hang off).
+  // Optional: a topic scope reached by phrase alone (a live re-rank with no
+  // saved record, a restore from a phrase) carries no id and shows no notes.
+  | { kind: "topic"; phrase: string; topicId?: string; within: GridScope };
 
 export class Ui {
   // -- slices (contracts frozen by FOUNDATIONS) -------------------------------
@@ -201,6 +207,16 @@ export class Ui {
           this.gridScope.within.kind === "collection"
         ? this.gridScope.within.id
         : null,
+  );
+  /** The SAVED topic whose note log is open in the rail, or null. Derived
+   * from the topic gridScope's `topicId` exactly as `collectionId` is derived
+   * from the collection scope, so leaving the topic scope (opening a folder,
+   * a query, a collection) auto-hides the note pane with no extra cleanup.
+   * Only the rail Topics tab opens a topic WITH its saved id; a phrase-only
+   * topic scope (a graph lens, a live re-rank) reads null and shows no notes,
+   * exactly as a query/similar scope shows no collection notes. */
+  topicDetailId = $derived<string | null>(
+    this.gridScope.kind === "topic" ? (this.gridScope.topicId ?? null) : null,
   );
   /** Collection ids the ACTIVE image is CURRENTLY in (open intervals) —
    * the thumb menu's Add-to-collection checkmarks and the
@@ -769,8 +785,9 @@ export class Ui {
     if (scope.kind === "topic") {
       // A live re-list under a topic view re-ranks the SAME phrase so
       // newly-embedded images can enter (and re-rank) the set. The underlying
-      // source is unchanged — re-feed against the same topic phrase.
-      await this.runTopicScope(scope.phrase);
+      // source is unchanged — re-feed against the same topic phrase, preserving
+      // the open topic's id so its note log stays surfaced across the re-rank.
+      await this.runTopicScope(scope.phrase, scope.topicId);
       return;
     }
     if (this.grid.rootId === null) return;
@@ -1075,11 +1092,13 @@ export class Ui {
    * Surface-safe like runSimilarScope: triggered from the rail, it swaps the
    * grid scope; the caller leaves Look first when that is the intent.
    */
-  async runTopicScope(phrase: string) {
+  async runTopicScope(phrase: string, topicId?: string) {
     const within = this.scopeSource();
     // Set the discriminator BEFORE the await: the residue and the sort menu key
-    // off it immediately; a stale async result is fenced by gridLoad.
-    this.gridScope = { kind: "topic", phrase, within };
+    // off it immediately; a stale async result is fenced by gridLoad. `topicId`
+    // (present when opened from a saved topic in the rail) rides the scope so
+    // the topic's note log can surface, mirroring the `collection` scope's id.
+    this.gridScope = { kind: "topic", phrase, topicId, within };
     // Ranked (descending-affinity) order IS the relevance order — the same
     // pass-through the query/similar scopes use.
     this.grid.sort = "relevance";
@@ -1148,11 +1167,15 @@ export class Ui {
       await this.clearQueryScope();
   }
 
-  /** Select a topic in the rail -> scope the grid to its ranked images. Leaves
-   * Look first (the rail drives the grid surface), like openFolder. */
-  async openTopic(phrase: string): Promise<void> {
+  /** Select a topic in the rail -> scope the grid to its ranked images AND, when
+   * opened from a saved topic record (`topicId` given), surface that topic's
+   * append-only note log in the rail. Mirrors how `openCollection` both scopes
+   * the grid and shows the collection's notes. Leaves Look first (the rail
+   * drives the grid surface), like openFolder. A phrase-only call (the graph
+   * lens) scopes the grid without a note log. */
+  async openTopic(phrase: string, topicId?: string): Promise<void> {
     if (this.surface === "look") await this.leaveLook();
-    await this.runTopicScope(phrase);
+    await this.runTopicScope(phrase, topicId);
   }
 
   /**
