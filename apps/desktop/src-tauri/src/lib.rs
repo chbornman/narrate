@@ -212,6 +212,10 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::capture::set_mic,
         commands::search::search,
         commands::search::find_similar,
+        // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md).
+        commands::graph::topic_affinities,
+        commands::graph::suggest_topics,
+        commands::graph::graph_tuning,
         commands::collections::list_collections,
         commands::collections::create_collection,
         commands::collections::rename_collection,
@@ -278,6 +282,10 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::capture::set_mic,
         commands::search::search,
         commands::search::find_similar,
+        // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md).
+        commands::graph::topic_affinities,
+        commands::graph::suggest_topics,
+        commands::graph::graph_tuning,
         commands::collections::list_collections,
         commands::collections::create_collection,
         commands::collections::rename_collection,

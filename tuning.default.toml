@@ -43,8 +43,21 @@ s4 = 1.0       # S4 image_clip — visual match (B69: raised 0.5→1.0)
 display_edge = 2560          # display-tier preview longest edge, px
 embedded_accept_edge = 2048  # in-RAW JPEG is "good enough" at >= this px
 
-# Heatmap and graph sections will be added here when those features land
-# (their design docs already name the knobs); no empty dead sections for now.
+# ---------------------------------------------------------------------------
+# Graph — semantic topic-graph force lens (DESIGN-SEMANTIC-GRAPH.md). The
+# force-directed lens' physics + the looks/said blend default. Tuned by feel:
+# alpha_default also gates topic_affinities when a caller passes no alpha.
+# ---------------------------------------------------------------------------
+[graph]
+alpha_default = 0.5   # looks vs said blend: 0 = annotation only, 1 = visual only. Range [0, 1].
+attraction = 0.02     # pull stiffness toward a topic anchor (× blended affinity). Range [0, 100000].
+repulsion = 800.0     # mutual image-image repulsion (spreads clusters). Range [0, 100000].
+damping = 0.85        # per-step velocity damping (the sim's cooling). Range [0, 1].
+centering = 0.01      # pull toward the origin (un-topic'd images drift to center). Range [0, 100000].
+ring_radius = 320.0   # topic-anchor ring radius in sim-space px. Range [0, 100000].
+
+# The heatmap section will be added here when that feature lands (its design
+# doc already names the knobs); no empty dead section for now.
 
 # FIXED contracts (deliberately NOT here — a config edit must never silently
 # break an invariant): the <100 ms search latency budget, and the embedded

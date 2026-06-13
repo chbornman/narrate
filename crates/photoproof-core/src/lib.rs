@@ -17,6 +17,8 @@
 //!   retrieval-quality gate (RETRIEVAL §12; the `pp-retrieval-eval` runner)
 //! - `tuning`: centralized, file-overridable tuning config — ONE home for the
 //!   scattered ranking/preview weights (DESIGN-TUNING-CONFIG.md, docs/tuning.html)
+//! - `topic`: semantic topic-graph backend — per-image affinity to named topic
+//!   anchors (visual/said blend) + cheap topic suggestions (DESIGN-SEMANTIC-GRAPH.md)
 
 pub mod canonical;
 pub mod capture;
@@ -31,6 +33,7 @@ pub mod runtime;
 pub mod search;
 pub mod sidecar;
 pub mod store;
+pub mod topic;
 pub mod tuning;
 pub mod voice_wer;
 

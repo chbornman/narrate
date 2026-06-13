@@ -55,6 +55,9 @@
   import Filmstrip from "./lib/components/shell/Filmstrip.svelte";
   import GridSurface from "./lib/components/grid/GridSurface.svelte";
   import LookSurface from "./lib/components/look/LookSurface.svelte";
+  // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): a force-directed
+  // overlay over the center column, gated on ui.graphOpen.
+  import TopicGraph from "./lib/components/graph/TopicGraph.svelte";
   import Inspector from "./lib/components/inspector/Inspector.svelte";
   import EmptyState from "./lib/primitives/EmptyState.svelte";
   import ToastHost from "./lib/primitives/ToastHost.svelte";
@@ -340,6 +343,13 @@
           {/if}
         {:else}
           <LookSurface />
+        {/if}
+
+        <!-- Topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): a force-directed map of
+             the current scope, overlaid on the center column. Self-contained;
+             it reads ui.graphScope() and re-uses the grid's scope/Look flows. -->
+        {#if ui.graphOpen}
+          <TopicGraph />
         {/if}
       </div>
 

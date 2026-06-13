@@ -41,6 +41,7 @@ use photoproof_connectors::embedder::Embedding;
 use photoproof_connectors::vector_store::{
     VecHit, VecKey, VecKind, VecSpace, VecUnit, VectorStore, VectorStoreError, VectorStoreResult,
 };
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::id::UtcMillis;
@@ -564,6 +565,111 @@ impl PpvecStore {
         )
         .optional()
         .map_err(db_err)
+    }
+
+    /// Score a SPECIFIC set of image hashes against a topic query embedding,
+    /// over one image-keyed space (`ImageClip` or `ImageSummary`). Returns a
+    /// `(image_hash -> cosine)` map carrying only the hashes that HAVE a live
+    /// stored vector in that space; a hash with no row is simply absent (its
+    /// affinity is "unknown", which the topic-graph treats as zero pull).
+    ///
+    /// WHY a sibling of `search()` rather than `search()` itself: the topic
+    /// graph scores a KNOWN in-scope set (collection members / the whole
+    /// library), not "the global top-k". A top-k search would silently drop
+    /// in-scope images past rank k and waste work ranking out-of-scope ones.
+    /// This walks exactly the requested rows through the SAME quantize /
+    /// dequantize / fused-multiply-add kernel the brute-force `search()` uses,
+    /// so the cosine numbers are identical to what fusion would compute — no
+    /// second similarity definition. The query and every stored row carry the
+    /// same int8 quantization error (§1.3), exactly as `search()`.
+    ///
+    /// Graceful by construction (DESIGN-SEMANTIC-GRAPH.md: "absent embedders
+    /// return zeros / empty, never error"): an empty space, a model mismatch,
+    /// or an empty hash set all yield an empty map, never an error — the
+    /// mechanism is correct before any embedding pass has run.
+    pub fn score_images(
+        &self,
+        query: &Embedding,
+        space: VecSpace,
+        image_hashes: &[String],
+    ) -> VectorStoreResult<HashMap<String, f32>> {
+        if image_hashes.is_empty() || query.model_id != space.model_id {
+            return Ok(HashMap::new());
+        }
+        let path = self.file_path(&space);
+        // ONE critical section (connection + file lock), mirroring `search()`:
+        // a compaction remap between the pointer reads and the byte snapshot
+        // would pair dense new file_rows with the old bytes.
+        let conn = self.db.lock().expect("poisoned");
+        let _io = file_io_lock();
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        let mut f = File::open(&path)?;
+        let header = read_header(&mut f)?;
+        let processed = mrl_truncate_normalize(&query.vector);
+        if processed.len() != header.dims as usize {
+            // A dimension mismatch is a model/space mismatch the graph treats
+            // as "no signal", never a hard error (it must not crash the lens).
+            return Ok(HashMap::new());
+        }
+        // SAFETY: identical to `search()` — one process owns the files and we
+        // hold the FILE_IO lock for the mapping's lifetime (this function).
+        let mmap = unsafe { memmap2::Mmap::map(&f)? };
+        let data = &mmap[header.data_offset() as usize..];
+
+        // Same hoisted quant kernel as `search()`: dequant(b)·q == b·(scale·q)
+        // + offset·q, so each row is a fused multiply-add.
+        let q: Vec<f32> = quantize(&processed, &header)
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| dequantize(v, i, &header))
+            .collect();
+        let weights: Vec<f32> = header.scale.iter().zip(&q).map(|(s, qf)| s * qf).collect();
+        let bias: f32 = header.offset.iter().zip(&q).map(|(o, qf)| o * qf).sum();
+        let dims = header.dims as usize;
+
+        // Resolve the requested hashes to their live file rows in ONE query.
+        // De-dup is harmless (the map keys on hash); a hash with no live row
+        // simply does not come back.
+        let marks = vec!["?"; image_hashes.len()].join(",");
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT image_hash, file_row FROM vectors
+                     WHERE vec_kind = ?1 AND model_id = ?2 AND deleted = 0
+                       AND image_hash IN ({marks})"
+                ))
+                .map_err(db_err)?;
+            let mut params: Vec<Value> = vec![
+                Value::Text(vec_kind_str(space.vec_kind).to_owned()),
+                Value::Text(space.model_id.clone()),
+            ];
+            params.extend(image_hashes.iter().map(|h| Value::Text(h.clone())));
+            let mapped = stmt
+                .query_map(rusqlite::params_from_iter(params), |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(db_err)?;
+            mapped.collect::<Result<_, _>>().map_err(db_err)?
+        };
+
+        let mut out = HashMap::with_capacity(rows.len());
+        for (hash, file_row) in rows {
+            let start = file_row as usize * dims;
+            let Some(row) = data.get(start..start + dims) else {
+                return Err(VectorStoreError::Corrupt(format!(
+                    "{}: file_row {file_row} beyond file end",
+                    path.display()
+                )));
+            };
+            let mut acc = 0.0f32;
+            for (b, w) in row.iter().zip(&weights) {
+                acc += f32::from(*b as i8) * w;
+            }
+            out.insert(hash, acc + bias);
+        }
+        Ok(out)
     }
 
     /// "More like this": the nearest OTHER images to `image_hash` by cosine

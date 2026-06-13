@@ -369,11 +369,11 @@ work lives here.
   focus cap, tiered: Look-open full, grid-select far less) + annotation counts
   (stroke COUNT small; effort dropped). Grid heat-tint toggle + sort-by-attention.
   NOT gaze surveillance; dwell lives outside the journal, local-only, resettable.
-- [ ] **Semantic topic-graph** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. Force-
-  directed lens: images pulled toward named TOPIC anchors by similarity. Topics
-  from manual seed (v1) -> cluster labels (v2) -> LLM (v3). Looks-vs-said blend
-  slider (alpha), reusing the find_similar/search machinery with topic-phrase
-  embeddings. Collection-first, then full-library LOD. A new navigation surface.
+- [ ] **Semantic topic-graph (v2/v3)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. v1
+  LANDED (see LANDED.md): manual-seed topics + cheap suggestions + looks/said
+  blend slider + live force layout, collection-first AND a full-library scale
+  spike. REMAINING: v2 cluster auto-labels + a full-library LOD strategy chosen
+  from the v1 profiling; v3 LLM topic suggestion (gated on Gemma being wired).
 - [ ] **Heatmap x graph synthesis (FUTURE opportunity)** (founder, June 13 2026):
   once both exist, combine them. Two payoffs the founder named: (a) **"hot
   topics"** — overlay engagement intensity onto the topic-graph so the themes

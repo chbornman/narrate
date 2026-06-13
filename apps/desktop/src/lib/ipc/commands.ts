@@ -135,6 +135,70 @@ export const findSimilar = (hash: string, limit?: number) =>
     limit === undefined ? { hash } : { hash, limit },
   );
 
+// -- semantic topic-graph (DESIGN-SEMANTIC-GRAPH.md) ------------------------
+
+/** The grid scope the graph lens is pointed at — a folder, a collection, or
+ * the WHOLE library (the deliberate scale spike). Field names are snake_case to
+ * match the Rust `GraphScope` (serde tag = "kind", snake_case). */
+export type GraphScope =
+  | { kind: "folder"; root_id: string; folder: string }
+  | { kind: "collection"; id: string }
+  | { kind: "library" };
+
+/** One image's blended affinity to one topic anchor (snake_case twin of the
+ * Rust `TopicScore` — same convention as the search `ImageResult`). */
+export interface TopicScore {
+  topic: number;
+  affinity: number;
+}
+export interface ImageAffinities {
+  image_hash: string;
+  scores: TopicScore[];
+}
+/** `topic_affinities` result + the honesty flags the UI surfaces (so a degraded
+ * rig is VISIBLE, not a silent all-centered blob). */
+export interface AffinityReport {
+  images: ImageAffinities[];
+  visual_ready: boolean;
+  annotation_ready: boolean;
+}
+/** A suggested topic for the rail — a mined note n-gram or a collection name. */
+export interface TopicSuggestion {
+  phrase: string;
+  source: "note" | "collection";
+  count: number;
+}
+/** The force-sim physics knobs (twin of the Rust `GraphTuning`). */
+export interface GraphTuning {
+  alpha_default: number;
+  attraction: number;
+  repulsion: number;
+  damping: number;
+  centering: number;
+  ring_radius: number;
+}
+
+/** Per-image blended affinity to each topic anchor (looks vs said, blend
+ * `alpha`; omitted ⇒ the GraphTuning default). Never errors on a degraded rig —
+ * a fresh/un-embedded machine resolves to a zeros report. */
+export const topicAffinities = (
+  scope: GraphScope,
+  topics: string[],
+  alpha?: number,
+) => {
+  const args: Record<string, unknown> = { scope, topics };
+  if (alpha !== undefined) args.alpha = alpha;
+  return invoke<AffinityReport>("topic_affinities", args);
+};
+
+/** Cheap candidate topics for the suggestion rail (note n-grams + collection
+ * names). v1: no LLM, no clustering. */
+export const suggestTopics = (scope: GraphScope) =>
+  invoke<TopicSuggestion[]>("suggest_topics", { scope });
+
+/** The GraphTuning knobs the force sim + alpha slider read. */
+export const graphTuning = () => invoke<GraphTuning>("graph_tuning");
+
 // -- roots & grid -----------------------------------------------------------
 
 export const listRoots = () => invoke<RootDto[]>("list_roots");
