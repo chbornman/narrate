@@ -341,6 +341,37 @@ export const rebuildPreviews = (rootId: string) =>
 export const requestFullDecode = (hash: string) =>
   invoke<boolean>("request_full_decode", { hash });
 
+// -- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) ---------------
+
+/** Which focus tier a dwell episode was captured at. "look" = single-image
+ * view (full weight); "grid" = grid select / multi-select (a small fraction).
+ * The tier RATE and the 60 s per-episode cap live in the backend (tuning is
+ * authoritative); the frontend reports only the raw episode. */
+export type DwellSource = "look" | "grid";
+
+/** Report one finished focus episode (DESIGN §"dwell capture"). Fire-and-
+ * forget: capture is light and a dropped report just loses a little dwell. The
+ * backend applies the tier rate + 60 s cap and accumulates into image_dwell. */
+export const recordDwell = (hash: string, source: DwellSource, elapsedMs: number) =>
+  invoke<void>("record_dwell", { hash, source, elapsedMs });
+
+/** One image's normalized (0..1) engagement intensity in a scope. */
+export interface ImageIntensity {
+  hash: string;
+  intensity: number;
+}
+
+/** Per-scope, normalized engagement intensity (DESIGN §"Rendering"). `allTime`
+ * false (default) is recency-weighted ("what am I working on now"); true is flat
+ * all-time ("what mattered most ever"). One entry per input hash, in order. */
+export const imageIntensity = (hashes: string[], allTime: boolean) =>
+  invoke<ImageIntensity[]>("image_intensity", { hashes, allTime });
+
+/** Settings → "Clear attention data": wipe the local dwell telemetry (the
+ * privacy-hygiene reset). Annotation counts are the user's journal, untouched.
+ * Resolves to the number of per-image rows removed. */
+export const clearDwell = () => invoke<number>("clear_dwell");
+
 // -- window plumbing ----------------------------------------------------------
 
 export const openSettingsWindow = () => invoke<void>("open_settings_window");

@@ -17,6 +17,7 @@ pub mod collections;
 // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): topic_affinities /
 // suggest_topics / graph_tuning. A self-contained command module.
 pub mod graph;
+pub mod heatmap;
 pub mod journal;
 pub mod library;
 pub mod os;

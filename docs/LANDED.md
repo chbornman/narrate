@@ -6,6 +6,36 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 13 2026 — Visualization lenses
+
+- [x] **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.
+  Engagement-intensity per image, NOT gaze surveillance: dwell is capped, local,
+  and lives OUTSIDE the journal (K14). Backend (photoproof-core): a `[heatmap]`
+  tuning section (`w_dwell`/`w_events`/`w_strokes`, `dwell_look_rate`/
+  `dwell_grid_rate`, `dwell_cap_ms`, `recency_half_life_days` — rates/cap/weights
+  are config, not literals) + matching `tuning.default.toml` block; a v12 schema
+  migration adding `image_dwell ( image_hash PK, dwell_ms, focus_count, last_ts )`
+  (local telemetry, preserved by `rebuild_derived`, never in sidecars) and an
+  `image_journal_stats.stroke_count` column maintained in the SAME recompute
+  transaction as event insert/retract/redact (live strokes only). Store methods:
+  `record_dwell(hash, source, elapsed_ms)` (tier rate + 60s cap applied in the
+  backend, accumulated per image), `image_intensity(hashes, all_time)` (composite
+  `w_dwell·dwell + w_events·events + w_strokes·strokes`, normalized 0..1 across the
+  scope; recency-weighted by `0.5^(age_days/half_life)` unless all_time), and
+  `clear_dwell()`. Three Tauri commands registered in both handler lists. Frontend
+  (apps/desktop): a `logic/dwell.ts` focus-episode tracker + a localized
+  `app.svelte.ts` hook (refocus from `reportScope`'s ONE funnel, flush on leaving
+  Look / deselect / switch / window blur + visibilitychange / short idle); a grid
+  heat-tint toggle (Flame, off by default, persisted) rendering a warm glow +
+  corner heat-bar in Thumb.svelte; an "All-time" recency switch (founder decision,
+  persisted); a "Sort by attention" mode (logic/sort.ts); and a "Clear attention
+  data" button in SettingsApp. Tests: backend (record_dwell tier+cap,
+  image_intensity composite+normalization, recency vs all-time, stroke_count
+  across insert/retract, HeatmapTuning defaults + toml merge + out-of-range
+  reject); frontend (dwell episode flush + blur-pause + fan-out, heat + all-time
+  toggle state/persist/fetch, sort-by-attention). Gate green (the pre-existing
+  `s02_2_case_only_rename_relinks_sidecar` failure aside).
+
 ## June 12-13 2026 — RAW decode + UI polish wave (three parallel-agent builds)
 
 - [x] **Semantic topic-graph (v1)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. The

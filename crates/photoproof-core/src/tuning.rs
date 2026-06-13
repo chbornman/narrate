@@ -78,6 +78,39 @@ const DISPLAY_EDGE: u32 = 2560;
 /// skip a full decode when its longest edge is ≥ this many px.
 const EMBEDDED_ACCEPT_EDGE: u32 = 2048;
 
+// --- Heatmap (DESIGN-ATTENTION-HEATMAP.md) ---------------------------------
+//
+// The attention/engagement heatmap's knobs. Dwell leads; stroke-count is a
+// small factor (founder dropped stroke "effort"/duration). The tier rates and
+// the per-episode cap live HERE (not as literals in the record path) so the
+// founder can re-feel "how much grid-select counts vs a Look-open" against the
+// real library without a rebuild. Intensity weights are explicitly DEFAULTS,
+// tuned later (DESIGN §3 "tuning pass on the weights").
+
+/// `w_dwell`: weight on accumulated dwell-ms in the composite. Dwell leads
+/// (DESIGN §"What attention is"), but a millisecond is a tiny unit next to a
+/// whole event, so this is small — 60 s of capped dwell contributes ~6 to the
+/// pre-normalization score, comparable to a handful of events.
+const HEATMAP_W_DWELL: f64 = 0.0001;
+/// `w_events`: weight on live event_count (remarks + ratings + strokes).
+const HEATMAP_W_EVENTS: f64 = 1.0;
+/// `w_strokes`: weight on live stroke_count — a SMALL extra nudge over the
+/// event_count a stroke already contributes (founder: a bare count is enough).
+const HEATMAP_W_STROKES: f64 = 0.5;
+/// Look-open dwell tier: full weight (1.0x) — the strongest "I am focusing on
+/// THIS" signal (DESIGN §"dwell capture").
+const HEATMAP_DWELL_LOOK_RATE: f64 = 1.0;
+/// Grid-select dwell tier: a small fraction of the Look rate — a grid click /
+/// multi-select counts, but far less (DESIGN: ~0.1-0.2x).
+const HEATMAP_DWELL_GRID_RATE: f64 = 0.15;
+/// Per-episode-per-image dwell cap, ms (60 s — DESIGN: keeps lunch-break
+/// walk-aways from skewing it; window-blur pause is the other half).
+const HEATMAP_DWELL_CAP_MS: i64 = 60_000;
+/// Recency half-life, days: when recency-weighting is on (the default), an
+/// image's intensity is multiplied by `0.5^(age_days / half_life)`, so dwell /
+/// annotation from `half_life` days ago counts half as much as today's.
+const HEATMAP_RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
+
 // --- Validation bounds (sane ranges; an out-of-range loaded value is rejected
 //     back to the default with a logged warning — never a silent bad number) ---
 
@@ -99,6 +132,18 @@ const BETA_MAX: f64 = 1.0;
 /// enough not to be a typo'd multi-gigapixel target.
 const EDGE_MIN: u32 = 256;
 const EDGE_MAX: u32 = 16_384;
+/// A dwell-tier rate is a fraction-or-multiple of raw elapsed time; outside
+/// (0, 1] it would either erase dwell (0) or invent more than really elapsed.
+const DWELL_RATE_MIN: f64 = 0.0; // exclusive lower bound enforced below
+const DWELL_RATE_MAX: f64 = 1.0;
+/// The dwell cap is a per-episode millisecond budget; 0 disables dwell and a
+/// wild value defeats the walk-away guard. One day is a generous ceiling.
+const DWELL_CAP_MIN_MS: i64 = 0;
+const DWELL_CAP_MAX_MS: i64 = 86_400_000;
+/// Recency half-life in days: must be positive (it sits in a divisor); a year
+/// is effectively "flat" already, so cap there to catch typos.
+const HALF_LIFE_MIN_DAYS: f64 = 0.0; // exclusive lower bound enforced below
+const HALF_LIFE_MAX_DAYS: f64 = 365.0;
 
 // --- Semantic topic-graph defaults (DESIGN-SEMANTIC-GRAPH.md) ---
 //
@@ -328,6 +373,44 @@ impl Default for GraphTuning {
     }
 }
 
+/// Attention/engagement heatmap tuning (DESIGN-ATTENTION-HEATMAP.md). LIVE
+/// consumers: `EventStore::record_dwell` (tier rate + cap) and
+/// `EventStore::image_intensity` (composite weights + recency half-life). The
+/// weights/rates/cap are config, not literals, so the founder re-feels them
+/// against the real library without a rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeatmapTuning {
+    /// Weight on accumulated (capped) dwell-ms in the composite. Dwell leads.
+    pub w_dwell: f64,
+    /// Weight on live event_count.
+    pub w_events: f64,
+    /// Weight on live stroke_count (a small extra factor).
+    pub w_strokes: f64,
+    /// Look-open dwell tier (full weight, 1.0).
+    pub dwell_look_rate: f64,
+    /// Grid-select dwell tier (a small fraction of the Look rate).
+    pub dwell_grid_rate: f64,
+    /// Per-episode-per-image dwell cap, ms.
+    pub dwell_cap_ms: i64,
+    /// Recency decay half-life, days (recency-weighted mode only).
+    pub recency_half_life_days: f64,
+}
+
+impl Default for HeatmapTuning {
+    fn default() -> Self {
+        Self {
+            w_dwell: HEATMAP_W_DWELL,
+            w_events: HEATMAP_W_EVENTS,
+            w_strokes: HEATMAP_W_STROKES,
+            dwell_look_rate: HEATMAP_DWELL_LOOK_RATE,
+            dwell_grid_rate: HEATMAP_DWELL_GRID_RATE,
+            dwell_cap_ms: HEATMAP_DWELL_CAP_MS,
+            recency_half_life_days: HEATMAP_RECENCY_HALF_LIFE_DAYS,
+        }
+    }
+}
+
 impl GraphTuning {
     fn validated(self) -> Self {
         let d = Self::default();
@@ -378,8 +461,66 @@ impl GraphTuning {
     }
 }
 
-/// The whole tuning surface, one section per domain. The heatmap section will
-/// be added by that feature when it lands (its design doc already names the
+impl HeatmapTuning {
+    fn validated(self) -> Self {
+        let d = Self::default();
+        HeatmapTuning {
+            w_dwell: range_or_default(
+                "heatmap.w_dwell",
+                self.w_dwell,
+                WEIGHT_MIN,
+                WEIGHT_MAX,
+                d.w_dwell,
+            ),
+            w_events: range_or_default(
+                "heatmap.w_events",
+                self.w_events,
+                WEIGHT_MIN,
+                WEIGHT_MAX,
+                d.w_events,
+            ),
+            w_strokes: range_or_default(
+                "heatmap.w_strokes",
+                self.w_strokes,
+                WEIGHT_MIN,
+                WEIGHT_MAX,
+                d.w_strokes,
+            ),
+            // Rates: (0, 1]. A 0 rate (or NaN/inf) snaps back — a tier that
+            // erases dwell is never the intent; a rate > 1 invents time.
+            dwell_look_rate: rate_or_default(
+                "heatmap.dwell_look_rate",
+                self.dwell_look_rate,
+                d.dwell_look_rate,
+            ),
+            dwell_grid_rate: rate_or_default(
+                "heatmap.dwell_grid_rate",
+                self.dwell_grid_rate,
+                d.dwell_grid_rate,
+            ),
+            dwell_cap_ms: if (DWELL_CAP_MIN_MS..=DWELL_CAP_MAX_MS).contains(&self.dwell_cap_ms) {
+                self.dwell_cap_ms
+            } else {
+                tracing::warn!(
+                    field = "heatmap.dwell_cap_ms",
+                    value = self.dwell_cap_ms,
+                    "tuning value out of range; keeping default"
+                );
+                d.dwell_cap_ms
+            },
+            // Half-life: positive and finite (it divides). A 0 or absurd value
+            // snaps back so the decay can never go NaN/inf or never decay.
+            recency_half_life_days: half_life_or_default(
+                "heatmap.recency_half_life_days",
+                self.recency_half_life_days,
+                d.recency_half_life_days,
+            ),
+        }
+    }
+}
+
+/// The whole tuning surface, one section per domain. Graph and heatmap sections
+/// are both live; a new feature adds its section here (its design doc names the
 /// knobs); we add no empty dead sections here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -387,6 +528,7 @@ pub struct Tuning {
     pub search: SearchTuning,
     pub preview: PreviewTuning,
     pub graph: GraphTuning,
+    pub heatmap: HeatmapTuning,
 }
 
 impl Tuning {
@@ -422,6 +564,7 @@ impl Tuning {
             search: self.search.validated(),
             preview: self.preview.validated(),
             graph: self.graph.validated(),
+            heatmap: self.heatmap.validated(),
         }
     }
 }
@@ -491,6 +634,36 @@ fn edge_or_default(field: &str, v: u32, default: u32) -> u32 {
     }
 }
 
+/// A dwell-tier rate: finite, in the OPEN-LOW interval (0, 1]. A 0 erases the
+/// tier's dwell entirely (never a tuning intent) and > 1 invents elapsed time.
+fn rate_or_default(field: &str, v: f64, default: f64) -> f64 {
+    if v.is_finite() && v > DWELL_RATE_MIN && v <= DWELL_RATE_MAX {
+        v
+    } else {
+        tracing::warn!(
+            field,
+            value = v,
+            "tuning dwell rate out of range (0, 1]; keeping default"
+        );
+        default
+    }
+}
+
+/// Recency half-life in days: finite and strictly positive (it divides), with
+/// a sane upper cap. A non-positive value would make the decay NaN/inf.
+fn half_life_or_default(field: &str, v: f64, default: f64) -> f64 {
+    if v.is_finite() && v > HALF_LIFE_MIN_DAYS && v <= HALF_LIFE_MAX_DAYS {
+        v
+    } else {
+        tracing::warn!(
+            field,
+            value = v,
+            "tuning half-life out of range; keeping default"
+        );
+        default
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +690,15 @@ mod tests {
         assert_eq!(t.graph.damping, 0.85);
         assert_eq!(t.graph.centering, 0.01);
         assert_eq!(t.graph.ring_radius, 320.0);
+        // Heatmap defaults (DESIGN-ATTENTION-HEATMAP.md): dwell leads, the
+        // grid tier is a small fraction of Look, 60 s cap, 14-day half-life.
+        assert_eq!(t.heatmap.w_dwell, 0.0001);
+        assert_eq!(t.heatmap.w_events, 1.0);
+        assert_eq!(t.heatmap.w_strokes, 0.5);
+        assert_eq!(t.heatmap.dwell_look_rate, 1.0);
+        assert_eq!(t.heatmap.dwell_grid_rate, 0.15);
+        assert_eq!(t.heatmap.dwell_cap_ms, 60_000);
+        assert_eq!(t.heatmap.recency_half_life_days, 14.0);
     }
 
     /// A partial `[graph]` override merges over defaults like every other
@@ -538,6 +720,46 @@ mod tests {
         assert_eq!(merged.graph.ring_radius, 320.0);
         // Other sections are entirely undisturbed:
         assert_eq!(merged.search, SearchTuning::default());
+    }
+
+    /// A partial `[heatmap]` file sets one knob and leaves the rest at their
+    /// code defaults (the `#[serde(default)]` merge), and the other sections
+    /// are untouched.
+    #[test]
+    fn partial_heatmap_toml_merges_over_defaults() {
+        let toml = r#"
+            [heatmap]
+            dwell_grid_rate = 0.25
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        assert_eq!(merged.heatmap.dwell_grid_rate, 0.25);
+        // Everything else in the section stayed default:
+        assert_eq!(merged.heatmap.dwell_look_rate, 1.0);
+        assert_eq!(merged.heatmap.dwell_cap_ms, 60_000);
+        assert_eq!(merged.heatmap.w_dwell, 0.0001);
+        // And the unrelated sections are pure defaults:
+        assert_eq!(merged.search, SearchTuning::default());
+        assert_eq!(merged.preview, PreviewTuning::default());
+    }
+
+    /// Out-of-range heatmap values reject back to defaults (never a silent bad
+    /// number): a 0 rate, a > 1 rate, a non-positive half-life, an absurd cap.
+    #[test]
+    fn out_of_range_heatmap_values_reject_to_default() {
+        let toml = r#"
+            [heatmap]
+            dwell_look_rate = 0.0
+            dwell_grid_rate = 5.0
+            recency_half_life_days = -1.0
+            dwell_cap_ms = -10
+            w_dwell = -1.0
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        assert_eq!(merged.heatmap.dwell_look_rate, 1.0); // 0 rejected
+        assert_eq!(merged.heatmap.dwell_grid_rate, 0.15); // > 1 rejected
+        assert_eq!(merged.heatmap.recency_half_life_days, 14.0); // <= 0 rejected
+        assert_eq!(merged.heatmap.dwell_cap_ms, 60_000); // negative rejected
+        assert_eq!(merged.heatmap.w_dwell, 0.0001); // negative weight rejected
     }
 
     /// A partial file merges over defaults: it sets one field and leaves the

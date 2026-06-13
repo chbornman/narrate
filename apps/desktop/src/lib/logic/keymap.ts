@@ -69,6 +69,9 @@ export type Action =
   | { kind: "thumb-size"; delta: 1 | -1 }
   | { kind: "set-thumb-step"; step: number }
   | { kind: "cycle-cell-info" }
+  // attention heatmap (DESIGN-ATTENTION-HEATMAP.md)
+  | { kind: "toggle-heat" }
+  | { kind: "toggle-attention-all-time" }
   | { kind: "stack-toggle-active" }
   | { kind: "stack-collapse-all" }
   | { kind: "stack-expand-all" }
@@ -190,6 +193,8 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   autoAdvance: false,
   sort: DEFAULT_SORT,
   queryActive: false,
+  heatOn: false,
+  heatAllTime: false,
   thumbStep: DEFAULT_THUMB_STEP,
   surround: "black",
   filmstrip: false,

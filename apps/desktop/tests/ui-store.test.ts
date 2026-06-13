@@ -59,6 +59,17 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "folder_tree":
       case "list_roots":
         return [];
+      case "image_intensity":
+        // Attention heatmap: one normalized score per requested hash. A simple
+        // descending ramp by index lets the heat/sort tests assert order and
+        // map population; the `allTime` flag rides through unchanged.
+        return ((args?.hashes ?? []) as string[]).map((h, i, arr) => ({
+          hash: h,
+          intensity: arr.length <= 1 ? 1 : 1 - i / (arr.length - 1),
+        }));
+      case "record_dwell":
+      case "clear_dwell":
+        return cmd === "clear_dwell" ? 0 : null;
       case "ingest_status":
         return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
       case "toggle_mic":
@@ -635,5 +646,154 @@ describe("Tab lights-out snapshot-restore (founder, June 12 2026)", () => {
     await ui.perform({ kind: "toggle-lights-out" });
     expect(ui.shell.railOpen).toBe(true);
     expect(ui.shell.railFocused).toBe(false); // restore is layout, not focus
+  });
+});
+
+describe("attention heatmap (DESIGN-ATTENTION-HEATMAP.md)", () => {
+  // ---- dwell capture: episode flush + blur-pause --------------------------
+
+  it("flushes a Look focus episode (tier 'look') on leaving Look", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      await ui.openLook("b"); // begins a Look episode for b
+      vi.setSystemTime(start + 5_000); // 5 s of focus
+      ipcLog.calls.length = 0;
+      await ui.leaveLook(); // ends the Look episode, begins a grid one
+      const dwell = ipcLog.calls.find((c) => c.cmd === "record_dwell");
+      expect(dwell).toBeDefined();
+      expect(dwell?.args?.hash).toBe("b");
+      expect(dwell?.args?.source).toBe("look");
+      // Elapsed is wall-clock between start and flush (the backend applies the
+      // tier rate + cap; the frontend reports the raw episode).
+      expect(dwell?.args?.elapsedMs).toBe(5_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a sub-threshold flick does not report (MIN_EPISODE_MS)", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      await ui.openLook("b");
+      vi.setSystemTime(start + 50); // below MIN_EPISODE_MS
+      ipcLog.calls.length = 0;
+      await ui.leaveLook();
+      expect(ipcLog.calls.some((c) => c.cmd === "record_dwell")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a grid multi-select episode fans out to each selected hash", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      await ui.applySelection(sel.selectAll(sel.EMPTY, ui.grid.unitHashes)); // a,b,c,d
+      vi.setSystemTime(start + 1_000);
+      ipcLog.calls.length = 0;
+      // Switch focus to a single cell: ends the multi-select episode.
+      await ui.applySelection(sel.click(sel.EMPTY, ui.grid.unitHashes, 0));
+      const reports = ipcLog.calls.filter((c) => c.cmd === "record_dwell");
+      // One report per previously-selected hash, all tier "grid".
+      expect(reports.length).toBe(4);
+      expect(reports.every((r) => r.args?.source === "grid")).toBe(true);
+      expect(new Set(reports.map((r) => r.args?.hash))).toEqual(
+        new Set(["a", "b", "c", "d"]),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("window blur pauses dwell by flushing the in-flight episode", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      await ui.openLook("b");
+      vi.setSystemTime(start + 2_000);
+      ipcLog.calls.length = 0;
+      ui.dwellPause(); // the App.svelte blur/visibilitychange hook
+      const dwell = ipcLog.calls.find((c) => c.cmd === "record_dwell");
+      expect(dwell?.args?.hash).toBe("b");
+      expect(dwell?.args?.elapsedMs).toBe(2_000);
+      // A second pause with no new episode reports nothing.
+      ipcLog.calls.length = 0;
+      ui.dwellPause();
+      expect(ipcLog.calls.some((c) => c.cmd === "record_dwell")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ---- heat toggle + all-time toggle: state, persistence, fetch -----------
+
+  it("the heat toggle fetches intensity, persists, and clears on off", async () => {
+    // rawItems (a,b,c,d) are set in beforeEach; the heat fetch keys off them.
+    expect(ui.heatOn).toBe(false);
+
+    ui.toggleHeat();
+    expect(ui.heatOn).toBe(true);
+    expect(localStorage.getItem("pp.heatOn")).toBe("1");
+    await Promise.resolve(); // let the fetch settle
+    await Promise.resolve();
+    expect(ui.intensity.size).toBeGreaterThan(0);
+    // The grid slice mirrors the map (the attention sort + cell tint read it).
+    expect(ui.grid.intensity.size).toBe(ui.intensity.size);
+
+    ui.toggleHeat();
+    expect(ui.heatOn).toBe(false);
+    expect(localStorage.getItem("pp.heatOn")).toBe("0");
+    expect(ui.intensity.size).toBe(0); // cleared on off
+  });
+
+  it("the All-time toggle persists and re-fetches with the flag", async () => {
+    ui.toggleHeat();
+    await Promise.resolve();
+    expect(ui.heatAllTime).toBe(false); // default = recency-weighted
+
+    ipcLog.calls.length = 0;
+    ui.toggleAllTime();
+    expect(ui.heatAllTime).toBe(true);
+    expect(localStorage.getItem("pp.heatAllTime")).toBe("1");
+    await Promise.resolve();
+    await Promise.resolve();
+    const fetch = lastCall("image_intensity");
+    expect(fetch?.args?.allTime).toBe(true);
+  });
+
+  // ---- sort by attention --------------------------------------------------
+
+  it("sort by attention orders the grid hottest-first by intensity", async () => {
+    ui.toggleHeat();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The mock ramps intensity DOWN by scope index (a hottest, d coldest).
+    ui.grid.setSort("attention");
+    expect(ui.grid.itemHashes).toEqual(["a", "b", "c", "d"]);
+    // Reversing the intensity map flips the order (hottest still leads).
+    ui.grid.intensity = new Map([
+      ["a", 0],
+      ["b", 0.3],
+      ["c", 0.6],
+      ["d", 1],
+    ]);
+    expect(ui.grid.itemHashes).toEqual(["d", "c", "b", "a"]);
+  });
+
+  // ---- clear attention data ----------------------------------------------
+
+  it("clearDwell wipes the cached intensity map", async () => {
+    ui.toggleHeat();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ui.intensity.size).toBeGreaterThan(0);
+    // The settings "Clear attention data" verb fires clear_dwell; the main
+    // window re-fetches (now empty) intensity on its next scope report.
+    const core = await import("@tauri-apps/api/core");
+    const invoke = vi.mocked(core.invoke);
+    await invoke("clear_dwell");
+    expect(lastCall("clear_dwell")).toBeDefined();
   });
 });

@@ -41,7 +41,7 @@ pub use canonical::{CanonicalParseError, canonical_json, parse_canonical};
 pub use event::{Event, Kind, Payload, Source, StrokePayload, StrokePoint, Tool, ValidationError};
 pub use id::{ContentHash, EventId, IdError, Minted, Minter, SessionId, UtcMillis};
 pub use store::{
-    AppendError, DirtyImage, DirtyReason, EventDraft, EventStore, JournalEntry, JournalStats,
-    MergeReport, RedactError, RemarkSource, RetractionSource, SessionContext, SessionRecord,
-    StoreError,
+    AppendError, DirtyImage, DirtyReason, DwellSource, EventDraft, EventStore, ImageIntensity,
+    JournalEntry, JournalStats, MergeReport, RedactError, RemarkSource, RetractionSource,
+    SessionContext, SessionRecord, StoreError,
 };

@@ -49,6 +49,13 @@ import {
   sections,
   toggleExpand,
 } from "../logic/sources";
+import {
+  IDLE_FLUSH_MS,
+  beginEpisode,
+  endEpisode,
+  sameFocus,
+  type DwellEpisode,
+} from "../logic/dwell";
 import type { Action } from "../logic/keymap";
 import type { ActionContext } from "../actions/types";
 import type {
@@ -169,6 +176,42 @@ export class Ui {
    * while the mode fields already describe the newer view. */
   private gridLoad = 0;
 
+  // -- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) --------------
+  // A focused, clearly-named region (kept localized for the parallel
+  // semantic-graph merge). Two parts: the grid HEAT-TINT state (a toggle + the
+  // fetched per-image intensity, the All-time recency switch) and the DWELL
+  // tracker (a tiny focus-episode state machine over logic/dwell.ts).
+
+  /** Grid heat-tint toggle, default OFF, persisted like the histogram/cell-info
+   * toggles (DESIGN §"Rendering"). When on, the grid fetches intensity and each
+   * cell gets a warm glow scaled by it. */
+  heatOn = $state(false);
+  /** "All-time" recency switch (founder decision), default OFF = recency-
+   * weighted ("what am I working on now"); ON = flat all-time ("what mattered
+   * most ever"). Persisted; re-fetches intensity on change. */
+  heatAllTime = $state(false);
+  /** Per-hash normalized intensity (0..1) for the current scope, fetched when
+   * the heat tint is on. Empty when off or not yet loaded; Thumb reads a cell's
+   * value (default 0 = no glow). A plain Map kept in a $state so reads in the
+   * grid re-render when it is replaced wholesale. */
+  intensity = $state<Map<string, number>>(new Map());
+
+  /** The in-flight dwell focus episode (logic/dwell.ts), or null when nothing
+   * is focused. Plain field (not $state): it is capture bookkeeping, never
+   * rendered. */
+  private dwellEpisode: DwellEpisode | null = null;
+  /** Idle-flush timer handle: a focus episode with no input for IDLE_FLUSH_MS
+   * is flushed (walk-away). Re-armed on each refocus/activity touch. */
+  private dwellIdleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Monotone token so a slow intensity fetch cannot overwrite a newer scope's
+   * (the gridLoad precedent, for the heat path). */
+  private heatLoad = 0;
+  /** The grid item-set the cached intensity was fetched for (length + first /
+   * last hash) — a cheap signature so reportScope (which fires on every focus
+   * move) only re-fetches when the SCOPE's items actually changed, never on a
+   * mere selection change. */
+  private heatItemsKey = "";
+
   // -- search bar (M3 search-as-scope) ----------------------------------------
   // The bar's live input state. `query`/`chips` drive the always-visible bar
   // in the grid header; committing them re-scopes the grid (runQueryScope).
@@ -252,6 +295,11 @@ export class Ui {
     this.autoAdvance = prefs.loadAutoAdvance();
     this.signalToggles = prefs.loadSignalToggles();
     this.fuzzyMode = prefs.loadFuzzy();
+    // Heatmap toggles (DESIGN-ATTENTION-HEATMAP.md), persisted like the other
+    // UI toggles. The first openFolder below drives the intensity fetch via
+    // reportScope when the heat tint comes back on.
+    this.heatOn = prefs.loadHeatOn();
+    this.heatAllTime = prefs.loadHeatAllTime();
     try {
       this.applySettings(await ipc.settingsGet());
     } catch {
@@ -361,6 +409,27 @@ export class Ui {
     // Membership marks follow the active image the same way: the thumb
     // menu's checkmarks must be honest at open time, not after a click.
     await this.refreshActiveMemberships();
+    // Dwell capture (heatmap): reportScope is the ONE funnel every focus
+    // change flows through (selection, deselect, surface switch, Look enter /
+    // leave / nav), so refocusing the dwell tracker here covers them all with
+    // one localized hook (DESIGN-ATTENTION-HEATMAP.md).
+    this.dwellRefocus();
+    // Heat-tint: refetch intensity only when the SCOPE's item set changed (not
+    // on a mere focus move) — reportScope fires far more often than the items
+    // change, and intensity is per-scope.
+    this.refreshHeatIfItemsChanged();
+  }
+
+  /** Refetch heat-tint intensity when the loaded grid item-set changed since
+   * the last fetch (a cheap length + endpoints signature). Cheap no-op when the
+   * heat tint is off or the scope is unchanged. */
+  private refreshHeatIfItemsChanged() {
+    if (!this.heatOn) return;
+    const h = this.grid.scopeHashes;
+    const key = `${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
+    if (key === this.heatItemsKey) return;
+    this.heatItemsKey = key;
+    void this.fetchIntensity();
   }
 
   /** Load the ACTIVE image's current memberships (collections_for_image).
@@ -1466,6 +1535,8 @@ export class Ui {
       // the grid in a backend-chosen order that "relevance" preserves.
       queryActive:
         this.gridScope.kind === "query" || this.gridScope.kind === "similar",
+      heatOn: this.heatOn,
+      heatAllTime: this.heatAllTime,
       thumbStep: this.grid.thumbStep,
       surround: this.shell.surround,
       filmstrip: this.look.filmstrip,
@@ -1655,6 +1726,13 @@ export class Ui {
         break;
       case "toggle-histogram":
         this.look.toggleHistogram();
+        break;
+      // ---- attention heatmap (DESIGN-ATTENTION-HEATMAP.md) ------------------
+      case "toggle-heat":
+        this.toggleHeat();
+        break;
+      case "toggle-attention-all-time":
+        this.toggleAllTime();
         break;
       // ---- panels -----------------------------------------------------------
       case "rail-nav": {
@@ -1995,6 +2073,122 @@ export class Ui {
   /** Rail rows for the Collections tab (logic/sources.ts provider). */
   railCollectionRows() {
     return collectionRows(this.collections);
+  }
+
+  // -- attention/engagement heatmap: dwell capture + heat-tint fetch ----------
+  // (DESIGN-ATTENTION-HEATMAP.md) — a focused region kept localized for the
+  // parallel semantic-graph merge. The cross-slice flows (openLook / leaveLook
+  // / reportScope / window blur) call dwellRefocus / dwellPause; this owns the
+  // episode lifecycle and the IPC report.
+
+  /** Refocus the dwell tracker on whatever the user is now attending to: the
+   * Look-viewed image (tier "look") or the grid selection (tier "grid"). Ends
+   * and flushes the previous episode when the focus actually changed, then
+   * begins a fresh one. A no-op re-report (same tier + hashes) keeps the
+   * current episode running, so a steady Look-open accrues one continuous span.
+   * Called from every cross-slice focus flow. */
+  dwellRefocus() {
+    const next =
+      this.surface === "look"
+        ? this.look.currentHash === null
+          ? null
+          : { source: "look" as const, hashes: [this.look.currentHash] }
+        : this.grid.sel.order.length > 0
+          ? { source: "grid" as const, hashes: this.grid.selectionTargets }
+          : null;
+    // Unchanged focus: let the running episode keep accruing.
+    if (sameFocus(this.dwellEpisode, next)) {
+      this.armDwellIdle();
+      return;
+    }
+    this.flushDwell();
+    this.dwellEpisode =
+      next === null ? null : beginEpisode(next.source, next.hashes, Date.now());
+    this.armDwellIdle();
+  }
+
+  /** End + report the in-flight episode (leaving Look / deselect / switch /
+   * window blur / idle). Fire-and-forget per focused hash: capture is light and
+   * a dropped report just loses a little dwell (DESIGN). */
+  flushDwell() {
+    clearTimeout(this.dwellIdleTimer);
+    const flushes = endEpisode(this.dwellEpisode, Date.now());
+    this.dwellEpisode = null;
+    for (const f of flushes) {
+      void ipc.recordDwell(f.hash, f.source, f.elapsedMs).catch(() => {});
+    }
+  }
+
+  /** Window blur / visibilitychange: pause dwell by flushing the current
+   * episode (the app backgrounded — the user is no longer attending). Re-focus
+   * on return re-begins a fresh episode via the next reportScope/flow. This +
+   * the backend 60 s cap handle the walk-away case. */
+  dwellPause() {
+    this.flushDwell();
+  }
+
+  /** (Re)arm the idle-flush timer: a focus episode with no input for
+   * IDLE_FLUSH_MS flushes (walk-away from the keyboard). App.svelte's activity
+   * touch re-arms it; the harder guard is the backend's per-episode cap. */
+  private armDwellIdle() {
+    clearTimeout(this.dwellIdleTimer);
+    if (this.dwellEpisode === null) return;
+    this.dwellIdleTimer = setTimeout(() => this.flushDwell(), IDLE_FLUSH_MS);
+  }
+
+  /** Toggle the grid heat-tint (DESIGN §"Rendering"), persisted. Turning it on
+   * fetches intensity for the current scope; off clears the cached map so no
+   * cell glows. */
+  toggleHeat() {
+    this.heatOn = !this.heatOn;
+    prefs.saveHeatOn(this.heatOn);
+    // Force the next fetch regardless of the cached item signature (the scope
+    // may be unchanged but the tint just turned on).
+    this.heatItemsKey = "";
+    if (this.heatOn) {
+      void this.fetchIntensity();
+    } else {
+      this.setIntensity(new Map());
+    }
+  }
+
+  /** Replace the intensity map and mirror it into the grid slice (where the
+   * `attention` sort and the cell heat-tint read it). One funnel so the two
+   * copies never drift. */
+  private setIntensity(map: Map<string, number>) {
+    this.intensity = map;
+    this.grid.intensity = map;
+  }
+
+  /** Toggle the "All-time" recency switch (founder decision), persisted. Re-
+   * fetches intensity with the new flag when the heat tint is showing. */
+  toggleAllTime() {
+    this.heatAllTime = !this.heatAllTime;
+    prefs.saveHeatAllTime(this.heatAllTime);
+    this.heatItemsKey = ""; // the flag changed: force a refetch
+    if (this.heatOn) void this.fetchIntensity();
+  }
+
+  /** Fetch normalized intensity for the loaded grid scope and replace the map.
+   * Guarded by a monotone token so a slow fetch cannot overwrite a newer
+   * scope's. Silent on backend failure (tests/dev): the tint just stays dark. */
+  async fetchIntensity() {
+    if (!this.heatOn) return;
+    // Key off the UNSORTED scope hashes so the `attention` sort can reorder by
+    // the result without a fetch cycle (the sorted `items` depend on this map).
+    const hashes = this.grid.scopeHashes;
+    if (hashes.length === 0) {
+      this.setIntensity(new Map());
+      return;
+    }
+    const load = ++this.heatLoad;
+    try {
+      const scores = await ipc.imageIntensity(hashes, this.heatAllTime);
+      if (load !== this.heatLoad) return; // a newer scope won
+      this.setIntensity(new Map(scores.map((s) => [s.hash, s.intensity])));
+    } catch {
+      /* backend unavailable: leave the tint dark */
+    }
   }
 
   /** Targets for the membership verbs: the WHOLE stack-expanded selection

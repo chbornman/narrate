@@ -52,6 +52,13 @@ export class GridSlice {
   // -- cell info (T cycle; logic/cellinfo.ts) ---------------------------------------
   cellInfo = $state<CellInfoLevel>("none");
 
+  // -- attention heatmap (DESIGN-ATTENTION-HEATMAP.md) ------------------------------
+  /** Per-hash normalized intensity (0..1) for the loaded scope, mirrored from
+   * the root (ui.intensity) so the `attention` sort and the cell heat-tint read
+   * it without the grid slice reaching back into the composition root. Empty
+   * when the heat tint is off. */
+  intensity = $state<ReadonlyMap<string, number>>(new Map());
+
   // -- scroll anchor (preserved across Look round-trips and folder revisits) ------
   scrollAnchor = $state<{ index: number; offset: number } | null>(null);
 
@@ -74,8 +81,14 @@ export class GridSlice {
   gridRowsPerPage = 1;
 
   // -- derived seam values ---------------------------------------------------------
-  items = $derived(sortItems(this.rawItems, this.sort));
+  // `attention` sort consults the intensity map; every other mode ignores it.
+  // The map is mirrored from the root, not derived from `items`, so there is no
+  // sort↔fetch cycle (the heat fetch keys off the unsorted scope hashes).
+  items = $derived(sortItems(this.rawItems, this.sort, this.intensity));
   itemHashes = $derived(this.items.map((i) => i.hash));
+  /** Unsorted SCOPE hashes (rawItems order) — the heat fetch keys off these so
+   * the `attention` sort can reorder by the result without a fetch cycle. */
+  scopeHashes = $derived(this.rawItems.map((i) => i.hash));
 
   /** Pairing + collapse over the sorted items (units + per-unit pair key). */
   stackModel = $derived(

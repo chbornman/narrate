@@ -306,6 +306,7 @@
           active={ui.grid.sel.focus === s.idx}
           size={geom.cell}
           infoStrip={geom.info}
+          intensity={ui.heatOn ? (ui.grid.intensity.get(unit.primary.hash) ?? 0) : 0}
           onpointerselect={(e) => onThumbClick(unit.primary.hash, e)}
           onopen={onThumbOpen}
           onstacktoggle={() => onChevron(unit.primary.hash)}

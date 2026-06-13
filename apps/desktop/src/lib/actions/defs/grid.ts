@@ -14,7 +14,13 @@
  * nature (logic/marquee.ts; Ctrl-additive is a modifier, not a chord).
  */
 import type { ActionDef } from "../types";
-import { RELEVANCE_SORT, SORT_MODES, THUMB_STEPS, type SortMode } from "../../logic/sort";
+import {
+  ATTENTION_SORT,
+  RELEVANCE_SORT,
+  SORT_MODES,
+  THUMB_STEPS,
+  type SortMode,
+} from "../../logic/sort";
 
 type Dir = "up" | "down" | "left" | "right";
 
@@ -131,6 +137,37 @@ export const GRID_DEFS: ActionDef[] = [
     scope: "grid",
     group: "grid",
     seats: ["gutter"], // pointer reachability (dogfood round 1): cycles per pick
+    available: always,
+    enabled: gridKeysFree,
+  },
+  // Attention heatmap (DESIGN-ATTENTION-HEATMAP.md): the grid heat-tint toggle
+  // and the "All-time" recency switch. Both are quiet reviewing aids (like the
+  // histogram), pointer/menu-reachable via the gutter and the header controls;
+  // no default key binding (the letter map is crowded and these are not hot
+  // paths). The header buttons drive perform directly.
+  {
+    id: "toggle-heat",
+    verb: "Attention heat",
+    label: "Toggle the grid attention heat-tint",
+    keys: [],
+    scope: "grid",
+    group: "grid",
+    seats: ["gutter"],
+    available: always,
+    enabled: gridKeysFree,
+  },
+  {
+    id: "toggle-attention-all-time",
+    verb: "All-time attention",
+    label: "Toggle all-time vs recency-weighted attention",
+    keys: [],
+    scope: "grid",
+    group: "grid",
+    seats: ["gutter"],
+    // Always present in the gutter (like toggle-auto-advance): it changes how
+    // intensity is computed, harmless when the tint is off (toggleAllTime only
+    // re-fetches when heat is on). The HEADER button is shown only while heat is
+    // on, where the switch is meaningful to the eye.
     available: always,
     enabled: gridKeysFree,
   },
@@ -265,15 +302,21 @@ export const GRID_DEFS: ActionDef[] = [
     toAction: (_ctx, arg) => ({ kind: "set-sort", mode: arg as SortMode }),
     // The `relevance` row appears ONLY while a query scopes the grid (M3):
     // it preserves the backend's fused order and is meaningless over a
-    // folder/collection. The other rows re-order the same result hashes.
-    options: (ctx) =>
-      (ctx.queryActive ? [RELEVANCE_SORT, ...SORT_MODES] : SORT_MODES).map(
-        ({ mode, label }) => ({
-          arg: mode,
-          label,
-          checked: ctx.sort === mode,
-        }),
-      ),
+    // folder/collection. The `attention` row appears ONLY while the heat tint
+    // is on (DESIGN-ATTENTION-HEATMAP.md): sorting by engagement needs loaded
+    // intensity. The other rows re-order the same result hashes.
+    options: (ctx) => {
+      const rows = [
+        ...(ctx.queryActive ? [RELEVANCE_SORT] : []),
+        ...(ctx.heatOn ? [ATTENTION_SORT] : []),
+        ...SORT_MODES,
+      ];
+      return rows.map(({ mode, label }) => ({
+        arg: mode,
+        label,
+        checked: ctx.sort === mode,
+      }));
+    },
   },
   {
     id: "thumb-size",

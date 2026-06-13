@@ -59,4 +59,24 @@ describe("sort modes", () => {
     sortItems(items, "filename");
     expect(items.map((i) => i.fileName)).toEqual(before);
   });
+
+  it("attention: hottest first by the intensity map; missing scores are cold", () => {
+    // a=0.2, c=0.9, b has no score (treated as 0 / cold). Hottest leads;
+    // unscored cells fall back to filename order.
+    const intensity = new Map([
+      ["a.jpg", 0.2],
+      ["c.jpg", 0.9],
+    ]);
+    expect(
+      sortItems(items, "attention", intensity).map((i) => i.fileName),
+    ).toEqual(["c.jpg", "a.jpg", "b.jpg"]);
+  });
+
+  it("attention: with no intensity map every cell is cold (filename order)", () => {
+    expect(sortItems(items, "attention").map((i) => i.fileName)).toEqual([
+      "a.jpg",
+      "b.jpg",
+      "c.jpg",
+    ]);
+  });
 });

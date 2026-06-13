@@ -263,6 +263,10 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::os::reveal_folder,
         commands::os::open_with_default,
         commands::os::open_in_external_editor,
+        // Attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md).
+        commands::heatmap::record_dwell,
+        commands::heatmap::image_intensity,
+        commands::heatmap::clear_dwell,
     ]
 }
 
@@ -333,6 +337,10 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::os::reveal_folder,
         commands::os::open_with_default,
         commands::os::open_in_external_editor,
+        // Attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md).
+        commands::heatmap::record_dwell,
+        commands::heatmap::image_intensity,
+        commands::heatmap::clear_dwell,
         debug::debug_tail_events,
         debug::debug_capture,
         debug::debug_ingest,

@@ -56,8 +56,29 @@ damping = 0.85        # per-step velocity damping (the sim's cooling). Range [0,
 centering = 0.01      # pull toward the origin (un-topic'd images drift to center). Range [0, 100000].
 ring_radius = 320.0   # topic-anchor ring radius in sim-space px. Range [0, 100000].
 
-# The heatmap section will be added here when that feature lands (its design
-# doc already names the knobs); no empty dead section for now.
+# Heatmap — attention/engagement intensity (DESIGN-ATTENTION-HEATMAP.md). NOT a
+# gaze tracker: it scores where you put intent (what you opened/marked/said),
+# capped and local. Dwell leads; stroke-count is a small factor. The tier rates
+# and the cap live here so "how much grid-select counts vs a Look-open" is
+# re-feel-able without a rebuild.
+# ---------------------------------------------------------------------------
+[heatmap]
+# Composite: intensity = w_dwell*dwell_ms + w_events*event_count + w_strokes*stroke_count,
+# then normalized 0..1 across the scope. Non-negative weights, range [0, 1000].
+w_dwell = 0.0001  # dwell-ms weight (small unit; 60 s capped dwell ~= 6 raw)
+w_events = 1.0    # live event_count weight
+w_strokes = 0.5   # extra nudge per live stroke (a bare count is enough)
+# Dwell tiers: fraction of raw elapsed credited per focus episode, range (0, 1].
+# Look-open is full weight; grid select/multiselect counts far less.
+dwell_look_rate = 1.0
+dwell_grid_rate = 0.15
+# Per-episode-per-image dwell cap, ms (60 s). With the window-blur pause this
+# handles the walk-away case. Range [0, 86400000].
+dwell_cap_ms = 60000
+# Recency decay half-life, days: in the default (recency-weighted) mode an
+# image's intensity is multiplied by 0.5^(age_days / half_life). The UI
+# "All-time" toggle turns the decay OFF (flat). Range (0, 365].
+recency_half_life_days = 14.0
 
 # FIXED contracts (deliberately NOT here — a config edit must never silently
 # break an invariant): the <100 ms search latency budget, and the embedded
