@@ -18,12 +18,16 @@
     currentKey,
     onopen,
     oncontextmenu,
+    ontoggle,
   }: {
     sections: SourceSection[];
     focusKey: string | null;
     currentKey: string | null;
     onopen: (row: SourceRow) => void;
     oncontextmenu: (row: SourceRow, x: number, y: number) => void;
+    /** Twist click (deep-tree ergonomics): expand/collapse WITHOUT opening
+     * the folder, so a deep branch can be opened by mouse. */
+    ontoggle: (row: SourceRow) => void;
   } = $props();
 
   const showHeads = $derived(sections.length > 1);
@@ -45,7 +49,28 @@
         }}
       >
         {#if row.hasChildren}
-          <span class="twist"
+          <!-- The twist toggles expand/collapse on its own (deep-tree
+               ergonomics): a span, not a nested button (invalid HTML), with
+               a role so it stays keyboard-reachable. stopPropagation keeps
+               the row's open-folder click from also firing. -->
+          <span
+            class="twist"
+            role="button"
+            tabindex="-1"
+            aria-label={row.expanded ? "Collapse folder" : "Expand folder"}
+            onclick={(e) => {
+              e.stopPropagation();
+              ontoggle(row);
+            }}
+            onkeydown={(e) => {
+              // Keyboard expand is primarily the row's ←/→ (defs/rail.ts);
+              // this keeps the twist itself operable if focused.
+              if (e.key === "Enter" || e.key === " ") {
+                e.stopPropagation();
+                e.preventDefault();
+                ontoggle(row);
+              }
+            }}
             >{#if row.expanded}<ChevronDown size={12} />{:else}<ChevronRight
                 size={12}
               />{/if}</span

@@ -85,8 +85,17 @@ pub enum LibraryError {
     Store(#[from] StoreError),
     #[error("watch error: {0}")]
     Watch(String),
-    #[error("nested roots are forbidden: {0}")]
-    NestedRoot(String),
+    /// A folder add was refused because it sits inside (or is a parent of) an
+    /// existing active root — the founder's "refuse + alias" rule: do not
+    /// double-ingest, point the user at the root they already have. Carries
+    /// that root's id so the UI can offer "go to the existing folder" instead
+    /// of a dead-end error (folder-tree improvements; replaced the older bare
+    /// `NestedRoot` message, which carried no id for the rail to navigate to).
+    #[error("overlaps existing root {existing_root_id}: {detail}")]
+    OverlappingRoot {
+        existing_root_id: RootId,
+        detail: String,
+    },
     #[error("not found: {0}")]
     NotFound(String),
     #[error("volume offline: {0}")]
@@ -821,19 +830,24 @@ impl Library {
             ))
         })?;
         // Nested roots are forbidden (§5): inside or above an existing
-        // active root, on the same volume.
+        // active root, on the same volume. The refusal now carries the
+        // offending root's id (folder-tree improvements: refuse + alias) so
+        // the caller can navigate to the root the user already has instead of
+        // showing a dead-end error.
         {
             let conn = self.db.lock().expect("poisoned");
-            let mut stmt = conn
-                .prepare("SELECT rel_path FROM roots WHERE volume_id = ?1 AND state = 'active'")?;
-            let existing: Vec<String> = stmt
-                .query_map(params![volume_id], |r| r.get(0))?
+            let mut stmt = conn.prepare(
+                "SELECT root_id, rel_path FROM roots WHERE volume_id = ?1 AND state = 'active'",
+            )?;
+            let existing: Vec<(String, String)> = stmt
+                .query_map(params![volume_id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            for other in existing {
+            for (other_id, other) in existing {
                 if rel_contains(&other, &rel) || rel_contains(&rel, &other) {
-                    return Err(LibraryError::NestedRoot(format!(
-                        "'{rel}' overlaps existing active root '{other}'"
-                    )));
+                    return Err(LibraryError::OverlappingRoot {
+                        existing_root_id: other_id,
+                        detail: format!("'{rel}' overlaps existing active root '{other}'"),
+                    });
                 }
             }
         }
@@ -914,6 +928,53 @@ impl Library {
             params![root_id, now],
         )?;
         Ok(())
+    }
+
+    /// Archive a root (folder-tree improvements): a NON-DESTRUCTIVE lifecycle
+    /// resting state. The row flips `active` → `archived` and NOTHING else —
+    /// unlike `remove_root`, `paths` stay `active`, so every image journal and
+    /// collection membership (all keyed by image hash, never by root) is
+    /// preserved exactly. An archived root drops out of the active rail and out
+    /// of `active_roots`/`reconcile_all` (those filter on `state = 'active'`),
+    /// so it no longer scans or watches; `unarchive_root` brings it whole back.
+    pub fn archive_root(&self, root_id: &str) -> Result<(), LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let n = conn.execute(
+            "UPDATE roots SET state = 'archived'
+             WHERE root_id = ?1 AND state = 'active'",
+            params![root_id],
+        )?;
+        if n == 0 {
+            return Err(LibraryError::NotFound(format!("active root {root_id}")));
+        }
+        Ok(())
+    }
+
+    /// Restore an archived root to active (folder-tree improvements). The
+    /// reverse of [`Self::archive_root`]; the caller rescans afterwards so the
+    /// index reconciles any on-disk drift that happened while it rested.
+    pub fn unarchive_root(&self, root_id: &str) -> Result<(), LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let n = conn.execute(
+            "UPDATE roots SET state = 'active'
+             WHERE root_id = ?1 AND state = 'archived'",
+            params![root_id],
+        )?;
+        if n == 0 {
+            return Err(LibraryError::NotFound(format!("archived root {root_id}")));
+        }
+        Ok(())
+    }
+
+    /// Archived roots, for the rail's collapsed "Archived" affordance.
+    pub fn archived_roots(&self) -> Result<Vec<RootRecord>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT root_id, volume_id, rel_path, display_name, state
+             FROM roots WHERE state = 'archived' ORDER BY root_id",
+        )?;
+        let rows = stmt.query_map([], root_record)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn root(&self, root_id: &str) -> Result<Option<RootRecord>, LibraryError> {

@@ -14,6 +14,22 @@ pub struct RootDto {
     pub online: bool,
     /// Absolute directory when the volume is online.
     pub abs_path: Option<String>,
+    /// Archived (lifecycle): hidden from the active rail list, kept whole.
+    /// `list_roots` only ever returns active roots (false here); the
+    /// `list_archived_roots` snapshot carries the archived ones (true).
+    pub archived: bool,
+}
+
+/// Outcome of an `add_root` attempt (folder-tree improvements: refuse +
+/// alias). A clean add returns `Added`; a folder overlapping an existing
+/// active root returns `Overlap` carrying that root's id so the rail can
+/// NAVIGATE to it instead of double-ingesting — the founder's rule that
+/// folders are a thin physical substrate, never duplicated.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum AddRootOutcome {
+    Added { root: RootDto },
+    Overlap { existing_root_id: String },
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -39,13 +39,19 @@ vi.mock("@tauri-apps/api/core", () => ({
       }
       case "add_root":
         if (ipcLog.failAddRoot) throw new Error("not a folder");
+        // add_root now returns an AddRootOutcome (refuse + alias): the happy
+        // path is `added` carrying the root.
         return {
-          rootId: `root:${args?.path as string}`,
-          displayName: String(args?.path),
-          relPath: "",
-          volumeId: "v1",
-          online: true,
-          absPath: String(args?.path),
+          kind: "added",
+          root: {
+            rootId: `root:${args?.path as string}`,
+            displayName: String(args?.path),
+            relPath: "",
+            volumeId: "v1",
+            online: true,
+            absPath: String(args?.path),
+            archived: false,
+          },
         };
       case "image_journal":
         return [];
@@ -54,6 +60,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "list_folder":
       case "folder_tree":
       case "list_roots":
+      case "list_archived_roots":
         return [];
       case "ingest_status":
         return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
@@ -270,6 +277,7 @@ describe("roots-changed live propagation (founder dogfood, round 2)", () => {
     volumeId: "v1",
     online: true,
     absPath: `/${id}`,
+    archived: false,
   });
 
   it("a first root added in Settings appears AND opens (nothing was open)", async () => {

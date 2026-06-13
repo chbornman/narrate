@@ -99,6 +99,10 @@ export type Action =
   // the preview pass for everything under the root; regeneration overwrites
   // artifacts idempotently (LIBRARY §9.8)
   | { kind: "rebuild-previews"; rootId: string }
+  // archive lifecycle (folder-tree improvements): non-destructive hide a
+  // root from the active rail (journal + memberships preserved), and restore
+  | { kind: "archive-root"; rootId: string }
+  | { kind: "unarchive-root"; rootId: string }
   // rail footer button + rail-folder seat: OS picker → register root
   | { kind: "add-root" }
   // collections (B71 — rail Collections tab, first slice): open a

@@ -147,6 +147,7 @@ describe("collection-open drives the grid (the folder-open sibling)", () => {
         volumeId: "v1",
         online: true,
         absPath: "/shoots",
+        archived: false,
       },
     ]);
     expect(ui.collectionId).toBe("01A");

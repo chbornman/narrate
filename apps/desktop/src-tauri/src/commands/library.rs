@@ -6,10 +6,11 @@ use photoproof_core::library::ScanOptions;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use super::S;
-use crate::dto::{FolderNode, GridItem, IngestStatus, RootDto};
+use crate::dto::{AddRootOutcome, FolderNode, GridItem, IngestStatus, RootDto};
 use crate::error::{CmdError, CmdResult};
 use crate::pump;
 use crate::state::App;
+use photoproof_core::library::LibraryError;
 
 pub(crate) fn root_dto(
     app: &App,
@@ -41,6 +42,7 @@ pub(crate) fn root_dto(
         volume_id: root.volume_id.clone(),
         online,
         abs_path,
+        archived: root.state == "archived",
     })
 }
 
@@ -82,13 +84,23 @@ pub async fn add_root<R: Runtime>(
     app: S<'_>,
     handle: AppHandle<R>,
     path: String,
-) -> CmdResult<RootDto> {
+) -> CmdResult<AddRootOutcome> {
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app.touch()?;
-        let root_id = app
-            .library
-            .register_root(std::path::Path::new(&path), None)?;
+        // Refuse + alias (folder-tree improvements): a folder overlapping an
+        // existing active root is NOT an error to surface raw — it is a
+        // navigation. Catch the structured refusal and hand the rail the
+        // existing root's id so it can jump there instead of double-ingesting.
+        let root_id = match app.library.register_root(std::path::Path::new(&path), None) {
+            Ok(id) => id,
+            Err(LibraryError::OverlappingRoot {
+                existing_root_id, ..
+            }) => {
+                return Ok(AddRootOutcome::Overlap { existing_root_id });
+            }
+            Err(e) => return Err(e.into()),
+        };
         // Initial scan on its own thread: it only enqueues ingest passes;
         // the pump processes them. The walk registers with `app.scans` so
         // `ingest_status` reports it live (scanning + discovered) — pass
@@ -131,7 +143,7 @@ pub async fn add_root<R: Runtime>(
             .ok_or_else(|| CmdError::Invalid("root vanished after register".into()))?;
         let dto = root_dto(&app, &record)?;
         emit_roots_changed(&app, &handle);
-        Ok(dto)
+        Ok(AddRootOutcome::Added { root: dto })
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -155,6 +167,110 @@ pub async fn remove_root<R: Runtime>(
         app.library.remove_root(&root_id)?;
         emit_roots_changed(&app, &handle);
         Ok(())
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Archive a root (folder-tree improvements): hide it from the active rail
+/// without destroying anything. Non-destructive — the library flips the
+/// state only (journals + collection memberships are keyed by image hash, so
+/// they are untouched); here the command also stops the live watcher (an
+/// archived root should not consume an inotify/FSEvents handle). Emits
+/// `roots-changed` so the now-archived root drops out of every window's
+/// active list live.
+#[tauri::command]
+pub async fn archive_root<R: Runtime>(
+    app: S<'_>,
+    handle: AppHandle<R>,
+    root_id: String,
+) -> CmdResult<()> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        app.library.archive_root(&root_id)?;
+        // Drop the watcher AFTER the state flip succeeds: a failed archive
+        // (e.g. already removed) must not silently stop watching an active
+        // root.
+        app.watchers
+            .lock()
+            .expect("watchers mutex")
+            .remove(&root_id);
+        emit_roots_changed(&app, &handle);
+        Ok(())
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Restore an archived root to active (folder-tree improvements): the reverse
+/// of `archive_root`. Restarts the watcher and kicks a rescan so any on-disk
+/// drift while the root rested reconciles, then emits `roots-changed`.
+#[tauri::command]
+pub async fn unarchive_root<R: Runtime>(
+    app: S<'_>,
+    handle: AppHandle<R>,
+    root_id: String,
+) -> CmdResult<RootDto> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        app.library.unarchive_root(&root_id)?;
+        // Restart the live watcher (mirrors add_root): an active root watches.
+        match app.library.start_watcher(&root_id) {
+            Ok(h) => {
+                app.watchers
+                    .lock()
+                    .expect("watchers mutex")
+                    .insert(root_id.clone(), h);
+            }
+            Err(e) => tracing::warn!(
+                root_id = %root_id,
+                error = %e,
+                "watcher failed on unarchive; polled rescans still run"
+            ),
+        }
+        // Reconcile drift accumulated while archived (its own thread, like the
+        // add_root initial scan): only enqueues passes, the pump drains them.
+        {
+            let scan_app = app.clone();
+            let rid = root_id.clone();
+            std::thread::Builder::new()
+                .name("pp-unarchive-scan".into())
+                .spawn(move || {
+                    let _walk = scan_app.scans.begin();
+                    let opts = ScanOptions {
+                        discovered: Some(scan_app.scans.counter()),
+                        ..ScanOptions::default()
+                    };
+                    if let Err(e) = scan_app.library.scan_root(&rid, &opts) {
+                        tracing::error!(root_id = %rid, error = %e, "unarchive rescan failed");
+                    }
+                })
+                .expect("spawn unarchive scan thread");
+        }
+        let record = app
+            .library
+            .root(&root_id)?
+            .ok_or_else(|| CmdError::Invalid("root vanished after unarchive".into()))?;
+        let dto = root_dto(&app, &record)?;
+        emit_roots_changed(&app, &handle);
+        Ok(dto)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Archived-roots snapshot for the rail's collapsed "Archived" affordance.
+#[tauri::command]
+pub async fn list_archived_roots(app: S<'_>) -> CmdResult<Vec<RootDto>> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for r in app.library.archived_roots()? {
+            out.push(root_dto(&app, &r)?);
+        }
+        Ok(out)
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
@@ -343,27 +459,32 @@ mod tests {
 
         let handle = tauri_app.handle().clone();
         let state: tauri::State<'_, Arc<App>> = tauri_app.state();
-        let dto = tauri::async_runtime::block_on(add_root(
+        let outcome = tauri::async_runtime::block_on(add_root(
             state.clone(),
             handle.clone(),
             photos.display().to_string(),
         ))
         .expect("add_root");
+        // A fresh folder adds cleanly (no overlap).
+        let root_id = match outcome {
+            AddRootOutcome::Added { root } => root.root_id,
+            AddRootOutcome::Overlap { .. } => panic!("fresh folder must not overlap"),
+        };
         {
             let got = payloads.lock().expect("payload mutex");
             assert_eq!(got.len(), 1, "add_root emits exactly once");
             assert!(
-                got[0].contains(&dto.root_id),
+                got[0].contains(&root_id),
                 "payload is the fresh snapshot (carries the new root)"
             );
         }
 
-        tauri::async_runtime::block_on(remove_root(state, handle, dto.root_id.clone()))
+        tauri::async_runtime::block_on(remove_root(state, handle, root_id.clone()))
             .expect("remove_root");
         let got = payloads.lock().expect("payload mutex");
         assert_eq!(got.len(), 2, "remove_root emits exactly once");
         assert!(
-            !got[1].contains(&dto.root_id),
+            !got[1].contains(&root_id),
             "the removed root has left the snapshot"
         );
     }
