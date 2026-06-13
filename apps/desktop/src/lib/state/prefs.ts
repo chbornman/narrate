@@ -15,6 +15,7 @@ import {
   parseSurround,
   type SurroundLevel,
 } from "../theme/surround";
+import { DEFAULT_THEME, parseTheme, type ThemeMode } from "../theme/theme";
 
 const safeGet = (k: string): string | null => {
   try {
@@ -222,6 +223,20 @@ export function loadSurround(): SurroundLevel {
 
 export function saveSurround(level: SurroundLevel) {
   safeSet("pp.surround", level);
+}
+
+// ---- interface theme (BACKLOG "Full interface themes") ----------------------
+
+/** App-chrome theme: system | light | dark, default system (follows the OS).
+ * Orthogonal to surround (the image backdrop); see theme/theme.ts. A malformed
+ * or absent value falls back to `system`, so an old/junk blob never strands
+ * the app in a theme the user can't see to fix. */
+export function loadTheme(): ThemeMode {
+  return parseTheme(safeGet("pp.theme")) ?? DEFAULT_THEME;
+}
+
+export function saveTheme(mode: ThemeMode) {
+  safeSet("pp.theme", mode);
 }
 
 // ---- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) -------------

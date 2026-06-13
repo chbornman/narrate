@@ -19,6 +19,8 @@
   import * as ipc from "../ipc/commands";
   import { isMac } from "../logic/platform";
   import AckButton from "../primitives/AckButton.svelte";
+  import { theme } from "../theme/theme-store.svelte";
+  import { THEME_LABELS, THEME_MODES, type ThemeMode } from "../theme/theme";
   import type { AppSettings, RootDto, RuntimeStatus } from "../types/dto";
 
   /** Same chrome split as Titlebar.svelte (UI §2.3): on macOS this window
@@ -162,6 +164,13 @@
     clearAttentionConfirm = false;
   }
 
+  /** Appearance theme (BACKLOG "Full interface themes"): writes the shared
+   * theme store, which persists the pref and repaints data-theme live in
+   * every webview. `system` follows the OS; light/dark are explicit. */
+  function setTheme(mode: ThemeMode) {
+    theme.set(mode);
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") void win.close();
   }
@@ -231,6 +240,30 @@
     <p class="helper">
       The app to open an image's original in. Leave blank to use the system
       default. On macOS use the application name (for example, Affinity Photo).
+    </p>
+  </section>
+
+  <!-- 1b. Appearance (BACKLOG "Full interface themes"): the chrome theme.
+       Segmented System / Light / Dark; the live chrome reflects it at once
+       because this window paints data-theme from the same store. -->
+  <section>
+    <h2>Appearance</h2>
+    <div class="row pref">
+      <span class="name">Theme</span>
+      <div class="segmented" role="radiogroup" aria-label="Theme">
+        {#each THEME_MODES as mode (mode)}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={theme.mode === mode}
+            class:active={theme.mode === mode}
+            onclick={() => setTheme(mode)}>{THEME_LABELS[mode]}</button
+          >
+        {/each}
+      </div>
+    </div>
+    <p class="helper">
+      System follows your operating system's light or dark setting.
     </p>
   </section>
 
@@ -468,6 +501,31 @@
     flex: 1;
     min-width: 0;
     margin-left: 8px;
+  }
+  /* Segmented control (System / Light / Dark): three peer buttons in a hairline
+     track. Token-only so it reads correctly in both themes — the active
+     segment lifts to --bg-raised, inactive ones stay flush and dim. */
+  .segmented {
+    display: inline-flex;
+    border: 1px solid var(--chrome);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .segmented button {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 4px 12px;
+  }
+  /* Hairline separators between segments (not on the first). */
+  .segmented button + button {
+    border-left: 1px solid var(--chrome);
+  }
+  .segmented button.active {
+    background: var(--bg-raised);
+    color: var(--text);
   }
   .helper {
     margin: 4px 0 0;
