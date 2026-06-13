@@ -24,6 +24,7 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 | `UI-ARCHITECTURE.md` | Frontend architecture contracts (action registry, slices, guardrails) — frozen by FOUNDATIONS. |
 | `DOGFOOD-M1.md` / `DOGFOOD-M2.md` | Founder-machine verification scripts: what to run, what to look at. |
 | `architecture.html` | The one-page visual architecture (self-contained HTML+SVG): processes, models, seams, truth stores. Regenerate at packet close, beside STATUS.md. |
+| `features.html` | The one-page cascading feature tree (self-contained HTML): everything BUILT, by product area, with honest partial markers. Regenerate beside STATUS.md. |
 | `MODELS.md` | The connector-options matrix: per seam, the current pick, alternates evaluated, candidates, watch triggers. |
 | `SPIKE-ASR35.md` | Nemotron 3.5 dev evaluation + the chunk-size root-cause finding (B74). |
 | `SPIKE-P6.3.md` | Model-spike findings and recipes (ASR/LLM/VAD pins, flags, measurements) — load-bearing for RUNTIME. |

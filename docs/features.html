@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photoproof - Features</title>
+<style>
+  :root {
+    --bg: #141414;
+    --panel: #1d1d1d;
+    --panel2: #242424;
+    --line: #3a3a3a;
+    --text: #e8e6e1;
+    --dim: #9a968e;
+    --faint: #6b675f;
+    --red: #c0392b;        /* the grease pencil */
+    --green: #5f8f5f;      /* live wires */
+    --blue: #5b7d99;       /* child processes */
+    --violet: #7d6b99;     /* in-process models */
+    --gold: #8a8455;       /* truth stores */
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.55; font-size: 15px;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 4px; }
+  h1 .pencil { color: var(--red); }
+  .subtitle { color: var(--dim); margin: 0 0 6px; }
+  .stamp { color: var(--faint); font-family: var(--mono); font-size: 12px; margin-bottom: 28px; }
+  .lede { color: var(--dim); margin: 0 0 22px; max-width: 70ch; }
+
+  .controls { margin: 0 0 18px; display: flex; gap: 10px; }
+  .controls button {
+    background: var(--panel); color: var(--dim); border: 1px solid var(--line);
+    border-radius: 7px; padding: 4px 14px; font-family: var(--mono); font-size: 12px;
+    cursor: pointer;
+  }
+  .controls button:hover { color: var(--text); border-color: var(--faint); }
+
+  /* The tree: nested details/summary. Top level = product areas. */
+  .tree details.branch {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 0; margin: 12px 0;
+  }
+  .tree details.branch > summary {
+    padding: 12px 18px; font-size: 17px; font-weight: 600;
+  }
+  .tree details.branch[open] > summary { border-bottom: 1px solid #262626; }
+  .tree details.branch > .body { padding: 8px 18px 16px; }
+
+  .tree summary { cursor: pointer; list-style: none; user-select: none; }
+  .tree summary::-webkit-details-marker { display: none; }
+  .tree summary::before {
+    content: "\25B8"; /* small right triangle */
+    color: var(--red); display: inline-block; width: 1.1em;
+    font-size: 0.8em; vertical-align: 1px;
+    transition: transform 0.12s ease;
+  }
+  .tree details[open] > summary::before { transform: rotate(90deg); }
+
+  .tree details.twig { margin: 6px 0 6px 4px; border-left: 1px solid #2b2b2b; padding-left: 12px; }
+  .tree details.twig > summary { font-size: 14.5px; font-weight: 600; color: var(--text); padding: 2px 0; }
+
+  .tree ul { margin: 4px 0 8px; padding-left: 26px; }
+  .tree li { margin: 5px 0; font-size: 14px; color: var(--text); }
+  .tree li::marker { color: var(--faint); }
+
+  .tag {
+    font-family: var(--mono); font-size: 11px; color: var(--faint);
+    white-space: nowrap; margin-left: 6px;
+  }
+  .tag.today { color: #9ec79a; }
+  .part { color: var(--dim); font-size: 13px; }
+  .count { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--faint); margin-left: 8px; }
+
+  .tree details.bench { border-color: #2b2b2b; }
+  .tree details.bench > summary { color: var(--dim); }
+  .tree details.bench li { color: var(--dim); }
+
+  footer { color: var(--faint); font-size: 12.5px; margin-top: 64px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Photoproof <span class="pencil">/</span> features</h1>
+<p class="subtitle">Everything built, as a cascading tree - the digital contact sheet with a grease pencil.</p>
+<p class="stamp">generated June 12, 2026 - commit 6ee8554 - sources: docs/FEATURES.md, docs/STATUS.md, docs/BACKLOG.md</p>
+
+<p class="lede">
+Each branch is a product area; each leaf is something that exists in the app
+today. Quiet mono tags carry the milestone or landing date where it earns it;
+a dim <span class="part">(partial: &hellip;)</span> marks the honest edges -
+built, with a named remainder. Nothing unbuilt is listed, except the
+collapsed "On the bench" branch at the bottom.
+</p>
+
+<div class="controls">
+  <button type="button" onclick="setAll(true)">expand all</button>
+  <button type="button" onclick="setAll(false)">collapse all</button>
+</div>
+
+<div class="tree">
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Library<span class="count"></span></summary>
+<div class="body">
+
+<details class="twig">
+<summary>Watched folders</summary>
+<ul>
+  <li>Register and remove watched root folders; everything beneath is indexed automatically <span class="tag">[M1]</span></li>
+  <li>Live filesystem watcher while running - debounced, mid-copy-safe, rename-pairing - plus reconciliation scans at launch, on volume mount, every 6 hours, and after sleep <span class="tag">[M1]</span></li>
+  <li>Drag a folder onto the window to add it; "Add folder&hellip;" button and context-menu row on the rail</li>
+  <li>Removing a root preserves its journals; re-adding it recovers everything with zero re-hashing</li>
+  <li>Junk never enters the library: hidden files, caches, sync partials, oversized files, and unknown formats are excluded during walks</li>
+  <li>Cloud placeholder files (iCloud / OneDrive dataless stubs) are detected and skipped, then ingested when they hydrate</li>
+</ul>
+</details>
+
+<details class="twig">
+<summary>Identity &amp; ingest</summary>
+<ul>
+  <li>Images are known by the BLAKE3 hash of their bytes, never by path - move and rename freely, annotations follow the pixels <span class="tag">[M1]</span></li>
+  <li>Resumable, idempotent ingest at 50k+ scale: interruption-safe, restart-safe, proven against real kill&nbsp;-9 mid-ingest <span class="tag">[M1]</span></li>
+  <li>Byte-identical duplicates collapse to one image with every known location and a single journal</li>
+  <li>Overwriting a file in place is a new image; the old journal is preserved, dormant and findable</li>
+  <li>Clock-shift detection: a DST-style mtime jump across the library updates timestamps in place instead of triggering a re-hash storm</li>
+  <li>Prioritized ingest queue with retries, poisoned-row rescue, and startup recovery - the queue is the truth, restarts just continue</li>
+  <li>Ingest honesty: the empty state says "scanning" with a live discovered count - never "No photographs" while work is pending <span class="tag today">[Jun 12]</span></li>
+</ul>
+</details>
+
+<details class="twig">
+<summary>Previews &amp; metadata</summary>
+<ul>
+  <li>Thumbnail + display preview cache (WebP), EXIF rotation applied, sRGB-converted - what you see is display-true <span class="tag">[M1]</span></li>
+  <li>Fast first run via embedded RAW preview extraction, including the Sony chained-IFD sweep <span class="tag">[M1]</span> <span class="part">(partial: the full RAW-decode backfill is M1.5 - HEIC previews and true decoded 1:1 wait on it)</span></li>
+  <li>RAW deep zoom today via the embedded full-resolution JPEG, with strokes staying put at any zoom</li>
+  <li>EXIF subset read at ingest (date, camera, lens, exposure, GPS) - strictly read-only; the app never writes into image files <span class="tag">[M1]</span></li>
+  <li>"Rebuild previews&hellip;" on any rail folder; preview-format upgrades regenerate automatically</li>
+  <li>Library doctor: a self-check pass that re-queues missing preview artifacts and sweeps stranded temp files - the library heals</li>
+</ul>
+</details>
+
+<details class="twig">
+<summary>Volumes &amp; offline</summary>
+<ul>
+  <li>Offline volumes are first-class: disconnected badge, cached thumbnails, journal intact and searchable; notes you make while offline queue and land on reconnect <span class="tag">[M1]</span></li>
+  <li>Stable volume identity that survives remounts and recognizes clones; verified live on macOS</li>
+  <li>Read-only volumes are probed, not guessed; an offline volume never burns retry attempts</li>
+</ul>
+</details>
+
+<details class="twig">
+<summary>RAW+JPEG pairs</summary>
+<ul>
+  <li>Auto-paired display stacks with live, reversible collapse/expand - per pair and globally</li>
+  <li>Annotating a collapsed stack targets both files in one event, so a note never hides on the member you aren't viewing</li>
+  <li>R flips the displayed member in Look</li>
+</ul>
+</details>
+
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Capture - the journal<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Typed quick notes bound to the current selection - press N or click the Station, type, Enter, gone <span class="tag">[M1]</span></li>
+  <li>One remark can target all N selected images; session-level remarks need no image at all <span class="tag">[M1]</span></li>
+  <li>Silent keyboard ratings 0&ndash;5 during culling - journal events, never file metadata; rating a multi-selection mints one event <span class="tag">[M1]</span></li>
+  <li>Sessions are automatic and idle-segmented; crashed sessions are recovered cleanly at next launch - there is no session management <span class="tag">[M1]</span></li>
+  <li>Append-only event log: nothing is ever silently edited or lost; merging machines or backups is a union by event id <span class="tag">[M1]</span></li>
+  <li>Retraction ("strike that"): hidden everywhere but preserved in the log, with an Undo that re-states <span class="tag">[M1]</span></li>
+  <li>True redaction: a two-step hold-to-confirm, then the content is physically scrubbed from database, search index, vectors, and sidecars - byte-scan proven <span class="tag">[M1]</span></li>
+  <li>Transcript correction: edits are revision events - the corrected text is what's shown and searched, the original stays in the log <span class="tag">[M2b]</span></li>
+  <li>Journal panel (J): verbatim chronological history under session dividers - edited folds, retracted behind a toggle, redacted stubs, stroke micro-previews; correct / retract / redact on every row <span class="tag">[M2a]</span></li>
+  <li>Compose from the journal panel; jump from any entry back to selecting its target images</li>
+  <li>Write scope is derived from what you're looking at, never set by hand - and voice binds to the scope at the moment speech starts</li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Voice<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Space is the microphone key: tap to toggle, press-and-hold for push-to-talk - one key, two gestures <span class="tag today">[Jun 12]</span></li>
+  <li>Real microphone chain: any input device, downmixed and resampled on a dedicated thread <span class="tag">[M2b, live-verified]</span></li>
+  <li>In-process voice-activity gate with a 400 ms pre-roll, so first words are never clipped <span class="tag">[live-verified]</span></li>
+  <li>Streaming local speech recognition (Nemotron via sherpa-onnx) in a supervised child process - fully offline <span class="tag">[live-verified]</span></li>
+  <li>Utterances bind to the selection snapshot at speech onset: words follow your eyes even if you click away mid-sentence</li>
+  <li>Finals are edge-trimmed of tokenizer artifacts - the journal holds your words, not the model's word-boundary spaces <span class="tag today">[Jun 12]</span></li>
+  <li>The tail-truncation class was root-caused to the model export's baked-in lookahead and fixed by the 560 ms pin swap <span class="tag today">[Jun 12]</span></li>
+  <li>Audio is never written to disk: an in-memory ring only, zeroed on disarm and quit</li>
+  <li>If speech recognition dies, it degrades quietly: nothing half-minted, the mic disarms with a quiet glyph, typed notes are untouched, supervision brings it back</li>
+  <li>ASR resilience: a plan that says "run" with a missing binary is surfaced instead of spinning, and the dev pipeline builds the speech server <span class="tag today">[Jun 12]</span></li>
+  <li>Voice notes get an edge trim so what lands in the journal starts and ends on your words <span class="tag today">[Jun 12]</span></li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Grease pencil<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>B picks up the red pencil on the single-image view; every stroke is one journal event <span class="tag">[M2a]</span></li>
+  <li>B with the tracing paper hidden shows the paper AND arms the pencil in one keystroke - a bound key is never dead <span class="tag today">[Jun 12]</span></li>
+  <li>Tracing-paper overlay toggle (O): marks on or off, the image untouched beneath <span class="tag">[M2a]</span></li>
+  <li>Strokes survive pan, zoom, and orientation - normalized coordinates round-trip to within one source pixel</li>
+  <li>Pressure-aware stroke width where hardware provides it <span class="part">(partial: logic-tested; real-stylus feel is still an open founder item)</span></li>
+  <li>Undo is a retraction (Cmd/Ctrl+Z, ten deep) - nothing is deleted, ever</li>
+  <li>Eraser: hold E or flip the stylus, tap to retract a whole stroke</li>
+  <li>Strokes and words spoken in the same moment link to each other, both ways <span class="tag">[M2b]</span></li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Main-flow UI<span class="count"></span></summary>
+<div class="body">
+
+<details class="twig">
+<summary>The shell</summary>
+<ul>
+  <li>Three surfaces - thumbnail grid, single-image Look, search - and that is the whole app <span class="tag">[M1]</span></li>
+  <li>Panel-system layout: drag-resizable rail, inspector, and filmstrip arranged around a centered canvas, all sizes persisted <span class="tag today">[Jun 12]</span></li>
+  <li>Tab is lights-out with snapshot-restore: all chrome vanishes, Tab again brings back exactly what you had; F totals the filmstrip <span class="tag today">[Jun 12]</span></li>
+  <li>Capture is ambient: no live transcript pane, no composer chrome, no metadata editing UI anywhere <span class="tag">[M1]</span></li>
+  <li>Keyboard-first throughout: Esc always backs out exactly one layer and never quits; G goes home from anywhere; every key means the same thing everywhere</li>
+</ul>
+</details>
+
+<details class="twig">
+<summary>Grid</summary>
+<ul>
+  <li>Virtualized thumbnail browsing that stays smooth while ingest populates it live; image bytes never cross IPC <span class="tag">[M1, live-verified]</span></li>
+  <li>Selection as you expect it: click, Shift-range, Ctrl-toggle, marquee from the gutter, full keyboard; active-vs-selected follows the pro-tool convention</li>
+  <li>Scroll is anchored to the image, not the offset - a mid-ingest re-sort never yanks the viewport</li>
+  <li>Thumbnail badges stay quiet: only the has-journal dot and the offline-volume badge, ever; T cycles cell info</li>
+  <li>Sort per folder (capture date, filename, date added), four thumbnail sizes, Ctrl+wheel sizing</li>
+  <li>Recycled cells can never flash the previous image's pixels</li>
+</ul>
+</details>
+
+<details class="twig">
+<summary>Look</summary>
+<ul>
+  <li>Edge-to-edge image; wheel zoom-to-cursor, Z fit/100%, Space holds-to-pan while zoomed, zoom state persists across prev/next</li>
+  <li>Prev/next walks the grid or search-result order; entering with a multi-selection cycles within it</li>
+  <li>Filmstrip scrolls the whole order with the selected photo centered, virtualized; it pushes the canvas up rather than covering it <span class="tag today">[Jun 12]</span></li>
+  <li>Right inspector: read-only Metadata tab (I) and the Journal tab (J), pushed not overlaid, persisted</li>
+  <li>Auto-advance (A): rate, advance, rate - the culling heartbeat, default off, persisted</li>
+  <li>Surround luminance: black through white behind the image, chrome stays dark and quiet</li>
+</ul>
+</details>
+
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Status &amp; feedback<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>The What's-Happening Station: the capture indicator grown into the app's one status organ - scope ("&#9679; 3 images"), mic, position, with a hover expansion listing live activities ("Indexing - 1,240 of 5,000", "Listening&hellip;"); it breathes gently only while something is actually happening <span class="tag today">[Jun 12]</span></li>
+  <li>Every commit pulses the Station - notes, strokes, ratings land with feedback but no interruption</li>
+  <li>While an utterance started under an earlier selection is still streaming, the Station shows the bound scope with a tether mark</li>
+  <li>Click feedback everywhere: a global pressed state, and fire-and-forget verbs acknowledge with a flash at the control <span class="tag today">[Jun 12]</span></li>
+  <li>Copy actions confirm themselves at the affordance - icon flips to a check only after the clipboard write lands</li>
+  <li>The titlebar shows one dim word ("digesting") while background work is queued, with the breakdown on hover - every background job flows through one register</li>
+  <li>Toast discipline: exactly two toasts exist in the whole app - retraction (with Undo) and redaction-completed</li>
+  <li>First run opens straight into the working app: the welcome card explains where your data lives, the consent card offers models with a live byte sum, and features light up silently as services come ready <span class="tag">[live-verified]</span></li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Search &amp; retrieval<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Instant keyword search over notes and transcripts, search-as-you-type, millisecond-grade at a million rows - works with zero models installed <span class="tag">[M1]</span></li>
+  <li>Filter chips as hard constraints: date (captured vs annotated), camera, lens, folder, rating (an explicit 0 is not "unrated"), has-strokes, volume, collection - all combinable</li>
+  <li>Every result shows <em>why</em> it matched: your own quote, highlighted and dated, with session context - never machine prose <span class="tag">[M3]</span></li>
+  <li>Hybrid semantic search: your words as vectors plus image content, fused so your words always outrank machine impressions; byte-identical to keyword search when no models are present <span class="tag">[M3]</span> <span class="part">(partial: proven end-to-end with the real models in tests; live in-app use is the founder dogfood gate, and the natural-language parse is not yet wired to the live model)</span></li>
+  <li>Search never errors: a failing embedder, a damaged vector file, or a bad parse all degrade silently to keyword results</li>
+  <li>The hallucination firewall drops exactly the invalid parse clauses, with debug-visible reasons, and runs the rest</li>
+  <li>Local vector store (PPVEC): compact int8 flat file, crash-atomic compaction, and redaction zeroes the stored bytes before the call returns</li>
+  <li>Embedding backfill rides the ingest queue politely - only when ingest is idle and the mic is off</li>
+  <li>Search lives in an overlay floating over the dimmed canvas; results fill the canvas as they arrive; Enter opens Look with result order driving prev/next</li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Collections<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Named collections with evented membership - "tags with time": when something joined or left is queryable history <span class="tag">[M3]</span></li>
+  <li>Rail Collections tab beside Folders: create, click to view members; add and remove membership from any image's context menu</li>
+  <li>Collections carry their own append-only notes - about the grouping's intent, not any one image <span class="part">(partial: storage and commands landed; the composer UI is pending)</span></li>
+  <li>Fully portable: a collections sidecar file with union merge, included in export, consumed by rebuild</li>
+  <li>A collection chip in search constrains to current members, with fuzzy name resolution that needs no models</li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Persistence &amp; portability<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>A <span class="tag">.photoproof.json</span> sidecar beside every annotated image, written within seconds - the sidecars ARE the data; walk away anytime <span class="tag">[M1]</span></li>
+  <li>Atomic, mtime-stable writes: identical content never touches the file; kill the app mid-write a thousand times and nothing corrupts</li>
+  <li>Overflow store (same format) for read-only volumes, migrating back beside the images when the volume becomes writable</li>
+  <li>SQLite is just a rebuildable index: delete it, rebuild from sidecars, get a byte-identical event set back - seconds at 50k events <span class="tag">[M1]</span></li>
+  <li>Merge is a union by event id: second machines, restored backups, and re-found sidecars simply merge - and redactions always win, even against a pre-redaction backup</li>
+  <li>Separated sidecars re-match: orphans, regenerated files, stale subsets, even two swapped images keep both their journals</li>
+  <li>Unknown fields and newer-schema files are preserved untouched - a future version's data is never damaged by an old build</li>
+  <li>One-click full export: the complete sidecar set, session journals, and a manifest - identical to rebuild input <span class="tag">[M1]</span> <span class="part">(partial: the export note doesn't yet say how many journals exist only in overflow)</span></li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Models &amp; runtime<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Local-first, network-never: the free tier makes no network calls except model downloads - SHA-pinned, license-gated, consent-gated before the first byte <span class="tag">[live-verified]</span></li>
+  <li>The no-models mode is a complete product: notes, pencil, ratings, sessions, sidecars, and keyword search on any machine <span class="tag">[M1]</span></li>
+  <li>Model downloads: resumable and checksummed, with model-cumulative progress, a resume baseline, and auto-retry on interruption <span class="tag today">[Jun 12]</span></li>
+  <li>Hardware tier detection with a one-time quiet proposal; the user's override always wins <span class="part">(partial: the Windows detection path is compiled but never exercised)</span></li>
+  <li>Supervised child processes: health probes, restart backoff, orphan sweep, single-instance lock - children die with the parent, no zombies</li>
+  <li>Streaming-ASR child (pp-asr-server) - live and founder-verified; language-model child (llama-server) supervised and ready <span class="part">(partial: no shipped feature consumes LLM completions yet)</span></li>
+  <li>In-process embedders via ONNX Runtime: EmbeddingGemma for your words, DFN5B CLIP for the images - pinned SHAs, proven end-to-end against the real weights</li>
+  <li>Installed-model rows in Settings show running/idle state; the degraded explainer says what works without them</li>
+  <li>Every model sits behind a trait seam - swapping a model is a manifest pin, never a rewrite</li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Desktop conventions<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Native macOS menu bar mirroring the app's verbs <span class="tag today">[Jun 12]</span></li>
+  <li>UI-scale zoom (Cmd +/&minus;), persisted across launches <span class="tag today">[Jun 12]</span></li>
+  <li>Right-click context menus mirror every keyboard verb - the discoverability story for a no-tour app</li>
+  <li>? / F1 opens the full keyboard map as a dismissable sheet - no tour, no coach marks</li>
+  <li>OS integration: show in file manager, copy file path, open with the default app; the app itself never moves or deletes a file</li>
+  <li>Window geometry persisted; F11 fullscreen; one window forever</li>
+  <li>Empty states say the next action; the few chrome controls carry key hints</li>
+  <li>One coherent icon set (Lucide), toned by the app's own tokens</li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch" open>
+<summary>Development-only<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Debug panel (F12): events, capture, ingest, sidecars, runtime, and search tabs - compile-time gated, provably absent from release builds</li>
+  <li>pp_voice_bench: the voice-pipeline harness with every chunking knob as a flag; an audiobook WER corpus is fetched and waiting on its scorer</li>
+  <li>Founder dogfood scripts (DOGFOOD-M1 / M2) and the real-model retrieval e2e for founder-machine runs</li>
+  <li>Library bench harness so performance work is driven by numbers, not vibes</li>
+</ul>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<details class="branch bench">
+<summary>On the bench - active design rounds, not yet built<span class="count"></span></summary>
+<div class="body">
+<ul>
+  <li>Search-as-scope: when collections become browsable grids, does search turn contextual - a sidebar scoped to the collection - instead of the full-canvas destination? Decide at M3 design time.</li>
+  <li>Digest visibility: how much of the background digestion (hashing, previews, embeddings) the quiet UI should surface beyond the titlebar word and the Station.</li>
+  <li>Voice chunking feel: endpoint-rule and merge-policy tuning against real dictation; the Nemotron 3.5 pin watch (native punctuation, 40 languages) rides the same round.</li>
+  <li>Roots &amp; subfolders: the long-practice design round - fine at 3 roots, unexamined at 30.</li>
+  <li>M1.5: the full RAW-decode backfill worker, unlocking HEIC previews and true decoded 1:1.</li>
+</ul>
+</div>
+</details>
+
+</div>
+
+<footer>
+Photoproof features - one page, hand-maintained beside docs/STATUS.md and
+docs/FEATURES.md. This page lists what is BUILT; states and evidence live in
+STATUS.md, and where this page and a spec disagree, the spec wins. No build
+tooling: self-contained HTML with inline vanilla JS for expand/collapse;
+edit and reload.
+</footer>
+
+</main>
+
+<script>
+  // Expand/collapse all. "Collapse" returns to the default view:
+  // top-level branches open, everything deeper closed.
+  function setAll(open) {
+    document.querySelectorAll(".tree details").forEach(function (d) {
+      if (!open && d.classList.contains("branch") && !d.classList.contains("bench")) {
+        d.open = true;
+      } else {
+        d.open = open;
+      }
+    });
+  }
+  // Quiet leaf counts on each top-level branch, computed so they never drift.
+  document.querySelectorAll(".tree details.branch").forEach(function (b) {
+    var n = b.querySelectorAll("li").length;
+    var slot = b.querySelector("summary .count");
+    if (slot) slot.textContent = n + (b.classList.contains("bench") ? "" : " built");
+  });
+</script>
+</body>
+</html>
