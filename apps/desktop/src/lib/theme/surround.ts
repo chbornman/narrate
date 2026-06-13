@@ -6,6 +6,8 @@
  * (tested for coverage so CSS and TS cannot drift silently).
  */
 
+import type { ResolvedTheme } from "./theme";
+
 export type SurroundLevel = "black" | "dark" | "middle" | "light" | "white";
 
 /** Cycle order, darkest → lightest (right-click menu order, D6). */
@@ -96,3 +98,47 @@ export const SURROUND_CONTRAST: Record<SurroundLevel, SurroundContrast> = {
     marquee: "rgba(14, 14, 14, 0.22)",
   },
 };
+
+// ---- surround MODE: follow-theme vs manual ---------------------------------
+
+/**
+ * How the active surround level is chosen:
+ *  - "follow-theme" (DEFAULT): the surround is DERIVED from the resolved
+ *    interface theme (theme/theme.ts) — when the user (or the OS, under
+ *    `system`) flips light/dark, the image backdrop follows automatically.
+ *  - "manual": the user pinned a specific SurroundLevel; it wins until they
+ *    switch back to follow-theme. The existing `set-surround` action (the
+ *    backdrop/gutter right-click, D6) is the manual control: picking a level
+ *    implies manual mode.
+ */
+export type SurroundMode = "follow-theme" | "manual";
+
+export const SURROUND_MODES: readonly SurroundMode[] = ["follow-theme", "manual"];
+
+/** Follow-theme is the default: a fresh install tracks the theme. */
+export const DEFAULT_SURROUND_MODE: SurroundMode = "follow-theme";
+
+export const SURROUND_MODE_LABELS: Record<SurroundMode, string> = {
+  "follow-theme": "Follow theme",
+  manual: "Manual",
+};
+
+/** Persistence codec: stored string → mode, anything else → null. */
+export function parseSurroundMode(v: string | null): SurroundMode | null {
+  return (SURROUND_MODES as readonly string[]).includes(v ?? "")
+    ? (v as SurroundMode)
+    : null;
+}
+
+/**
+ * Follow-theme mapping (the documented derivation): a dark chrome theme wants
+ * a dark image surround, a light theme a light surround. We pick the existing
+ * "dark"/"light" levels rather than the extremes ("black"/"white") so the
+ * backdrop sits a notch off pure black/white — comfortable, and still clearly
+ * keyed to the theme. The middle level is reserved for an explicit manual
+ * choice; follow-theme is intentionally a clean two-way mapping so a theme
+ * flip is unambiguous.
+ */
+export function surroundForTheme(resolved: ResolvedTheme): SurroundLevel {
+  return resolved === "dark" ? "dark" : "light";
+}
