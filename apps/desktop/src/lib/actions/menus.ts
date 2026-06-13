@@ -115,6 +115,7 @@ const SEAT_ORDER: Record<MenuSeat, SeatEntry[]> = {
     "—",
     // Dogfood round 1 reachability audit (Look-side pointer seats).
     "toggle-filmstrip",
+    "toggle-histogram",
     "flip-stack-member",
     "—",
     "set-surround",

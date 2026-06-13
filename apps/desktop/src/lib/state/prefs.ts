@@ -160,6 +160,17 @@ export function saveFilmstrip(on: boolean) {
   saveBool("pp.filmstrip", on);
 }
 
+/** Look histogram overlay (H), default OFF. A reviewing aid (exposure /
+ * clipping check), not an editing tool; remembered across the session like
+ * the filmstrip so a reviewer who wants it keeps it. */
+export function loadHistogram(): boolean {
+  return loadBool("pp.histogram", false);
+}
+
+export function saveHistogram(on: boolean) {
+  saveBool("pp.histogram", on);
+}
+
 // ---- UI scale (desktop-conventions pass, June 2026) --------------------------
 
 /** Webview-zoom ladder for Cmd+= / Cmd+− / Cmd+0 (browser-conventional

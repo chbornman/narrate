@@ -84,6 +84,7 @@ export type Action =
   | { kind: "zoom-fit" }
   | { kind: "zoom-100" }
   | { kind: "toggle-filmstrip" }
+  | { kind: "toggle-histogram" }
   // panels
   | { kind: "rail-nav"; dir: "up" | "down" | "left" | "right" }
   | { kind: "rail-enter" }
@@ -184,6 +185,7 @@ export const CONTEXT_DEFAULTS: Omit<ActionContext, LegacyContextKeys> = {
   thumbStep: DEFAULT_THUMB_STEP,
   surround: "black",
   filmstrip: false,
+  histogram: false,
   pencilMode: false,
   overlayVisible: true, // tracing paper defaults ON (UI §4.4)
   pencilUndoable: false,

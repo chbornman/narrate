@@ -1154,6 +1154,7 @@ export class Ui {
       thumbStep: this.grid.thumbStep,
       surround: this.shell.surround,
       filmstrip: this.look.filmstrip,
+      histogram: this.look.histogram,
       pencilMode: this.look.pencilMode,
       overlayVisible: this.look.overlayVisible,
       pencilUndoable: this.look.penDown || this.look.undoStack.length > 0,
@@ -1336,6 +1337,9 @@ export class Ui {
         break;
       case "toggle-filmstrip":
         this.look.toggleFilmstrip();
+        break;
+      case "toggle-histogram":
+        this.look.toggleHistogram();
         break;
       // ---- panels -----------------------------------------------------------
       case "rail-nav": {

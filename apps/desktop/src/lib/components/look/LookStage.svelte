@@ -35,6 +35,7 @@
     type FullresSource,
   } from "../../logic/fullres";
   import PencilOverlay from "./PencilOverlay.svelte";
+  import HistogramOverlay from "./HistogramOverlay.svelte";
 
   let stageEl: HTMLDivElement | undefined = $state();
   let cw = $state(0);
@@ -142,6 +143,22 @@
     fullresHash === null
       ? ""
       : `${fullDecodeUrl(fullresHash)}?v=${developBust}`,
+  );
+
+  // The source the stage is ACTUALLY painting right now: the full-res /
+  // develop artifact once it has proved pixels and swapped in, otherwise the
+  // display preview. The histogram bins THIS (the faithful render), so it
+  // recomputes for free when a develop lands and the source swaps.
+  const displayedSrc = $derived(
+    hash === null
+      ? ""
+      : fullresShown
+        ? fullresSource === "original"
+          ? originalUrl(hash)
+          : fullresSource === "embedded"
+            ? embeddedUrl(hash)
+            : fullDecodeSrc
+        : displayUrl(hash),
   );
 
   // Reaching the /full-decode rung for a not-yet-declined hash: ask the backend
@@ -429,6 +446,11 @@
     <!-- the tracing paper (P5.1): folded strokes + the live stroke; its
          pointer-events gate keeps drag-pan/wheel on the stage -->
     <PencilOverlay {t} {container} {image} {hash} />
+  {/if}
+  {#if ui.look.histogram && !ui.shell.chromeHidden && hash !== null && displayedSrc !== ""}
+    <!-- the histogram (H): a reviewing aid bound to the displayed source,
+         hidden unconditionally under lights-out (canvas chrome, not a panel) -->
+    <HistogramOverlay src={displayedSrc} />
   {/if}
   {#if readout !== null && !ui.shell.chromeHidden}
     <span class="readout">{readout}</span>
