@@ -169,9 +169,23 @@ const GRAPH_DAMPING: f64 = 0.85;
 /// Centering pull toward the origin, so an image related to no topic drifts to
 /// the middle rather than flying off the canvas.
 const GRAPH_CENTERING: f64 = 0.01;
-/// Topic-anchor ring radius (px) in sim space. Anchors sit on a ring (DESIGN
-/// open decision: "lean ring for v1" — stable, readable).
+/// Topic-anchor ring radius (px) in sim space. The ring is now only the INITIAL
+/// layout: anchors are FORCE-PLACED (founder dogfood, June 2026) and relax from
+/// here toward their images' centroids.
 const GRAPH_RING_RADIUS: f64 = 320.0;
+/// Anchor attraction stiffness (founder dogfood): pull on a topic anchor toward
+/// the affinity-weighted centroid of the images that hold to it. Higher = two
+/// topics sharing many images snap together faster. Larger than the image
+/// `attraction` so anchors visibly move within the reheat's ~1 s.
+const GRAPH_ANCHOR_ATTRACTION: f64 = 0.08;
+/// Mutual anchor-anchor repulsion (founder dogfood): keeps force-placed anchors
+/// from collapsing onto each other even when they share most images. Much larger
+/// than the image `repulsion` so a handful of topics stay legibly spread.
+const GRAPH_ANCHOR_REPULSION: f64 = 60_000.0;
+/// Per-step velocity damping for the anchors (their own cooling). A touch
+/// heavier than the image `damping` so the heavy, centroid-seeking anchors
+/// settle without oscillating.
+const GRAPH_ANCHOR_DAMPING: f64 = 0.8;
 /// v2 cluster auto-labels — k bounds for `cluster_topics`' k-means. The cluster
 /// count is `clamp(round(sqrt(n/2)), k_min, k_max)` unless a `k` is passed: a
 /// handful of images yields `k_min` clusters; a large scope is capped at `k_max`
@@ -378,8 +392,15 @@ pub struct GraphTuning {
     pub damping: f64,
     /// Centering pull toward the origin.
     pub centering: f64,
-    /// Topic-anchor ring radius in sim-space px.
+    /// Topic-anchor ring radius in sim-space px (the INITIAL anchor layout).
     pub ring_radius: f64,
+    /// Anchor attraction toward its images' affinity-weighted centroid (anchors
+    /// are force-placed; related topics drift together).
+    pub anchor_attraction: f64,
+    /// Mutual anchor-anchor repulsion (so force-placed anchors don't collapse).
+    pub anchor_repulsion: f64,
+    /// Per-step velocity damping for the anchors (their own cooling).
+    pub anchor_damping: f64,
     /// v2 cluster auto-labels — minimum k for `cluster_topics`' k-means.
     pub cluster_k_min: u32,
     /// v2 cluster auto-labels — maximum k (caps the suggestion rail width).
@@ -398,6 +419,9 @@ impl Default for GraphTuning {
             damping: GRAPH_DAMPING,
             centering: GRAPH_CENTERING,
             ring_radius: GRAPH_RING_RADIUS,
+            anchor_attraction: GRAPH_ANCHOR_ATTRACTION,
+            anchor_repulsion: GRAPH_ANCHOR_REPULSION,
+            anchor_damping: GRAPH_ANCHOR_DAMPING,
             cluster_k_min: GRAPH_CLUSTER_K_MIN,
             cluster_k_max: GRAPH_CLUSTER_K_MAX,
             lod_threshold: GRAPH_LOD_THRESHOLD,
@@ -488,6 +512,27 @@ impl GraphTuning {
                 GRAPH_FORCE_MIN,
                 GRAPH_FORCE_MAX,
                 d.ring_radius,
+            ),
+            anchor_attraction: range_or_default(
+                "graph.anchor_attraction",
+                self.anchor_attraction,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.anchor_attraction,
+            ),
+            anchor_repulsion: range_or_default(
+                "graph.anchor_repulsion",
+                self.anchor_repulsion,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.anchor_repulsion,
+            ),
+            anchor_damping: range_or_default(
+                "graph.anchor_damping",
+                self.anchor_damping,
+                GRAPH_DAMPING_MIN,
+                GRAPH_DAMPING_MAX,
+                d.anchor_damping,
             ),
             cluster_k_min: count_or_default(
                 "graph.cluster_k_min",
@@ -761,6 +806,10 @@ mod tests {
         assert_eq!(t.graph.damping, 0.85);
         assert_eq!(t.graph.centering, 0.01);
         assert_eq!(t.graph.ring_radius, 320.0);
+        // Force-placed anchor knobs (founder dogfood, June 2026).
+        assert_eq!(t.graph.anchor_attraction, 0.08);
+        assert_eq!(t.graph.anchor_repulsion, 60_000.0);
+        assert_eq!(t.graph.anchor_damping, 0.8);
         // Graph v2 knobs (cluster k bounds + LOD threshold).
         assert_eq!(t.graph.cluster_k_min, 2);
         assert_eq!(t.graph.cluster_k_max, 12);
@@ -799,6 +848,9 @@ mod tests {
         // Untouched graph fields kept their defaults:
         assert_eq!(merged.graph.attraction, 0.02);
         assert_eq!(merged.graph.ring_radius, 320.0);
+        assert_eq!(merged.graph.anchor_attraction, 0.08);
+        assert_eq!(merged.graph.anchor_repulsion, 60_000.0);
+        assert_eq!(merged.graph.anchor_damping, 0.8);
         assert_eq!(merged.graph.cluster_k_min, 2);
         // Other sections are entirely undisturbed:
         assert_eq!(merged.search, SearchTuning::default());

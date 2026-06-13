@@ -193,6 +193,11 @@ export interface GraphTuning {
   damping: number;
   centering: number;
   ring_radius: number;
+  /** Force-placed anchors (founder dogfood): anchor centroid attraction +
+   * mutual anchor repulsion + the anchors' own damping. */
+  anchor_attraction: number;
+  anchor_repulsion: number;
+  anchor_damping: number;
   /** v2 cluster auto-labels: k-means k bounds. */
   cluster_k_min: number;
   cluster_k_max: number;

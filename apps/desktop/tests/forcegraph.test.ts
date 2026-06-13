@@ -8,22 +8,35 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateToSuperNodes,
+  coolHeat,
   expandSuperNode,
+  REHEAT_START,
   ringAnchors,
+  screenToSim,
   seedNodes,
   shouldUseLod,
+  simToScreen,
   simulate,
   step,
   type ForceConfig,
   type ImageNode,
+  type TopicAnchor,
+  type ViewTransform,
 } from "../src/lib/logic/forcegraph";
 
+// Baseline config with the anchor forces OFF (anchorAttraction 0), so the image
+// physics tests below pin the v1 FIXED-anchor behavior exactly — the
+// force-placed-anchor knobs are exercised by their own describe block. (A
+// zero-attraction anchor still attracts images; it just doesn't move itself.)
 const config: ForceConfig = {
   attraction: 0.05,
   repulsion: 400,
   damping: 0.85,
   centering: 0.01,
   ringRadius: 300,
+  anchorAttraction: 0,
+  anchorRepulsion: 0,
+  anchorDamping: 0.8,
 };
 
 describe("ringAnchors", () => {
@@ -271,5 +284,199 @@ describe("force sim handles super-nodes (mass)", () => {
     step([b], [], config);
     expect(a.x).toBeCloseTo(b.x, 10);
     expect(a.vx).toBeCloseTo(b.vx, 10);
+  });
+});
+
+// Force-placed anchors (founder dogfood, June 2026): the ring is only the
+// INITIAL layout. Each anchor is pulled toward its images' affinity-weighted
+// centroid (so related topics drift together) with mutual anchor repulsion (so
+// they don't collapse). A pinned/fixed anchor holds its position.
+describe("force-placed anchors", () => {
+  // Anchor physics ON; images held fixed so the test isolates the ANCHOR motion
+  // (no image repulsion confound), the anchors free to move toward their images.
+  const anchorCfg: ForceConfig = {
+    attraction: 0.05,
+    repulsion: 0,
+    damping: 0.85,
+    centering: 0,
+    ringRadius: 300,
+    anchorAttraction: 0.1,
+    anchorRepulsion: 0, // off here so the pure centroid pull is unambiguous
+    anchorDamping: 0.8,
+  };
+
+  it("an anchor drifts toward the centroid of the images that hold to it", () => {
+    // One topic; its anchor starts on the ring (top), its images sit off to the
+    // RIGHT. The force-placed anchor should move toward those images (its x
+    // should rise from ~0 toward the images' x), not stay pinned at the top.
+    const anchor: TopicAnchor = { topic: 0, x: 0, y: -300, vx: 0, vy: 0 };
+    const imgs: ImageNode[] = [
+      { hash: "a", x: 200, y: 0, vx: 0, vy: 0, affinity: [1], fixed: true },
+      { hash: "b", x: 200, y: 40, vx: 0, vy: 0, affinity: [1], fixed: true },
+    ];
+    const x0 = anchor.x;
+    const y0 = anchor.y;
+    for (let i = 0; i < 200; i++) step(imgs, [anchor], anchorCfg);
+    // It moved toward the images' centroid (right and down from the ring top).
+    expect(anchor.x).toBeGreaterThan(x0 + 50);
+    expect(anchor.y).toBeGreaterThan(y0 + 50);
+    // And it converged NEAR the centroid (≈ (200, 20)).
+    expect(anchor.x).toBeCloseTo(200, 0);
+    expect(anchor.y).toBeCloseTo(20, 0);
+  });
+
+  it("an anchor with no images holding to it does not chase a centroid", () => {
+    // Affinity 0 to this topic => no centroid pull; with repulsion off the
+    // anchor should stay put (within float noise).
+    const anchor: TopicAnchor = { topic: 0, x: 10, y: 20, vx: 0, vy: 0 };
+    const imgs: ImageNode[] = [
+      { hash: "a", x: 200, y: 0, vx: 0, vy: 0, affinity: [0], fixed: true },
+    ];
+    for (let i = 0; i < 50; i++) step(imgs, [anchor], anchorCfg);
+    expect(anchor.x).toBeCloseTo(10, 6);
+    expect(anchor.y).toBeCloseTo(20, 6);
+  });
+
+  it("mutual anchor repulsion pushes two coincident anchors apart", () => {
+    // Two anchors started at (nearly) the same point with NO images: pure anchor
+    // repulsion must separate them instead of leaving them collapsed.
+    const repelCfg: ForceConfig = {
+      ...anchorCfg,
+      anchorAttraction: 0,
+      anchorRepulsion: 50000,
+    };
+    const a: TopicAnchor = { topic: 0, x: 0, y: 0, vx: 0, vy: 0 };
+    const b: TopicAnchor = { topic: 1, x: 0.5, y: 0, vx: 0, vy: 0 };
+    const d0 = Math.hypot(a.x - b.x, a.y - b.y);
+    for (let i = 0; i < 100; i++) step([], [a, b], repelCfg);
+    const d1 = Math.hypot(a.x - b.x, a.y - b.y);
+    expect(d1).toBeGreaterThan(d0);
+    expect(d1).toBeGreaterThan(10); // clearly separated, not collapsed
+    expect(Number.isFinite(a.x)).toBe(true);
+  });
+
+  it("two topics sharing images drift CLOSER than two topics that share none", () => {
+    // Shared: both anchors' images overlap in space, so the centroid pull draws
+    // the anchors together. Disjoint: each anchor's images sit far apart, so the
+    // anchors stay apart. The shared pair ends up closer.
+    const cfg: ForceConfig = { ...anchorCfg, anchorAttraction: 0.1, anchorRepulsion: 2000 };
+    const run = (imgs: ImageNode[]) => {
+      const an = [
+        { topic: 0, x: 0, y: -200, vx: 0, vy: 0 } as TopicAnchor,
+        { topic: 1, x: 0, y: 200, vx: 0, vy: 0 } as TopicAnchor,
+      ];
+      for (let i = 0; i < 300; i++) step(imgs, an, cfg);
+      return Math.hypot(an[0].x - an[1].x, an[0].y - an[1].y);
+    };
+    // Shared: every image holds to BOTH topics, all near the origin.
+    const shared: ImageNode[] = [
+      { hash: "s1", x: 0, y: 0, vx: 0, vy: 0, affinity: [1, 1], fixed: true },
+      { hash: "s2", x: 10, y: 0, vx: 0, vy: 0, affinity: [1, 1], fixed: true },
+    ];
+    // Disjoint: topic 0's images far left, topic 1's far right.
+    const disjoint: ImageNode[] = [
+      { hash: "d1", x: -300, y: 0, vx: 0, vy: 0, affinity: [1, 0], fixed: true },
+      { hash: "d2", x: 300, y: 0, vx: 0, vy: 0, affinity: [0, 1], fixed: true },
+    ];
+    expect(run(shared)).toBeLessThan(run(disjoint));
+  });
+
+  it("a PINNED anchor stays exactly where it was placed", () => {
+    const anchor: TopicAnchor = {
+      topic: 0,
+      x: 123,
+      y: -45,
+      vx: 0,
+      vy: 0,
+      pinned: true,
+    };
+    // Images pulling hard toward a different spot must NOT move a pinned anchor.
+    const imgs: ImageNode[] = [
+      { hash: "a", x: -200, y: 200, vx: 0, vy: 0, affinity: [1], fixed: true },
+    ];
+    for (let i = 0; i < 100; i++) step(imgs, [anchor], anchorCfg);
+    expect(anchor.x).toBe(123);
+    expect(anchor.y).toBe(-45);
+    expect(anchor.vx).toBe(0);
+  });
+
+  it("a FIXED (being-dragged) anchor also holds its position", () => {
+    const anchor: TopicAnchor = { topic: 0, x: 5, y: 5, vx: 0, vy: 0, fixed: true };
+    const imgs: ImageNode[] = [
+      { hash: "a", x: 300, y: 0, vx: 0, vy: 0, affinity: [1] },
+    ];
+    step(imgs, [anchor], anchorCfg);
+    expect(anchor.x).toBe(5);
+    expect(anchor.y).toBe(5);
+  });
+});
+
+// Reheat (founder dogfood): a topic-set / alpha change boosts the sim energy so
+// the layout SETTLES in ~1 s, then cools to the stable steady state. The heat is
+// an attraction multiplier; `coolHeat` decays it toward 1.0.
+describe("reheat", () => {
+  it("coolHeat decays a boosted heat toward 1.0 and never below", () => {
+    let h = REHEAT_START;
+    expect(h).toBeGreaterThan(1);
+    let prev = h;
+    // It monotonically cools toward 1.0.
+    for (let i = 0; i < 200; i++) {
+      h = coolHeat(h);
+      expect(h).toBeLessThanOrEqual(prev);
+      expect(h).toBeGreaterThanOrEqual(1);
+      prev = h;
+    }
+    expect(h).toBeCloseTo(1, 3); // settled at the steady state
+    // It never dips below 1 even from a steady-state input.
+    expect(coolHeat(1)).toBe(1);
+  });
+
+  it("a reheated step RAISES the kinetic energy over an un-reheated one", () => {
+    // Same fixture, two configs differing only in heat: the hot one pulls harder,
+    // so the first step injects more kinetic energy (faster settle).
+    const anchors = ringAnchors(2, 300);
+    const aff = new Map<string, number[]>([
+      ["a", [1, 0]],
+      ["b", [0, 1]],
+    ]);
+    const cold = seedNodes([...aff.keys()], aff, 2);
+    const hot = seedNodes([...aff.keys()], aff, 2);
+    const coldE = step(cold, ringAnchors(2, 300), { ...config, heat: 1 });
+    const hotE = step(hot, anchors, { ...config, heat: REHEAT_START });
+    expect(hotE).toBeGreaterThan(coldE);
+  });
+});
+
+// The view transform (pan/zoom) round-trips exactly: a screen point mapped to
+// sim-space and back lands where it started, for any pan/zoom. This is the math
+// behind background-drag-to-pan and zoom-to-cursor.
+describe("view transform", () => {
+  it("simToScreen ∘ screenToSim is the identity for any pan/zoom", () => {
+    const views: ViewTransform[] = [
+      { width: 800, height: 600, zoom: 1, panX: 0, panY: 0 },
+      { width: 800, height: 600, zoom: 2.5, panX: -120, panY: 75 },
+      { width: 1024, height: 768, zoom: 0.4, panX: 300, panY: -200 },
+    ];
+    for (const v of views) {
+      for (const [sx, sy] of [
+        [0, 0],
+        [400, 300],
+        [799, 599],
+      ] as const) {
+        const [x, y] = screenToSim(sx, sy, v);
+        const [bx, by] = simToScreen(x, y, v);
+        expect(bx).toBeCloseTo(sx, 9);
+        expect(by).toBeCloseTo(sy, 9);
+      }
+    }
+  });
+
+  it("panning shifts a sim point by exactly the pan delta in screen px", () => {
+    const base: ViewTransform = { width: 800, height: 600, zoom: 2, panX: 0, panY: 0 };
+    const panned: ViewTransform = { ...base, panX: 30, panY: -15 };
+    const [bx, by] = simToScreen(10, 10, base);
+    const [px, py] = simToScreen(10, 10, panned);
+    expect(px - bx).toBeCloseTo(30, 9);
+    expect(py - by).toBeCloseTo(-15, 9);
   });
 });
