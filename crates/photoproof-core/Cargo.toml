@@ -94,6 +94,18 @@ path = "src/bin/pp_retrieval_eval.rs"
 name = "pp-sweep"
 path = "src/bin/pp_sweep.rs"
 
+[[bin]]
+# The metric-regression guard (DESIGN-TUNING-LOOP.md "Testing (defense)").
+# Reads the committed tuning-baselines.json + the JSON the cheap synthetic
+# benches emit (pp-retrieval-eval --synthetic, pp-bench ingest), compares each
+# metric to its baseline within a per-metric tolerance, and EXITS NON-ZERO with
+# a per-metric report if any regresses. `--update-baseline` rewrites the
+# baseline (K14: the human commits the new reference). The comparator math is
+# pure + unit-tested in the bin; scripts/tune-check.sh runs the benches and
+# invokes this. Explicit [[bin]] only to spell the name with hyphens.
+name = "pp-tune-check"
+path = "src/bin/pp_tune_check.rs"
+
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }

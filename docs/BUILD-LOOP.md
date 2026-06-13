@@ -44,6 +44,41 @@ is disjoint (the pattern that built the specs). Shared files (workspace
 Cargo.toml, lib.rs module lists) are touched only by the coordinator between
 packets.
 
+## Regression guard (`make tune-check`)
+
+The metric-regression guard (DESIGN-TUNING-LOOP.md, the "Testing (defense)"
+half) protects search-ranking quality and ingest throughput as code changes.
+It is SEPARATE from the per-commit gate above: it runs the cheap, deterministic
+SYNTHETIC benches and fails if a quality/perf metric regressed past a tolerance
+vs the committed `tuning-baselines.json`.
+
+```
+make tune-check            # or: scripts/tune-check.sh
+make tune-check JSON=1     # machine-readable verdict on stdout
+make tune-baseline         # regenerate the baseline after an INTENDED change
+```
+
+- **What it runs:** `pp-retrieval-eval --synthetic` (IR metrics nDCG/MRR/recall
+  over a 3-image in-process corpus, no models, no real DB) and `pp-bench ingest`
+  over a small synthetic corpus. Both are zero-setup and deterministic, so the
+  guard runs on ANY machine with a checkout (it never touches the gitignored
+  real corpora or any model).
+- **When to run it:** locally, before a change that touches ranking/fusion
+  (search weights, RRF, the hybrid pipeline) or the ingest path (hashing,
+  decode/resize, the queue). It is NOT in the per-commit gate — the DEEP
+  real-model quality checks are founder-machine — but the cheap synthetic guard
+  here CAN run in CI (zero setup is the whole point).
+- **Tolerances:** search metrics use a tight ABSOLUTE slack (0.02 — the number
+  is machine-independent, so any real drop is a ranking regression); ingest uses
+  a GENEROUS RELATIVE slack (15%) because throughput swings with machine
+  speed/cores/thermals/load, and a tight threshold would red-flag a slow runner,
+  not a regression. The WHYs live in `tuning-baselines.json`.
+- **Updating the baseline (K14):** when an intended improvement lands, run
+  `make tune-baseline` to re-measure, then REVIEW and commit the new
+  `tuning-baselines.json` deliberately — the machine measures, the human commits
+  the new reference. The ingest baseline is host-specific; regenerate it on the
+  machine the guard will run on.
+
 **Spec discipline:** agents implement the spec as written. Ambiguities are
 resolved by the reading most consistent with the integrity invariants,
 implemented, and *flagged* — never silently "improved." Spec changes go
