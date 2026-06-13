@@ -17,6 +17,12 @@ tracing.workspace = true
 # --- sidecar deps (owned by packet P2.1; append below this line only) ---
 # --- library deps (owned by packet P2.2; append below this line only) ---
 # --- search deps (owned by packet P3.1; append below this line only) ---
+# Foreign editor sidecar reader (foreign_sidecar.rs): a tiny, pure-Rust XMP/RDF
+# reader for the read-only portable subset of Lightroom/darktable edits. We
+# deliberately avoid a heavy XML stack (no serde-xml, no DOM). With default
+# features off, quick-xml pulls only `memchr` (already in the tree via blake3),
+# so this stays a lightweight, read-only parse seam.
+quick-xml = { version = "0.40", default-features = false }
 rayon = "1.12.0"
 notify = "8.2.0"
 walkdir = "2.5.0"
