@@ -215,6 +215,55 @@ export function nodeBaseSizePx(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Zoom-scaled draw size (founder: "zoom must GROW the thumbnails"). The node
+// previews were a FIXED screen size regardless of zoom, so zooming in just
+// spread the nodes apart without making any individual preview more readable.
+// The fix: the drawn side SCALES WITH ZOOM, clamped to a sensible [min, max] so
+// zooming in enlarges previews to a readable size (capped so they never balloon)
+// and zooming out keeps them legible (floored so they never vanish to a speck).
+// Pure so the draw loop AND the hit-test share one source of truth and it
+// unit-tests without a canvas.
+// ---------------------------------------------------------------------------
+
+/** Lower bound on a node's zoom-scaled drawn side (screen px). At deep zoom-out
+ * the preview shrinks to (but not below) this, so a far view still reads as
+ * images, not invisible specks. */
+export const ZOOM_MIN_PX = 20;
+/** Upper bound on a node's zoom-scaled drawn side (screen px). At deep zoom-in
+ * the preview grows to (but not past) this, so a close view shows a readable
+ * preview without a single node swallowing the canvas. Comfortably larger than
+ * THUMB_BASE_PX so zooming in is a real, visible enlargement. */
+export const ZOOM_MAX_PX = 132;
+
+/**
+ * Scale a node's BASE drawn side (the `nodeBaseSizePx` value, already
+ * overlay-scaled by the caller) by the current view `zoom`, clamped to
+ * [`min`, `max`]. At zoom 1 a node draws near its base size; zooming in grows the
+ * preview toward `max`, zooming out shrinks it toward `min`. The clamps cap the
+ * growth (so a deep zoom-in does not produce a canvas-filling thumbnail) and
+ * floor the shrink (so a zoomed-out view stays legible).
+ *
+ * Pure (numbers in, number out) so the draw call and the hit-test use the exact
+ * same drawn side — the pickable box always matches what is painted.
+ *
+ * @param base the unscaled side from nodeBaseSizePx (× any overlay sizeScale)
+ * @param zoom the view transform's current zoom (sim→screen multiplier)
+ * @param min  the floor (defaults to ZOOM_MIN_PX)
+ * @param max  the ceiling (defaults to ZOOM_MAX_PX)
+ */
+export function zoomedSide(
+  base: number,
+  zoom: number,
+  min: number = ZOOM_MIN_PX,
+  max: number = ZOOM_MAX_PX,
+): number {
+  // A non-finite/non-positive zoom is meaningless for sizing; treat it as 1 so
+  // the node still draws at its base (defensive against a degenerate transform).
+  const z = zoom > 0 && Number.isFinite(zoom) ? zoom : 1;
+  return Math.min(max, Math.max(min, base * z));
+}
+
+// ---------------------------------------------------------------------------
 // Native-aspect draw rect (founder: "not forced square") — a node draws its
 // thumbnail at its REAL aspect ratio so a landscape photo is a wide rounded-rect
 // and a portrait is a tall one, instead of clipping every preview to a square.

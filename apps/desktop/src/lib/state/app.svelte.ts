@@ -834,6 +834,10 @@ export class Ui {
    * (query OR similar): home is the underlying folder/collection, not a
    * search result set or a similarity view. */
   async goHome() {
+    // The Visualizer lens is a grid-level overlay: "go grid" (G / goHome) must
+    // CLOSE it so the user actually lands back on the grid, not stay hidden
+    // behind the open lens (founder bug: pressing G ran but left the lens up).
+    if (this.graphOpen) this.closeGraph();
     if (this.surface === "look") {
       await this.leaveLook();
       return;

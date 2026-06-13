@@ -1,3 +1,34 @@
+<script module lang="ts">
+  /**
+   * MODULE-LEVEL Visualizer caches (one set per app session, NOT per component
+   * instance). These outlive the lens' `{#if ui.graphOpen}` mount/unmount so that
+   * closing + reopening the Visualizer reuses the work it already paid for
+   * instead of recomputing everything (the founder's "leaving and coming back
+   * re-renders everything from scratch"):
+   *   - moduleAffinityCache: the fetched per-(topic-set, scope, alpha) affinity
+   *     reports — a reopen of the same view skips the backend embed+scan.
+   *   - moduleThumbs: the decoded thumbnail <img> elements — a reopen reuses
+   *     every loaded preview instead of reloading the screenful.
+   * The settled LAYOUT + field + view transform are snapshotted separately via
+   * the keyed graphState store (restored on mount, saved on unmount).
+   */
+  import { GraphThumbCache } from "../../logic/graphthumbs";
+  import { AffinityCache } from "../../logic/affinitycache";
+  import type { AffinityReport } from "../../ipc/commands";
+
+  const moduleAffinityCache = new AffinityCache<AffinityReport>();
+
+  /** The live component's repaint hook for the shared thumbnail cache. Each mount
+   * re-points this at ITS draw(), so a thumb that finishes after a close→reopen
+   * repaints the CURRENT Visualizer (the prior instance's closure pointed at a
+   * now-dead canvas). Null when no Visualizer is mounted, so a late load is a
+   * harmless no-op. */
+  let thumbRepaint: ((hash: string) => void) | null = null;
+  const moduleThumbs = new GraphThumbCache((hash) => {
+    thumbRepaint?.(hash);
+  });
+</script>
+
 <script lang="ts">
   /**
    * Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md, v1): a force-directed
@@ -34,10 +65,12 @@
     REHEAT_START,
     ringAnchors,
     screenToSim,
+    seedNearAnchors,
     seedNodes,
     shouldUseLod,
     simToScreen,
     step,
+    subStepsForHeat,
     type ForceConfig,
     type ImageNode,
     type TopicAnchor,
@@ -51,12 +84,12 @@
     type TopicAttention,
   } from "../../logic/synthesis";
   import {
-    GraphThumbCache,
     nodeBaseSizePx,
     nodeDrawRect,
+    zoomedSide,
   } from "../../logic/graphthumbs";
   import { viewportPriority } from "../../logic/thumbqueue";
-  import { AffinityCache } from "../../logic/affinitycache";
+  import { graphState, graphStateKey } from "../../logic/graphstore";
   import {
     countAboveThreshold,
     DEFAULT_BAKE_THRESHOLD,
@@ -108,12 +141,15 @@
    * detail set (every image), kept even in LOD mode so a super-node can expand
    * back into its members with their real per-image affinity. */
   let affinity = new Map<string, number[]>();
-  /** Per-(topic-set, scope, alpha) cache of the fetched AffinityReport, so
-   * re-adding a topic you just removed or re-viewing the same set does NOT
-   * re-run the backend embed+scan (founder: cache affinities for performance).
-   * The cache invalidates wholesale on a scope or alpha change (those change
-   * every row). One instance per graph view. */
-  const affinityCache = new AffinityCache<ipc.AffinityReport>();
+  // Per-(topic-set, scope, alpha) cache of the fetched AffinityReport, so
+  // re-adding a topic you just removed or re-viewing the same set does NOT
+  // re-run the backend embed+scan (founder: cache affinities for performance).
+  // The cache invalidates wholesale on a scope or alpha change (those change
+  // every row). MODULE-LEVEL (not per-instance) so it SURVIVES the lens
+  // unmount/remount: closing + reopening the Visualizer no longer re-runs the
+  // embed+scan it already paid for (the founder's "reopen re-renders
+  // everything"). Pure data keyed by content, safe to share app-wide.
+  const affinityCache = moduleAffinityCache;
   /** The total image count behind the current layout (M), even when the sim runs
    * over far fewer super-nodes (N = nodeCount). The status reports both. */
   let imageTotal = $state(0);
@@ -277,12 +313,14 @@
    * still counts as "visible" for thumb prioritization, so the fill stays a step
    * ahead of a pan instead of popping in at the edge. */
   const PRELOAD_MARGIN = 200;
-  const thumbs = new GraphThumbCache(() => {
-    // A thumb finished loading: bump a tick so a settled (non-ticking) sim still
-    // repaints to swap the placeholder for the image, and request a frame.
-    thumbReadyTick++;
-    requestAnimationFrame(() => draw());
-  });
+  // The thumbnail image cache is MODULE-LEVEL (moduleThumbs), so the decoded
+  // <img> elements SURVIVE the lens unmount/remount: reopening the Visualizer
+  // reuses every already-loaded thumbnail instead of reloading the whole
+  // screenful from a fresh empty cache (the founder's "reopen re-renders
+  // everything"). The cache's onReady is re-targeted at the LIVE component each
+  // mount (the prior instance's repaint closure would point at a dead canvas),
+  // so a completing load repaints the current Visualizer, not a stale one.
+  const thumbs = moduleThumbs;
 
   /** The hash whose thumbnail REPRESENTS a node on the canvas: a single image is
    * itself; a LOD super-node shows its highest-affinity member (its strongest
@@ -342,16 +380,35 @@
     loading = true;
     scaleNote = null;
     const sc = scope();
-    // Keep the topic-watcher's key in sync REGARDLESS of what triggered this
-    // recompute (mount, alpha, scope, or a topic change), so the $effect does
-    // not fire a duplicate recompute for the set we are about to lay out.
+    // Keep the reactive watchers' keys in sync REGARDLESS of what triggered this
+    // recompute (mount, alpha, scope, or a topic change), so the $effects do not
+    // fire a duplicate recompute for the set/blend we are about to lay out.
     lastTopicKey = topics.join(" ");
+    lastAlpha = alpha;
+    lastFullLibrary = fullLibrary;
+    // recompute() calls refreshOverlay() itself below, so record the overlay key
+    // now to keep the overlay $effect from double-firing the same fetch.
+    lastOverlayKey = `${ui.graphAttention}|${ui.heatAllTime}`;
+
+    // FAST FIRST PAINT (founder: "the graph should populate fast"): on a cold
+    // open we would otherwise paint nothing until the affinity fetch resolved.
+    // Seed + draw the topic ANCHOR ring immediately so the topic structure
+    // appears at once; the image nodes fill in below as soon as affinities
+    // arrive. Skipped on a cache hit (the fetch is synchronous there, so the
+    // full layout paints in the same tick anyway) and when nodes already exist
+    // (an in-place re-blend keeps the current layout visible until the new one
+    // is ready, no flash to an empty ring).
+    const cached = affinityCache.get(topics, sc, alpha);
+    if (cached === undefined && nodes.length === 0) {
+      anchors = ringAnchors(topics.length, forceConfig().ringRadius);
+      draw();
+    }
+
     const t0 = performance.now();
     let report: ipc.AffinityReport;
-    // Affinity cache: a hit (same topic-set + scope + alpha as a prior view)
+    // Affinity cache hit (computed above): a same (topic-set, scope, alpha) view
     // skips the backend embed+scan entirely. A miss fetches, then stores the
     // result so re-adding/undoing a topic is instant on the next view.
-    const cached = affinityCache.get(topics, sc, alpha);
     if (cached !== undefined) {
       report = cached;
     } else {
@@ -390,6 +447,13 @@
       nodes = fullNodes;
       scaleNote = null;
     }
+    // SNAP each node to its dominant topic's anchor neighborhood immediately
+    // (founder: a topic add should snap its photos over, not ooze). With the
+    // reheat below, the layout now settles from NEAR its home instead of drifting
+    // across the whole canvas from the central spiral. Applies to both the
+    // full-detail nodes and the LOD super-nodes (a super-node carries its bin's
+    // mean affinity, so it snaps toward the topic it aggregates).
+    seedNearAnchors(nodes, anchors);
     nodeCount = nodes.length;
 
     // A fresh node set (scope/topic/alpha change): drop stale PENDING thumb
@@ -571,7 +635,16 @@
     cancelAnimationFrame(raf);
     let cool = 0;
     const tick = () => {
-      const energy = step(nodes, anchors, forceConfig());
+      // During the HOT phase of a reheat, advance MULTIPLE sim sub-steps per
+      // frame so the layout closes the distance fast (the founder's "snap, not
+      // ooze") — a single frame of wall-clock buys several integration steps,
+      // while the expensive canvas paint still runs once below. As the heat
+      // cools, subStepsForHeat drops back to 1 step/frame for the steady state.
+      const subSteps = subStepsForHeat(heat);
+      let energy = 0;
+      for (let s = 0; s < subSteps; s++) {
+        energy = step(nodes, anchors, forceConfig());
+      }
       // Cool the reheat one frame toward the 1.0 steady state (pure helper, so
       // the curve is unit-testable). While heat is still elevated we keep
       // ticking even if the energy momentarily dips, so a reheat fully plays out.
@@ -936,7 +1009,11 @@
           : glowSet.has(n.hash)
         : false;
       const effGlow = bakeActive ? (inGlow ? 1 : 0) : ov.glow;
-      const side = baseSide * ov.sizeScale;
+      // The drawn side SCALES WITH ZOOM (founder: "zoom must grow the
+      // thumbnails"), clamped to [min, max] so zooming in enlarges previews to a
+      // readable size and zooming out keeps them legible. The hit-test below
+      // uses the SAME zoomedSide, so the pickable box always matches the paint.
+      const side = zoomedSide(baseSide * ov.sizeScale, zoom);
 
       // Request this node's representative thumbnail, prioritized VISIBLE-FIRST:
       // a node inside the viewport always loads before any off-screen node, and
@@ -1113,7 +1190,9 @@
       overlay() !== "off"
         ? nodeOverlay(n, intensity, overlay(), overlookedByTopic)
         : { sizeScale: 1 };
-    const side = base * ov.sizeScale;
+    // Match the draw loop's zoom-scaled side exactly, so the pickable rectangle
+    // tracks the visibly-grown thumbnail at every zoom level.
+    const side = zoomedSide(base * ov.sizeScale, zoom);
     const img = thumbs.get(repHash(n));
     const { w, h } = nodeDrawRect(
       side,
@@ -1324,33 +1403,194 @@
     draw();
   }
 
+  // -- persist / restore across close → reopen (the instant-reopen fix) -------
+  // The lens is mounted/unmounted by `{#if ui.graphOpen}`, so the component
+  // instance is destroyed on close. Without persistence, reopening re-ran the
+  // affinity fetch, re-seeded the layout (losing the settled positions),
+  // reloaded thumbnails, and recomputed the field — the founder's "leaving and
+  // coming back re-renders everything from scratch". We snapshot the settled
+  // restorable state into the MODULE-LEVEL graphState store on unmount, keyed by
+  // (scope, topic-set), and RESTORE it on mount when the key still matches, so a
+  // reopen of the same view is INSTANT and only a real scope/topic change pays
+  // the recompute. (The thumbnail + affinity caches are already module-level, so
+  // they survive on their own; this carries the per-view LAYOUT + field + view.)
+
+  /** The restorable layout/view of one settled Visualizer view. Holds live
+   * references (the component is being torn down, so transferring them is safe)
+   * keyed by (scope, topic-set) via graphState. */
+  interface GraphSnapshot {
+    alpha: number;
+    nodes: ImageNode[];
+    anchors: TopicAnchor[];
+    affinity: Map<string, number[]>;
+    zoom: number;
+    panX: number;
+    panY: number;
+    heat: number;
+    lodActive: boolean;
+    imageTotal: number;
+    nodeCount: number;
+    visualReady: boolean;
+    annotationReady: boolean;
+    scaleNote: string | null;
+    topicFields: TopicFields | null;
+    fieldTextures: HTMLCanvasElement[];
+    intensity: Map<string, number>;
+    attentionRanked: TopicAttention[];
+    overlookedByTopic: number[];
+  }
+
+  // The last (alpha, fullLibrary) a recompute / restore actually laid out, so
+  // the reactive effects below only re-run on a REAL change — and a restore or
+  // the cold-open init can set these to the value it just applied, so its own
+  // `alpha`/`fullLibrary` assignment does not fire a redundant recompute that
+  // would defeat the instant-reopen restore. Mirrors the lastTopicKey guard the
+  // topic-set effect already uses (a value dedup, not a fragile timing flag).
+  let lastAlpha = Number.NaN;
+  let lastFullLibrary: boolean | null = null;
+
+  /** The key for the CURRENT view (scope + topic-set). A null scope-less call
+   * site never happens (scope() always resolves), so this is total. */
+  function currentStateKey(): string {
+    return graphStateKey(scope(), topics);
+  }
+
+  /** Snapshot the current settled state into the module store, so a reopen of
+   * this same (scope, topic-set) restores instantly. Called on unmount. */
+  function saveSnapshot() {
+    const snap: GraphSnapshot = {
+      alpha,
+      nodes,
+      anchors,
+      affinity,
+      zoom,
+      panX,
+      panY,
+      heat,
+      lodActive,
+      imageTotal,
+      nodeCount,
+      visualReady,
+      annotationReady,
+      scaleNote,
+      topicFields,
+      fieldTextures,
+      intensity,
+      attentionRanked,
+      overlookedByTopic,
+    };
+    graphState.set(currentStateKey(), snap);
+  }
+
+  /** Restore a snapshot into this fresh instance, reusing the settled positions
+   * + caches so the reopen paints immediately with NO recompute. Returns true on
+   * a hit (the caller then skips the affinity fetch / reseed / reheat). */
+  function restoreSnapshot(): boolean {
+    const snap = graphState.get(currentStateKey()) as GraphSnapshot | null;
+    if (snap === null) return false;
+    alpha = snap.alpha;
+    nodes = snap.nodes;
+    anchors = snap.anchors;
+    affinity = snap.affinity;
+    zoom = snap.zoom;
+    panX = snap.panX;
+    panY = snap.panY;
+    // Restore COOLED: the layout is already settled, so we open at rest (no
+    // gratuitous reheat that would re-ooze a view that is already in place).
+    heat = 1;
+    lodActive = snap.lodActive;
+    imageTotal = snap.imageTotal;
+    nodeCount = snap.nodeCount;
+    visualReady = snap.visualReady;
+    annotationReady = snap.annotationReady;
+    scaleNote = snap.scaleNote;
+    topicFields = snap.topicFields;
+    fieldTextures = snap.fieldTextures;
+    intensity = snap.intensity;
+    attentionRanked = snap.attentionRanked;
+    overlookedByTopic = snap.overlookedByTopic;
+    // The reactive watchers' keys must reflect the restored view so a spurious
+    // topic / alpha / fullLibrary $effect does not fire a needless recompute
+    // right after the restore (which would re-ooze a view already in place).
+    lastTopicKey = topics.join(" ");
+    lastAlpha = alpha;
+    lastFullLibrary = fullLibrary;
+    // The overlay was restored from the snapshot; record its key so the overlay
+    // $effect's first run does not re-fetch intensity for this same view.
+    lastOverlayKey = `${ui.graphAttention}|${ui.heatAllTime}`;
+    return true;
+  }
+
   // -- lifecycle --------------------------------------------------------------
   onMount(() => {
+    // Re-target the shared thumbnail cache's repaint at THIS instance: a thumb
+    // that finishes after a previous close→reopen must repaint the CURRENT
+    // canvas, not the prior (dead) one.
+    thumbRepaint = () => {
+      thumbReadyTick++;
+      requestAnimationFrame(() => draw());
+    };
     void (async () => {
       try {
         tuning = await ipc.graphTuning();
-        alpha = tuning.alpha_default;
       } catch {
         /* defaults stand (forceConfig falls back) */
       }
+      // INSTANT REOPEN: if this exact (scope, topic-set) was snapshotted on a
+      // prior close, restore its settled layout + view + field and paint it
+      // immediately — no affinity fetch, no reseed, no reheat. Suggestions are
+      // still refreshed (cheap, and they may have changed), but the heavy path
+      // is skipped entirely.
+      if (restoreSnapshot()) {
+        draw();
+        scheduleFieldRecompute();
+        void loadSuggestions();
+        return;
+      }
+      // Cold open (no snapshot, or scope/topics changed): the full path. Apply
+      // the default alpha and pre-set the dedup guards to that value, so this
+      // assignment does NOT fire a redundant reactive recompute (the explicit
+      // recompute below lays out the initial view; recompute() re-syncs the
+      // guards itself).
+      if (tuning !== null) alpha = tuning.alpha_default;
+      lastAlpha = alpha;
+      lastFullLibrary = fullLibrary;
       await loadSuggestions();
       await recompute();
     })();
     return () => {
+      // Snapshot the settled state for an instant reopen of this same view,
+      // THEN tear down the live loop. The module caches (thumbs/affinity) and
+      // the snapshot persist; only this instance's rAF + repaint hook detach.
+      saveSnapshot();
+      thumbRepaint = null;
       cancelAnimationFrame(raf);
       cancelAnimationFrame(panRaf);
-      // Detach in-flight thumb loads so a completing load can't repaint a dead
-      // canvas after teardown.
-      thumbs.dispose();
+      // A pending throttled field recompute would fire into a dead canvas; drop
+      // it (the next mount recomputes/restores the field itself).
+      if (fieldTimer !== null) {
+        clearTimeout(fieldTimer);
+        fieldTimer = null;
+      }
+      // NOTE: we do NOT dispose `thumbs` — it is the MODULE-LEVEL cache that must
+      // survive this unmount so a reopen reuses the loaded thumbnails. Detaching
+      // the repaint hook (above) already makes any in-flight load that completes
+      // after teardown a harmless no-op (thumbRepaint is null until the next
+      // mount re-points it); the decoded image stays cached for the reopen.
     };
   });
 
   // Re-blend live when the alpha slider moves (DESIGN: "re-blend affinities
-  // live"). untrack the body so only `alpha` retriggers it.
+  // live"). untrack the body so only `alpha` retriggers it; dedup on the last
+  // laid-out alpha so a restore's / cold-open's own alpha assignment does not
+  // fire a redundant recompute (mirrors the topic-set guard).
   $effect(() => {
-    void alpha;
+    const a = alpha;
     untrack(() => {
-      if (tuning !== null) void recompute();
+      if (tuning !== null && a !== lastAlpha) {
+        lastAlpha = a;
+        void recompute();
+      }
     });
   });
 
@@ -1371,10 +1611,13 @@
   });
 
   // Flipping the full-library scale spike re-fetches against the new scope.
+  // Dedup on the last laid-out value so a restore's own fullLibrary assignment
+  // does not fire a redundant recompute.
   $effect(() => {
-    void fullLibrary;
+    const fl = fullLibrary;
     untrack(() => {
-      if (tuning !== null) {
+      if (tuning !== null && fl !== lastFullLibrary) {
+        lastFullLibrary = fl;
         void loadSuggestions();
         void recompute();
       }
@@ -1384,12 +1627,18 @@
   // The Attention overlay reacts to the persisted mode (Off / Engaged /
   // Overlooked) and the heatmap's All-time flag: a change re-fetches intensity
   // (reusing image_intensity) + re-ranks. untrack so only those two retrigger it,
-  // not the whole reactive surface.
+  // not the whole reactive surface. Dedup on the (mode, all-time) pair so an
+  // instant REOPEN (which restored the intensity + ranking from the snapshot)
+  // does not re-fetch intensity for a view it already has; a real later toggle
+  // still refreshes.
+  let lastOverlayKey: string | null = null;
   $effect(() => {
-    void ui.graphAttention;
-    void ui.heatAllTime;
+    const key = `${ui.graphAttention}|${ui.heatAllTime}`;
     untrack(() => {
-      if (tuning !== null) void refreshOverlay();
+      if (tuning !== null && key !== lastOverlayKey) {
+        lastOverlayKey = key;
+        void refreshOverlay();
+      }
     });
   });
 
