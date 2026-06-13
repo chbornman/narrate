@@ -180,4 +180,19 @@ export const LOOK_DEFS: ActionDef[] = [
     available: always,
     enabled: (ctx) => ctx.activeHash !== null,
   },
+  // "More like this" (B69 retrieval-stays-additive): the Look-side def.
+  // SEPARATE from grid's because id is unique per (id, scope) — same Action
+  // kind, scope "look" (the flip-stack-member precedent). NO key; pointer-
+  // seated on the look backdrop. Dispatch leaves Look and re-scopes the grid
+  // to the neighbors.
+  {
+    id: "find-similar",
+    verb: "Find similar images",
+    keys: [],
+    scope: "look",
+    group: "look",
+    seats: ["look-backdrop"],
+    available: always,
+    enabled: (ctx) => ctx.activeHash !== null,
+  },
 ];

@@ -117,6 +117,18 @@ export const search = (
 export const listImages = (hashes: string[]) =>
   invoke<GridItem[]>("list_images", { hashes });
 
+/** "More like this" (B69 retrieval-stays-additive): the nearest OTHER images
+ * to `hash` by visual (CLIP) similarity, in descending-similarity order with
+ * the query image excluded. Returns just the ranked hashes — the `similar`
+ * grid scope feeds them to `listImages` exactly like the query scope feeds
+ * fused-order hashes. An un-embedded image or empty index resolves to `[]`
+ * (never an error), so the mechanism is correct on a fresh/mock machine. */
+export const findSimilar = (hash: string, limit?: number) =>
+  invoke<string[]>(
+    "find_similar",
+    limit === undefined ? { hash } : { hash, limit },
+  );
+
 // -- roots & grid -----------------------------------------------------------
 
 export const listRoots = () => invoke<RootDto[]>("list_roots");

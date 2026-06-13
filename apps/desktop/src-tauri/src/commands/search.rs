@@ -48,3 +48,44 @@ pub fn search(
     *app.last_search.lock().expect("last_search mutex") = Some(results.query.clone());
     Ok(results)
 }
+
+/// Default neighbor count for "more like this" when the caller passes none.
+/// One screenful of a typical grid; the frontend may override.
+const DEFAULT_SIMILAR_LIMIT: usize = 60;
+
+/// "More like this" (B69 retrieval-stays-additive): the nearest OTHER images
+/// to `hash` by visual (CLIP image) similarity, in descending-similarity
+/// order with the query image itself excluded. The frontend renders these as
+/// a `similar` grid scope — the same in-place result set the committed-query
+/// scope produces — so this returns just the ranked hashes; `list_images`
+/// enriches them on the frontend (the query scope's exact two-step shape).
+///
+/// Reuses the existing PPVEC brute-force similarity search the S4 hybrid path
+/// uses (no second kNN), over the image's OWN stored vector. Graceful when
+/// the index is empty or this image was never embedded (a fresh/mock machine):
+/// it returns an empty list, never an error — the mechanism is correct before
+/// any embedding pass has run.
+#[tauri::command]
+pub async fn find_similar(
+    app: S<'_>,
+    hash: String,
+    limit: Option<usize>,
+) -> CmdResult<Vec<String>> {
+    let app = app.inner().clone();
+    let limit = limit.unwrap_or(DEFAULT_SIMILAR_LIMIT);
+    // The brute-force scan + a metadata read can take real time on a large
+    // space; do it off the async runtime's cooperative threads (the os.rs
+    // spawn_blocking precedent) so a big library can't stall the UI loop.
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        let pairs = app
+            .vectors
+            .similar_images(&hash, limit)
+            .map_err(|e| crate::error::CmdError::Invalid(format!("similarity search: {e}")))?;
+        // Pass through the backend's similarity order verbatim — relevance is
+        // the order, exactly like the query scope's fused order.
+        Ok(pairs.into_iter().map(|(h, _score)| h).collect())
+    })
+    .await
+    .map_err(|e| crate::error::CmdError::Invalid(format!("task join: {e}")))?
+}

@@ -86,10 +86,22 @@
     // layer ownership (logic/escape.ts).
   }
 
-  // The detail row appears only while the bar is focused AND there is text
-  // or chips to refine against — a quiet, queryless header otherwise.
+  // The detail row appears while the bar is focused AND there is text or chips
+  // to refine against — a quiet, queryless header otherwise. It ALSO appears in
+  // a `similar` scope (B69 "more like this"): that scope clears the bar input,
+  // so its residue ("similar to <name>") is the only thing announcing the view,
+  // and it must stay visible without bar focus so the one-key clear is always
+  // reachable.
   const showDetail = $derived(
-    ui.barFocused && (ui.query.trim().length > 0 || ui.chips.length > 0),
+    ui.gridScope.kind === "similar" ||
+      (ui.barFocused && (ui.query.trim().length > 0 || ui.chips.length > 0)),
+  );
+
+  /** "More like this" residue copy (B69): the filename the grid is showing
+   * neighbors of, captured into the scope at dispatch. Null unless a similar
+   * scope is active. No em-dash in user copy (gate: check:emdash). */
+  const similarLabel = $derived(
+    ui.gridScope.kind === "similar" ? ui.gridScope.filename : null,
   );
 
   // The lane status indicator (M3 Phase 2): the detail row names the lane the
@@ -206,7 +218,18 @@
     <!-- The thin detail row: the `within:` residue (one-key clear) + chips.
          "within:" is the M3 query-residue indicator. -->
     <div class="detail-row">
-      {#if withinLabel !== null}
+      {#if similarLabel !== null}
+        <!-- "More like this" residue (B69): names the image whose visual
+             neighbors fill the grid; one-key clear returns to the source
+             (the same clearQueryScope funnel the query residue uses). -->
+        <button
+          class="residue"
+          onclick={() => void ui.clearQueryScope()}
+          aria-label="Clear similar, return to source"
+        >
+          similar to {similarLabel} <X size={11} />
+        </button>
+      {:else if withinLabel !== null}
         <button
           class="residue"
           onclick={() => void ui.clearQueryScope()}

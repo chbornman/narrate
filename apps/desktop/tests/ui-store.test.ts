@@ -35,6 +35,12 @@ vi.mock("@tauri-apps/api/core", () => ({
           images: [],
           session_hits: [],
         };
+      case "find_similar":
+        // "More like this": neighbor hashes in similarity order, query image
+        // excluded (the backend already drops self). A fixed set lets the
+        // similar-scope tests assert the grid feeds these in order. An empty
+        // case is exercised separately by overriding this mock per-test.
+        return ["n1", "n2", "n3"];
       case "list_images":
         // Enrich the (fused-order) result hashes into GridItems. runQueryScope
         // feeds these to the grid under relevance sort (the factory is
@@ -344,6 +350,72 @@ describe("search-as-scope (M3): the query is a grid scope", () => {
     const before = ui.focusBarRequest;
     void ui.perform({ kind: "open-search" });
     expect(ui.focusBarRequest).toBe(before + 1);
+  });
+});
+
+describe('"More like this" (B69): the similar scope is a grid scope', () => {
+  beforeEach(async () => {
+    // Land on a real folder so the similar scope has a `within` source to
+    // return to (and a residue that points there).
+    await ui.openFolder("root-1", "Harbor");
+    // The grid items the active image / filename lookup reads from.
+    ui.grid.rawItems = ["q", "x", "y"].map(item);
+  });
+
+  it("dispatching find-similar re-scopes the grid to the neighbors in place", async () => {
+    await ui.runSimilarScope("q", "q.jpg");
+    // The new fourth scope variant, carrying the query image + its filename.
+    expect(ui.gridScope.kind).toBe("similar");
+    if (ui.gridScope.kind === "similar") {
+      expect(ui.gridScope.hash).toBe("q");
+      expect(ui.gridScope.filename).toBe("q.jpg");
+      // `within` is the source the grid returns to on clear.
+      expect(ui.gridScope.within).toEqual({
+        kind: "folder",
+        rootId: "root-1",
+        folder: "Harbor",
+      });
+    }
+    // find_similar ran for the query image, then list_images enriched the
+    // returned neighbor hashes IN ORDER (similarity = relevance, pass-through).
+    expect(lastCall("find_similar")?.args).toMatchObject({ hash: "q" });
+    expect(lastCall("list_images")?.args).toMatchObject({ hashes: ["n1", "n2", "n3"] });
+    expect(ui.grid.itemHashes).toEqual(["n1", "n2", "n3"]);
+    // Relevance is auto-selected: the backend order is the displayed order.
+    expect(ui.grid.sort).toBe("relevance");
+  });
+
+  it("the find-similar action (grid thumb seat) drives the similar scope", async () => {
+    // Make "q" (index 0 of rawItems) the active grid image, then perform the
+    // seated action. focus/anchor are indices into the item list.
+    ui.grid.sel = { ...ui.grid.sel, order: ["q"], anchor: 0, focus: 0 };
+    await ui.perform({ kind: "find-similar" });
+    expect(ui.gridScope.kind).toBe("similar");
+    if (ui.gridScope.kind === "similar") expect(ui.gridScope.hash).toBe("q");
+  });
+
+  it("first Escape clears the similar scope and returns to the source", async () => {
+    await ui.runSimilarScope("q", "q.jpg");
+    expect(ui.gridScope.kind).toBe("similar");
+    // The query residue's Esc layer covers the similar scope too.
+    await ui.escape(); // clear-query-scope -> returnToSource
+    expect(ui.gridScope).toEqual({ kind: "folder", rootId: "root-1", folder: "Harbor" });
+  });
+
+  it("G (go home) clears the similar scope back to the source", async () => {
+    await ui.runSimilarScope("q", "q.jpg");
+    await ui.perform({ kind: "go-grid" });
+    expect(ui.gridScope).toEqual({ kind: "folder", rootId: "root-1", folder: "Harbor" });
+  });
+
+  it("an empty index leaves the grid empty, never errors (fresh/mock machine)", async () => {
+    // Override find_similar to the empty-index shape for this one case.
+    const core = await import("@tauri-apps/api/core");
+    const invoke = vi.mocked(core.invoke);
+    invoke.mockImplementationOnce(async () => []);
+    await ui.runSimilarScope("q", "q.jpg");
+    expect(ui.gridScope.kind).toBe("similar"); // the scope still committed
+    expect(ui.grid.itemHashes).toEqual([]); // but shows nothing, no throw
   });
 });
 

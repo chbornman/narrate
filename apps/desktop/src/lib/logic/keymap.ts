@@ -131,6 +131,10 @@ export type Action =
   // revisit"): hand the original off to the user's editor (review here,
   // edit there). Pointer-seated only — no key.
   | { kind: "open-in-external-editor" }
+  // "More like this" (B69 retrieval-stays-additive): nearest visual neighbors
+  // of the active image, rendered as a `similar` grid scope. Pointer-seated
+  // only — no key.
+  | { kind: "find-similar" }
   // search
   | { kind: "search-nav"; dir: "up" | "down" | "left" | "right" }
   | { kind: "search-open-result" }
