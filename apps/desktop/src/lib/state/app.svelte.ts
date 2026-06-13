@@ -146,6 +146,15 @@ export class Ui {
   // small + clearly named so the parallel heatmap merge stays mechanical.
   graphOpen = $state(false);
 
+  /** The image node SELECTED on the Visualizer (its hash), or null when nothing
+   * is selected. A single click on an image node SELECTS it (glow + scope);
+   * double-click / Enter then OPENS it in Look. The selection drives the write
+   * scope while the graph is open (see reportScope): a selected node is the
+   * dictation/rating target, null is the NEUTRAL session scope. This lives in
+   * the composition root (not the TopicGraph component) because it must outlive
+   * the lens' {#if graphOpen} mount and gate reportScope. */
+  graphSelection = $state<string | null>(null);
+
   /** The three-state Attention OVERLAY on the graph (heatmap x graph synthesis):
    * "off" (the plain graph) / "engaged" (where attention lives) / "overlooked"
    * (coherent but cold). Persisted like the other graph + heatmap toggles. The
@@ -474,6 +483,15 @@ export class Ui {
   // scope reporting (CAPTURE §3 — report, then render the echo)
   // ---------------------------------------------------------------------------
 
+  /** The ACTIVE image hash the inspector + membership marks follow. The graph,
+   * when open, makes the SELECTED node active (so the inspector follows a graph
+   * selection like it follows the grid focus); otherwise it is the Look image
+   * or the grid focus. */
+  private get activeHash(): string | null {
+    if (this.graphOpen) return this.graphSelection;
+    return this.surface === "look" ? this.look.currentHash : this.grid.activeHash;
+  }
+
   async reportScope() {
     const targets = scopeTargets({
       surface: this.surface,
@@ -485,6 +503,11 @@ export class Ui {
       gridSelection: this.grid.selectionTargets, // stack-expanded upstream
       searchSelection: [],
       lookTargets: this.look.currentTargets,
+      // The Visualizer, when open, OWNS the scope: the selected node (or
+      // session-neutral when none) takes precedence over grid/Look so graph
+      // dictation/rating never targets a stale image (scope.ts comment).
+      graphOpen: this.graphOpen,
+      graphSelection: this.graphSelection,
     });
     try {
       const echoed = await ipc.setScope(targets);
@@ -494,9 +517,8 @@ export class Ui {
     }
     // The inspector shows the ACTIVE image's truth (featureset §3); every
     // active-hash change flows through here (focus moves, ←/→ in Look,
-    // stack flips), so an open inspector follows the eye.
-    const active =
-      this.surface === "look" ? this.look.currentHash : this.grid.activeHash;
+    // stack flips, graph node select), so an open inspector follows the eye.
+    const active = this.activeHash;
     if (this.inspector.open !== false && this.inspector.hash !== active)
       await this.inspector.load(active);
     // Membership marks follow the active image the same way: the thumb
@@ -531,8 +553,7 @@ export class Ui {
    * unchanged hash (a collections-changed snapshot may mean THIS image's
    * membership moved in another window). */
   private async refreshActiveMemberships(force = false) {
-    const active =
-      this.surface === "look" ? this.look.currentHash : this.grid.activeHash;
+    const active = this.activeHash;
     if (!force && active === this.membershipsHash) return;
     this.membershipsHash = active;
     if (active === null || this.collections.length === 0) {
@@ -837,7 +858,7 @@ export class Ui {
     // The Visualizer lens is a grid-level overlay: "go grid" (G / goHome) must
     // CLOSE it so the user actually lands back on the grid, not stay hidden
     // behind the open lens (founder bug: pressing G ran but left the lens up).
-    if (this.graphOpen) this.closeGraph();
+    if (this.graphOpen) await this.closeGraph();
     if (this.surface === "look") {
       await this.leaveLook();
       return;
@@ -1172,16 +1193,33 @@ export class Ui {
   // ---------------------------------------------------------------------------
 
   /** Open the force-directed topic-graph lens over the current grid scope.
-   * Leaves Look first (the lens is a grid-level overlay), like find-similar. */
+   * Leaves Look first (the lens is a grid-level overlay), like find-similar.
+   * Opens with NOTHING selected and NEUTRALIZES the scope (empty targets): a
+   * dictation on the freshly-opened graph becomes a session note, never a
+   * silent commit against the stale grid/Look image (founder decision). */
   async openGraph() {
     if (this.surface === "look") await this.leaveLook();
     this.graphOpen = true;
+    this.graphSelection = null;
+    await this.reportScope();
   }
 
-  /** Close the lens; the grid underneath is untouched (the lens never mutated
-   * the scope unless the user clicked a topic, which scopes explicitly). */
-  closeGraph() {
+  /** Single-click on a graph image node SELECTS it (glow + scope); pass null to
+   * DESELECT (Esc on a selection, or a click on empty canvas). Reporting scope
+   * here is the whole point: a selected node becomes the dictation/rating
+   * target, a deselect returns to the neutral session scope. */
+  async selectGraphNode(hash: string | null) {
+    this.graphSelection = hash;
+    await this.reportScope();
+  }
+
+  /** Close the lens; clear any selection and report scope so the write scope
+   * returns to the grid/Look selection underneath (the lens never mutated that
+   * scope itself unless the user clicked a topic, which scopes explicitly). */
+  async closeGraph() {
     this.graphOpen = false;
+    this.graphSelection = null;
+    await this.reportScope();
   }
 
   /** Set the Attention overlay mode on the graph (Off / Engaged / Overlooked)
@@ -1214,16 +1252,17 @@ export class Ui {
    * residue + Escape-to-clear the query scope already provides. The lens closes
    * so the user lands on the scoped grid (the find-similar pattern). */
   async scopeToTopic(phrase: string) {
-    this.closeGraph();
+    await this.closeGraph();
     this.query = phrase;
     this.chips = [];
     await this.runQueryScope("semantic");
   }
 
-  /** Click an image node → open it in Look. The lens closes; openLook builds
-   * the nav set over the grid units exactly as a grid click would. */
+  /** Double-click / Enter on a selected image node → open it in Look. The lens
+   * closes; openLook builds the nav set over the grid units exactly as a grid
+   * click would. (Single click now SELECTS rather than opens — selectGraphNode.) */
   async openFromGraph(hash: string) {
-    this.closeGraph();
+    await this.closeGraph();
     await this.openLook(hash);
   }
 
@@ -1849,7 +1888,7 @@ export class Ui {
         await this.goHome();
         break;
       case "toggle-graph":
-        if (this.graphOpen) this.closeGraph();
+        if (this.graphOpen) await this.closeGraph();
         else await this.openGraph();
         break;
       case "toggle-lights-out":

@@ -972,6 +972,11 @@
     // a topic anchor is selected, the above-threshold images GLOW and the rest
     // recede (the signature "nearby set lighting up"). Computed once per frame.
     const bakeActive = selectedTopic !== null;
+    // The image node SELECTED on the graph (founder decision): it draws a clear
+    // selection ring so the user sees which image their voice/rating targets
+    // while staying on the graph. Read once per frame; reading the $state here
+    // ties the redraw to selection changes.
+    const selectedHash = ui.graphSelection;
     ctx.clearRect(0, 0, width, height);
     // image nodes. Each draws as its TINY preview thumbnail (founder: "tiny
     // previews as the markers"); until the thumb loads, the old colored DOT is
@@ -1104,6 +1109,32 @@
       ctx.lineWidth = isSuper || effGlow > 0 ? 2 : 1;
       ctx.stroke();
       ctx.restore();
+
+      // The SELECTION ring (founder decision): the graph-selected node gets a
+      // distinct accent ring + soft halo OUTSIDE the thumbnail, so it reads as
+      // clearly "picked" (distinct from the inner affinity border and from the
+      // attention/bake glow). A pad pushes it off the image edge; full opacity
+      // so it stays legible even when a dim overlay is active.
+      if (selectedHash !== null && n.hash === selectedHash && !isSuper) {
+        ctx.save();
+        const pad = 4;
+        ctx.shadowColor = c.glow;
+        ctx.shadowBlur = 12;
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        roundedRectPath(
+          ctx,
+          sx - halfW - pad,
+          sy - halfH - pad,
+          w + pad * 2,
+          h + pad * 2,
+          rectRadius + pad,
+        );
+        ctx.strokeStyle = c.glow;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+        ctx.restore();
+      }
 
       // The member-count badge at the super-node's top-right CORNER (the actual
       // drawn rectangle's corner, so it tracks the native aspect), keeping the
@@ -1297,11 +1328,23 @@
     }
   }
   let downAt = 0;
+  /** Manual double-click detection on image nodes: the LAST clicked node hash +
+   * timestamp. A second quick click on the SAME node opens Look (founder: select
+   * first, then open). Tracked here (not via the native dblclick) so it survives
+   * the press/drag-threshold logic — a tiny jitter between the two clicks still
+   * counts as the same node. */
+  let lastClickHash: string | null = null;
+  let lastClickAt = 0;
+  const DBLCLICK_MS = 350;
   function onPointerUp(e: PointerEvent) {
     if (panning) {
-      // End the pan; nothing else to do (the view already moved live).
+      // End the pan; a no-move press-release on EMPTY canvas is a click that
+      // DESELECTS any selected node (clicking the background clears the scope
+      // back to neutral). A pan that moved leaves the selection alone.
+      const wasMove = moved;
       panning = null;
       canvasEl?.releasePointerCapture(e.pointerId);
+      if (!wasMove) void ui.selectGraphNode(null);
       return;
     }
     if (draggingAnchor) {
@@ -1332,13 +1375,32 @@
     dragging = null;
     canvasEl?.releasePointerCapture(e.pointerId);
     // A quick press-release with little movement is a CLICK. On a LOD super-node
-    // a click EXPANDS it into its members; on a single image it opens Look. A
-    // drag just releases the node back into the physics.
+    // a click EXPANDS it into its members. On a single image a FIRST click
+    // SELECTS it (glow + scope, so dictation/rating land on it while staying on
+    // the graph); a SECOND quick click on the same node OPENS it in Look
+    // (founder decision: select first, then open). A drag just releases the
+    // node back into the physics.
     if (!moved && performance.now() - downAt < 250) {
       if (node.members !== undefined) {
         expandSuper(node);
+        // A super-node is not selectable: reset the double-click tracker so a
+        // following image-node click is a fresh first click, not a stale pair.
+        lastClickHash = null;
       } else {
-        void ui.openFromGraph(node.hash);
+        const now = performance.now();
+        const isDouble =
+          lastClickHash === node.hash && now - lastClickAt < DBLCLICK_MS;
+        if (isDouble) {
+          lastClickHash = null;
+          void ui.openFromGraph(node.hash);
+        } else {
+          lastClickHash = node.hash;
+          lastClickAt = now;
+          // Re-selecting the already-selected node leaves it selected (no
+          // toggle): the gesture stays predictable, and the second click is
+          // reserved for open.
+          void ui.selectGraphNode(node.hash);
+        }
       }
     }
   }
@@ -1642,6 +1704,18 @@
     });
   });
 
+  // The graph SELECTION ring repaints reactively: when the sim has settled the
+  // draw loop is idle, so a select/deselect (ui.graphSelection) would not show
+  // until the next frame. Reading the $state here and repainting keeps the ring
+  // in sync with the selection the moment it changes (the bake-glow path does
+  // the same via selectTopicForBake -> draw()).
+  $effect(() => {
+    void ui.graphSelection;
+    untrack(() => {
+      if (canvasEl) draw();
+    });
+  });
+
   // Keep both canvas backing stores (node layer + field layer) sized to the box.
   $effect(() => {
     if (canvasEl) {
@@ -1658,7 +1732,17 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.key === "Escape") ui.closeGraph();
+    // Esc ladder: a selected node DESELECTS first (clearing the scope back to
+    // neutral) and the graph STAYS open; only a second Esc (nothing selected)
+    // closes the lens. Enter on a selected node OPENS it in Look (the keyboard
+    // twin of the double-click). The mic (Space) and rating keys stay live, so
+    // they target the selected node through the reported scope.
+    if (e.key === "Escape") {
+      if (ui.graphSelection !== null) void ui.selectGraphNode(null);
+      else void ui.closeGraph();
+    } else if (e.key === "Enter" && ui.graphSelection !== null) {
+      void ui.openFromGraph(ui.graphSelection);
+    }
   }}
 />
 
