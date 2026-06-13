@@ -87,6 +87,59 @@ their original wording.
   the gitignored wavs). Still open in the harness item: actually running it on
   the corpus and reading the raw-vs-gated delta. (Coordinator, June 13 2026.)
 
+### Search-as-scope + histogram + eval (same wave, autonomous, cont.)
+
+- [x] **Search-as-scope Phase 1** — landed `c4735bf` (merge `a71021e`): the query
+  is now a THIRD grid scope alongside folder and collection. The old
+  `collectionId`-null two-mode arbitration became a `gridScope` discriminated
+  union (`folder | collection | query`); `collectionId` is a back-compat
+  `$derived` getter. A new `runQueryScope()` feeder enriches fused-order result
+  hashes into GridItems (new `list_images` IPC, order-preserving) and renders
+  them IN the grid via `grid.setItems`, guarded by the `gridLoad` token. The
+  whole separate overlay selection system is RETIRED: `SearchOverlay.svelte` +
+  `SearchResultRow.svelte` deleted, `searchSel`/`searchFocus`/`resultHashes`
+  gone, openLook's `fromSearch` branch gone, one selection system (`grid.sel`).
+  An always-visible search bar lives in `GridHeader.svelte` (chips + debounce
+  migrated from the overlay); `/` and Cmd+F focus it; Escape splits into
+  clear-query-scope then blur. Relevance added to `SortMode` (pass-through of the
+  backend's fused order, auto-selected in query mode). Backend: `mode:
+  "lexical" | "semantic"` on the `search` command (default Auto = prior
+  behavior); lexical forces the M1 keyword rig even on warm-embedder machines to
+  hold the <100ms keystroke budget (`search_latency.rs` extended with the lexical
+  assertion). The agent self-caught two regressions before commit (first-keystroke
+  text-erase; a misleading empty-state message). Phases 2-4 (explicit
+  lexical/semantic status, per-signal weight toggles, fuzzy) follow.
+  D1-D6 ratified in `docs/DESIGN-SEARCH-AS-SCOPE.md`. (Founder + coordinator, June 13 2026.)
+- [x] **Histogram overlay in Look** — landed `4b0fe60` (merge `7a6a9b5`): a
+  reviewing-aid RGB+luma histogram (exposure / clipping check), toggled by `H`
+  (audited free against every Look binding), top-right, semi-transparent,
+  pointer-events-none. Computed from the DISPLAYED image via an offscreen canvas
+  downsampled to <=1024px long edge, binned once per image change (off the render
+  path), recomputed when the RAW full-decode artifact swaps in. Pure tested
+  binning module `logic/histogram.ts` (14 tests: Rec.709 luma, transparent-pixel
+  skip, downsample, log/linear normalize). Log-scaled by default (keeps end-range
+  clipping legible). Obeys Tab lights-out; off by default, persisted. FOUNDER
+  REVIEW: combined R/G/B+luma display (vs a luminance-only toggle); log default;
+  no explicit clipping-callout markers yet. (Coordinator, June 13 2026 — was a
+  "needs founder appetite" item, built on the new decode pipeline.)
+- [x] **Golden-query retrieval eval harness** — landed `abcc31f` (merge
+  `bf7cd48`): the M3 retrieval-quality gate instrument (the founder supplies the
+  query set). New pure `retrieval_eval` module (precision@k, recall@k, MRR,
+  nDCG@k with ideal-DCG normalization; 14 unit tests) + a CI-gated sample eval
+  (`tests/retrieval_eval_sample.rs`, builds a synthetic corpus via the
+  `retrieval_hybrid` helpers and asserts sane metrics) + a `pp-retrieval-eval`
+  runner bin (`--db`/`--queries`, `--k`, `--json`, and `--s1/--s2/--s3/--s4`
+  weight-sweep overrides via the existing `FusionWeights`/`HybridOptions` API).
+  Query-set is JSON keyed by BLAKE3 content hashes; drop the real set at
+  gitignored `test-corpora/retrieval/golden.json` (README committed). The runner
+  uses `keyword_only_rig()` (no live models); a full four-signal sweep is a
+  desktop-driven run feeding the same scorer. Beta (`SIM_BLEND_BETA`) stays a
+  compile-time const (would need promoting into `HybridOptions` to sweep at
+  runtime — deferred to avoid touching hybrid.rs mid-search-overhaul). Settles
+  the B69 "how much should S4 vote" question once real queries land. (Coordinator,
+  June 13 2026 — blocked-item advance: instrument built, query set is the
+  founder's to supply.)
+
 ## June 12 2026 — the evening waves (two parallel-agent builds + inline fixes)
 
 - [x] **B summons the overlay** — landed `c13f09b`: the key was dead
