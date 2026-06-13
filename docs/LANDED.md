@@ -140,6 +140,21 @@ their original wording.
   June 13 2026 — blocked-item advance: instrument built, query set is the
   founder's to supply.)
 
+- [x] **Search Phase 4: fuzzy quiet-toggle** — landed `8d4e6a5` (merge
+  `514a1b1`): a `~` glyph in the search bar (off by default), typo-tolerant
+  matching over the metadata columns camera/lens/filename. Length-scaled
+  Levenshtein (via `strsim`, already in the tree) over the DISTINCT metadata-
+  value space — tiny + low-cardinality, so it stays inside the <100ms keystroke
+  budget (a new `fuzzy_armed_lexical_lane_stays_under_budget` test pins it). Key
+  insight: camera/lens/filename are filter-only columns, NOT in the FTS corpus,
+  so fuzzy is a genuinely new ADDITIVE pass. Structurally exact-first: the fuzzy
+  pass runs only after the exact FTS set is assembled, appends with a new honest
+  `Provenance::FuzzyMeta { field }` ("approximate <field> match"), and skips any
+  hash already exact (no dup, no demotion). `fuzzy: bool` through the search
+  command, default false = byte-identical; lexical-lane-only (never the semantic
+  commit). 7 backend + frontend tests incl. exact-beats-fuzzy and off-is-
+  identical. Completes the search-as-scope line (P1-P4). The continuous weight
+  sliders remain eval-gated. (Founder-confirmed, June 13 2026.)
 - [x] **"More like this" (visual-similarity search)** — landed `3ea6f2f`
   (merge `33865e1`): right-click an image -> "Find similar images" -> the grid
   fills with its visual neighbours. A new `find_similar(hash, limit)` Tauri
