@@ -7,6 +7,71 @@ lane runs. Inputs: spec/LIBRARY.md sections 9.3 / 9.3.1 / 9.4 / 10.3,
 `crates/photoproof-core/src/library/mod.rs` (preview routing + worker loop),
 web research on `imagepipe` / `rawkit` / `rawler` / darktable cited inline.
 
+## CORRECTIONS + RESOLVED DECISIONS (June 12 2026 — verified against rawler 0.7.2 source, founder-ratified)
+
+This block OVERRIDES the body below where they conflict. It was added after a
+read-only verification pass against the actual rawler 0.7.2 crate source
+(`~/.cargo/registry/.../rawler-0.7.2`), which found two load-bearing API errors
+in the original plan.
+
+### Verified API corrections (the body is WRONG on these)
+
+- **`cropped_cfa()` is a `todo!()` panic** (`rawimage.rs:697`). The body lists it
+  as "free from rawler" for the CFA pattern (pipeline table, synthetic tests) —
+  it would PANIC. This is the very same unimplemented function the body itself
+  cites as the reason imagepipe's rawler migration stalled. **Do NOT call it.**
+  Get the CFA pattern from `RawPhotometricInterpretation::Cfa(CFAConfig)` →
+  `camera.cfa` → `CFA::color_at(row, col)`, applying the crop origin yourself via
+  `CFA::shift(crop_x, crop_y)` from `active_area`/`crop_area`.
+- **`linearize()` is a `todo!()` panic** (`rawimage.rs:585`). Body lists it free.
+  Use **`apply_scaling()`** (`:507`) instead for black/white-level → float [0,1]
+  (works for `Cfa(_)` and `LinearRaw`; it `todo!()`s only `BlackIsZero` — guard
+  monochrome before calling).
+- **`pixels_u16()` PANICS on float-data DNGs** (`:492`). Some DNGs decode to
+  `RawImageData::Float`. Read pixels via **`data.as_f32()`** (`:254`), which
+  handles both Integer and Float.
+- **`cam_to_xyz_normalized()` returns `[[f32;4];3]`** (3 XYZ rows × 4 camera
+  channels), built from the **deprecated** `xyz_to_cam` field, with no real D65
+  selection. Fold the 4th (E) channel per CFA arity, then compose with a fixed
+  XYZ(D65)→linear-sRGB matrix. Do NOT rely on `develop_params()` for illuminant
+  choice — it does `color_matrix.values().next()` (arbitrary HashMap order).
+- **`adobe_rgb_to_srgb_in_place` is private and AdobeRGB-specific** (`preview.rs:280`);
+  it is not a reusable generic sRGB encoder. Refactor the sRGB-encode closure
+  inside it (`:293-301`) into a shared `pub(crate)` helper, or duplicate it.
+- **`write_artifacts` HARD-RESIZES to `DISPLAY_EDGE=2560`** (`preview.rs:358/369`).
+  The body's "hand it to the existing `write_artifacts`" only yields the 2560
+  display tier — it CANNOT produce a full-sensor-res 1:1 artifact (see OD-1).
+- **No decode pool exists.** There is only one shared `worker_pool()`
+  (`mod.rs:2592`, sized by `hash_pool_size()`). The LIBRARY 10.3 decode pool
+  `max(2, physical_cores/2)` is **net-new infrastructure** to add, not existing.
+- **Wrap the rawler decode panic-safe** (`catch_unwind` or rigorous CFA/data-kind
+  pre-validation) — sibling methods `todo!()` and several have panic paths; a
+  surprising format must mark the row failed/skipped, never crash the pool thread.
+
+The authoritative current file:line map and the corrected ordered build
+checklist + synthetic-test design are tracked alongside this plan (verification
+report, June 12 2026). Build from those, not the body's stale line numbers.
+
+### Founder-ratified build decisions (June 12 2026)
+
+- **OD-1 = FULL-SENSOR-RESOLUTION IN THE FIRST BUILD.** Phase 1 ships the
+  net-new full-resolution `source='full-decode'` artifact (a new artifact kind +
+  a Look deep-zoom protocol route), not just the 2560 display tier. The 2560
+  display+thumb artifacts are still written for grid/fit; the full-res artifact
+  backs Look's 100%-zoom. Geometry-safe: the full-res artifact must pass the
+  `embedded_native_acceptable`-style aspect assertion before serving.
+- **Interactive = NEW TOP PRIORITY above the live folder-watcher.** The view-time
+  trigger (user staring at a "developing…" spinner) outranks `PRIORITY_SCAN` AND
+  `PRIORITY_WATCHER=0`. Renumber the priority constants so interactive is highest.
+- **Color matrix: trust `cam_to_xyz_normalized()`, document the choice.** Per
+  OD-2 ("typical neutral decode, just need real resolution"), the simple path is
+  licensed; no per-illuminant `color_matrix` selection in Phase 1.
+- **No-embedded-preview enqueue site: stay fully on-demand (do NOT eager-develop).**
+  Even when a RAW has no embedded preview at all, develop only when viewed, like
+  any other. FLAGGED FOR FURTHER REVIEW — this is the one removal site where an
+  eager develop could be argued (no substrate to show meanwhile); revisit if
+  dogfood shows a RAW with no embedded preview feels broken before first view.
+
 ## The bug, stated plainly (founder, June 12 2026)
 
 RAW files (incl. the founder's DNGs) never reach a true 1:1 preview.
