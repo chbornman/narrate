@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photoproof - Tuning registry</title>
+<style>
+  :root {
+    --bg: #141414; --panel: #1d1d1d; --panel2: #242424; --line: #3a3a3a;
+    --text: #e8e6e1; --dim: #9a968e; --faint: #6b675f; --red: #c0392b;
+    --green: #4a8c5e; --amber: #b08a3a;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.55; font-size: 15px; }
+  main { max-width: 980px; margin: 0 auto; padding: 48px 32px 96px; }
+  a { color: inherit; text-decoration: none; }
+  .back { color: var(--faint); font-family: var(--mono); font-size: 12.5px; }
+  .back:hover { color: var(--red); }
+  h1 { font-size: 28px; font-weight: 600; margin: 14px 0 4px; }
+  h1 .pencil { color: var(--red); }
+  .subtitle { color: var(--dim); margin: 0 0 6px; max-width: 74ch; }
+  .stamp { color: var(--faint); font-family: var(--mono); font-size: 12px; margin-bottom: 36px; }
+  h2 { font-size: 19px; font-weight: 600; margin: 52px 0 6px;
+    padding-top: 18px; border-top: 1px solid var(--line); }
+  h2 .pill { font-size: 11px; font-family: var(--mono); font-weight: 600;
+    padding: 2px 7px; border-radius: 20px; vertical-align: middle; margin-left: 8px; }
+  .pill.live { color: var(--green); border: 1px solid var(--green); }
+  .pill.proposed { color: var(--amber); border: 1px solid var(--amber); }
+  .lede { color: var(--dim); margin: 0 0 18px; max-width: 78ch; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th { text-align: left; color: var(--faint); font-weight: 600; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .04em; padding: 0 14px 6px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 9px 14px 9px 0; border-bottom: 1px solid #262626; vertical-align: top; }
+  td.knob { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; }
+  td.val { font-family: var(--mono); font-size: 12.5px; color: #fff; white-space: nowrap; }
+  td.where { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  td.note { color: var(--dim); }
+  .owner { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 4px;
+    border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+  .uf-yes { color: var(--green); }
+  .uf-no { color: var(--faint); }
+  .principle { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--red);
+    border-radius: 8px; padding: 14px 18px; margin: 22px 0; color: var(--dim); max-width: 82ch; }
+  .principle b { color: var(--text); }
+  footer { color: var(--faint); font-size: 12.5px; margin-top: 64px; border-top: 1px solid var(--line); padding-top: 16px; }
+  code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+</style>
+</head>
+<body>
+<main>
+
+<a class="back" href="index.html">&larr; docs</a>
+<h1>Photoproof <span class="pencil">/</span> tuning registry</h1>
+<p class="subtitle">Every arbitrary ranking / recommendation factor in one place, so we never lose track of what we decided to weight by how much. Search, retrieval, and the visualization lenses all rest on tunable constants that are otherwise scattered across code, specs, and design docs.</p>
+<p class="stamp">drafted June 13, 2026 - a map, not the source of truth</p>
+
+<div class="principle">
+  <b>How to read this.</b> The CODE is the source of truth; this page is the
+  human index that points at it. Each row gives the current value, where it
+  lives, whether the user can change it, and <b>who owns the number</b> - the
+  &sect;12 golden-set retrieval eval (data-driven), the founder (a product
+  judgment), or "fixed" (a budget/contract, not really a knob). When you change
+  a value in code, update its row here. Defaults are starting points, not truths
+  - most of these are explicitly flagged in-code as "data, not findings."
+</div>
+
+<h2>Search - hybrid fusion (B75) <span class="pill live">LIVE</span></h2>
+<p class="lede">Weighted similarity-aware RRF over four signals. The per-signal weights are now user-visible as on/off toggles (search Phase 3); continuous sliders + a beta control are deferred until the eval gives real numbers.</p>
+<table>
+  <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
+  <tr><td class="knob">S1 - your words (note vectors)</td><td class="val">1.0</td><td class="where">hybrid.rs:123</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span></td></tr>
+  <tr><td class="knob">S2 - note keyword FTS</td><td class="val">1.0</td><td class="where">hybrid.rs:124</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span></td></tr>
+  <tr><td class="knob">S3 - derived summaries (each)</td><td class="val">0.5</td><td class="where">hybrid.rs:125</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span> derived prose never outvotes own words</td></tr>
+  <tr><td class="knob">S4 - image CLIP (visual)</td><td class="val">1.0</td><td class="where">hybrid.rs:137</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span> B69 - raised 0.5&rarr;1.0 at B75</td></tr>
+  <tr><td class="knob">RRF k</td><td class="val">60.0</td><td class="where">hybrid.rs:53</td><td class="uf-no">no</td><td><span class="owner">&sect;12 eval</span> rank-flatness constant</td></tr>
+  <tr><td class="knob">beta - similarity blend</td><td class="val">0.5</td><td class="where">hybrid.rs:92 / HybridOptions.beta :166</td><td class="uf-no">deferred</td><td><span class="owner">&sect;12 eval</span> dense signal tilt 1+beta&middot;cos; a per-search field now, slider eval-gated</td></tr>
+  <tr><td class="knob">as-you-type debounce</td><td class="val">50 ms</td><td class="where">GridHeader.svelte:39</td><td class="uf-no">no</td><td><span class="owner">fixed</span> UI &sect;5.1 ceiling inside the &lt;100ms budget</td></tr>
+  <tr><td class="knob">min query chars</td><td class="val">2</td><td class="where">app.svelte.ts:83</td><td class="uf-no">no</td><td><span class="owner">fixed</span></td></tr>
+  <tr><td class="knob">lexical vs semantic lane</td><td class="val">type=lexical, Enter=semantic</td><td class="where">searchmode.ts</td><td class="uf-no">no</td><td><span class="owner">fixed</span> protects the keystroke budget (P2)</td></tr>
+  <tr><td class="knob">fuzzy (typo-tolerant metadata)</td><td class="val">off; additive</td><td class="where">P4 (building)</td><td class="uf-yes">~ toggle</td><td><span class="owner">founder</span> never default-on, never outranks exact</td></tr>
+</table>
+
+<h2>More like this - visual neighbours <span class="pill live">LIVE</span></h2>
+<table>
+  <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
+  <tr><td class="knob">similarity metric</td><td class="val">CLIP cosine kNN</td><td class="where">retrieval/ppvec.rs (similar_images)</td><td class="uf-no">no</td><td><span class="owner">fixed</span> brute-force over image_clip, self-excluded</td></tr>
+  <tr><td class="knob">result limit</td><td class="val">limit param</td><td class="where">commands/search.rs find_similar</td><td class="uf-no">no</td><td><span class="owner">data</span> tune if results feel too few/many</td></tr>
+</table>
+
+<h2>Attention heatmap <span class="pill proposed">PROPOSED</span></h2>
+<p class="lede">Engagement-intensity per image. See <a href="DESIGN-ATTENTION-HEATMAP.md"><code>DESIGN-ATTENTION-HEATMAP.md</code></a>. Not built yet - these are the proposed starting weights.</p>
+<table>
+  <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
+  <tr><td class="knob">w_dwell (capped dwell)</td><td class="val">lead factor</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span> the primary signal</td></tr>
+  <tr><td class="knob">w_events (annotation count)</td><td class="val">secondary</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span></td></tr>
+  <tr><td class="knob">w_strokes (stroke COUNT)</td><td class="val">small</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span> effort/duration deliberately dropped</td></tr>
+  <tr><td class="knob">dwell tier - Look-open</td><td class="val">1.0x</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span></td></tr>
+  <tr><td class="knob">dwell tier - grid select/multi</td><td class="val">~0.1-0.2x</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span> counts, but far less</td></tr>
+  <tr><td class="knob">dwell cap per episode</td><td class="val">60 s</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span> anti walk-away skew</td></tr>
+  <tr><td class="knob">recency decay</td><td class="val">optional, TBD</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span> "now" vs all-time</td></tr>
+</table>
+
+<h2>Semantic topic-graph <span class="pill proposed">PROPOSED</span></h2>
+<p class="lede">Force-directed lens, images pulled toward topic anchors. See <a href="DESIGN-SEMANTIC-GRAPH.md"><code>DESIGN-SEMANTIC-GRAPH.md</code></a>. Not built yet.</p>
+<table>
+  <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
+  <tr><td class="knob">alpha - looks vs said blend</td><td class="val">0.5 (50/50)</td><td class="where">design doc</td><td class="uf-yes">slider</td><td><span class="owner">founder</span> pull = alpha&middot;visual + (1-alpha)&middot;annotation</td></tr>
+  <tr><td class="knob">topic attraction force</td><td class="val">&prop; blended cosine</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">data</span> layout feel</td></tr>
+  <tr><td class="knob">image-image repulsion</td><td class="val">TBD</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">data</span> spread vs cluster</td></tr>
+  <tr><td class="knob">anchor layout</td><td class="val">ring (v1)</td><td class="where">design doc</td><td class="uf-no">no</td><td><span class="owner">founder</span></td></tr>
+  <tr><td class="knob">topic sources</td><td class="val">manual &rarr; cluster &rarr; LLM</td><td class="where">design doc</td><td class="uf-yes">add/suggest</td><td><span class="owner">founder</span> staged</td></tr>
+</table>
+
+<h2>Other tunable constants <span class="pill live">LIVE</span></h2>
+<p class="lede">Lower-stakes knobs that still encode a judgment, kept here so they're not forgotten.</p>
+<table>
+  <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
+  <tr><td class="knob">voice chunking - rule2 trailing silence</td><td class="val">1.2 s</td><td class="where">pp-asr-server</td><td class="uf-no">no</td><td><span class="owner">data</span> "when does a sentence end"; tuning round open (BACKLOG)</td></tr>
+  <tr><td class="knob">embedded-preview accept edge</td><td class="val">2048 px</td><td class="where">preview.rs:44 (EMBEDDED_ACCEPT_EDGE)</td><td class="uf-no">no</td><td><span class="owner">fixed</span> when the in-RAW JPEG is "good enough"</td></tr>
+  <tr><td class="knob">display preview edge</td><td class="val">2560 px</td><td class="where">preview.rs:34 (DISPLAY_EDGE)</td><td class="uf-no">no</td><td><span class="owner">fixed</span></td></tr>
+  <tr><td class="knob">embedded aspect tolerance</td><td class="val">0.02</td><td class="where">preview.rs:643</td><td class="uf-no">no</td><td><span class="owner">fixed</span> geometry safety for strokes</td></tr>
+</table>
+
+<h2>Future - the synthesis lens <span class="pill proposed">PROPOSED</span></h2>
+<p class="lede">When the heatmap and the graph both exist, combining them ("hot topics" and the inverse, "missing themes from ignored images") introduces its own weighting - how strongly to weight engagement-inverse against semantic coherence to surface neglected-but-coherent clusters. A knob that does not exist yet; logged so it joins this registry when it does. See the BACKLOG "Visualization lenses" item.</p>
+
+<footer>
+  When you add a feature with an arbitrary weight, add its row here. The number
+  you pick today is a guess wearing a default's clothes - this page is how we
+  remember which guesses we made.
+</footer>
+
+</main>
+</body>
+</html>
