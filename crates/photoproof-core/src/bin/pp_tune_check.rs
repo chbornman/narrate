@@ -70,6 +70,14 @@ struct Verdict {
     tolerance: f64,
     floor: f64,
     passed: bool,
+    /// Whether a failure of THIS metric fails the guard (non-zero exit). The
+    /// deterministic, machine-INDEPENDENT search IR metrics GATE (true): a drop
+    /// is a real ranking regression and must block. The ingest THROUGHPUT does
+    /// NOT gate (false) - it is informational only, because it is machine- and
+    /// load-variable (a parallel build, a busy host, a slower laptop all move it
+    /// and would cry wolf). A perf drop is reported as WARN, never a hard fail;
+    /// real perf work is tracked via `bench-results.jsonl`, not this gate.
+    gates: bool,
 }
 
 /// Compare one observed metric to its baseline under a tolerance. This is the
@@ -100,6 +108,10 @@ fn compare(
         tolerance,
         floor,
         passed,
+        // Default: a metric gates. build_verdicts() demotes the perf metrics to
+        // warn-only (gates = false). Keeping the default true means a NEW
+        // deterministic metric added later gates unless explicitly demoted.
+        gates: true,
     }
 }
 
@@ -230,14 +242,18 @@ fn build_verdicts(
     let i_tol = get_f64(baselines, "ingest.tolerance")?;
     let baseline = get_f64(baselines, "ingest.files_per_s")?;
     let observed = get_f64(ingest_obs, "files_per_s")?;
-    out.push(compare(
+    let mut ingest = compare(
         "ingest.files_per_s",
         observed,
         baseline,
         i_tol,
         ToleranceKind::Relative,
         Direction::HigherIsBetter,
-    ));
+    );
+    // Perf is WARN-only: a slow run (busy host, parallel build, slower laptop)
+    // must not fail the guard. Only the deterministic search metrics gate.
+    ingest.gates = false;
+    out.push(ingest);
 
     Ok(out)
 }
@@ -295,20 +311,29 @@ fn print_report(verdicts: &[Verdict]) {
         "metric", "observed", "baseline", "floor"
     );
     for v in verdicts {
+        // A failed gating metric REGRESSED (blocks); a failed warn-only metric
+        // is a WARN (perf drop, informational, never blocks).
+        let verdict = match (v.passed, v.gates) {
+            (true, _) => "OK",
+            (false, true) => "REGRESSED",
+            (false, false) => "WARN",
+        };
         println!(
             "{:<24} {:>10.4} {:>10.4} {:>10.4}  {}",
-            v.name,
-            v.observed,
-            v.baseline,
-            v.floor,
-            if v.passed { "OK" } else { "REGRESSED" }
+            v.name, v.observed, v.baseline, v.floor, verdict
         );
     }
-    let failed = verdicts.iter().filter(|v| !v.passed).count();
-    if failed == 0 {
-        println!("\nall {} metrics within tolerance.", verdicts.len());
+    let gating_failed = verdicts.iter().filter(|v| !v.passed && v.gates).count();
+    let warned = verdicts.iter().filter(|v| !v.passed && !v.gates).count();
+    if gating_failed == 0 {
+        println!("\nall gating metrics within tolerance.");
     } else {
-        println!("\n{failed} metric(s) regressed past tolerance.");
+        println!("\n{gating_failed} gating metric(s) regressed past tolerance.");
+    }
+    if warned > 0 {
+        println!(
+            "{warned} perf metric(s) below baseline (WARN only - machine/load variable, not a gate)."
+        );
     }
 }
 
@@ -323,14 +348,18 @@ fn print_report_json(verdicts: &[Verdict]) {
                 "tolerance": v.tolerance,
                 "floor": v.floor,
                 "passed": v.passed,
+                "gates": v.gates,
             })
         })
         .collect();
-    let failed = verdicts.iter().filter(|v| !v.passed).count();
+    // "passed" reflects the GATING metrics only; a perf WARN never fails the run.
+    let gating_failed = verdicts.iter().filter(|v| !v.passed && v.gates).count();
+    let warned = verdicts.iter().filter(|v| !v.passed && !v.gates).count();
     let doc = serde_json::json!({
         "schema": 1,
-        "passed": failed == 0,
-        "regressed_count": failed,
+        "passed": gating_failed == 0,
+        "regressed_count": gating_failed,
+        "warn_count": warned,
         "metrics": rows,
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap());
@@ -364,7 +393,8 @@ fn run(args: &Args) -> Result<bool, String> {
     } else {
         print_report(&verdicts);
     }
-    Ok(verdicts.iter().all(|v| v.passed))
+    // Only GATING metrics determine the exit; a perf WARN never fails the guard.
+    Ok(verdicts.iter().filter(|v| v.gates).all(|v| v.passed))
 }
 
 fn main() -> ExitCode {
@@ -584,7 +614,50 @@ mod tests {
         )
         .unwrap();
         let ing = v.iter().find(|x| x.name == "ingest.files_per_s").unwrap();
+        // The throughput dropped below the floor...
         assert!(!ing.passed);
+        // ...but ingest is WARN-only, so it must NOT gate (a busy host/parallel
+        // build must never fail the guard on perf alone).
+        assert!(!ing.gates);
+    }
+
+    #[test]
+    fn search_metrics_gate_but_ingest_does_not() {
+        let v = build_verdicts(
+            &baselines_doc(),
+            &retrieval_doc(1.0),
+            &serde_json::json!({ "files_per_s": 100.0 }),
+        )
+        .unwrap();
+        for x in &v {
+            if x.name.starts_with("search.") {
+                assert!(x.gates, "{} must gate", x.name);
+            } else {
+                assert!(!x.gates, "{} must be warn-only", x.name);
+            }
+        }
+    }
+
+    #[test]
+    fn ingest_slowdown_alone_does_not_fail_the_guard() {
+        // The run-level pass logic: only gating metrics count. A healthy search
+        // with a slow ingest is a PASS (perf warns, never blocks).
+        let v = build_verdicts(
+            &baselines_doc(),
+            &retrieval_doc(1.0),
+            &serde_json::json!({ "files_per_s": 40.0 }), // way under the floor
+        )
+        .unwrap();
+        let gating_pass = v.iter().filter(|x| x.gates).all(|x| x.passed);
+        assert!(gating_pass, "a perf-only drop must not fail the guard");
+        // but a search regression alongside it WOULD fail.
+        let v2 = build_verdicts(
+            &baselines_doc(),
+            &retrieval_doc(0.5),
+            &serde_json::json!({ "files_per_s": 40.0 }),
+        )
+        .unwrap();
+        assert!(!v2.iter().filter(|x| x.gates).all(|x| x.passed));
     }
 
     #[test]
