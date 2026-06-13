@@ -34,7 +34,10 @@ cargo test --workspace
 
 plus the packet's own acceptance tests (each spec's acceptance-criteria
 section must be traceable to named tests — see Traceability). Frontend
-packets add: `npm run check` (svelte-check), `npm run build`, `vitest`.
+packets add: `npm run check` (svelte-check), `npm run build`, `vitest`, and
+`npm run check:emdash` (the no-em-dashes-in-visible-UI-copy creep gate —
+`scripts/check-no-emdash.sh`; scopes to rendered text/attributes, exempts
+comments and the menus.ts separator sentinel).
 
 **Parallelism rule:** packets run in parallel only when their file ownership
 is disjoint (the pattern that built the specs). Shared files (workspace
