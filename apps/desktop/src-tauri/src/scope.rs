@@ -5,12 +5,15 @@
 //! ring truth: this is a thin clock-holding adapter over the core ring.
 
 use photoproof_core::ContentHash;
-use photoproof_core::capture::{Clock, ScopeRing, ScopeSnapshot, SystemClock};
+use photoproof_core::capture::{
+    Clock, ScopeRing, ScopeSnapshot, ScopeSubject, SubjectKind, SystemClock,
+};
 
 use crate::dto::ScopeView;
 
 /// Core scope snapshot → the wire `ScopeView` (CAPTURE §11: first ≤ 3
-/// preview hashes).
+/// preview hashes; DESIGN-VOICE-SUBJECTS.md subject name when targeting a
+/// collection/topic note log).
 pub fn view_of(s: &ScopeSnapshot) -> ScopeView {
     let v = s.view();
     ScopeView {
@@ -21,6 +24,11 @@ pub fn view_of(s: &ScopeSnapshot) -> ScopeView {
             .iter()
             .map(|h| h.as_str().to_owned())
             .collect(),
+        subject: v.subject.map(|k| match k {
+            SubjectKind::Collection => "collection",
+            SubjectKind::Topic => "topic",
+        }),
+        subject_name: v.subject_name,
     }
 }
 
@@ -42,10 +50,17 @@ impl ScopeTracker {
         Self { clock, ring }
     }
 
-    /// Report a selection/view change; echoes the derived scope (CAPTURE §3).
-    pub fn set(&mut self, targets: Vec<ContentHash>) -> ScopeView {
+    /// DESIGN-VOICE-SUBJECTS.md: report a selection/view change that MAY name
+    /// a non-image subject (collection/topic). The echoed scope carries the
+    /// subject + its display name so the indicator can render "noting: <name>".
+    pub fn set_with_subject(
+        &mut self,
+        targets: Vec<ContentHash>,
+        subject: Option<ScopeSubject>,
+        subject_name: Option<String>,
+    ) -> ScopeView {
         let (m, w) = (self.clock.mono_ms(), self.clock.wall());
-        view_of(self.ring.push(targets, m, w))
+        view_of(self.ring.push_scope(targets, subject, subject_name, m, w))
     }
 
     pub fn current(&self) -> &ScopeSnapshot {
@@ -71,20 +86,25 @@ mod tests {
         ContentHash::from_bytes_of(&[n])
     }
 
+    /// Image-only scope push (the subject-less common case) for the tests.
+    fn set(t: &mut ScopeTracker, targets: Vec<ContentHash>) -> ScopeView {
+        t.set_with_subject(targets, None, None)
+    }
+
     #[test]
     fn kind_derives_mechanically_from_target_count() {
         let mut t = ScopeTracker::new();
         assert_eq!(t.current_view().kind, "session");
-        assert_eq!(t.set(vec![h(1)]).kind, "single");
-        assert_eq!(t.set(vec![h(1), h(2), h(3)]).kind, "multi");
-        assert_eq!(t.set(vec![]).kind, "session");
+        assert_eq!(set(&mut t, vec![h(1)]).kind, "single");
+        assert_eq!(set(&mut t, vec![h(1), h(2), h(3)]).kind, "multi");
+        assert_eq!(set(&mut t, vec![]).kind, "session");
     }
 
     #[test]
     fn multi_target_order_is_selection_order() {
         let mut t = ScopeTracker::new();
         let order = vec![h(9), h(2), h(5)];
-        t.set(order.clone());
+        set(&mut t, order.clone());
         assert_eq!(t.current().targets, order);
     }
 
@@ -92,7 +112,7 @@ mod tests {
     fn view_echoes_count_and_first_three_preview_hashes() {
         let mut t = ScopeTracker::new();
         let targets: Vec<ContentHash> = (0..5).map(h).collect();
-        let v = t.set(targets.clone());
+        let v = set(&mut t, targets.clone());
         assert_eq!(v.kind, "multi");
         assert_eq!(v.count, 5);
         assert_eq!(

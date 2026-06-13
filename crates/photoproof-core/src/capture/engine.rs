@@ -25,7 +25,7 @@ use crate::store::{AppendError, EventDraft, EventStore, RemarkSource};
 use super::audio::AudioRing;
 use super::clock::Clock;
 use super::link::{StrokeSpan, UtteranceSpan, resolve_stroke_link, resolve_utterance_link};
-use super::scope::{ScopeRing, ScopeSnapshot, ScopeView};
+use super::scope::{ScopeRing, ScopeSnapshot, ScopeSubject, ScopeView};
 use super::session::CaptureDrain;
 use crate::event::StrokePayload;
 
@@ -65,6 +65,29 @@ pub const TRAILING_SHIP_MS: u64 = 3_000;
 pub const PRE_ROLL_MS: u64 = 1_000;
 /// Debug-panel note cap (in-memory only).
 const DEBUG_NOTE_CAP: usize = 256;
+
+/// DESIGN-VOICE-SUBJECTS.md: the seam by which a voice final reaches the
+/// collection/topic note logs (`collection_notes` / `topic_notes`). The
+/// engine writes EVENTS through its `&EventStore`, but those subject note
+/// tables hang off the separate Collections/Topics handles (their own
+/// connections over the SAME db); this trait is the thin accessor that lets
+/// `on_final` route a subject final to them without the engine owning those
+/// handles. The shell wires a real sink over `Arc<Collections>`/`Arc<Topics>`;
+/// tests use a fake. Text is verbatim (K14); `ts` is wall-clock-now, exactly
+/// as the typed composer commands pass `UtcMillis::now()`.
+pub trait SubjectNoteSink: Send {
+    /// Append `text` to `collection_id`'s note log. `Err` is logged to the
+    /// debug ring (a stale id is the realistic failure); it never mints an
+    /// image event as a fallback (that would silently misroute the words).
+    fn append_collection_note(
+        &self,
+        collection_id: &str,
+        text: &str,
+        ts: UtcMillis,
+    ) -> Result<(), String>;
+    /// Append `text` to `topic_id`'s note log.
+    fn append_topic_note(&self, topic_id: &str, text: &str, ts: UtcMillis) -> Result<(), String>;
+}
 
 /// CAPTURE §6.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +205,12 @@ pub struct CaptureEngine<'t, C: Clock> {
     /// the idle timer (§2.2: a boundary never bisects an in-flight
     /// utterance).
     last_activity: Option<(u64, UtcMillis)>,
+    /// DESIGN-VOICE-SUBJECTS.md: the subject-note seam, wired by the shell
+    /// (`with_note_sink`). `None` in the bare engine — a subject final then
+    /// has nowhere to land, so it logs and mints nothing (it must NOT fall
+    /// back to an image event). Optional so the existing `new` signature and
+    /// every test that does not exercise subjects stay untouched.
+    note_sink: Option<Box<dyn SubjectNoteSink>>,
 }
 
 impl<'t, C: Clock> CaptureEngine<'t, C> {
@@ -212,7 +241,18 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             pre_roll: std::collections::VecDeque::new(),
             debug: Vec::new(),
             last_activity: None,
+            note_sink: None,
         }
+    }
+
+    /// DESIGN-VOICE-SUBJECTS.md: wire the subject-note seam (the shell's
+    /// `Arc<Collections>`/`Arc<Topics>` accessor). Builder form so the bare
+    /// `new` signature — used by ~15 acceptance tests and the pump's
+    /// reconstruction — stays untouched; only the live shell and the
+    /// subject-routing tests opt in.
+    pub fn with_note_sink(mut self, sink: Box<dyn SubjectNoteSink>) -> Self {
+        self.note_sink = Some(sink);
+        self
     }
 
     /// Record capture-side activity NOW (§2.1) for the session engine's
@@ -224,8 +264,22 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
     // -- scope (§3) -----------------------------------------------------------
 
     /// The UI reports its selection/view-derived target list; the engine
-    /// snapshots it into the ring. Returns the echoed snapshot.
+    /// snapshots it into the ring. Returns the echoed snapshot. Image-only
+    /// entry point (no subject) — kept for the bare callers/tests.
     pub fn set_scope(&mut self, targets: Vec<ContentHash>) -> &ScopeSnapshot {
+        self.set_scope_with_subject(targets, None, None)
+    }
+
+    /// DESIGN-VOICE-SUBJECTS.md: the UI reports its targets AND (when a
+    /// collection/topic detail is open with no image focused) a non-image
+    /// subject. The subject rides onto the pushed snapshot so it is
+    /// onset-bound and frozen for the utterance, exactly like image targets.
+    pub fn set_scope_with_subject(
+        &mut self,
+        targets: Vec<ContentHash>,
+        subject: Option<ScopeSubject>,
+        subject_name: Option<String>,
+    ) -> &ScopeSnapshot {
         let (m, w) = (self.clock.mono_ms(), self.clock.wall());
         // WHY union into open utterances: a single voice dictation that spans
         // an image swap (the user starts speaking on image A, then
@@ -242,6 +296,13 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         // so we append first-seen and de-dup — A→B yields [A.., B..],
         // A→B→A stays [A.., B..]. Every open utterance spanned this swap, so
         // union into all of them.
+        //
+        // DESIGN-VOICE-SUBJECTS.md: the union is IMAGE-targets-only and never
+        // touches `subject` — a subject snapshot has empty `targets`, so this
+        // loop is a no-op for an utterance bound to a subject (the onset
+        // subject stays frozen; focusing an image mid-utterance does NOT
+        // retro-rebind it). And a subject's id never arrives through this
+        // path's `targets`, so it cannot be unioned in.
         for u in &mut self.in_flight {
             for t in &targets {
                 if !u.snapshot.targets.contains(t) {
@@ -253,7 +314,7 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             // once a second image joins an open utterance).
             u.snapshot.kind = super::scope::ScopeKind::from_target_count(u.snapshot.targets.len());
         }
-        self.ring.push(targets, m, w)
+        self.ring.push_scope(targets, subject, subject_name, m, w)
     }
 
     pub fn scope_ring(&self) -> &ScopeRing {
@@ -720,6 +781,47 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         };
 
         let end_mono = end_mono.max(onset_mono);
+
+        // DESIGN-VOICE-SUBJECTS.md routing: a snapshot carrying a SUBJECT
+        // (collection/topic, frozen at onset) routes the verbatim text to
+        // that subject's note log instead of minting an image event. WHY
+        // before the image path: a subject final must NEVER mint an image
+        // Remark (and a subject snapshot has empty targets, so it would
+        // otherwise fall through as a zero-target SESSION note — exactly the
+        // wrong place). The image-targets-win invariant is upheld upstream
+        // (a subject only ever rides a targetless snapshot), so this branch
+        // only fires when there are no image targets to honor.
+        if let Some(subject) = snapshot.subject.clone() {
+            // K14: machine routes verbatim user speech; never composes. Same
+            // trim the image path applies — BPE word-boundary spacing is
+            // tokenizer plumbing, not the user's words.
+            let text = seg.text.trim().to_owned();
+            let ts = minted.ts; // onset wall time, like the image Remark's ts
+            let result = match (&subject, self.note_sink.as_ref()) {
+                (ScopeSubject::Collection(id), Some(sink)) => {
+                    sink.append_collection_note(id, &text, ts)
+                }
+                (ScopeSubject::Topic(id), Some(sink)) => sink.append_topic_note(id, &text, ts),
+                // No sink wired (bare engine): nothing to do but log. We do
+                // NOT fall through to an image/session mint — that would
+                // misroute the user's words to the wrong target.
+                (_, None) => Err("no subject-note sink wired".to_owned()),
+            };
+            match result {
+                Ok(()) => {
+                    self.audio.note_finalized(now_mono);
+                    self.settle_speaking_state();
+                }
+                Err(e) => {
+                    self.note(format!("subject note append failed: {e}"));
+                    self.settle_speaking_state();
+                }
+            }
+            // A subject final mints NO event (it is not in `event_targets`);
+            // its note lives in collection_notes/topic_notes.
+            return None;
+        }
+
         // §9.2: the voice remark is the later-committed event here — it
         // carries the backward link to an earlier committed stroke.
         let linked_event = resolve_utterance_link(

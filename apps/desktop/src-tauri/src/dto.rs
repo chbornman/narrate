@@ -81,6 +81,29 @@ pub struct ScopeView {
     pub count: usize,
     /// First ≤ 3 target hashes, for micro-thumbnails (CAPTURE §11).
     pub preview_hashes: Vec<String>,
+    /// DESIGN-VOICE-SUBJECTS.md: "collection" | "topic" when dictation
+    /// targets a subject's note log rather than an image; absent for the
+    /// ordinary image/session scope. The indicator names the subject.
+    pub subject: Option<&'static str>,
+    /// Subject display name (collection name / topic phrase) for the
+    /// "noting: <name>" indicator copy; absent off the subject path.
+    pub subject_name: Option<String>,
+}
+
+/// DESIGN-VOICE-SUBJECTS.md: the optional non-image dictation subject the
+/// frontend reports alongside `targets` in `set_scope`. Present ONLY when a
+/// collection/topic detail is open AND no image is focused; `targets` is
+/// empty then (image targets always win — the frontend never sends both).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeSubjectDto {
+    /// "collection" | "topic".
+    pub kind: String,
+    /// The subject's ULID — the note-append methods key on it.
+    pub id: String,
+    /// Display name (collection name / topic phrase) echoed straight back
+    /// for the indicator; the id stays authoritative for routing.
+    pub name: String,
 }
 
 /// CAPTURE §11 `IndicatorState`. M1: mic permanently disarmed, no streaming

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use photoproof_connectors::SherpaOnlineTranscriber;
 use photoproof_connectors::silero::SileroVad;
-use photoproof_core::capture::{CaptureDrain, CaptureEngine, SystemClock};
+use photoproof_core::capture::{CaptureDrain, CaptureEngine, SubjectNoteSink, SystemClock};
 use photoproof_core::collections::Collections;
 use photoproof_core::library::{Library, RootWatcherHandle};
 use photoproof_core::retrieval::PpvecStore;
@@ -240,12 +240,22 @@ impl App {
                 runtime.supervisors.asr_endpoint.clone(),
             )));
         let capture = Arc::new(Mutex::new(match SileroVad::new() {
-            Ok(vad) => Some(CaptureEngine::new(
-                SystemClock::new(),
-                transcriber,
-                Box::new(vad),
-                session.id().clone(),
-            )),
+            Ok(vad) => Some(
+                CaptureEngine::new(
+                    SystemClock::new(),
+                    transcriber,
+                    Box::new(vad),
+                    session.id().clone(),
+                )
+                // DESIGN-VOICE-SUBJECTS.md: wire the subject-note seam so a
+                // voice final bound to a collection/topic appends to its note
+                // log (the same Collections/Topics handles the typed composer
+                // commands use), instead of minting an image event.
+                .with_note_sink(Box::new(SubjectNotes {
+                    collections: Arc::clone(&collections),
+                    topics: Arc::clone(&topics),
+                })),
+            ),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -380,6 +390,38 @@ impl CaptureDrain for SharedDrain {
         if let Some(engine) = self.0.lock().expect("capture mutex").as_mut() {
             engine.session_rotated(opened);
         }
+    }
+}
+
+/// DESIGN-VOICE-SUBJECTS.md: the subject-note seam over the shell's
+/// `Collections`/`Topics` handles. The capture engine writes EVENTS through
+/// its `&EventStore`, but the subject note tables hang off these separate
+/// connections (same db); this sink is the thin accessor `on_final` calls to
+/// land a collection/topic voice final in its note log. `UtcMillis::now()`
+/// matches the typed composer commands' timestamp source exactly.
+struct SubjectNotes {
+    collections: Arc<Collections>,
+    topics: Arc<Topics>,
+}
+
+impl SubjectNoteSink for SubjectNotes {
+    fn append_collection_note(
+        &self,
+        collection_id: &str,
+        text: &str,
+        ts: UtcMillis,
+    ) -> Result<(), String> {
+        self.collections
+            .add_note(collection_id, text, ts)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn append_topic_note(&self, topic_id: &str, text: &str, ts: UtcMillis) -> Result<(), String> {
+        self.topics
+            .add_note(topic_id, text, ts)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 

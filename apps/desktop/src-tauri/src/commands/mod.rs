@@ -85,6 +85,7 @@ pub(crate) fn announce_events(handle: &AppHandle, events: &[photoproof_core::Eve
 
 /// Core capture `ScopeView` → the wire shape (CAPTURE §11).
 fn scope_view_dto(view: photoproof_core::capture::ScopeView) -> crate::dto::ScopeView {
+    use photoproof_core::capture::SubjectKind;
     crate::dto::ScopeView {
         kind: view.kind.as_str(),
         count: view.count,
@@ -93,6 +94,13 @@ fn scope_view_dto(view: photoproof_core::capture::ScopeView) -> crate::dto::Scop
             .iter()
             .map(|h| h.as_str().to_owned())
             .collect(),
+        // DESIGN-VOICE-SUBJECTS.md: a streaming utterance bound to a subject
+        // shows "noting: <name>" in the §11 indicator.
+        subject: view.subject.map(|k| match k {
+            SubjectKind::Collection => "collection",
+            SubjectKind::Topic => "topic",
+        }),
+        subject_name: view.subject_name,
     }
 }
 

@@ -2282,3 +2282,255 @@ fn c13_1_single_image_dictation_stays_single_target() {
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].targets, vec![hash(0xA)]);
 }
+
+// ---------------------------------------------------------------------------
+// DESIGN-VOICE-SUBJECTS.md — voice dictation to a collection/topic note log.
+// A subject final routes its verbatim text to the subject's note log (the
+// SubjectNoteSink seam) and mints NO event; image dictation is unchanged.
+// ---------------------------------------------------------------------------
+
+use std::sync::{Arc, Mutex};
+
+use photoproof_core::capture::{ScopeSubject, SubjectNoteSink};
+
+/// A recording sink that captures every subject-note append (id, text, ts),
+/// the test double for the shell's Collections/Topics handles.
+#[derive(Default, Clone)]
+struct FakeNotes {
+    collection: Arc<Mutex<Vec<(String, String, UtcMillis)>>>,
+    topic: Arc<Mutex<Vec<(String, String, UtcMillis)>>>,
+}
+
+impl SubjectNoteSink for FakeNotes {
+    fn append_collection_note(
+        &self,
+        collection_id: &str,
+        text: &str,
+        ts: UtcMillis,
+    ) -> Result<(), String> {
+        self.collection
+            .lock()
+            .unwrap()
+            .push((collection_id.to_owned(), text.to_owned(), ts));
+        Ok(())
+    }
+
+    fn append_topic_note(&self, topic_id: &str, text: &str, ts: UtcMillis) -> Result<(), String> {
+        self.topic
+            .lock()
+            .unwrap()
+            .push((topic_id.to_owned(), text.to_owned(), ts));
+        Ok(())
+    }
+}
+
+/// A Collection subject final appends to the collection note log (verbatim)
+/// and mints NO event — not an image Remark, not a zero-target session note.
+#[test]
+fn voice_subject_collection_appends_note_mints_no_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 2500,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 2600,
+        event: ScriptedEvent::Segment(final_seg(1, "this set is the cover edit", 1000, 2400)),
+    }]);
+    let notes = FakeNotes::default();
+    let mut engine =
+        CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session.clone())
+            .with_note_sink(Box::new(notes.clone()));
+    // A collection detail is open with no image focused: targetless scope
+    // carrying the subject (exactly what reportScope sends).
+    engine.set_scope_with_subject(
+        vec![],
+        Some(ScopeSubject::Collection("coll01".into())),
+        Some("Cover Edit".into()),
+    );
+    engine.arm();
+    let committed = drive(&mut engine, &clock, &store, 2700, &[]);
+
+    assert!(committed.is_empty(), "a subject final mints NO event");
+    assert!(
+        store.sessionlevel_events(&session).unwrap().is_empty(),
+        "and NOT a zero-target session note either"
+    );
+    let coll = notes.collection.lock().unwrap();
+    assert_eq!(coll.len(), 1, "exactly one collection note appended");
+    assert_eq!(coll[0].0, "coll01");
+    assert_eq!(coll[0].1, "this set is the cover edit", "verbatim (K14)");
+    // ts = onset wall time, as the image Remark would carry.
+    assert_eq!(coll[0].2, UtcMillis::from_epoch_ms(WALL0 + 1000));
+    assert!(notes.topic.lock().unwrap().is_empty());
+}
+
+/// A Topic subject final appends to the topic note log and mints no event.
+#[test]
+fn voice_subject_topic_appends_note_mints_no_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 2500,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 2600,
+        event: ScriptedEvent::Segment(final_seg(1, "golden hour rooftops", 1000, 2400)),
+    }]);
+    let notes = FakeNotes::default();
+    let mut engine =
+        CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session.clone())
+            .with_note_sink(Box::new(notes.clone()));
+    engine.set_scope_with_subject(
+        vec![],
+        Some(ScopeSubject::Topic("topic07".into())),
+        Some("golden hour".into()),
+    );
+    engine.arm();
+    let committed = drive(&mut engine, &clock, &store, 2700, &[]);
+
+    assert!(committed.is_empty(), "a subject final mints NO event");
+    assert!(store.sessionlevel_events(&session).unwrap().is_empty());
+    let topic = notes.topic.lock().unwrap();
+    assert_eq!(topic.len(), 1);
+    assert_eq!(topic[0].0, "topic07");
+    assert_eq!(topic[0].1, "golden hour rooftops", "verbatim (K14)");
+    assert!(notes.collection.lock().unwrap().is_empty());
+}
+
+/// Regression: image targets still mint an image event with the sink wired —
+/// the subject branch only fires for a subject snapshot.
+#[test]
+fn voice_image_targets_still_mint_event_with_sink_wired() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 2500,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 2600,
+        event: ScriptedEvent::Segment(final_seg(1, "lovely light here", 1000, 2400)),
+    }]);
+    let notes = FakeNotes::default();
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session)
+        .with_note_sink(Box::new(notes.clone()));
+    engine.set_scope(vec![hash(0xA)]); // an image is focused: no subject
+    engine.arm();
+    let committed = drive(&mut engine, &clock, &store, 2700, &[]);
+
+    assert_eq!(committed.len(), 1, "image dictation still mints an event");
+    assert_eq!(committed[0].targets, vec![hash(0xA)]);
+    assert_eq!(committed[0].text.as_deref(), Some("lovely light here"));
+    assert!(
+        notes.collection.lock().unwrap().is_empty(),
+        "no note appended"
+    );
+    assert!(notes.topic.lock().unwrap().is_empty());
+}
+
+/// Onset-bound subject survives a mid-utterance image focus: focusing image A
+/// at T+800 while a subject utterance is in flight does NOT retro-rebind it
+/// (the union is image-targets-only, a no-op for the targetless subject
+/// snapshot). The note still lands on the onset subject; no image event mints.
+#[test]
+fn voice_subject_survives_mid_utterance_image_focus() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 3050,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 3000,
+        event: ScriptedEvent::Segment(final_seg(1, "this whole collection sings", 1000, 2900)),
+    }]);
+    let notes = FakeNotes::default();
+    let mut engine =
+        CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session.clone())
+            .with_note_sink(Box::new(notes.clone()));
+    engine.set_scope_with_subject(
+        vec![],
+        Some(ScopeSubject::Collection("coll01".into())),
+        Some("Cover Edit".into()),
+    );
+    engine.arm();
+    // Focus image A mid-utterance (T+1800): an ordinary image scope change.
+    let committed = drive(
+        &mut engine,
+        &clock,
+        &store,
+        3100,
+        &[(1800, vec![hash(0xA)])],
+    );
+
+    assert!(committed.is_empty(), "still routed to the onset subject");
+    assert!(store.sessionlevel_events(&session).unwrap().is_empty());
+    assert!(
+        store.events_for_image(&hash(0xA)).unwrap().is_empty(),
+        "the mid-utterance image did NOT retro-capture the note"
+    );
+    let coll = notes.collection.lock().unwrap();
+    assert_eq!(coll.len(), 1);
+    assert_eq!(
+        coll[0].0, "coll01",
+        "onset subject kept, frozen for the utterance"
+    );
+    assert_eq!(coll[0].1, "this whole collection sings");
+}
+
+/// An empty/whitespace subject final appends NOTHING and mints nothing — the
+/// verbatim-empty rule applies before the subject route, same as images.
+#[test]
+fn voice_subject_empty_final_appends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 2500,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 2600,
+        event: ScriptedEvent::Segment(final_seg(1, "   ", 1000, 2400)),
+    }]);
+    let notes = FakeNotes::default();
+    let mut engine =
+        CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session.clone())
+            .with_note_sink(Box::new(notes.clone()));
+    engine.set_scope_with_subject(
+        vec![],
+        Some(ScopeSubject::Collection("coll01".into())),
+        Some("Cover Edit".into()),
+    );
+    engine.arm();
+    let committed = drive(&mut engine, &clock, &store, 2700, &[]);
+
+    assert!(committed.is_empty());
+    assert!(store.sessionlevel_events(&session).unwrap().is_empty());
+    assert!(
+        notes.collection.lock().unwrap().is_empty(),
+        "empty mints nothing"
+    );
+}

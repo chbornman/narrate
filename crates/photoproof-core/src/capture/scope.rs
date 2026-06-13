@@ -23,6 +23,17 @@ pub enum ScopeKind {
     Session,
 }
 
+/// A non-image dictation subject (DESIGN-VOICE-SUBJECTS.md). When a
+/// collection or topic detail is open and NO image is focused, a voice
+/// final lands in that subject's append-only note log (`collection_notes`
+/// / `topic_notes`) instead of minting an image-targeted event. The id is
+/// the subject's ULID; the note-append methods key on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeSubject {
+    Collection(String),
+    Topic(String),
+}
+
 impl ScopeKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -51,6 +62,17 @@ pub struct ScopeSnapshot {
     pub kind: ScopeKind,
     /// Ordered: multi target order = selection order (`event_targets.position`).
     pub targets: Vec<ContentHash>,
+    /// DESIGN-VOICE-SUBJECTS.md: a non-image dictation subject. INVARIANT:
+    /// `subject` is `Some` ONLY when `targets` is empty (the frontend never
+    /// sends both, and image targets win if both somehow arrive). A subject
+    /// snapshot routes the voice final to the subject's note log instead of
+    /// minting an image event; its empty `targets` make the §3 image
+    /// machinery (kind, the spanning-swap union) a no-op for it.
+    pub subject: Option<ScopeSubject>,
+    /// Display name for the subject (collection name / topic phrase), carried
+    /// ONLY so the §11 indicator can echo "noting: <name>"; never used for
+    /// routing (the id inside `subject` is authoritative).
+    pub subject_name: Option<String>,
     /// Capture clock (decisions happen here).
     pub captured_at_mono: u64,
     /// Diagnostics only (§3.1).
@@ -63,8 +85,20 @@ impl ScopeSnapshot {
             kind: self.kind,
             count: self.targets.len(),
             preview_hashes: self.targets.iter().take(PREVIEW_HASHES).cloned().collect(),
+            subject: self.subject.as_ref().map(|s| match s {
+                ScopeSubject::Collection(_) => SubjectKind::Collection,
+                ScopeSubject::Topic(_) => SubjectKind::Topic,
+            }),
+            subject_name: self.subject_name.clone(),
         }
     }
+}
+
+/// Which kind of non-image subject the bound scope names (§11 indicator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectKind {
+    Collection,
+    Topic,
 }
 
 /// CAPTURE §11 `ScopeView` — what the indicator renders.
@@ -73,6 +107,11 @@ pub struct ScopeView {
     pub kind: ScopeKind,
     pub count: usize,
     pub preview_hashes: Vec<ContentHash>,
+    /// DESIGN-VOICE-SUBJECTS.md: when dictation targets a collection/topic
+    /// rather than an image, the indicator names it ("noting: <name>")
+    /// instead of "● N". `None` for the ordinary image/session scope.
+    pub subject: Option<SubjectKind>,
+    pub subject_name: Option<String>,
 }
 
 /// Result of a `scope_at` lookup. `predated` = the asked-for instant fell
@@ -99,6 +138,8 @@ impl ScopeRing {
         ring.push_back(ScopeSnapshot {
             kind: ScopeKind::Session,
             targets: Vec::new(),
+            subject: None,
+            subject_name: None,
             captured_at_mono: now_mono,
             captured_at: now_wall,
         });
@@ -107,19 +148,44 @@ impl ScopeRing {
 
     /// Scope derives mechanically (§3): 0 targets → session, 1 → single,
     /// N ≥ 2 → multi (selection order kept). Returns the pushed snapshot.
+    /// Image-only entry point (no subject) — the common path.
     pub fn push(
         &mut self,
         targets: Vec<ContentHash>,
         now_mono: u64,
         now_wall: UtcMillis,
     ) -> &ScopeSnapshot {
+        self.push_scope(targets, None, None, now_mono, now_wall)
+    }
+
+    /// DESIGN-VOICE-SUBJECTS.md: push a snapshot that MAY carry a non-image
+    /// subject. The invariant (subject ⇒ empty targets) is the caller's; if
+    /// both arrive the image targets win (a subject is dropped here) so an
+    /// image note is never silently lost. Returns the pushed snapshot.
+    pub fn push_scope(
+        &mut self,
+        targets: Vec<ContentHash>,
+        subject: Option<ScopeSubject>,
+        subject_name: Option<String>,
+        now_mono: u64,
+        now_wall: UtcMillis,
+    ) -> &ScopeSnapshot {
         let kind = ScopeKind::from_target_count(targets.len());
+        // Image targets win the invariant: only a TARGETLESS scope may carry
+        // a subject, so a stray subject alongside targets is dropped here.
+        let (subject, subject_name) = if targets.is_empty() {
+            (subject, subject_name)
+        } else {
+            (None, None)
+        };
         if self.ring.len() == RING_CAPACITY {
             self.ring.pop_front();
         }
         self.ring.push_back(ScopeSnapshot {
             kind,
             targets,
+            subject,
+            subject_name,
             captured_at_mono: now_mono,
             captured_at: now_wall,
         });
@@ -222,6 +288,50 @@ mod tests {
             r.push(vec![h((i % 250) as u8)], i, wall(i as i64));
         }
         assert_eq!(r.history().count(), RING_CAPACITY);
+    }
+
+    #[test]
+    fn subject_rides_a_targetless_snapshot_and_echoes_in_the_view() {
+        let mut r = ScopeRing::new(0, wall(0));
+        let snap = r
+            .push_scope(
+                vec![],
+                Some(ScopeSubject::Collection("coll01".into())),
+                Some("Cover Edit".into()),
+                10,
+                wall(10),
+            )
+            .clone();
+        assert_eq!(snap.kind, ScopeKind::Session, "targetless ⇒ session kind");
+        assert_eq!(
+            snap.subject,
+            Some(ScopeSubject::Collection("coll01".into()))
+        );
+        let v = snap.view();
+        assert_eq!(v.subject, Some(SubjectKind::Collection));
+        assert_eq!(v.subject_name.as_deref(), Some("Cover Edit"));
+        assert_eq!(v.count, 0);
+    }
+
+    #[test]
+    fn image_targets_win_a_stray_subject_is_dropped() {
+        let mut r = ScopeRing::new(0, wall(0));
+        // INVARIANT: a subject only rides an empty target list; if both
+        // arrive image targets win and the subject is dropped — an image
+        // note is never silently lost (DESIGN-VOICE-SUBJECTS.md).
+        let snap = r
+            .push_scope(
+                vec![h(1)],
+                Some(ScopeSubject::Topic("topic07".into())),
+                Some("golden hour".into()),
+                10,
+                wall(10),
+            )
+            .clone();
+        assert_eq!(snap.targets, vec![h(1)]);
+        assert_eq!(snap.subject, None, "image targets win; subject dropped");
+        assert!(snap.subject_name.is_none());
+        assert_eq!(snap.view().subject, None);
     }
 
     #[test]

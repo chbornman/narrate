@@ -57,6 +57,24 @@ export interface ScopeView {
   kind: ScopeKind;
   count: number;
   previewHashes: string[];
+  /** DESIGN-VOICE-SUBJECTS.md: when dictation targets a collection/topic note
+   * log (a subject detail open, no image focused) rather than an image, this
+   * names which kind; absent for the ordinary image/session scope. */
+  subject?: "collection" | "topic" | null;
+  /** Subject display name (collection name / topic phrase) for the
+   * "noting: <name>" indicator copy. */
+  subjectName?: string | null;
+}
+
+/** DESIGN-VOICE-SUBJECTS.md: the optional non-image dictation subject the
+ * frontend reports alongside `targets`. Present ONLY when a collection/topic
+ * detail is open AND no image is focused (targets empty then). */
+export interface ScopeSubject {
+  kind: "collection" | "topic";
+  /** The subject's id (ULID). */
+  id: string;
+  /** Display name echoed straight back for the indicator. */
+  name: string;
 }
 
 export interface IndicatorState {

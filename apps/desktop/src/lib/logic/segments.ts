@@ -13,11 +13,19 @@
  */
 import type { ActionContext, ModeDef, SegmentIcon, SegmentTone } from "../actions/types";
 import { MODES } from "../actions/modes";
-import { scopeLabel } from "./scope";
+import { scopeLabel, subjectScopeText } from "./scope";
 
 export interface SegmentInput {
   ingest: { running: boolean; done: number; total: number };
-  scope: { kind: string; count: number };
+  scope: {
+    kind: string;
+    count: number;
+    /** DESIGN-VOICE-SUBJECTS.md: when dictation targets a collection/topic
+     * note log rather than an image, these name it so the scope segment reads
+     * "noting: <name>" instead of "● N". Absent for image/session scope. */
+    subject?: "collection" | "topic" | null;
+    subjectName?: string | null;
+  };
   /** 0-based position within the Look navigation set; null outside Look. */
   lookPosition: { index: number; total: number } | null;
   /** CAPTURE §5.4/§11: an in-flight utterance's BOUND scope. `differs` =
@@ -72,7 +80,24 @@ export function segments(
   // (UI §7.3 `● 1 ⇠ mic`) and reverts at finalization; the indicator never
   // re-binds anything itself (§5.4 — the distinction is mandatory).
   const streaming = input.streaming ?? null;
-  if (streaming !== null && streaming.differs) {
+  const subjectText =
+    input.scope.subject != null
+      ? subjectScopeText(input.scope.subject, input.scope.subjectName ?? null)
+      : null;
+  if (subjectText !== null) {
+    // DESIGN-VOICE-SUBJECTS.md: dictation targets a collection/topic note
+    // log, not an image. Name it so the user sees where their words land
+    // before speaking ("noting: <name>"). No em-dashes in the copy.
+    out.push({
+      id: "scope",
+      text: subjectText,
+      title:
+        input.scope.subject === "topic"
+          ? "Words land on this topic's notes"
+          : "Words land on this collection's notes",
+      pulse: true,
+    });
+  } else if (streaming !== null && streaming.differs) {
     out.push({
       id: "scope",
       text: `● ${scopeLabel(streaming.kind, streaming.count)} ⇠`,
