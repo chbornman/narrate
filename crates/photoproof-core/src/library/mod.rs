@@ -11,6 +11,7 @@
 mod clip_preprocess;
 mod embedding;
 mod exclusions;
+mod foreign_sidecar;
 mod hashing;
 mod ingest;
 mod metadata;
@@ -26,6 +27,9 @@ pub use clip_preprocess::{CLIP_IMAGE_EDGE, preprocess_clip_image};
 pub use embedding::EmbeddingRig;
 pub use exclusions::{
     ImageFormat, MAX_FILE_BYTES, classify_extension, is_excluded_dir_name, is_excluded_file_name,
+};
+pub use foreign_sidecar::{
+    CropRect, ForeignEdit, ForeignSidecarSource, read_foreign_edit, read_foreign_edit_from_str,
 };
 pub use hashing::{hash_file, hash_invocation_count, hashed_byte_count};
 pub use ingest::{
