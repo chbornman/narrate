@@ -6,6 +6,67 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 13 2026 — Dogfood round 4: Visualizer polish + RAW cache versioning
+
+Founder dogfood asks against the live Visualizer (the semantic topic-graph lens)
+and the RAW develop pipeline. Tracked in the session task list rather than as
+discrete BACKLOG checkboxes; recorded here for the changelog.
+
+- [x] **Visualizer performance: butter-smooth** — merge `2503ed8` (work `8fe9d08`).
+  Founder: "if I leave the view and come back to graph it all rerenders??? we
+  need a focused agent... this has to be BUTTERY smooth." Root cause of the
+  reopen re-render: `App.svelte` gated the lens with `{#if ui.graphOpen}`, so
+  close DESTROYED the component and every expensive thing (nodes/anchors/affinity,
+  zoom/pan, AffinityCache, GraphThumbCache, fields, heat) was instance-local and
+  re-derived on reopen (guaranteed affinity miss, golden-spiral reseed discarding
+  settled positions, reheat, empty thumb cache). Fixes: new `logic/graphstore.ts`
+  single-slot store keyed by (scope, sorted topic-set) snapshots settled
+  layout/view/field on unmount and restores on mount (no fetch, no reseed, no
+  reheat); AffinityCache + GraphThumbCache moved to `<script module>` so reports
+  and decoded `<img>`s survive unmount (repaint callback re-targeted to the live
+  instance each mount). Faster settle: `REHEAT_START 6→10`, `HEAT_COOL 0.92→0.88`,
+  `subStepsForHeat` (3 sim sub-steps/frame hot, 1 cooled), `seedNearAnchors`
+  (snap ~60% toward dominant-topic anchor on recompute). Faster cold open: draw
+  the anchor ring immediately before awaiting affinities. Idle-when-stable
+  preserved. (Founder, June 12 2026.)
+- [x] **Visualizer: zoom grows the thumbnails** — merge `2503ed8` (work `8fe9d08`).
+  Founder: "when I zoom on the graph the previews don't change size? they should
+  grow to some max size... not huge, but bigger than currently." `nodeBaseSizePx`
+  had no zoom term (fixed screen size at every zoom). New `zoomedSide(base, zoom,
+  min=20, max=132)` scales draw size with zoom, clamped; both `draw()` and the
+  hit-test (`nodeHitExtent`) use it so picks match paint. (Founder, June 12 2026.)
+- [x] **Visualizer: `g` returns to grid** — merge `2503ed8` (work `8fe9d08`).
+  Founder: "when on graph pressing 'g' doesn't return to grid?" `goHome()` never
+  touched `graphOpen`; now closes the lens first. (Founder, June 12 2026.)
+- [x] **Rename the "Graph" lens to "Visualizer"** — merge `3cf660b` (work `a658c99`).
+  Founder: "can we call the Graph 'Visualizer' everywhere?" User-visible copy only
+  (action def verb/label, GridHeader entry button aria/title); code identifiers
+  (`toggle-graph`, `TopicGraph.svelte`, `forcegraph.ts`, `[graph]` tuning, prefs)
+  left untouched. (Founder, June 12 2026.)
+- [x] **Version full-res RAW artifacts so develop fixes auto-invalidate** — merge
+  `929f0da` (work `31ec891`). The black-RAW develop fix (color-matrix sourcing)
+  left STALE cached 1:1 artifacts that stayed black with no manual clear. New
+  `RAW_DEVELOP_VERSION: i64 = 2` const + filename scheme `<hash>-full-v<N>.{webp,jpg}`
+  (set to v2 because pre-fix black files were written UNVERSIONED, so they are now
+  cache misses and re-develop in color). `existing_full_artifact` resolves only the
+  current version (forces re-develop), the glob `is_full_artifact` matches current +
+  old `-v<N>` + legacy unversioned (so stats/evict/clear reap every version), and a
+  new `remove_stale_full_artifacts` sweeps a hash's stale full files after the atomic
+  write. Serve route `/full-decode/<hash>` unchanged (version is internal to the
+  filename). +5 preview.rs tests. (Founder, June 12 2026.)
+- [x] **Settings: surround color in Appearance + Follow-theme toggle** — merge
+  `706e3ea`. The per-image backdrop surround moved into the Appearance section with
+  a Follow-theme (default) vs Manual override toggle (`surround-store.svelte.ts`).
+  (Founder, June 12 2026.)
+- [x] **Consistent hover effects + explanatory button tooltips** — merge `b6bd874`
+  (work `34cf626`). Founder: "do a pass over the UI for more consistent hover
+  effects explaining buttons." Extended the existing `primitives/tooltip.ts`
+  `{@attach tooltip()}` helper to surface the action registry's explanatory `label`
+  (single source of truth, key-chord chip appended) and to accept a plain `text` for
+  non-action buttons, replacing ad-hoc native `title=`. Applied across GridHeader,
+  Station, TopicList, StrokePreview, JournalTab rate buttons. No layout/behavior
+  changes. (Founder, June 12 2026.)
+
 ## June 13 2026 — Visualization lenses
 
 - [x] **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.
