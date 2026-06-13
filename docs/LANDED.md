@@ -119,6 +119,24 @@ discrete BACKLOG checkboxes; recorded here for the changelog.
   <name>"). Subject is onset-bound and frozen for the utterance; the spanning-swap
   union stays image-only. (Founder, June 13 2026.)
 
+## June 13 2026 — Roots and folder tree (design round, mostly)
+
+- [x] **Folder-tree improvements** — `770fc5f` (merge `7c26126`). The bulk of the
+  "roots and subfolders" design round. Deep-tree ergonomics: lazy expansion past
+  `AUTO_EXPAND_DEPTH` (a deep root never renders its whole tree eagerly; explicit
+  expands survive the cap) and a filter / jump-to-folder input (type to narrow to
+  matching names + ancestors, Enter opens the first match). Overlapping roots: the
+  "refuse, merge, or alias?" question decided as REFUSE nesting -
+  `register_root` returns a structured `OverlappingRoot { existing_root_id }`, and
+  the rail NAVIGATES to the existing root instead of double-ingesting. Archive
+  lifecycle: a non-destructive `archived` root state (v14 migration rebuilds the
+  `roots.state` CHECK, copies rows verbatim so journals + memberships keyed by
+  image hash are untouched); `archive_root` flips state + stops the watcher,
+  `unarchive_root` restores + rewatches + rescans drift; archived roots live in a
+  collapsed "Archived" rail affordance. STILL OPEN (see BACKLOG): group-by-volume
+  in the Folders tab (deferred) + the collections-first folder-UI framing.
+  (Founder, June 2026.)
+
 ## June 13 2026 — Visualization lenses
 
 - [x] **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.

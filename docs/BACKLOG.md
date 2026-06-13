@@ -215,18 +215,18 @@ work lives here.
   et al now low-priority); chunking FEEL tuning (rule2, merge policy)
   remains live and applies to any model.
 
-- [ ] **Roots and subfolders: the long-practice design round** (founder,
-  June 2026): today the model is a FLAT list of watched roots, each with
-  a navigable subfolder tree in the rail (folder_tree); fine at 3 roots,
-  unexamined at 30. Questions for a deliberate round: nested or
-  overlapping roots (adding a folder inside an existing root - refuse,
-  merge, or alias?); whether the Folders tab should group roots (by
-  volume? by year-shaped naming?); deep-tree ergonomics (lazy loading,
-  filtering, jump-to-folder); root lifecycle (a root that moved volumes;
-  archiving a root without losing its journal); and how the
-  collections-first philosophy shapes how much folder UI we even want.
-  Pairs with the sidebar design pass already logged under founder
-  appetite. (Founder, June 2026.)
+- [~] **Roots and subfolders: the long-practice design round** (founder,
+  June 2026): MOSTLY LANDED `770fc5f` (merge `7c26126`) - see LANDED. Resolved:
+  overlapping roots (decided: REFUSE nesting + navigate to the existing root,
+  no double-ingest); deep-tree ergonomics (lazy expansion, filter/jump-to-folder);
+  root lifecycle (archive/unarchive non-destructive via v14, moved/removed-root
+  relink + `root-removed` stale already existed). STILL OPEN: (a) **group-by-volume**
+  in the Folders tab (greyed offline groups) - explicitly deferred in `770fc5f` as
+  "more than a small change, would reshape the row provider"; online/volume state
+  is already on `RootDto`. (b) the open framing: whether the Folders tab should
+  group roots by year-shaped naming, and how the collections-first philosophy
+  shapes how much folder UI we even want. Pairs with the sidebar design pass.
+  (Founder, June 2026.)
 - [ ] **Model-landscape survey** (founder, June 2026 - periodic): the
   toolchain is modular by seam, so every block deserves a recurring
   look at the leading alternatives: ASR, VAD, LLM, image embedder, text
