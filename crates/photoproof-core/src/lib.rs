@@ -12,6 +12,7 @@
 //! - `runtime`: supervision, weights, tiers, scheduling (RUNTIME, P6.2)
 //! - `retrieval`: PPVEC vector storage + chunking (RETRIEVAL, P7.1)
 //! - `collections`: named collections + portability file (RETRIEVAL §10, P7.3)
+//! - `voice_wer`: word-error-rate scoring for the voice stress harness (BACKLOG)
 
 pub mod canonical;
 pub mod capture;
@@ -25,6 +26,7 @@ pub mod runtime;
 pub mod search;
 pub mod sidecar;
 pub mod store;
+pub mod voice_wer;
 
 pub use canonical::{CanonicalParseError, canonical_json, parse_canonical};
 pub use event::{Event, Kind, Payload, Source, StrokePayload, StrokePoint, Tool, ValidationError};

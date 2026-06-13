@@ -22,6 +22,27 @@
 //!   rule1/rule2/rule3 = the server's endpoint rules; enter/exit/hang =
 //!   silero hysteresis (hang in 32 ms windows).
 //!
+//!   `--expect FILE` (BACKLOG "Audiobook WER stress harness"): FILE is a
+//!   reference transcript (Project Gutenberg chapter text). The bench
+//!   scores word error rate two ways against it — the GATED feed (the
+//!   --enter/--exit pass above, the production path) and a RAW feed (a
+//!   second pass with the VAD gate forced open, the model-accuracy
+//!   ceiling) — and prints both WERs plus the gating cost (their gap).
+//!   Without --expect the run is unchanged (single pass, no scoring), so
+//!   the sweep flows are untouched. The WER algorithm lives in
+//!   `photoproof_core::voice_wer` (unit-tested there). To score Alice
+//!   ch1 on the founder machine (the model + corpus are local, gitignored):
+//!
+//!   ```text
+//!   cargo run -p photoproof-core --bin pp-voice-bench --release -- \
+//!     --wav    "$PP_VOICE_CORPUS/alice_ch1_16k.wav" \
+//!     --expect "$PP_VOICE_CORPUS/alice_ch1_gutenberg.txt" --json
+//!   ```
+//!
+//!   where PP_VOICE_CORPUS points at test-corpora/voice-long (no path is
+//!   hardcoded; the README in that dir names the exact wav/transcript
+//!   files). This run needs the real ASR model, so it is NOT a CI test.
+//!
 //! Audio never persists (kernel K10 applies to the bench too): frames go
 //! wav → ring → VAD → wire, all in memory; the journal db is a tempdir.
 
@@ -311,23 +332,33 @@ fn seg_of(e: &Event, wall0: i64) -> Seg {
     }
 }
 
-fn run(a: &Args) {
-    let wav = a.wav.as_ref().expect("--wav required (or --synth)");
-    let samples = read_wav(wav);
-    let (child, addr) = spawn_server(a);
-    // Kill-on-drop: a panic anywhere below must not leak the server (it
-    // inherits our stderr and would hold the caller's pipe open forever).
-    struct Reap(Child);
-    impl Drop for Reap {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let _reap = Reap(child);
-
+/// Drive the live pipeline once over `samples` with the given silero
+/// hysteresis, returning the minted segments and the abandoned count.
+///
+/// Factored out of `run` so `--expect` can drive it TWICE against the
+/// SAME recording — once GATED (the caller's VAD params, the production
+/// path that can truncate) and once RAW (gate forced open) — and score
+/// both feeds against one transcript. That raw-vs-gated WER gap is the
+/// founder's headline: it splits MODEL error from PIPELINE truncation.
+fn drive_pipeline(
+    samples: &[f32],
+    addr: SocketAddr,
+    enter: f32,
+    exit: f32,
+    hang: u32,
+) -> (Vec<Seg>, u64) {
     // Scratch journal db (tempfile is a dev-dependency; bins get std).
-    let dir = std::env::temp_dir().join(format!("pp-voice-bench-{}", std::process::id()));
+    // Unique per pass so a second drive in the same process never reopens
+    // the first pass's store.
+    let dir = std::env::temp_dir().join(format!(
+        "pp-voice-bench-{}-{}",
+        std::process::id(),
+        // nanos disambiguate the two passes of a single --expect run.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let store = EventStore::open(dir.join("bench.db")).expect("open store");
     let session = store
@@ -340,7 +371,7 @@ fn run(a: &Args) {
 
     let cell = EndpointCell::fixed(addr);
     let transcriber = SherpaOnlineTranscriber::new("bench", cell);
-    let vad = SileroVad::with_params(a.enter, a.exit, a.hang).expect("silero");
+    let vad = SileroVad::with_params(enter, exit, hang).expect("silero");
     // Anchor the fake clock at REAL now: event ids stay monotonic with
     // the session row (no wall-regress warning); onsets report relative
     // to this anchor either way.
@@ -379,8 +410,80 @@ fn run(a: &Args) {
         segs.extend(engine.pump(&store).iter().map(|e| seg_of(e, wall0)));
     }
     let abandoned = engine.abandoned_count();
+    (segs, abandoned)
+}
+
+/// Concatenate a feed's minted segment text into one hypothesis string
+/// for WER scoring. Order is mint order (onset order), which is reading
+/// order — exactly what the reference transcript is in.
+fn hypothesis_of(segs: &[Seg]) -> String {
+    segs.iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn run(a: &Args) {
+    let wav = a.wav.as_ref().expect("--wav required (or --synth)");
+    let samples = read_wav(wav);
+    let (child, addr) = spawn_server(a);
+    // Kill-on-drop: a panic anywhere below must not leak the server (it
+    // inherits our stderr and would hold the caller's pipe open forever).
+    struct Reap(Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _reap = Reap(child);
+
+    // The production (GATED) pass: the caller's VAD hysteresis, the path
+    // that can truncate. This is the sole pass for the back-compat sweep
+    // flows (no --expect) and the "gated" feed when --expect is present.
+    let (segs, abandoned) = drive_pipeline(&samples, addr, a.enter, a.exit, a.hang);
+
+    // --expect upgrade (BACKLOG "Audiobook WER stress harness"): score
+    // the produced hypotheses against a reference transcript. We drive a
+    // SECOND, RAW pass over the same recording with the gate forced open
+    // (enter/exit = 0.0 -> every window scores >= the threshold, so every
+    // frame ships to the ASR). RAW WER is the model-accuracy ceiling;
+    // GATED WER adds whatever the VAD/endpointer truncation costs. The
+    // gap between them is the founder's headline number. Computed only
+    // when --expect is given, so the no-expect path is byte-for-byte the
+    // old behavior (one pass, no transcript read).
+    let scoring = a.expect.as_ref().map(|expect| {
+        let reference = std::fs::read_to_string(expect).unwrap_or_else(|e| {
+            eprintln!("pp-voice-bench: read --expect {}: {e}", expect.display());
+            std::process::exit(1);
+        });
+        let gated_hyp = hypothesis_of(&segs);
+        let gated = photoproof_core::voice_wer::score(&reference, &gated_hyp);
+        // Raw pass: same recording, gate wide open.
+        let (raw_segs, _) = drive_pipeline(&samples, addr, 0.0, 0.0, a.hang);
+        let raw_hyp = hypothesis_of(&raw_segs);
+        let raw = photoproof_core::voice_wer::score(&reference, &raw_hyp);
+        (raw, gated)
+    });
 
     if a.json {
+        // Build the WER sub-object only when scoring ran; otherwise the
+        // JSON shape is unchanged for existing sweep consumers.
+        let wer_json = scoring.as_ref().map(|(raw, gated)| {
+            let feed = |s: &photoproof_core::voice_wer::WerScore| {
+                serde_json::json!({
+                    "wer": s.wer,
+                    "sub": s.sub, "del": s.del, "ins": s.ins,
+                    "ref_words": s.ref_words, "hyp_words": s.hyp_words,
+                    "hits": s.hits, "hit_rate": s.hit_rate(),
+                })
+            };
+            serde_json::json!({
+                "expect": a.expect.as_ref().map(|p| p.display().to_string()),
+                "raw": feed(raw),
+                "gated": feed(gated),
+            })
+        });
         let json = serde_json::json!({
             "wav": wav.display().to_string(),
             "params": {
@@ -392,6 +495,7 @@ fn run(a: &Args) {
                 "onset_ms": s.onset_ms, "dur_ms": s.dur_ms, "text": s.text,
             })).collect::<Vec<_>>(),
             "abandoned": abandoned,
+            "wer": wer_json,
         });
         println!("{json}");
     } else {
@@ -404,23 +508,29 @@ fn run(a: &Args) {
                 s.text
             );
         }
-    }
-    if let Some(expect) = &a.expect {
-        let expected: Vec<String> = std::fs::read_to_string(expect)
-            .expect("read --expect")
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        let verdict = if expected.len() == segs.len() {
-            "MATCH"
-        } else {
-            "MISMATCH"
-        };
-        println!(
-            "expected {} utterances, got {} -> {verdict}",
-            expected.len(),
-            segs.len()
-        );
+        if let Some((raw, gated)) = &scoring {
+            let line = |label: &str, s: &photoproof_core::voice_wer::WerScore| {
+                println!(
+                    "  {label:5} WER {:.4}  (S {} D {} I {} N {}  hits {}  hit_rate {:.4})",
+                    s.wer,
+                    s.sub,
+                    s.del,
+                    s.ins,
+                    s.ref_words,
+                    s.hits,
+                    s.hit_rate(),
+                );
+            };
+            println!("WER vs {}:", a.expect.as_ref().expect("checked").display());
+            line("RAW", raw);
+            line("GATED", gated);
+            // The headline: how much WER the pipeline's gating ADDS on top
+            // of the model's own error (positive = truncation cost).
+            println!(
+                "  gating cost (gated - raw WER): {:+.4}",
+                gated.wer - raw.wer
+            );
+        }
     }
     // Flush before exit (println buffers under pipes).
     let _ = std::io::stdout().flush();
