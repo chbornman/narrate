@@ -263,6 +263,23 @@ export function saveHeatAllTime(on: boolean) {
   saveBool("pp.heatAllTime", on);
 }
 
+// ---- semantic graph: attention overlay (heatmap x graph synthesis) ----------
+
+/** The three-state Attention overlay on the topic-graph (Off / Engaged /
+ * Overlooked), default OFF = the plain graph. Persisted across the session like
+ * the other graph + heatmap toggles so a reviewer who leaves the overlay on the
+ * "Overlooked" view returns to it. A malformed/absent value falls back to off. */
+export type AttentionMode = "off" | "engaged" | "overlooked";
+
+export function loadAttentionMode(): AttentionMode {
+  const v = safeGet("pp.graphAttention");
+  return v === "engaged" || v === "overlooked" ? v : "off";
+}
+
+export function saveAttentionMode(mode: AttentionMode) {
+  safeSet("pp.graphAttention", mode);
+}
+
 // ---- ranking signals (search-as-scope Phase 3) ------------------------------
 
 /** The ⚙ "Ranking signals" on/off state, persisted across the session like
