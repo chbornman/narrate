@@ -753,6 +753,34 @@ Measured grounds in docs/SPIKE-P6.3.md; throwaway harness in spike-p6.3/.
   swap) for an immediate dictation-quality win; finals land ~0.5 s later,
   irrelevant for journaling.
 
+- **B75 (founder dogfood, June 12 2026 — hybrid fusion was rank-flat;
+  RETRIEVAL §5.3 amended to similarity-aware RRF).** The first real-library
+  dogfood surfaced the §12-eval failure mode the spec already flagged as a
+  risk: with the §5.3 default weights (S4 image_clip at **0.5**, half a
+  note) and *pure* weighted RRF, retrieval was **rank-flat** — RRF scores by
+  RANK, not similarity, so a PERFECT CLIP visual match and a tangential
+  near-miss at the SAME rank scored identically, and a weak note-keyword hit
+  at rank #1 (1.0/61 ≈ 0.016393) *always* buried a perfect visual match at
+  rank #1 (0.5/61 ≈ 0.008197). Symptom: "any saved note outranks even a
+  perfect visual match." This dogfood IS the §12 golden-set gate arriving
+  early. **Decision** (RRF stays the spec skeleton; this is an amendment, not
+  a replacement — the §12 eval still owns final tuning): (1) raise **S4 to
+  1.0** — visual evidence is not half a note; (2) make each DENSE
+  (vector/cosine) signal **similarity-aware** — tilt its per-image
+  contribution around the RRF baseline by the centered cosine,
+  `w·(1/(k+rank))·(1 + β·(2·norm_cosine − 1))`, β = 0.5,
+  `norm_cosine = (cos+1)/2`; **sparse (bm25) signals stay pure RRF** (their
+  bm25 is not a comparable similarity, and rank already is the verdict).
+  S3_each stays 0.5 — summaries are DERIVED prose and the §5.3 invariant
+  that they never outvote the photographer's own words holds; the blend
+  already lifts a strong S3 vector hit without granting derived prose
+  note-level weight. Weights and β stay **data** (the `FusionWeights` struct
+  + `SIM_BLEND_BETA`), not hardcoded constants — the §12 eval retunes them.
+  The normative §7.1 worked-example fused scores changed accordingly
+  (0.043997/0.032522/0.027163 → 0.056822/0.038999/0.035569; order A>B>C
+  unchanged); a new regression test pins a clip-only image beating a
+  note-only image. Implemented in `crates/photoproof-core/src/search/hybrid.rs`.
+
 ## Open questions deliberately left to the founder
 - ~~**Q2.** EVENTS §12 journal-semantics questions~~ — **RESOLVED (founder, June 2026)**: (a) sibling-image hashes in shared sidecars accepted; (b) redacted events render as "[redacted]" stubs. Specs approved for implementation as of this date.
 - ~~**Q3.** Frontend framework~~ — **RESOLVED (founder, June 2026): Svelte** (Tauri 2 + Svelte 5; lighter runtime in a webview, fits the quiet-UI philosophy).

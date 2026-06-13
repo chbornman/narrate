@@ -398,9 +398,27 @@ fn r13_6_worked_example_7_1_reproduced() {
         out.images.iter().map(hash_of).collect::<Vec<_>>(),
         vec![a.to_string(), b.to_string(), c.to_string()]
     );
-    assert_eq!(floor6(out.images[0].score), 43_997);
-    assert_eq!(floor6(out.images[1].score), 32_522);
-    assert_eq!(floor6(out.images[2].score), 27_163);
+    // §5.3 amendment (founder dogfood, June 12 2026): the original §7.1
+    // pure-RRF totals 0.043997 / 0.032522 / 0.027163 NO LONGER hold — the
+    // fusion is now similarity-aware. Each DENSE (cosine) signal's
+    // contribution is tilted around its RRF baseline by the centered cosine:
+    //   contribution = w·(1/(k+rank))·(1 + β·(2·norm_cosine − 1))
+    // with β = SIM_BLEND_BETA (0.5) and norm_cosine = (cos+1)/2; sparse
+    // (bm25) signals stay pure RRF. Worked here for A (S1 rank1 cos≈0.9,
+    // S2 rank2 bm25, S3-vec rank1 cos≈0.95 at w=0.7):
+    //   S1:    1.0/61 · (1 + 0.5·(2·0.95 −1))  ≈ 0.016393 · 1.45  = 0.023770
+    //   S2:    1.0/62                            (sparse, pure RRF) = 0.016129
+    //   S3vec: 0.7/61 · (1 + 0.5·(2·0.975−1))  ≈ 0.011475 · 1.475 = 0.016926
+    //   A ≈ 0.056825 (int8 quantization of the pinned cosines lands 0.056822)
+    // The order A > B > C is UNCHANGED — own-words note matches still rank
+    // well; the amendment lets strong dense signal compete, it does not nuke
+    // S1/S2. (The companion b69_strong_clip_match_* test pins the part of
+    // the fix this example cannot show: a clip-only image BEATING a
+    // note-only image.) Values are floor-truncated to 6 decimals as before.
+    // Do NOT delete these assertions — they pin the normative fused math.
+    assert_eq!(floor6(out.images[0].score), 56_822);
+    assert_eq!(floor6(out.images[1].score), 38_999);
+    assert_eq!(floor6(out.images[2].score), 35_569);
 
     // Per-signal ranks (§7.1 stage 2): S1 A/B/C = 1/2/3; S2 B 1, A 2;
     // S3 A 1, C 2.
@@ -882,7 +900,14 @@ fn b69_image_clip_votes_on_semantic_queries_without_a_gate() {
     assert_eq!(
         out.images.iter().map(hash_of).collect::<Vec<_>>(),
         vec![a.to_string(), x.to_string()],
-        "own words outrank clip by weight (1.0 vs 0.5), not by exclusion"
+        // Post §5.3 amendment (June 12 2026) S4 is at PARITY with notes
+        // (1.0, not 0.5). A still leads X here not by a clip discount but
+        // because A accumulates S1 (own-words cosine) + S2 (bm25) + S4,
+        // while X's only evidence is one clip hit. Own words win by having
+        // MORE evidence, not by clip being handicapped — exactly the
+        // behaviour the founder dogfood wanted (a strong visual match can
+        // now compete, it is no longer halved on arrival).
+        "annotated A outranks clip-only X by accumulating signals, not by a clip discount"
     );
     match &out.images[0].provenance {
         Provenance::Quote(q) => assert!(q.text.contains("harbor fog")),
@@ -895,6 +920,84 @@ fn b69_image_clip_votes_on_semantic_queries_without_a_gate() {
     );
     assert_eq!(rank_of(&out.images[1], SignalId::S4ImageClip), Some(1));
     assert_eq!(rank_of(&out.images[0], SignalId::S4ImageClip), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// §5.3 amendment — founder dogfood regression (June 12 2026): a strong CLIP
+// visual match can OUTRANK an image whose only evidence is a tangential note
+// keyword hit. Before the amendment (S4 at 0.5, pure rank-flat RRF) the note
+// hit at rank #1 (1.0/61 = 0.016393) ALWAYS buried a perfect clip match at
+// rank #1 (0.5/61 = 0.008197) — "any saved note outranks even a perfect
+// visual match." This test pins the fix and FAILS on the old math.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn b69_strong_clip_match_outranks_a_tangential_note_keyword_hit() {
+    let hx = Hx::new();
+    // V is the visually-perfect image with NO note at all; N has a single
+    // note whose only relation to the query is an incidental keyword the
+    // FTS catches (a tangential, weak hit — not what the photographer meant
+    // by it). The deterministic scripted ranks below reproduce the dogfood:
+    // both surface at rank #1 of their respective signals.
+    let (n, v) = (&hx.hashes[0], &hx.hashes[1]);
+
+    // N's only evidence: one note that merely CONTAINS "harbor" (its actual
+    // subject is unrelated). It ranks #1 in S2 (the sole FTS hit) — a
+    // tangential keyword match, exactly the kind that used to win by fiat.
+    hx.append_at(
+        d_remark(
+            "filed the harbor paperwork before the shoot, nothing visual here",
+            vec![n.clone()],
+        ),
+        "2026-03-01T10:00:00.000Z",
+    );
+
+    // V has NO note. Its only way in is a near-perfect CLIP match (cosine
+    // 0.98) at S4 rank #1. The query embeds to e0 on the CLIP tower.
+    hx.clip.set_text_embedding("harbor", e0());
+    hx.upsert_image_vector(VecKind::ImageClip, CLIP_MODEL, v, unit(0.98, 9));
+
+    // No LLM/text embedder: degenerate parse — "harbor" is both the FTS
+    // keyword (S2) and the bare CLIP query text (S4). This is precisely the
+    // founder's path (a plain visually-descriptive query, no parse model).
+    let rig: HybridRig<'_, NoModel, NoModel, MockEmbedder> = HybridRig {
+        llm: None,
+        text: None,
+        clip: Some(&hx.clip),
+        vectors: Some(&hx.vectors),
+    };
+    let opts = HybridOptions {
+        include_debug: true,
+        ..HybridOptions::default()
+    };
+    let out = hx
+        .env
+        .searcher
+        .hybrid_search("harbor", &[], &rig, &opts)
+        .unwrap();
+
+    // The fix: V (strong clip, no note) BEATS N (tangential note-only).
+    // Under the old fusion N would have led by construction.
+    assert_eq!(
+        out.images.iter().map(hash_of).collect::<Vec<_>>(),
+        vec![v.to_string(), n.to_string()],
+        "a strong CLIP visual match must beat a tangential note-only keyword hit \
+         (founder dogfood, June 12 2026): S4 at parity (1.0) + similarity blend"
+    );
+    // Both did surface at rank #1 of their signal — this is rank-flat
+    // territory where pure RRF tied them and weight alone decided. The
+    // amendment is what tips it to the visual match.
+    assert_eq!(rank_of(&out.images[0], SignalId::S4ImageClip), Some(1));
+    assert_eq!(rank_of(&out.images[1], SignalId::S2EventFts), Some(1));
+    // V's evidence is honestly a visual match — no fabricated quote (§6).
+    assert_eq!(out.images[0].provenance, Provenance::VisualMatch);
+    // And the win is strict, not a tie-break fluke.
+    assert!(
+        out.images[0].score > out.images[1].score,
+        "clip {} must strictly exceed note {}",
+        out.images[0].score,
+        out.images[1].score
+    );
 }
 
 // ---------------------------------------------------------------------------
