@@ -196,7 +196,16 @@ pub fn read_foreign_edit_from_str(xmp: &str) -> Option<ForeignEdit> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 scan_attributes(&e, &mut fields);
-                current_local = Some(local_name(e.name().as_ref()));
+                let name = e.name();
+                let (prefix, local) = split_prefix(name.as_ref());
+                // A darktable <history> block is "edits we detect but cannot
+                // portably decode" (its IOP params are opaque base64). The
+                // element ITSELF is the signal: it holds child elements, not
+                // text or a `history` attribute, so note() never sees it.
+                if prefix == b"darktable" && local == b"history" {
+                    fields.has_dt_history = true;
+                }
+                current_local = Some(String::from_utf8_lossy(local).into_owned());
             }
             Ok(Event::Empty(e)) => {
                 // Self-closing element with attributes (compact crop, etc.).
@@ -314,31 +323,32 @@ impl Fields {
 
         // Crop is Lightroom-only and portable. darktable's crop lives in opaque
         // IOP params we do not decode, so we never populate it there.
-        if source == ForeignSidecarSource::Lightroom && self.has_crop {
-            if let (Some(top), Some(left), Some(bottom), Some(right)) = (
+        if source == ForeignSidecarSource::Lightroom
+            && self.has_crop
+            && let (Some(top), Some(left), Some(bottom), Some(right)) = (
                 self.crop_top,
                 self.crop_left,
                 self.crop_bottom,
                 self.crop_right,
-            ) {
-                // Only accept a sane normalized rectangle; a degenerate or
-                // out-of-range box is dropped rather than surfaced as bogus.
-                let in_unit = |x: f64| (0.0..=1.0).contains(&x);
-                if in_unit(top)
-                    && in_unit(left)
-                    && in_unit(bottom)
-                    && in_unit(right)
-                    && right > left
-                    && bottom > top
-                {
-                    edit.crop = Some(CropRect {
-                        top,
-                        left,
-                        bottom,
-                        right,
-                        angle: self.crop_angle,
-                    });
-                }
+            )
+        {
+            // Only accept a sane normalized rectangle; a degenerate or
+            // out-of-range box is dropped rather than surfaced as bogus.
+            let in_unit = |x: f64| (0.0..=1.0).contains(&x);
+            if in_unit(top)
+                && in_unit(left)
+                && in_unit(bottom)
+                && in_unit(right)
+                && right > left
+                && bottom > top
+            {
+                edit.crop = Some(CropRect {
+                    top,
+                    left,
+                    bottom,
+                    right,
+                    angle: self.crop_angle,
+                });
             }
         }
 
@@ -388,12 +398,6 @@ fn split_prefix(name: &[u8]) -> (&[u8], &[u8]) {
         Some(i) => (&name[..i], &name[i + 1..]),
         None => (b"", name),
     }
-}
-
-/// The local part of a (possibly prefixed) element name, as an owned String.
-fn local_name(name: &[u8]) -> String {
-    let (_, local) = split_prefix(name);
-    String::from_utf8_lossy(local).into_owned()
 }
 
 /// Parse a crop fraction. XMP writes plain decimals; reject NaN/inf.
@@ -606,7 +610,10 @@ mod tests {
     #[test]
     fn empty_and_garbage_input_return_none() {
         assert_eq!(read_foreign_edit_from_str(""), None);
-        assert_eq!(read_foreign_edit_from_str("not xml at all {json:true}"), None);
+        assert_eq!(
+            read_foreign_edit_from_str("not xml at all {json:true}"),
+            None
+        );
     }
 
     #[test]
