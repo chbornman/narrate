@@ -232,8 +232,9 @@ impl App {
                 session.id().clone(),
             )),
             Err(e) => {
-                eprintln!(
-                    "photoproof: in-process VAD failed to build; voice capture disabled: {e}"
+                tracing::warn!(
+                    error = %e,
+                    "in-process VAD failed to build; voice capture disabled"
                 );
                 None
             }
@@ -325,15 +326,15 @@ impl App {
             .expect("session mutex")
             .close(&self.store, &mut EngineFlush { app: self })
         {
-            eprintln!("photoproof: session close failed at shutdown: {e}");
+            tracing::error!(error = %e, "session close failed at shutdown");
         }
         if let Err(e) = self.engine.flush_session(&session_id) {
-            eprintln!("photoproof: session journal flush failed at shutdown: {e}");
+            tracing::error!(error = %e, "session journal flush failed at shutdown");
         }
         // App shutdown is an immediate-flush trigger (SIDECARS §9.1); the
         // collections file drains with the sidecars.
         if let Err(e) = self.collections.flush(UtcMillis::now()) {
-            eprintln!("photoproof: collections flush failed at shutdown: {e}");
+            tracing::error!(error = %e, "collections flush failed at shutdown");
         }
     }
 }
@@ -376,10 +377,10 @@ impl photoproof_core::capture::SidecarFlush for EngineFlush<'_> {
     fn flush_for_close(&mut self, closing: &SessionId) {
         let now = UtcMillis::now();
         if let Err(e) = self.app.engine.flush_all(now) {
-            eprintln!("photoproof: sidecar flush at session close failed: {e}");
+            tracing::error!(error = %e, "sidecar flush at session close failed");
         }
         if let Err(e) = self.app.engine.flush_session(closing) {
-            eprintln!("photoproof: session journal flush at session close failed: {e}");
+            tracing::error!(error = %e, "session journal flush at session close failed");
         }
     }
 }

@@ -103,7 +103,7 @@ pub fn spawn_disarm_drain(handle: AppHandle) {
 /// cannot stay armed without audio — disarm through the engine (trailing
 /// finals still mint) and tell the indicator.
 fn disarm_on_device_failure(handle: &AppHandle, app: &App, why: &str) {
-    eprintln!("photoproof: mic device failure, disarming: {why}");
+    tracing::warn!(reason = %why, "mic device failure, disarming");
     let events = {
         let mut capture = app.capture.lock().expect("capture mutex");
         match capture.as_mut() {
@@ -141,7 +141,7 @@ fn run(handle: &AppHandle, stop: &AtomicBool) {
     let cb_err = Arc::new(AtomicBool::new(false));
     let err_flag = Arc::clone(&cb_err);
     let on_err = move |e: cpal::Error| {
-        eprintln!("photoproof: mic stream error: {e}");
+        tracing::error!(error = %e, "mic stream error");
         err_flag.store(true, Ordering::Relaxed);
     };
     let stream = match config.sample_format() {

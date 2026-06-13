@@ -107,7 +107,7 @@ pub async fn add_root<R: Runtime>(
                         ..ScanOptions::default()
                     };
                     if let Err(e) = scan_app.library.scan_root(&rid, &opts) {
-                        eprintln!("photoproof: initial scan failed for {rid}: {e}");
+                        tracing::error!(root_id = %rid, error = %e, "initial scan failed");
                     }
                 })
                 .expect("spawn scan thread");
@@ -119,8 +119,10 @@ pub async fn add_root<R: Runtime>(
                     .expect("watchers mutex")
                     .insert(root_id.clone(), handle);
             }
-            Err(e) => eprintln!(
-                "photoproof: watcher failed for {root_id}: {e} (polled rescans still run)"
+            Err(e) => tracing::warn!(
+                root_id = %root_id,
+                error = %e,
+                "watcher failed; polled rescans still run"
             ),
         }
         let record = app
