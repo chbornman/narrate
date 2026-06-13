@@ -1,11 +1,18 @@
 /* Photoproof design tokens — the ONLY place colors/levels are defined
  * (UI-ARCHITECTURE §1: theming is token-only; no inline styles anywhere).
  *
- * Chrome stays dark (the quiet philosophy, UI §12 / DECISIONS I5). The
- * IMAGE SURROUND (Grid canvas + Look backdrop) is user-tunable (D6):
- * [data-surround] blocks retune --surround and the evidence/selection
- * tokens for legibility at each luminance. Full interface themes
- * (post-M1) will be a [data-theme] block here — no component changes.
+ * Chrome is dark-first (the quiet philosophy, UI §12 / DECISIONS I5), but
+ * the FULL INTERFACE THEME is now user-selectable (BACKLOG "Full interface
+ * themes"): system | light | dark. The dark values below are the :root
+ * default (mirrored under [data-theme="dark"]); [data-theme="light"] flips
+ * the chrome grays. theme/theme.ts resolves `system` to the OS and writes
+ * data-theme on <html>. No component changes — it's token-only.
+ *
+ * The IMAGE SURROUND (Grid canvas + Look backdrop) is a SEPARATE, orthogonal
+ * axis (D6): [data-surround] blocks retune --surround and the
+ * evidence/selection tokens for legibility at each image luminance. Theme is
+ * the chrome; surround is the backdrop behind the photo. They write different
+ * attributes and never collide.
  *
  * THE SATURATED PENCIL RED belongs to the grease pencil ALONE (DECISIONS
  * I5; live since P5.1): the Look overlay, the live stroke, the journal
@@ -43,6 +50,49 @@
   --selection: #cfcfcf;
   --focus-cell: #8a8a8a;
   --marquee: rgba(207, 207, 207, 0.35);
+}
+
+/* Dark is the design default (above). The explicit [data-theme="dark"] block
+ * exists so the resolver can always write a concrete value — it restates the
+ * dark chrome so toggling back from light is a single attribute swap with no
+ * reliance on :root cascade order. Only chrome tokens live here; the surround
+ * tokens are owned by [data-surround] and intentionally untouched. */
+[data-theme="dark"] {
+  --scrim: rgba(0, 0, 0, 0.5);
+  --bg: #0e0e0e;
+  --bg-raised: #161616;
+  --bg-overlay: #1b1b1b;
+  --chrome: #2a2a2a;
+  --chrome-strong: #3a3a3a;
+  --text: #d6d6d6;
+  --text-dim: #8a8a8a;
+  --text-faint: #5a5a5a;
+  --focus: #cfcfcf;
+}
+
+/* LIGHT theme (BACKLOG "Full interface themes"): light chrome + grays. The
+ * grease-pencil red (--red-pencil) is the brand constant and is NOT redefined
+ * here — it stays the one saturated color in either theme (DECISIONS I5).
+ *
+ * Contrast notes: --text on --bg is #1a1a1a on #f4f4f4 (~14:1, well past
+ * WCAG AAA body text); --text-dim (#5a5a5a) and --text-faint (#8a8a8a) keep
+ * the same dim→faint ordering as dark, both readable on the light surfaces.
+ * Surfaces step DOWN in lightness as they raise (bg → raised → overlay) so
+ * panels read as layered cards under a light scrim, mirroring how the dark
+ * theme steps UP. The scrim flips to a light wash so modals dim a light app
+ * without the heavy black veil that reads wrong on white. */
+[data-theme="light"] {
+  /* a light wash, not a black veil: dims the light app without going muddy */
+  --scrim: rgba(20, 20, 20, 0.32);
+  --bg: #f4f4f4; /* app canvas */
+  --bg-raised: #ffffff; /* panels/cards lift toward white */
+  --bg-overlay: #ffffff; /* menus/sheets: crisp white over the scrim */
+  --chrome: #d8d8d8; /* borders/dividers */
+  --chrome-strong: #c2c2c2; /* stronger dividers, pressed states */
+  --text: #1a1a1a; /* primary text, ~14:1 on --bg */
+  --text-dim: #5a5a5a; /* secondary, comfortably readable */
+  --text-faint: #8a8a8a; /* tertiary/hints, still legible */
+  --focus: #404040; /* focus ring: dark on light, mirrors dark's light ring */
 }
 
 /* D6: image-surround luminance levels. Each block retunes the surround
