@@ -59,6 +59,45 @@ describe("scope targets (CAPTURE §3 table)", () => {
   });
 });
 
+describe("Visualizer (topic-graph) scope precedence", () => {
+  // The graph, when open, OWNS the write scope: dictation/rating must target
+  // the SELECTED node, never the stale grid/Look selection underneath.
+  it("graph open + a node selected → that node, overriding grid/Look", () => {
+    expect(
+      scopeTargets({
+        ...base,
+        surface: "look",
+        gridSelection: ["a", "b"],
+        lookTargets: ["c"],
+        graphOpen: true,
+        graphSelection: "sel",
+      }),
+    ).toEqual(["sel"]);
+  });
+
+  it("graph open + nothing selected → NEUTRAL session scope (empty), not stale", () => {
+    expect(
+      scopeTargets({
+        ...base,
+        gridSelection: ["a", "b"],
+        graphOpen: true,
+        graphSelection: null,
+      }),
+    ).toEqual([]);
+  });
+
+  it("graph CLOSED → the selection is ignored, normal grid/Look rules apply", () => {
+    expect(
+      scopeTargets({
+        ...base,
+        gridSelection: ["a"],
+        graphOpen: false,
+        graphSelection: "sel",
+      }),
+    ).toEqual(["a"]);
+  });
+});
+
 describe("collapsed RAW+JPEG stacks (D1 / CAPTURE conformance)", () => {
   // The slices pre-expand: one selected collapsed pair arrives as TWO
   // ordered hashes — display member (JPEG) FIRST, then RAW. That order is

@@ -27,9 +27,23 @@ export interface ScopeSource {
   /** Hashes shown in Look — [display] or [display, alt] for a collapsed
    * pair; empty when not in Look. */
   lookTargets: string[];
+  /** The Visualizer (topic-graph) overlay is open. While it is, the graph is
+   * the ACTIVE surface for dictation/rating and OWNS the write scope (it sits
+   * on top of the grid). */
+  graphOpen?: boolean;
+  /** The image node SELECTED on the graph, or null when nothing is selected.
+   * A selected node scopes to itself; null is the NEUTRAL session scope. */
+  graphSelection?: string | null;
 }
 
 export function scopeTargets(src: ScopeSource): string[] {
+  // The Visualizer overlay takes scope precedence while open: dictation and
+  // rating on the graph must land on the SELECTED node (or be session-scoped
+  // when nothing is selected), never on the stale grid/Look selection
+  // underneath. Selected node -> [hash]; nothing selected -> [] (neutral),
+  // so a graph dictation becomes a session note instead of mis-targeting.
+  if (src.graphOpen === true)
+    return src.graphSelection != null ? [src.graphSelection] : [];
   if (src.searchOpen) return [...src.searchSelection];
   if (src.surface === "look") return [...src.lookTargets];
   return [...src.gridSelection];
