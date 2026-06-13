@@ -335,6 +335,29 @@ pub async fn request_full_decode(app: S<'_>, hash: String) -> CmdResult<bool> {
         .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// Viewport-first preview generation (OD-2): the grid sends the hashes the
+/// user is currently scrolled to (visible + a small look-ahead) whose thumbnail
+/// is not yet generated, so those preview passes jump ahead of the offscreen
+/// backfill the pump would otherwise grind through first. Bumps only PENDING
+/// preview rows to the top interactive priority; running/done rows and hashes
+/// without a pending preview are untouched. Only hashes cross IPC; returns how
+/// many rows were promoted. The frontend debounces this on scroll-settle and
+/// only sends previews-missing hashes, so it complements (does not fight) the
+/// client-side `thumbqueue` LOAD ordering.
+#[tauri::command]
+pub async fn prioritize_previews(app: S<'_>, hashes: Vec<String>) -> CmdResult<usize> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = hashes
+            .iter()
+            .map(|h| super::parse_hash(h))
+            .collect::<CmdResult<Vec<_>>>()?;
+        Ok(app.library.prioritize_previews(&parsed)?)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 /// Core badge row → wire shape — shared with the collection-members grid
 /// read (commands/collections.rs), so both grid listings stay one mapping.
 pub(crate) fn grid_item(i: photoproof_core::library::FolderImage) -> GridItem {

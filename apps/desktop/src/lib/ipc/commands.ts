@@ -467,6 +467,17 @@ export const rebuildPreviews = (rootId: string) =>
 export const requestFullDecode = (hash: string) =>
   invoke<boolean>("request_full_decode", { hash });
 
+/** Viewport-first preview generation (OD-2): the grid sends the hashes the
+ * user is currently scrolled to (visible + a small look-ahead) whose thumbnail
+ * is not yet generated, so the pump generates those previews ahead of the
+ * offscreen backfill it would otherwise grind through in scan order. Bumps only
+ * PENDING preview rows to the top interactive priority; resolves to how many
+ * rows were promoted. Image bytes never cross IPC: only hashes go out, a count
+ * comes back. Complements the client-side `thumbqueue` LOAD ordering (this
+ * reorders SERVER generation; that reorders the draw of already-made thumbs). */
+export const prioritizePreviews = (hashes: string[]) =>
+  invoke<number>("prioritize_previews", { hashes });
+
 // -- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) ---------------
 
 /** Which focus tier a dwell episode was captured at. "look" = single-image
