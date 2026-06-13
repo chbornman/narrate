@@ -364,7 +364,7 @@ work lives here.
 
 ## Visualization lenses (founder, June 13 2026 — design docs written)
 
-- [ ] **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.
+- [x] (LANDED `cbe20c2`, merge `feefde4`; details in LANDED.md) **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.
   Engagement-intensity per image from capped dwell (NEW local telemetry, 60s/
   focus cap, tiered: Look-open full, grid-select far less) + annotation counts
   (stroke COUNT small; effort dropped). Grid heat-tint toggle + sort-by-attention.
