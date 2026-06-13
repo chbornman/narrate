@@ -66,10 +66,12 @@ managing = off-thesis).
   collections-first philosophy shapes how much folder UI we even want.
   Pairs with the sidebar design pass already logged under founder
   appetite. (Founder, June 2026.)
-- [ ] **B summons the overlay** (founder, June 2026): pressing B in Look
-  with the tracing-paper overlay hidden currently does nothing - it
-  should show the overlay AND enter pencil mode in one keystroke; a
-  bound key must never be dead.
+- [x] **B summons the overlay** — landed `c13f09b`: the key was dead
+  twice over (the `pencil-pen` def gated on `overlayVisible`, and
+  `togglePencil()` refused while hidden); now B with hidden paper shows
+  the overlay AND arms the pencil in one keystroke (show-and-arm),
+  visible-overlay toggling byte-for-byte unchanged. (Founder, June
+  2026.)
 - [ ] **Model-landscape survey** (founder, June 2026 - periodic): the
   toolchain is modular by seam, so every block deserves a recurring
   look at the leading alternatives: ASR, VAD, LLM, image embedder, text
@@ -117,7 +119,173 @@ managing = off-thesis).
   with the real 512px artifact when the preview pass lands. Performance
   work should be DRIVEN by pp-bench numbers (scripts/bench.sh), not
   vibes. (Founder, dogfood round 3, June 2026.)
-- [ ] **Drag photos OUT of the app** — from the grid or from Look, click-
+  FRESH-INSTANCE DOGFOOD (founder, June 12, 2026) sharpened two more
+  edges of the same flow — BOTH LANDED `d066fe8`: (d) instant scanning
+  state — `ingestExpecting` optimistic bridge set synchronously on
+  add-root/drop/rescan, cleared by the first real ingest event; the
+  walk itself now reads as running (root cause was structural:
+  scan_root walked the entire tree before any pass row existed, so
+  `running` was false for the whole walk); (e) live discovered count —
+  a per-file atomic counter on ScanOptions rides the existing
+  ingest-progress channel; the empty state reads "Indexing — N
+  photographs found so far…". Items (a)–(c) above (pre-identity cards,
+  shimmer, low-res tier) remain open. The whole shebang remains the
+  goal: add folder → instant "scanning" → live count → cards appear →
+  previews fill in.
+- [x] **The What's-Happening Station (indicator 2.0)** — landed
+  `de9f126` (merge-fixed: the mic seat resolves `mic-press` arg
+  "toggle", the def the M→Space move owns): pure StationModel
+  (logic/station.ts) over existing state, collapsed icon row with one
+  breathe driver, hover-expand via the indicator Popover (read-only
+  body; icons are the only click targets), info seat pins via new
+  `toggle-station-detail` row, pop-chips generalize the note pop to
+  mic arm/disarm/"Captured". Founder manual pass pending: pulse/hover
+  feel, chip stacking. Original riff: (founder, June
+  12, 2026 — "Do you see what I mean?" riff, captured verbatim in
+  spirit): evolve the bottom-right capture indicator into the app-wide
+  LIVING STATUS ORGAN. Same corner, bigger presence. Two states:
+  COLLAPSED = a quiet icon row (mic, magnifying-glass search,
+  background-tasks/info dot, the note pencil), pulsing gently when
+  something is happening; HOVER = the capsule expands large with real
+  context (ingest/digest progress with counts, background task list,
+  current scope, streaming utterance), shrinking back to icons on
+  leave — counts move INTO the hover, off the always-on chrome.
+  Events POP from the station: note creation already does (founder:
+  "which is cool" — that's the signature move, keep it), mic
+  arm/disarm and push-to-talk evidence join it, and searches could
+  pop from there too (pairs with the search-as-scope direction).
+  Each icon is a clickable seat with the expected verb: mic =
+  toggle (the M tap twin), magnifier = focus search, info = expand
+  the tasks view. Existing rulings carry forward: lights-out
+  exemption (DECISIONS U5), scope-segment → inspector bridge, the
+  note-input summon. This is likely WHERE the digest-visibility
+  surface below lives — design the two together. (Founder, June
+  2026.)
+- [ ] **Digest visibility: a design round for "what is my library
+  doing?"** (founder, fresh-instance dogfood, June 12, 2026): while a
+  new folder digests, the only signal is the word "digest" in the
+  header bar. A new folder kicks off a whole pipeline of background
+  work — discovery walk, hashing, sidecar adoption, preview builds,
+  embedding passes (CLIP + text once M3 lights up), and any model
+  downloads those need — and the user has no way to see where the
+  library IS in that pipeline, what remains, or what the app is waiting
+  on. Needs a deliberate UX round, not another one-word status: a
+  per-stage progress surface (counts done/total per pass), an
+  at-a-glance "library is settled / library is working" state, and an
+  answer for where it lives — LEADING CANDIDATE: the What's-Happening
+  Station above (founder, June 12: hover-expanded task detail there,
+  not always-on counts). Subsumes the header word as the COLLAPSED form of something
+  expandable. Related: the progressive-import item above (the grid's
+  half of the same story) and the model-download progress item below
+  (same disease: real work invisible or misreported). (Founder, June
+  2026.)
+- [x] **Voice notes save a leading space** — landed `6ee8554`:
+  `on_final` mints `seg.text.trim()` (edges only; interior spacing
+  verbatim — §6.5 protects words from paraphrase, not BPE tokenizer
+  plumbing); acceptance test pins " Slow  down " → "Slow  down".
+  NOT taken: normalizing the handful of existing test-note rows
+  (append-only journal; they're tonight's throwaway dictation).
+  Original report (founder, June 12, 2026):
+  every voice remark in the journal starts with a literal " " —
+  CONFIRMED IN THE STORE, not a render artifact (sqlite:
+  `[ Slow down]`, `[ We've got time left to be lazy]` …; typed notes
+  unaffected). Root cause shape: BPE-style ASR tokens carry the
+  word-boundary space, so an utterance's first token decodes as
+  " Slow", and the engine mints the final without trimming. Fix at the
+  final-minting boundary in the capture engine (trim leading/trailing
+  whitespace before the journal event exists — whitespace is not "the
+  user's words", K14 is safe); decide whether to also normalize the
+  nine-and-counting existing rows (journal events are append-only —
+  if normalization is wrong, a display-time trim for legacy rows is
+  the honest fallback). Check the sidecar snapshots carry the same
+  bytes. (Founder, June 12, 2026.)
+- [x] **Desktop platform conventions pass** — landed `a0cac41` (audit
+  found NO native menu existed): macOS menu bar App/File/Edit/View/
+  Window with standard roles (Edit roles = ⌘C/⌘V in WKWebView fields;
+  predefined Quit still exits through the sidecar-flush path), custom
+  rows routed through the one action registry via a `menu-action`
+  event (the menu is a fourth rendering of the action table); UI-scale
+  zoom ⌘=/⌘−/⌘0 on a 0.8–1.5 ladder via webview setZoom, persisted
+  (`pp.uiZoom`), distinct from Look's plain-key image zoom; keymap now
+  forfeits ctrl+meta chords to the menu layer (⌃⌘F fullscreen no
+  longer starved by ⌘F search). Founder manual smoke test pending
+  (menus/zoom/Edit-paste/window verbs). Original ask:
+  (Founder, June 12, 2026):
+  all the things long-lived desktop apps just DO, audited and wired for
+  macOS first: (a) UI-scale zoom on Cmd+= / Cmd+− / Cmd+0-to-reset —
+  the webview zoom convention every Tauri/Electron app inherits (note:
+  distinct from the existing image zoom in Look; UI zoom scales the
+  chrome) — persist the chosen scale; (b) the window-management row:
+  Cmd+W close window, Cmd+M minimize, Cmd+H hide (these come free with
+  a proper native menu bar — audit ours for the standard App/File/Edit/
+  View/Window menus and make sure every in-app action with a key also
+  appears in a menu, which is also what makes them discoverable and
+  remappable in System Settings); (c) Cmd+, opens settings (verify the
+  existing open-settings binding uses it); (d) Edit-menu basics working
+  in every text field (cut/copy/paste/select-all/undo); (e) sweep for
+  the rest: double-click titlebar to zoom, full-screen Cmd+Ctrl+F (a
+  toggle-fullscreen action exists — check the binding), text-field
+  focus outlines. One pass, one checklist, so the app feels NATIVE,
+  not webby. (Founder, June 2026.)
+- [x] **Click feedback pass: every action acknowledges the click** —
+  landed `d8a8658`: one global `button:active` rule (filter+transform,
+  chosen because component-scoped background overrides would swallow a
+  background-based press) gives every real button a pressed state; new
+  `AckFlash`/`AckButton` primitives (copyflash idiom) give
+  fire-and-forget verbs a truthful momentary done-label — Restart
+  runtime ("Restarted") and Re-detect hardware ("Re-detected") adopted.
+  Non-button clickables audited and deliberately left alone (selection
+  surfaces already self-signal). (Founder, fresh-instance dogfood,
+  June 12, 2026.)
+- [x] **M key = push-to-talk on hold, mic toggle on click** — landed
+  `2fbe2c9`: pure hold machine (`logic/michold.ts`, time-as-parameter),
+  press arms immediately from disarmed (both gestures want sound from
+  the keydown), release <250 ms = tap (arm stands), ≥250 ms = PTT
+  (explicit disarm ships through the normal drain); from armed, tap
+  disarms and hold is deliberately inert (an absent-minded hold never
+  tears down a deliberately armed mic). Intents are explicit
+  arm/disarm via a new idempotent `set_mic` command — never blind
+  toggle. Auto-repeat absorbed; window blur resolves a gesture-opened
+  mic, leaves a pre-armed one alone. (Founder, June 12, 2026.)
+  SUPERSEDED same night (founder: "like a Zoom call"): the mic moves
+  to SPACE — tap toggles, hold is push-to-talk; M is freed back to
+  the reserved pool; Space's old verbs displaced (open-Look keeps
+  Enter, Look-close keeps Esc, zoomed hold-Space pan dies — drag-pan
+  remains). LANDED `e486023`; the hold machine itself was unchanged,
+  and §11 input suppression already covered Space (the rule keys on
+  "the chord can type", not "single letter").
+- [x] **Model download progress must be model-cumulative** — landed
+  `ab1369a`: core's download loop carries a `base` accumulator so every
+  DownloadProgress event is model-cumulative (the per-file completion
+  event is what advances the row through DFN5B's ~290 sub-coalescing
+  shards); enqueue seeds from `downloaded_bytes(model)` (statted before
+  the host lock) so a resume opens at its true bytes; the dead `last`
+  fold deleted. Original diagnosis (founder, fresh-instance dogfood,
+  June 12, 2026 — caused two separate "it didn't resume / stuck at
+  zero" impressions in one evening while downloads were in fact
+  healthy; founder's actual bar: "look and feel modern"): two
+  compounding display defects on the settings model rows. (a) `DownloadProgress` bus events carry the CURRENT FILE's
+  bytes (core download.rs publish sites), but the row divides by the
+  whole model's total (runtime.rs status ~336) — DFN5B is 400 files,
+  ~290 of them tiny shards, so the displayed number sits at ~0% while
+  gigabytes land verified on disk. (b) clicking Download seeds
+  `state.downloads` with `(0, total_bytes)` (enqueue_downloads ~525), so
+  a resume of a 1 GB part file FIRST displays "0 bytes" — reads as
+  progress thrown away. Fix shape: publish cumulative model bytes from
+  core's per-model loop (it knows the model), or seed/fold in the
+  manager's `downloaded_bytes(model)` baseline host-side; the discarded
+  `last` fold in run_download (~597–623, `let _ = last;`) is a vestige
+  of the same seam. One number, one meaning: bytes of THIS MODEL on
+  disk over its manifest total.
+- [x] **Auto-retry interrupted model downloads** — landed `ab1369a`:
+  `run_download` retries the `Interrupted` class ONLY, 4 more attempts
+  at 2/5/15/30 s backoff (sliced sleeps against the stop latch so quit
+  mid-backoff returns within a beat), row stays "downloading" with a
+  `retry_hint` ("connection interrupted — retrying (attempt 2 of 5)")
+  until exhaustion; checksum/license/HTTP errors still fail fast.
+  NOT taken (still open if wanted): resume-on-launch for models with a
+  part file + recorded acceptance. (Founder, fresh-instance dogfood,
+  June 12, 2026 — interruptions hit 3× in one evening.) — from the grid or from Look, click-
   drag an image out of the window and drop it into Finder/another app as
   the ORIGINAL file (a native OS file drag carrying absolute paths — the
   D4 reveal/open-with class of OS integration, not an in-app file verb;
@@ -376,7 +544,45 @@ managing = off-thesis).
 
 ## Decided, awaiting founder appetite
 
-- [ ] **Sidebar design pass** — both sidebars (rail/sources, inspector) deserve a deliberate future design round (layout, affordances, what lives where) once M3's source-list growth and the collection-view question land; for now only baseline functionality matters. (Founder, dogfood round 2.)
+- [x] **Layout architecture design round: canvas-centered, everything
+  resizable** — landed `c12a90c`: one `Panel` primitive (drag-resize
+  with pointer capture, double-click-resets, min/max clamps, sizes
+  persisted globally under pp.panel.*), canvas-centered shell (flex
+  [rail][center 1fr][inspector], center = [canvas][filmstrip] so the
+  filmstrip is canvas-width by construction), Tab snapshot-restores
+  exactly what was open (DECISIONS exemptions preserved), F total in
+  both surfaces (the "works sometimes" gate was scope:"look"), rail
+  resize root cause was an $effect that re-read size every drag frame
+  and snapped back. Founder manual pass pending: drag feel, filmstrip
+  width tracking, traffic-light lockstep. FIRST DOGFOOD FIX `8e24911`:
+  the launch filmstrip rendered a fixed 17-neighbor window ("only loads
+  17 images… doesn't fill the width") — now a virtual horizontal list
+  over the whole order, selected photo centered with the founder's
+  override rule (manual scroll holds until the next selection snaps
+  back). (Supersedes the narrower "sidebar design pass" from
+  dogfood round 2; founder, fresh-instance dogfood, June 12, 2026):
+  rethink the BASE LAYERS of the app layout. The principle: the canvas
+  (grid/Look) is the center section ALWAYS, regardless of which
+  top/bottom/left/right bars are open; every bar is a peer panel with
+  the same contract. Concretely from tonight's annoyances: (a) the left
+  rail can't be click-drag resized — all four edges' panels should be
+  drag-resizable; (b) the left rail and right inspector have visibly
+  different UX (affordances, headers, toggle behavior) — one panel
+  system, two instances; (c) the filmstrip doesn't extend the full app
+  width (and shouldn't depend on what else is open — see the canvas
+  principle); (d) F sometimes opens the filmstrip and sometimes doesn't
+  — find the contextual gate (or focus dependence) and either make it
+  total or make the WHY visible; (e) interaction contract: each panel
+  gets its individual toggle, AND the Tab global hide-everything stays
+  (it works today and feels right). Layout state (sizes, open/closed)
+  persists. This is an architecture round first (the panel/dock layer),
+  then reconcile the existing rail/inspector/filmstrip into it.
+  (Founder, June 2026.) FOUNDER CALLS (June 12, 2026 — build in
+  flight): filmstrip spans the CANVAS width (bottom of the center
+  column, dynamic as side panels toggle); panel sizes persist
+  GLOBALLY (one size per panel, not per-surface); Tab lights-out
+  restores WHAT WAS OPEN (snapshot at hide); F toggles the filmstrip
+  in BOTH grid and Look.
 
 - [ ] Full interface themes (light chrome + grays) — token architecture
   ready; surround-luminance shipped in P4.2 (D6).
