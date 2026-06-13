@@ -128,6 +128,22 @@ pub fn develop_to_display_oriented(
         return Err(DevelopError::Decode("zero sensor dimensions".into()));
     }
 
+    // DIAGNOSTIC (once per develop, debug level): the scaled-data range. After
+    // apply_scaling this MUST sit in [0,1]; if the founder's log shows a max of
+    // ~65535 the scaling no-op'd (wrong black/white levels), and if min==max==0
+    // the sensor data itself is black BEFORE any colour math. This disambiguates
+    // a black DEVELOP-INPUT from a black colour-matrix collapse. `sample_stats`
+    // strides the buffer so it stays O(few thousand reads) on a 50MP raster.
+    let scaled = sample_stats(&data);
+    tracing::debug!(
+        target: "photoproof::raw_develop",
+        min = scaled.min,
+        max = scaled.max,
+        mean = scaled.mean,
+        samples = scaled.count,
+        "raw develop: scaled sensor data range (expect [0,1])"
+    );
+
     // ---- Stage 2: crop to the recommended/active area ---------------------
     //
     // We crop to the camera's recommended area (`crop_area`, the DNG
@@ -168,7 +184,27 @@ pub fn develop_to_display_oriented(
     // multiply a channel that does not exist in the demosaiced [R,G,B] pixel.
     // We then compose XYZ→linear-sRGB so the whole camera-RGB → linear-sRGB
     // collapse is a single 3×3 multiply in the inner loop.
-    let cam_rgb_to_srgb = compose_cam_rgb_to_linear_srgb(&raw);
+    let (cam_rgb_to_srgb, matrix_source) = compose_cam_rgb_to_linear_srgb(&raw);
+    // DIAGNOSTIC + GUARD-VISIBILITY (once per develop): name the matrix source.
+    // A real founder DNG should log `color_matrix`; a fall-through to `identity`
+    // is the warning that BOTH the DNG ColorMatrix tag and the deprecated
+    // xyz_to_cam field were degenerate (the develop is still VISIBLE/neutral,
+    // not black, but colour is approximate). This is the single most useful
+    // line for triaging a black/wrong-colour develop from the log.
+    if matrix_source == MatrixSource::Identity {
+        tracing::warn!(
+            target: "photoproof::raw_develop",
+            source = matrix_source.label(),
+            "raw develop: colour matrix degenerate; using neutral identity fallback (image stays visible, colour approximate)"
+        );
+    } else {
+        tracing::debug!(
+            target: "photoproof::raw_develop",
+            source = matrix_source.label(),
+            matrix = ?cam_rgb_to_srgb,
+            "raw develop: composed camera-RGB to linear-sRGB matrix"
+        );
+    }
 
     // White balance, as-shot, RGBE order. NaN-guard mirrors rawler's
     // develop_params(): a camera that did not record WB substitutes neutral
@@ -227,12 +263,136 @@ pub fn develop_to_display_oriented(
         }
     };
 
+    // DIAGNOSTIC (once per develop): the developed-pixel u8 range. This is the
+    // FINAL black-screen tell: if max == 0 here the develop produced an all-
+    // black buffer (the founder's bug) even though the artifact then encodes/
+    // serves fine — so a black 1:1 with max==0 here points at the develop, while
+    // a non-zero range here with a black screen points downstream (encode/serve/
+    // display). Cheap byte stats over the whole RGB buffer (already in memory).
+    let dev = byte_stats(&rgb);
+    tracing::debug!(
+        target: "photoproof::raw_develop",
+        min = dev.0,
+        max = dev.1,
+        mean = dev.2,
+        out_w,
+        out_h,
+        matrix_source = matrix_source.label(),
+        "raw develop: developed sRGB u8 pixel range (max==0 means black develop)"
+    );
+
     let img = RgbImage::from_raw(out_w as u32, out_h as u32, rgb)
         .ok_or_else(|| DevelopError::Decode("rgb buffer size mismatch".into()))?;
 
     // ---- Stage 6: orient LAST, identical to the embedded path -------------
     let oriented = preview::apply_exif_orientation(DynamicImage::ImageRgb8(img), exif_orientation);
     Ok(oriented)
+}
+
+/// Which source the camera→sRGB matrix was built from, for one-shot logging.
+/// The founder's log line names this so a black/wrong develop is diagnosable
+/// without a debugger: `XyzToCam` is the rawler-deprecated field, `ColorMatrix`
+/// is the DNG-populated map (the real-DNG path), `Identity` is the last-resort
+/// neutral fallback that fires only when both sources are degenerate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatrixSource {
+    /// Built from `raw.xyz_to_cam[0..3]` (rawler-deprecated; populated by the
+    /// in-catalog decoders, all-zero for catalog-miss DNGs).
+    XyzToCam,
+    /// Built from `raw.color_matrix` (DNG `ColorMatrix1/2` tags) — the path a
+    /// real founder DNG takes, since the DNG decoder leaves `xyz_to_cam` zero.
+    ColorMatrix,
+    /// Neutral identity passthrough: both real sources were degenerate (zero,
+    /// non-finite, or singular after composition). Keeps the develop NEUTRAL
+    /// instead of NaN-black; colour will be approximate but the image is real.
+    Identity,
+}
+
+impl MatrixSource {
+    /// Stable label for the diagnostic log line (no em-dashes; user-facing-ish).
+    fn label(self) -> &'static str {
+        match self {
+            MatrixSource::XyzToCam => "xyz_to_cam (rawler deprecated field)",
+            MatrixSource::ColorMatrix => "color_matrix (DNG ColorMatrix tag)",
+            MatrixSource::Identity => "identity fallback (both sources degenerate)",
+        }
+    }
+}
+
+/// A 3×3 is usable as a colour matrix only if every entry is finite AND every
+/// row carries real signal. An all-zero row makes `normalize` leave it zero,
+/// which then makes `pseudo_inverse` divide by a zero pivot and emit NaN/inf
+/// for the WHOLE matrix (rawler's `pseudo_inverse` has no pivoting) — the exact
+/// path that turned a real DNG develop all-black. Reject early.
+fn matrix_3x3_is_usable(m: &[[f32; 3]; 3]) -> bool {
+    let all_finite = m.iter().all(|row| row.iter().all(|v| v.is_finite()));
+    if !all_finite {
+        return false;
+    }
+    // Every row must have a non-zero sum: `normalize` divides each row by its
+    // sum and skips (leaves zero) any row that sums to zero, which feeds a
+    // degenerate matrix straight into the inverse. Require real signal per row.
+    m.iter()
+        .all(|row| row.iter().sum::<f32>().abs() > f32::EPSILON)
+}
+
+/// Extract the camera's XYZ→cameraRGB matrix (3 XYZ-input rows × 3 RGB camera
+/// channels) from the best available source, preferring the non-deprecated
+/// `color_matrix` map and validating each candidate.
+///
+/// WHY this ordering: rawler's DNG decoder sets `xyz_to_cam: Default::default()`
+/// (all zeros) and ONLY populates `color_matrix` from the DNG `ColorMatrix1/2`
+/// tags (verified in rawler 0.7.2 `decoders/dng.rs::make_camera`). So for a
+/// real founder DNG, `xyz_to_cam` is zero and the previous code composed a
+/// zero matrix -> NaN inverse -> every pixel black. The in-catalog Bayer
+/// decoders (CR3/ARW/NEF) populate `xyz_to_cam` instead. Trying `color_matrix`
+/// first, then `xyz_to_cam`, covers both real-world shapes; the synthetic tests
+/// (which set `xyz_to_cam` and leave `color_matrix` empty) still land on the
+/// `xyz_to_cam` branch, so their golden values are unchanged.
+///
+/// `color_matrix` is a flat `Vec<f32>` of `ColorMatrix` values: 9 entries for a
+/// 3×3 (RGB) profile, 12 for a 3×4 (RGBE) profile (3 XYZ rows × N camera
+/// channels, row-major). We take the first 3 columns of each XYZ row (drop the
+/// E channel the demosaiced [R,G,B] pixel does not have), matching the existing
+/// `xyz_to_cam[0..3]` fold.
+fn xyz_to_cam_rgb_from_source(raw: &RawImage) -> ([[f32; 3]; 3], MatrixSource) {
+    // 1) Preferred: the DNG-populated color_matrix map. Pick D65 if present
+    //    (the develop's sRGB target white point), else any illuminant — a
+    //    single profile is the common DNG case and is better than zero.
+    if !raw.color_matrix.is_empty() {
+        let flat = raw
+            .color_matrix
+            .get(&rawler::imgop::xyz::Illuminant::D65)
+            .or_else(|| raw.color_matrix.values().next());
+        if let Some(flat) = flat {
+            // Need at least a 3×3 (9 entries). 12 entries = 3×4 RGBE; we read
+            // the first 3 of each 3- or 4-wide row. Anything else is junk.
+            let cols = flat.len() / 3;
+            if flat.len() % 3 == 0 && (3..=4).contains(&cols) {
+                let mut m = [[0.0f32; 3]; 3];
+                for (i, row) in m.iter_mut().enumerate() {
+                    for (j, cell) in row.iter_mut().enumerate() {
+                        *cell = flat[i * cols + j];
+                    }
+                }
+                if matrix_3x3_is_usable(&m) {
+                    return (m, MatrixSource::ColorMatrix);
+                }
+            }
+        }
+    }
+
+    // 2) Fallback: the rawler-deprecated xyz_to_cam (first 3 RGB rows). This is
+    //    what the in-catalog Bayer decoders and the synthetic tests populate.
+    let from_xyz: [[f32; 3]; 3] = [raw.xyz_to_cam[0], raw.xyz_to_cam[1], raw.xyz_to_cam[2]];
+    if matrix_3x3_is_usable(&from_xyz) {
+        return (from_xyz, MatrixSource::XyzToCam);
+    }
+
+    // 3) Both sources degenerate: signal the caller to use the identity
+    //    passthrough. We return zeros + Identity so the caller logs and swaps
+    //    in IDENTITY_MATRIX_3 (never composing the zero matrix into a NaN).
+    ([[0.0; 3]; 3], MatrixSource::Identity)
 }
 
 /// Compose the per-pixel camera-RGB → linear-sRGB 3×3 matrix once.
@@ -244,9 +404,9 @@ pub fn develop_to_display_oriented(
 ///   rgb2cam = normalize( xyz_to_cam[R,G,B rows] · SRGB_TO_XYZ_D65 )
 ///   cam2rgb = pseudo_inverse(rgb2cam)
 ///
-/// E-channel fold: `xyz_to_cam` is [[f32;3];4] (4 camera channels R,G,B,E × 3
-/// XYZ). For an RGB Bayer sensor (CFA arity 3) we use ONLY the first three
-/// rows — the E row maps a channel the demosaiced [R,G,B] pixel does not have.
+/// E-channel fold: the source matrix is 3 XYZ rows × (3 or 4) camera channels;
+/// we use ONLY the first three camera columns — the E column maps a channel the
+/// demosaiced [R,G,B] pixel does not have (see `xyz_to_cam_rgb_from_source`).
 /// The `normalize` step (each row summed to 1.0) is what guarantees neutral:
 /// a flat camera grey maps to a flat sRGB grey. WHY NOT the literal
 /// `cam_to_xyz_normalized()` the PLAN body names: that method normalizes so
@@ -256,14 +416,109 @@ pub fn develop_to_display_oriented(
 /// composing through `SRGB_TO_XYZ_D65` and normalizing the result — so we
 /// follow the working path, not the broken-by-name one. (OD-2: trust the
 /// simple neutral path; documented deviation for the careful review.)
-fn compose_cam_rgb_to_linear_srgb(raw: &RawImage) -> [[f32; 3]; 3] {
-    use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
-    // First three rows of xyz_to_cam: the R,G,B camera channels (drop E).
-    let xyz_to_cam_rgb: [[f32; 3]; 3] = [raw.xyz_to_cam[0], raw.xyz_to_cam[1], raw.xyz_to_cam[2]];
+///
+/// ROBUSTNESS (the real-DNG-black fix): we (a) source the matrix from the best
+/// non-degenerate of `color_matrix` / `xyz_to_cam`, and (b) validate the
+/// COMPOSED result is finite and non-degenerate before returning it. If any
+/// stage yields NaN/inf/singular, we fall back to the identity matrix (a
+/// neutral, slightly-off-colour but VISIBLE develop) rather than emitting NaN
+/// pixels that clamp to all-black. The chosen source is returned so the caller
+/// can log it ONCE per develop (the founder's black-screen debug surface).
+fn compose_cam_rgb_to_linear_srgb(raw: &RawImage) -> ([[f32; 3]; 3], MatrixSource) {
+    use rawler::imgop::matrix::{IDENTITY_MATRIX_3, multiply, normalize, pseudo_inverse};
+
+    let (xyz_to_cam_rgb, source) = xyz_to_cam_rgb_from_source(raw);
+    // Both real sources were degenerate: skip composition entirely (composing
+    // the zero matrix is exactly what produced NaN) and use identity.
+    if source == MatrixSource::Identity {
+        return (IDENTITY_MATRIX_3, MatrixSource::Identity);
+    }
+
     // rgb2cam: linear-sRGB → camera, row-normalized so camera-neutral is
     // sRGB-neutral; cam2rgb is its inverse (camera → linear sRGB).
     let rgb2cam = normalize(multiply(&xyz_to_cam_rgb, &SRGB_TO_XYZ_D65));
-    pseudo_inverse(rgb2cam)
+    // Guard the COMPOSED matrix before inverting: even a finite, non-zero
+    // source can compose to a row that sums to zero (then normalize leaves it
+    // zero -> pseudo_inverse divides by zero -> NaN). Catch it here.
+    if !matrix_3x3_is_usable(&rgb2cam) {
+        return (IDENTITY_MATRIX_3, MatrixSource::Identity);
+    }
+    let cam2rgb = pseudo_inverse(rgb2cam);
+    // Final guard: pseudo_inverse has no pivoting, so a near-singular rgb2cam
+    // can still slip a NaN/inf through. If the inverse is not all-finite, fall
+    // back to identity rather than ship NaN pixels (the all-black failure).
+    if !cam2rgb.iter().all(|row| row.iter().all(|v| v.is_finite())) {
+        return (IDENTITY_MATRIX_3, MatrixSource::Identity);
+    }
+    (cam2rgb, source)
+}
+
+/// Min/max/mean of a float buffer, sampled with a stride so the diagnostic is
+/// cheap on a 50MP raster (a few thousand reads, not 50M). Used ONCE per
+/// develop to log the scaled-data range — not in any per-pixel hot loop.
+struct SampleStats {
+    min: f32,
+    max: f32,
+    mean: f32,
+    count: usize,
+}
+
+/// Stride the buffer to roughly `TARGET` samples and report range/mean. NaN/inf
+/// samples are folded in honestly (min/max via partial compares) so a NaN in
+/// the scaled data still shows up as a non-finite mean rather than being hidden.
+fn sample_stats(data: &[f32]) -> SampleStats {
+    const TARGET: usize = 4096;
+    if data.is_empty() {
+        return SampleStats {
+            min: 0.0,
+            max: 0.0,
+            mean: 0.0,
+            count: 0,
+        };
+    }
+    let stride = (data.len() / TARGET).max(1);
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for &v in data.iter().step_by(stride) {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        sum += v as f64;
+        count += 1;
+    }
+    SampleStats {
+        min,
+        max,
+        mean: (sum / count as f64) as f32,
+        count,
+    }
+}
+
+/// Min/max/mean of the developed u8 RGB buffer (whole buffer; it is already in
+/// memory and the develop is not in a tight loop here). `max == 0` is the
+/// all-black tell the founder's log surfaces.
+fn byte_stats(rgb: &[u8]) -> (u8, u8, f32) {
+    if rgb.is_empty() {
+        return (0, 0, 0.0);
+    }
+    let mut min = u8::MAX;
+    let mut max = u8::MIN;
+    let mut sum = 0u64;
+    for &b in rgb {
+        if b < min {
+            min = b;
+        }
+        if b > max {
+            max = b;
+        }
+        sum += b as u64;
+    }
+    (min, max, (sum as f64 / rgb.len() as f64) as f32)
 }
 
 /// Apply WB (per-channel multiply), the camera→sRGB matrix, and the sRGB gamma
@@ -705,6 +960,162 @@ mod tests {
         );
         let img = develop_to_display_oriented(raw, 1).expect("develops float data");
         assert_eq!(img.dimensions(), (4, 4));
+    }
+
+    /// THE REAL-DNG-BLACK REGRESSION GUARD. rawler's DNG decoder leaves
+    /// `xyz_to_cam` all-zero and populates only `color_matrix`; the old code
+    /// composed the zero matrix into a NaN inverse, so every pixel clamped to
+    /// 0 (all-black). Here we build that exact pathology: a non-black RGGB
+    /// mosaic with `xyz_to_cam` all-zero AND `color_matrix` empty (the
+    /// worst-case catalog-miss). The develop MUST NOT be all-black and MUST NOT
+    /// contain NaN-derived zeros — the identity fallback keeps it visible.
+    #[test]
+    fn degenerate_xyz_to_cam_does_not_develop_black() {
+        let (w, h) = (4usize, 4usize);
+        let cfa = CFA::new("RGGB");
+        // A clearly non-black mosaic (mid-grey-ish per channel).
+        let to_u16 = |v: f32| (v * u16::MAX as f32) as u16;
+        let mut pix = vec![0u16; w * h];
+        for row in 0..h {
+            for col in 0..w {
+                pix[row * w + col] = match cfa.color_at(row, col) {
+                    0 => to_u16(0.5),
+                    1 => to_u16(0.5),
+                    _ => to_u16(0.5),
+                };
+            }
+        }
+        // Camera with ZERO xyz_to_cam and EMPTY color_matrix: the degenerate
+        // catalog-miss DNG shape. (Camera::default() already zeroes both, but
+        // we spell it out so the intent is unmissable.)
+        let camera = Camera {
+            xyz_to_cam: [[0.0; 3]; 4],
+            color_matrix: std::collections::HashMap::new(),
+            ..Camera::default()
+        };
+        let black = BlackLevel::new(&[0u16], 1, 1, 1);
+        let mut raw = RawImage::new_with_data(
+            camera,
+            RawImageData::Integer(pix),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, 1.0],
+            rggb_config(),
+            Some(black),
+            Some(WhiteLevel::new(vec![u16::MAX as u32; 1])),
+            false,
+        );
+        raw.crop_area = None;
+        raw.active_area = None;
+        let img = develop_to_display_oriented(raw, 1).expect("develops via fallback, not black");
+        let c = img.to_rgb8();
+        // Not all-black: at least the centre pixel must be non-zero, and no
+        // channel may be NaN-derived (NaN -> 0 via clamp, so "non-zero" is the
+        // observable guard). A 0.5 input through identity -> ~188 sRGB.
+        let p = c.get_pixel(2, 2);
+        assert!(
+            p[0] > 0 && p[1] > 0 && p[2] > 0,
+            "degenerate matrix produced black/NaN pixel: {:?}",
+            p
+        );
+    }
+
+    /// The non-degenerate guard unit: `matrix_3x3_is_usable` rejects an all-zero
+    /// matrix, a single zero row, and any non-finite entry, but accepts a real
+    /// matrix. This is the predicate that stands between a real DNG and a black
+    /// screen, so it gets its own direct test.
+    #[test]
+    fn matrix_usable_predicate_rejects_degenerate() {
+        // Healthy: rows sum non-zero, all finite.
+        assert!(matrix_3x3_is_usable(&[
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ]));
+        // All-zero (the catalog-miss xyz_to_cam): rejected.
+        assert!(!matrix_3x3_is_usable(&[[0.0; 3]; 3]));
+        // One zero row (would make pseudo_inverse divide by zero): rejected.
+        assert!(!matrix_3x3_is_usable(&[
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ]));
+        // Non-finite entry (a NaN already in the source): rejected.
+        assert!(!matrix_3x3_is_usable(&[
+            [f32::NAN, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ]));
+    }
+
+    /// A real `color_matrix` (DNG ColorMatrix shape) is used as the matrix
+    /// source when `xyz_to_cam` is zero, and develops non-black. Uses the
+    /// XYZ(D65)->camera identity profile (so the develop round-trips a neutral
+    /// grey) installed via `color_matrix`, NOT `xyz_to_cam` — proving the
+    /// real-DNG path (color_matrix, xyz_to_cam empty) produces a real image.
+    #[test]
+    fn color_matrix_source_develops_when_xyz_to_cam_zero() {
+        use rawler::imgop::xyz::Illuminant;
+        let (w, h) = (4usize, 4usize);
+        let cfa = CFA::new("RGGB");
+        let to_u16 = |v: f32| (v * u16::MAX as f32) as u16;
+        let mut pix = vec![0u16; w * h];
+        for row in 0..h {
+            for col in 0..w {
+                pix[row * w + col] = match cfa.color_at(row, col) {
+                    0 => to_u16(0.4),
+                    1 => to_u16(0.4),
+                    _ => to_u16(0.4),
+                };
+            }
+        }
+        // XYZ(D65) -> linear-sRGB as a flat 3x3 ColorMatrix (row-major). This is
+        // the inverse of SRGB_TO_XYZ_D65, so compose_cam_rgb_to_linear_srgb
+        // collapses to ~identity and a neutral grey stays neutral.
+        #[allow(clippy::excessive_precision)]
+        let flat: Vec<f32> = vec![
+            3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434,
+            -0.2040259, 1.0572252,
+        ];
+        let mut color_matrix = std::collections::HashMap::new();
+        color_matrix.insert(Illuminant::D65, flat);
+        let camera = Camera {
+            xyz_to_cam: [[0.0; 3]; 4], // zero: force the color_matrix path
+            color_matrix,
+            ..Camera::default()
+        };
+        let black = BlackLevel::new(&[0u16], 1, 1, 1);
+        let mut raw = RawImage::new_with_data(
+            camera,
+            RawImageData::Integer(pix),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, 1.0],
+            rggb_config(),
+            Some(black),
+            Some(WhiteLevel::new(vec![u16::MAX as u32; 1])),
+            false,
+        );
+        raw.crop_area = None;
+        raw.active_area = None;
+        let img = develop_to_display_oriented(raw, 1).expect("develops via color_matrix");
+        let c = img.to_rgb8();
+        let p = c.get_pixel(2, 2);
+        // Non-black and near-neutral (identity-equivalent profile).
+        assert!(
+            p[0] > 0 && p[1] > 0 && p[2] > 0,
+            "color_matrix path black: {:?}",
+            p
+        );
+        let dr = (p[0] as i16 - p[1] as i16).abs();
+        let db = (p[1] as i16 - p[2] as i16).abs();
+        assert!(
+            dr <= 3 && db <= 3,
+            "color_matrix neutral grey tinted: {:?}",
+            p
+        );
     }
 
     // NOTE (founder-machine, #[ignore]): a real-RAW timing + visual check —
