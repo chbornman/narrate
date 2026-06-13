@@ -204,7 +204,7 @@ describe("auto-advance wiring (featureset §4, D7 default OFF)", () => {
     await ui.leaveLook();
     ui.summonNote();
     await ui.submitNote("session thought");
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
   });
 });
 
@@ -494,7 +494,7 @@ describe("P4.2 contract flows", () => {
     // list_folder's empty mock can't wipe them before openLook).
     await ui.openLook("c");
     await ui.perform({ kind: "go-grid" });
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
     // The same image stays active back in the grid.
     expect(ui.grid.unitHashes[ui.grid.sel.focus]).toBe("c");
     // And from a query scope, G returns to the underlying source (a folder).
@@ -524,9 +524,9 @@ describe("P4.2 contract flows", () => {
   // semantics — pointer paths and the frozen union both rely on it.
   it("Look entry/close is symmetric: look-close ≡ Escape", async () => {
     await ui.openLook("b");
-    expect(ui.surface).toBe("look");
+    expect(ui.viewMode).toBe("look");
     await ui.perform({ kind: "look-close" });
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
     expect(ui.grid.unitHashes[ui.grid.sel.focus]).toBe("b"); // same image active
   });
 });

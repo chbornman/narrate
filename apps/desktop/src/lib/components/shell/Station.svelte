@@ -56,7 +56,7 @@
       ingest: ui.shell.ingest,
       scope: ui.shell.scope,
       lookPosition:
-        ui.surface === "look" && ui.look.order.length > 0
+        ui.viewMode === "look" && ui.look.order.length > 0
           ? { index: ui.look.index, total: ui.look.order.length }
           : null,
       // §5.4: a still-streaming utterance bound to an earlier scope
@@ -133,7 +133,7 @@
   const POPOVER_THUMB_MAX = 8;
   const popThumbs = $derived(
     scopeTargets({
-      surface: ui.surface,
+      viewMode: ui.viewMode,
       // Search is no longer a separate selection surface (M3): results are
       // grid cells, so the scope is the grid selection in every non-Look
       // case. searchOpen/searchSelection held false/empty for scope.ts.
@@ -141,6 +141,8 @@
       gridSelection: ui.grid.selectionTargets,
       searchSelection: [],
       lookTargets: ui.look.currentTargets,
+      // The visualizer's selected node owns scope when active (R6).
+      viewSelection: ui.viewSelection,
     }).slice(0, POPOVER_THUMB_MAX),
   );
   const popMore = $derived(Math.max(0, ui.shell.scope.count - POPOVER_THUMB_MAX));

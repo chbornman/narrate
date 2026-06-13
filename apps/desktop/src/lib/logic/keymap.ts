@@ -167,7 +167,7 @@ export type Action =
 /** The P3.2 KeyContext fields — still required, so existing fixtures and
  * callers compile unchanged. */
 type LegacyContextKeys =
-  | "surface"
+  | "viewMode"
   | "searchOpen"
   | "inputFocused"
   | "searchInputFocused"

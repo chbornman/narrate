@@ -1,7 +1,8 @@
 /**
  * MODULE-LEVEL persisted state for the Visualizer (the semantic topic-graph
- * lens). The lens is mounted/unmounted by an `{#if ui.graphOpen}` gate, so the
- * component instance is DESTROYED on close and re-created on open. Without this
+ * lens). The lens is mounted/unmounted by the `viewMode === "visualizer"`
+ * render arm (DESIGN-VIEW-MODES.md), so the component instance is DESTROYED on
+ * close and re-created on open. Without this
  * module the reopen path re-ran EVERYTHING from scratch (re-fetch affinities,
  * re-seed the golden-spiral layout losing the settled positions, reload every
  * thumbnail, recompute the field) — the founder's "leaving and coming back

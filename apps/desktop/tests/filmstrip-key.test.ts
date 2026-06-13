@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { dispatch, type KeyContext, type KeyInput } from "../src/lib/logic/keymap";
 
 const base: KeyContext = {
-  surface: "grid",
+  viewMode: "grid",
   searchOpen: false,
   inputFocused: false,
   searchInputFocused: false,
@@ -33,7 +33,7 @@ describe("F toggles the filmstrip on BOTH surfaces", () => {
   });
 
   it("dispatches toggle-filmstrip in Look (unchanged)", () => {
-    expect(dispatch(key("f"), { ...base, surface: "look" })).toEqual({
+    expect(dispatch(key("f"), { ...base, viewMode: "look" })).toEqual({
       kind: "toggle-filmstrip",
     });
   });
@@ -41,7 +41,7 @@ describe("F toggles the filmstrip on BOTH surfaces", () => {
   it("still yields to a focused rail on either surface", () => {
     const railFocused = { ...base, railOpen: true, railFocused: true };
     expect(dispatch(key("f"), railFocused)).toBeNull();
-    expect(dispatch(key("f"), { ...railFocused, surface: "look" })).toBeNull();
+    expect(dispatch(key("f"), { ...railFocused, viewMode: "look" })).toBeNull();
   });
 
   it("is suppressed while a text input is focused (§11)", () => {

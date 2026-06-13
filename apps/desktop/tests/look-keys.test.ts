@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { dispatch, type KeyContext, type KeyInput } from "../src/lib/logic/keymap";
 
 const look: KeyContext = {
-  surface: "look",
+  viewMode: "look",
   searchOpen: false,
   inputFocused: false,
   searchInputFocused: false,
@@ -47,7 +47,7 @@ describe("R — flip the displayed stack member (featureset §5)", () => {
 
   it("does not fire on the grid surface from this row (Grid's R is Stage A's)", () => {
     // Scope eligibility only — no assertion about what Grid binds to "r".
-    const action = dispatch(key("r"), { ...look, surface: "grid" });
+    const action = dispatch(key("r"), { ...look, viewMode: "grid" });
     expect(action === null || action.kind === "flip-stack-member").toBe(true);
     if (action !== null) expect(action.kind).not.toBe("look-nav");
   });
@@ -81,7 +81,7 @@ describe("zoom chord residue", () => {
   });
 
   it("Z does not exist on the grid surface (scope eligibility)", () => {
-    expect(dispatch(key("z"), { ...look, surface: "grid" })).toBeNull();
+    expect(dispatch(key("z"), { ...look, viewMode: "grid" })).toBeNull();
   });
 });
 

@@ -119,7 +119,7 @@ export const GLOBAL_DEFS: ActionDef[] = [
     available: always,
     // Grid needs a selection; Look always rates the viewed image
     // (CAPTURE §10: session scope → rating keys do nothing).
-    enabled: (ctx) => ctx.surface === "look" || ctx.hasSelection,
+    enabled: (ctx) => ctx.viewMode === "look" || ctx.hasSelection,
     toAction: (_ctx, arg) => ({ kind: "rate", value: arg as number }),
     options: () =>
       [0, 1, 2, 3, 4, 5].map((v) => ({

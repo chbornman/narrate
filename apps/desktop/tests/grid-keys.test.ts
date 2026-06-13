@@ -11,7 +11,7 @@ import { dispatch, withDefaults, type KeyContext, type KeyInput } from "../src/l
 import { menuModel, type MenuRow } from "../src/lib/actions/menus";
 
 const base: KeyContext = {
-  surface: "grid",
+  viewMode: "grid",
   searchOpen: false,
   inputFocused: false,
   searchInputFocused: false,
@@ -31,7 +31,7 @@ const key = (key: string, mods: Partial<KeyInput> = {}): KeyInput => ({
 describe("T cycles cell info (featureset §1)", () => {
   it("dispatches in Grid; never in Look; suppressed while typing", () => {
     expect(dispatch(key("t"), base)).toEqual({ kind: "cycle-cell-info" });
-    expect(dispatch(key("t"), { ...base, surface: "look" })).toBeNull();
+    expect(dispatch(key("t"), { ...base, viewMode: "look" })).toBeNull();
     expect(dispatch(key("t"), { ...base, inputFocused: true })).toBeNull();
   });
 });
@@ -69,7 +69,7 @@ describe("Home/End and PageUp/PageDown (featureset §1)", () => {
   });
 
   it("stay with the grid surface (nothing in Look; rail focus gates)", () => {
-    expect(dispatch(key("Home"), { ...base, surface: "look" })).toBeNull();
+    expect(dispatch(key("Home"), { ...base, viewMode: "look" })).toBeNull();
     expect(dispatch(key("PageDown"), { ...base, railOpen: true, railFocused: true })).toBeNull();
   });
 });

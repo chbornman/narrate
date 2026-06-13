@@ -176,7 +176,7 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
       [() => ui.gridScope.kind !== "query", "clear query scope"],
       [() => !ui.barFocused, "blur search bar"],
       // Founder, June 2026: Look→Grid keeps the inspector open.
-      [() => ui.surface === "grid", "Look → Grid"],
+      [() => ui.viewMode === "grid", "Look → Grid"],
       [() => ui.inspector.open === false, "inspector"],
       [() => ui.grid.sel.order.length === 0, "selection"],
     ];
@@ -189,7 +189,7 @@ describe("Esc peels the live shell one layer per press (§0: sacred)", () => {
         expect(peels[j][0](), `${peels[j][1]} peeled early`).toBe(false);
     }
     await ui.escape(); // layer 15: none — never quits
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
   });
 });
 
@@ -211,16 +211,16 @@ describe("G goes home from everywhere", () => {
     }));
     await ui.openLook("b");
     await ui.perform({ kind: "go-grid" });
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
     // G from a query scope returns to the underlying source (M3).
     ui.query = "fog";
     await ui.runQueryScope("lexical");
     expect(ui.gridScope.kind).toBe("query");
     await ui.perform({ kind: "go-grid" });
     expect(ui.gridScope.kind).not.toBe("query");
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
     await ui.perform({ kind: "go-grid" }); // already home: stays home
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
   });
 });
 
@@ -304,7 +304,7 @@ function genContext(rnd: () => number): ActionContext {
   const bool = () => rnd() < 0.5;
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)];
   return withDefaults({
-    surface: pick(["grid", "look"] as const),
+    viewMode: pick(["grid", "look"] as const),
     searchOpen: bool(),
     inputFocused: bool(),
     searchInputFocused: bool(),

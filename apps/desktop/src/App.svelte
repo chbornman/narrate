@@ -55,8 +55,9 @@
   import Filmstrip from "./lib/components/shell/Filmstrip.svelte";
   import GridSurface from "./lib/components/grid/GridSurface.svelte";
   import LookSurface from "./lib/components/look/LookSurface.svelte";
-  // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): a force-directed
-  // overlay over the center column, gated on ui.graphOpen.
+  // The visualizer view (DESIGN-VIEW-MODES.md): a force-directed map of the
+  // current scope, now a PEER view rendered when ui.viewMode === "visualizer"
+  // (no longer an overlay boolean).
   import TopicGraph from "./lib/components/graph/TopicGraph.svelte";
   import Inspector from "./lib/components/inspector/Inspector.svelte";
   import EmptyState from "./lib/primitives/EmptyState.svelte";
@@ -76,9 +77,10 @@
   });
 
   const title = $derived.by(() => {
-    // Search is a grid scope now (M3), not a surface — the title follows the
+    // Search is a grid scope now (M3), not a view — the title follows the
     // grid's source/folder name (folderName), the same as any other scope.
-    if (ui.surface === "look") {
+    // Look titles with the viewed file; grid + visualizer use the scope name.
+    if (ui.viewMode === "look") {
       const item = ui.grid.items.find((i) => i.hash === ui.look.currentHash);
       return item?.fileName ?? "Photoproof";
     }
@@ -293,7 +295,10 @@
          canvas width by construction (founder, June 12 2026) -->
     <div class="center">
       <div class="surface">
-        {#if ui.surface === "grid"}
+        <!-- ONE view-mode chain (DESIGN-VIEW-MODES.md): grid / visualizer /
+             look are peer views — the visualizer renders INSTEAD of the grid
+             (TopicGraph fills its container), not over it. -->
+        {#if ui.viewMode === "grid"}
           {#if ui.roots.length === 0}
             <FirstRun />
           {:else}
@@ -353,15 +358,13 @@
               </div>
             {/if}
           {/if}
-        {:else}
-          <LookSurface />
-        {/if}
-
-        <!-- Topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): a force-directed map of
-             the current scope, overlaid on the center column. Self-contained;
-             it reads ui.graphScope() and re-uses the grid's scope/Look flows. -->
-        {#if ui.graphOpen}
+        {:else if ui.viewMode === "visualizer"}
+          <!-- The visualizer (DESIGN-VIEW-MODES.md): a force-directed map of
+               the current scope. Self-contained; it reads ui.graphScope() and
+               re-uses the grid's scope/Look flows. -->
           <TopicGraph />
+        {:else if ui.viewMode === "look"}
+          <LookSurface />
         {/if}
       </div>
 

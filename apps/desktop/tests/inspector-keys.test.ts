@@ -12,7 +12,7 @@ import { menuModel } from "../src/lib/actions/menus";
 import { withDefaults } from "../src/lib/logic/keymap";
 
 const base: KeyContext = {
-  surface: "grid",
+  viewMode: "grid",
   searchOpen: false,
   inputFocused: false,
   searchInputFocused: false,
@@ -42,7 +42,7 @@ describe("I / J open their tabs (featureset §3, D2)", () => {
   });
 
   it("…and in Look (same keys everywhere, §0)", () => {
-    const look = { ...base, surface: "look" as const };
+    const look = { ...base, viewMode: "look" as const };
     expect(dispatch(key("i"), look)).toEqual({
       kind: "open-inspector",
       tab: "metadata",

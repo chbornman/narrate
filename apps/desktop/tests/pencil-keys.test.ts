@@ -17,7 +17,7 @@ import {
 import { menuModel } from "../src/lib/actions/menus";
 
 const look: KeyContext = {
-  surface: "look",
+  viewMode: "look",
   searchOpen: false,
   inputFocused: false,
   searchInputFocused: false,
@@ -37,7 +37,7 @@ const key = (key: string, mods: Partial<KeyInput> = {}): KeyInput => ({
 describe("B — sticky pencil toggle (UI §4.4: a held key cramps the hand)", () => {
   it("dispatches in Look, never in Grid", () => {
     expect(dispatch(key("b"), look)).toEqual({ kind: "pencil-pen" });
-    expect(dispatch(key("b"), { ...look, surface: "grid" })).toBeNull();
+    expect(dispatch(key("b"), { ...look, viewMode: "grid" })).toBeNull();
   });
 
   it("stays LIVE while the overlay is hidden (a bound key must never be dead)", () => {

@@ -18,7 +18,10 @@
  */
 
 export interface ScopeSource {
-  surface: "grid" | "look";
+  /** The active center view (DESIGN-VIEW-MODES.md): replaces the old
+   * `surface` + `graphOpen` pair. The visualizer is a peer view here, not an
+   * overlay boolean. */
+  viewMode: "grid" | "visualizer" | "look";
   searchOpen: boolean;
   /** Stack-expanded grid selection targets, in selection order. */
   gridSelection: string[];
@@ -27,25 +30,24 @@ export interface ScopeSource {
   /** Hashes shown in Look — [display] or [display, alt] for a collapsed
    * pair; empty when not in Look. */
   lookTargets: string[];
-  /** The Visualizer (topic-graph) overlay is open. While it is, the graph is
-   * the ACTIVE surface for dictation/rating and OWNS the write scope (it sits
-   * on top of the grid). */
-  graphOpen?: boolean;
-  /** The image node SELECTED on the graph, or null when nothing is selected.
-   * A selected node scopes to itself; null is the NEUTRAL session scope. */
-  graphSelection?: string | null;
+  /** The image SELECTED in the visualizer (its hash), or null when nothing is
+   * selected. A selected node scopes to itself; null is the NEUTRAL session
+   * scope. Renamed from `graphSelection` — no longer graph-specific, a future
+   * compare view could reuse it (DESIGN-VIEW-MODES.md). */
+  viewSelection?: string | null;
 }
 
 export function scopeTargets(src: ScopeSource): string[] {
-  // The Visualizer overlay takes scope precedence while open: dictation and
-  // rating on the graph must land on the SELECTED node (or be session-scoped
-  // when nothing is selected), never on the stale grid/Look selection
-  // underneath. Selected node -> [hash]; nothing selected -> [] (neutral),
-  // so a graph dictation becomes a session note instead of mis-targeting.
-  if (src.graphOpen === true)
-    return src.graphSelection != null ? [src.graphSelection] : [];
+  // The visualizer OWNS the write scope while it is the active view:
+  // dictation and rating must land on the SELECTED node (or be session-scoped
+  // when nothing is selected), never on the stale grid/Look selection. R6
+  // seed-from-active means the selection is the photo you carried in, not
+  // stale; null is the neutral session scope (a fresh scope with nothing
+  // focused), so a visualizer dictation becomes a session note.
+  if (src.viewMode === "visualizer")
+    return src.viewSelection != null ? [src.viewSelection] : [];
   if (src.searchOpen) return [...src.searchSelection];
-  if (src.surface === "look") return [...src.lookTargets];
+  if (src.viewMode === "look") return [...src.lookTargets];
   return [...src.gridSelection];
 }
 

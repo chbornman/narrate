@@ -11,7 +11,7 @@ import { withDefaults } from "../src/lib/logic/keymap";
 
 const ctx = (over: Partial<Parameters<typeof withDefaults>[0]> = {}) =>
   withDefaults({
-    surface: "grid",
+    viewMode: "grid",
     searchOpen: false,
     inputFocused: false,
     searchInputFocused: false,

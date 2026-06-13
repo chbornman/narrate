@@ -1,7 +1,8 @@
 <script module lang="ts">
   /**
    * MODULE-LEVEL Visualizer caches (one set per app session, NOT per component
-   * instance). These outlive the lens' `{#if ui.graphOpen}` mount/unmount so that
+   * instance). These outlive the lens' `viewMode === "visualizer"` render-arm
+   * mount/unmount so that
    * closing + reopening the Visualizer reuses the work it already paid for
    * instead of recomputing everything (the founder's "leaving and coming back
    * re-renders everything from scratch"):
@@ -976,7 +977,7 @@
     // selection ring so the user sees which image their voice/rating targets
     // while staying on the graph. Read once per frame; reading the $state here
     // ties the redraw to selection changes.
-    const selectedHash = ui.graphSelection;
+    const selectedHash = ui.viewSelection;
     ctx.clearRect(0, 0, width, height);
     // image nodes. Each draws as its TINY preview thumbnail (founder: "tiny
     // previews as the markers"); until the thumb loads, the old colored DOT is
@@ -1466,8 +1467,9 @@
   }
 
   // -- persist / restore across close → reopen (the instant-reopen fix) -------
-  // The lens is mounted/unmounted by `{#if ui.graphOpen}`, so the component
-  // instance is destroyed on close. Without persistence, reopening re-ran the
+  // The lens is mounted/unmounted by the `{#if ui.viewMode === "visualizer"}`
+  // render arm, so the component instance is destroyed on close (leave to grid
+  // or open Look). Without persistence, reopening re-ran the
   // affinity fetch, re-seeded the layout (losing the settled positions),
   // reloaded thumbnails, and recomputed the field — the founder's "leaving and
   // coming back re-renders everything from scratch". We snapshot the settled
@@ -1705,12 +1707,12 @@
   });
 
   // The graph SELECTION ring repaints reactively: when the sim has settled the
-  // draw loop is idle, so a select/deselect (ui.graphSelection) would not show
+  // draw loop is idle, so a select/deselect (ui.viewSelection) would not show
   // until the next frame. Reading the $state here and repainting keeps the ring
   // in sync with the selection the moment it changes (the bake-glow path does
   // the same via selectTopicForBake -> draw()).
   $effect(() => {
-    void ui.graphSelection;
+    void ui.viewSelection;
     untrack(() => {
       if (canvasEl) draw();
     });
@@ -1738,10 +1740,10 @@
     // twin of the double-click). The mic (Space) and rating keys stay live, so
     // they target the selected node through the reported scope.
     if (e.key === "Escape") {
-      if (ui.graphSelection !== null) void ui.selectGraphNode(null);
-      else void ui.closeGraph();
-    } else if (e.key === "Enter" && ui.graphSelection !== null) {
-      void ui.openFromGraph(ui.graphSelection);
+      if (ui.viewSelection !== null) void ui.selectGraphNode(null);
+      else void ui.leaveVisualizer();
+    } else if (e.key === "Enter" && ui.viewSelection !== null) {
+      void ui.openFromGraph(ui.viewSelection);
     }
   }}
 />
@@ -1825,7 +1827,7 @@
       Field
     </label>
 
-    <button class="close" onclick={() => ui.closeGraph()} aria-label="Close topic graph">
+    <button class="close" onclick={() => ui.leaveVisualizer()} aria-label="Close topic graph">
       Close
     </button>
   </header>

@@ -128,9 +128,9 @@ describe("topic gridScope feeds the grid in ranked order", () => {
   });
 
   it("openTopic leaves Look first then scopes (the rail drives the grid)", async () => {
-    ui.surface = "look";
+    ui.viewMode = "look";
     await ui.openTopic("harbor at dusk");
-    expect(ui.surface).toBe("grid");
+    expect(ui.viewMode).toBe("grid");
     expect(ui.gridScope.kind).toBe("topic");
   });
 });
