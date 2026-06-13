@@ -132,6 +132,14 @@ export class Ui {
   // small + clearly named so the parallel heatmap merge stays mechanical.
   graphOpen = $state(false);
 
+  /** The three-state Attention OVERLAY on the graph (heatmap x graph synthesis):
+   * "off" (the plain graph) / "engaged" (where attention lives) / "overlooked"
+   * (coherent but cold). Persisted like the other graph + heatmap toggles. The
+   * TopicGraph component owns the synthesis math + the intensity fetch (reusing
+   * the heatmap `image_intensity` command); this flag just survives sessions and
+   * is the one piece of overlay state the composition root holds. */
+  graphAttention = $state<prefs.AttentionMode>("off");
+
   // -- roots & folder tree (shared by rail + grid) ----------------------------
   roots = $state<RootDto[]>([]);
   tree = $state<FolderNode[]>([]);
@@ -300,6 +308,9 @@ export class Ui {
     // reportScope when the heat tint comes back on.
     this.heatOn = prefs.loadHeatOn();
     this.heatAllTime = prefs.loadHeatAllTime();
+    // Attention overlay on the graph (heatmap x graph synthesis), persisted like
+    // the heat tint so the lens reopens in the view the reviewer left it.
+    this.graphAttention = prefs.loadAttentionMode();
     try {
       this.applySettings(await ipc.settingsGet());
     } catch {
@@ -927,6 +938,15 @@ export class Ui {
    * the scope unless the user clicked a topic, which scopes explicitly). */
   closeGraph() {
     this.graphOpen = false;
+  }
+
+  /** Set the Attention overlay mode on the graph (Off / Engaged / Overlooked)
+   * and persist it. The TopicGraph component reacts to the change (fetching
+   * intensity + recomputing the synthesis); this just holds + persists the
+   * flag, like toggleHeat for the grid tint. */
+  setAttention(mode: prefs.AttentionMode) {
+    this.graphAttention = mode;
+    prefs.saveAttentionMode(mode);
   }
 
   /** The backend GraphScope for the lens, derived from the CURRENT grid scope

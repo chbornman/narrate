@@ -31,6 +31,13 @@
     type ImageNode,
     type TopicAnchor,
   } from "../../logic/forcegraph";
+  import {
+    engagedTopics,
+    nodeOverlay,
+    overlookedTopics,
+    type OverlayMode,
+    type TopicAttention,
+  } from "../../logic/synthesis";
 
   // -- topic + scope state ----------------------------------------------------
   let topics = $state<string[]>([]);
@@ -72,6 +79,27 @@
   /** The total image count behind the current layout (M), even when the sim runs
    * over far fewer super-nodes (N = nodeCount). The status reports both. */
   let imageTotal = $state(0);
+
+  // -- attention overlay (heatmap x graph synthesis) --------------------------
+  // The three-state Attention control (Off / Engaged / Overlooked) overlays the
+  // attention FIELD (per-image intensity from the heatmap) onto the semantic
+  // STRUCTURE (this graph). The persisted mode lives on the ui store; the
+  // intensity fetch (REUSING the heatmap `image_intensity` command) and the pure
+  // synthesis math (logic/synthesis.ts) live here so TopicGraph stays the thin
+  // renderer. The draw() loop reads `intensity` + the per-mode mapping per node.
+  const overlay = (): OverlayMode => ui.graphAttention;
+  /** hash -> normalized [0,1] engagement intensity for the in-scope set, fetched
+   * once per scope/mode/all-time change (NOT per frame). Empty until fetched or
+   * when the overlay is off. */
+  let intensity = $state<Map<string, number>>(new Map());
+  /** The ranked readout the header lists: "Engaged: <topic> ..." or
+   * "Overlooked: <topic> ...". Recomputed when the overlay, intensity, or layout
+   * changes. */
+  let attentionRanked = $state<TopicAttention[]>([]);
+  /** Per-topic overlooked-ness (normalized [0,1], indexed by topic) so a node can
+   * inherit its dominant topic's overlooked score for a cluster-level glow that
+   * agrees with the readout. Empty outside Overlooked mode. */
+  let overlookedByTopic: number[] = [];
 
   // -- canvas -----------------------------------------------------------------
   let canvasEl: HTMLCanvasElement | null = $state(null);
@@ -149,7 +177,84 @@
     nodeCount = nodes.length;
 
     loading = false;
+    // The overlay reads per-image intensity; a fresh affinity set means a fresh
+    // in-scope hash set, so re-fetch + re-rank against it.
+    void refreshOverlay();
     restartLoop();
+  }
+
+  // -- attention overlay: intensity fetch + synthesis -------------------------
+  /** Monotone token so a slow intensity fetch cannot overwrite a newer scope's
+   * (mirrors the heatmap's heatLoad guard). */
+  let overlayLoad = 0;
+
+  /** Fetch per-image intensity for the in-scope set and recompute the ranked
+   * readout + per-node mapping. REUSES the heatmap `image_intensity` command (no
+   * second intensity definition) over the FULL detail hashes (so a super-node's
+   * members resolve), honoring the heatmap's existing All-time concept via the
+   * shared ui.heatAllTime flag. Off mode clears the overlay. */
+  async function refreshOverlay() {
+    if (overlay() === "off") {
+      intensity = new Map();
+      attentionRanked = [];
+      overlookedByTopic = [];
+      draw();
+      return;
+    }
+    // The full detail hashes (every image), so a super-node's members resolve to
+    // their own intensity even while the sim runs over the aggregates.
+    const hashes = [...affinity.keys()];
+    const load = ++overlayLoad;
+    if (hashes.length === 0) {
+      intensity = new Map();
+    } else {
+      try {
+        const scores = await ipc.imageIntensity(hashes, ui.heatAllTime);
+        if (load !== overlayLoad) return; // a newer scope won
+        intensity = new Map(scores.map((s) => [s.hash, s.intensity]));
+      } catch {
+        // A degraded/unreachable backend leaves the overlay dark rather than
+        // throwing under the user (the graceful posture, like recompute()).
+        intensity = new Map();
+      }
+    }
+    recomputeRanking();
+    draw();
+  }
+
+  /** Recompute the ranked readout + the per-topic overlooked scores from the
+   * current nodes + intensity (pure synthesis math). Runs over the FULL detail
+   * nodes so the aggregation is over every image, not just the visible
+   * super-nodes. */
+  function recomputeRanking() {
+    const mode = overlay();
+    if (mode === "off") {
+      attentionRanked = [];
+      overlookedByTopic = [];
+      return;
+    }
+    // Aggregate over every image (the full detail set), so the readout reflects
+    // the whole scope even in LOD mode. A single-image node per hash with its
+    // real affinity is exactly what the synthesis math wants.
+    const detail: ImageNode[] = [...affinity.entries()].map(([hash, aff]) => ({
+      hash,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: aff,
+    }));
+    if (mode === "engaged") {
+      attentionRanked = engagedTopics(detail, intensity, topics.length);
+      overlookedByTopic = [];
+    } else {
+      const ranked = overlookedTopics(detail, intensity, topics.length);
+      attentionRanked = ranked;
+      // Index the overlooked score by topic so a node inherits its cluster's glow.
+      const byTopic = new Array(topics.length).fill(0);
+      for (const r of ranked) byTopic[r.topic] = r.score;
+      overlookedByTopic = byTopic;
+    }
   }
 
   async function loadSuggestions() {
@@ -215,50 +320,137 @@
     return [(sx - width / 2 - panX) / zoom, (sy - height / 2 - panY) / zoom];
   }
 
+  /** Read the canvas colors from the theme TOKENS (getComputedStyle), so the
+   * graph honors the chrome theme (a light mode just landed) instead of hardcoded
+   * hex. Cached per draw; the few token reads are cheap and the theme rarely
+   * changes mid-frame. The overlay GLOW uses --red-pencil, the one saturated
+   * accent (DECISIONS I5) reused as the attention highlight. */
+  interface CanvasColors {
+    superFill: string;
+    dragFill: string;
+    nodeFill: string;
+    anchorFill: string;
+    stroke: string;
+    text: string;
+    glow: string;
+  }
+  function canvasColors(): CanvasColors {
+    const cs = canvasEl ? getComputedStyle(canvasEl) : null;
+    const tok = (name: string, fallback: string): string => {
+      const v = cs?.getPropertyValue(name).trim();
+      return v !== undefined && v !== "" ? v : fallback;
+    };
+    return {
+      superFill: tok("--chrome", "#2a2a2a"),
+      dragFill: tok("--text", "#d6d6d6"),
+      nodeFill: tok("--text-dim", "#8a8a8a"),
+      anchorFill: tok("--bg-raised", "#161616"),
+      stroke: tok("--focus", "#cfcfcf"),
+      text: tok("--text", "#d6d6d6"),
+      glow: tok("--red-pencil", "#e03131"),
+    };
+  }
+
   function draw() {
     const ctx = canvasEl?.getContext("2d");
     if (!ctx) return;
+    const c = canvasColors();
+    const mode = overlay();
+    const overlayOn = mode !== "off";
     ctx.clearRect(0, 0, width, height);
     // image nodes. A LOD super-node (members present) draws as a larger disc
     // sized by member count, labeled with that count, so the aggregation is
-    // legible (DESIGN: "a super-node's size reflects its member count").
+    // legible (DESIGN: "a super-node's size reflects its member count"). With the
+    // Attention overlay ON each node also tints/sizes by its synthesis mapping:
+    // Engaged glows where attention lives; Overlooked glows coherent-but-cold.
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "12px system-ui, sans-serif";
     for (const n of nodes) {
       const [sx, sy] = toScreen(n.x, n.y);
       const isSuper = n.members !== undefined;
-      const radius = isSuper
+      const baseRadius = isSuper
         ? Math.min(22, 5 + Math.sqrt(n.members!.length) * 1.5)
         : n.fixed === true
           ? 5
           : 3.2;
+      // The per-node overlay mapping (glow + size). Off mode is a no-op
+      // (glow 0, sizeScale 1) so the plain graph is unchanged.
+      const ov = overlayOn
+        ? nodeOverlay(n, intensity, mode, overlookedByTopic)
+        : { glow: 0, sizeScale: 1, intensity: 0 };
+      const radius = baseRadius * ov.sizeScale;
+
+      // A glowing node gets a soft halo + the saturated accent fill, scaled by
+      // its glow weight; a dimmed node fades toward the faint node fill.
+      if (overlayOn && ov.glow > 0) {
+        ctx.save();
+        ctx.shadowColor = c.glow;
+        ctx.shadowBlur = 4 + 12 * ov.glow;
+        ctx.globalAlpha = 0.5 + 0.5 * ov.glow;
+      } else if (overlayOn) {
+        ctx.save();
+        // Recede the out-of-focus nodes so the highlighted bodies of work stand
+        // out (the "rest dims" half of the overlay).
+        ctx.globalAlpha = 0.35;
+      }
+
       ctx.beginPath();
       ctx.arc(sx, sy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isSuper ? "#2a2a2a" : n.fixed === true ? "#d6d6d6" : "#8a8a8a";
+      ctx.fillStyle =
+        overlayOn && ov.glow > 0
+          ? c.glow
+          : isSuper
+            ? c.superFill
+            : n.fixed === true
+              ? c.dragFill
+              : c.nodeFill;
       ctx.fill();
       if (isSuper) {
-        ctx.strokeStyle = "#cfcfcf";
+        ctx.strokeStyle = c.stroke;
         ctx.lineWidth = 1.5;
         ctx.stroke();
-        ctx.fillStyle = "#d6d6d6";
+        ctx.fillStyle = c.text;
         ctx.fillText(String(n.members!.length), sx, sy);
       }
+      if (overlayOn) ctx.restore();
     }
-    // topic anchors (drawn on top, with labels)
+    // topic anchors (drawn on top, with labels). In an overlay mode an anchor
+    // glows by its ranked attention score, so the readout and the ring agree.
     for (const a of anchors) {
       const [sx, sy] = toScreen(a.x, a.y);
+      const score = overlayOn ? (anchorScore.get(a.topic) ?? 0) : 0;
+      if (overlayOn && score > 0) {
+        ctx.save();
+        ctx.shadowColor = c.glow;
+        ctx.shadowBlur = 4 + 14 * score;
+      }
       ctx.beginPath();
       ctx.arc(sx, sy, 8, 0, Math.PI * 2);
-      ctx.fillStyle = "#161616";
-      ctx.strokeStyle = "#cfcfcf";
+      ctx.fillStyle = c.anchorFill;
+      ctx.strokeStyle = overlayOn && score > 0 ? c.glow : c.stroke;
       ctx.lineWidth = 2;
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = "#d6d6d6";
+      if (overlayOn && score > 0) ctx.restore();
+      ctx.fillStyle = c.text;
       ctx.fillText(topics[a.topic] ?? "", sx, sy - 16);
     }
   }
+
+  /** topic -> its current ranked score (Engaged total or Overlooked-ness),
+   * indexed for the anchor glow. Derived from the readout so the ring and the
+   * "Engaged: ... / Overlooked: ..." list agree. */
+  let anchorScore = $derived(
+    new Map(attentionRanked.map((r) => [r.topic, r.score])),
+  );
+
+  /** The ranked readout, trimmed to the topics that actually carry a non-zero
+   * score (strongest first), capped so a long topic list stays readable. */
+  const READOUT_MAX = 6;
+  let rankedNonzero = $derived(
+    attentionRanked.filter((r) => r.score > 1e-6).slice(0, READOUT_MAX),
+  );
 
   // -- pointer interaction ----------------------------------------------------
   let dragging: ImageNode | null = null;
@@ -414,6 +606,18 @@
     });
   });
 
+  // The Attention overlay reacts to the persisted mode (Off / Engaged /
+  // Overlooked) and the heatmap's All-time flag: a change re-fetches intensity
+  // (reusing image_intensity) + re-ranks. untrack so only those two retrigger it,
+  // not the whole reactive surface.
+  $effect(() => {
+    void ui.graphAttention;
+    void ui.heatAllTime;
+    untrack(() => {
+      if (tuning !== null) void refreshOverlay();
+    });
+  });
+
   // Keep the canvas backing store sized to its box.
   $effect(() => {
     if (canvasEl) {
@@ -465,6 +669,35 @@
       <input type="checkbox" bind:checked={fullLibrary} />
       whole library
     </label>
+
+    <!-- Attention overlay: Off / Engaged / Overlooked (heatmap x graph
+         synthesis). Engaged shows where attention LIVES; Overlooked shows the
+         coherent bodies of work you've barely touched. Persisted on the ui store. -->
+    <div class="attention" role="group" aria-label="Attention overlay">
+      <span class="attn-label">Attention</span>
+      <div class="attn-seg">
+        <button
+          class="attn-btn"
+          class:on={ui.graphAttention === "off"}
+          aria-pressed={ui.graphAttention === "off"}
+          onclick={() => ui.setAttention("off")}>Off</button
+        >
+        <button
+          class="attn-btn"
+          class:on={ui.graphAttention === "engaged"}
+          aria-pressed={ui.graphAttention === "engaged"}
+          title="Where your attention lives"
+          onclick={() => ui.setAttention("engaged")}>Engaged</button
+        >
+        <button
+          class="attn-btn"
+          class:on={ui.graphAttention === "overlooked"}
+          aria-pressed={ui.graphAttention === "overlooked"}
+          title="Coherent bodies of work you've barely touched"
+          onclick={() => ui.setAttention("overlooked")}>Overlooked</button
+        >
+      </div>
+    </div>
 
     <button class="close" onclick={() => ui.closeGraph()} aria-label="Close topic graph">
       Close
@@ -559,6 +792,30 @@
     {/if}
   </div>
 
+  <!-- Attention readout: ranks the topics by where attention lives (Engaged) or
+       which coherent themes are cold (Overlooked). Only the topics carrying a
+       non-zero score are listed, strongest first. -->
+  {#if ui.graphAttention !== "off" && topics.length > 0}
+    <div class="readout" aria-label="Attention readout">
+      <span class="readout-label">
+        {ui.graphAttention === "engaged" ? "Engaged" : "Overlooked"}:
+      </span>
+      {#if rankedNonzero.length > 0}
+        {#each rankedNonzero as r, i (r.topic)}
+          <span class="readout-topic">
+            {topics[r.topic]}{i < rankedNonzero.length - 1 ? " ·" : ""}
+          </span>
+        {/each}
+      {:else}
+        <span class="dim">
+          {ui.graphAttention === "engaged"
+            ? "no attention recorded in this scope yet"
+            : "nothing coherent and cold here yet"}
+        </span>
+      {/if}
+    </div>
+  {/if}
+
   <div
     class="canvas-wrap"
     bind:clientWidth={width}
@@ -628,6 +885,55 @@
     gap: 4px;
     color: var(--text-dim);
     font-size: 12px;
+  }
+  .attention {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .attn-label {
+    color: var(--text-dim);
+  }
+  .attn-seg {
+    display: inline-flex;
+    border: 1px solid var(--chrome);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .attn-btn {
+    border: none;
+    border-radius: 0;
+    border-left: 1px solid var(--chrome);
+    background: var(--bg-raised);
+    color: var(--text-dim);
+    padding: 3px 8px;
+  }
+  .attn-btn:first-child {
+    border-left: none;
+  }
+  .attn-btn.on {
+    background: var(--chrome-strong);
+    color: var(--text);
+  }
+  .readout {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 4px 12px;
+    font-size: 12px;
+    color: var(--text);
+    border-bottom: 1px solid var(--chrome);
+    flex-wrap: wrap;
+  }
+  .readout-label {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+  }
+  .readout .dim {
+    color: var(--text-faint);
   }
   button {
     background: var(--bg-raised);
