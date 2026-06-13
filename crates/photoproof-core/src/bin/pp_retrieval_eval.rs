@@ -21,9 +21,20 @@
 //!                     [--k N] [--json]
 //!                     [--s1 W] [--s2 W] [--s3 W] [--s4 W]
 //!
+//!   pp-retrieval-eval --synthetic [--k N] [--json] [--s1 W] [--s2 W] ...
+//!
 //!   Paths may also come from the environment (args win):
 //!     PP_RETRIEVAL_DB        the library SQLite database
 //!     PP_RETRIEVAL_QUERYSET  the golden query-set JSON
+//!
+//! SYNTHETIC MODE (`--synthetic`): builds a tiny deterministic in-process
+//! corpus (three seeded JPEGs, three distinctive remarks, three single-answer
+//! golden queries) in a tempdir, runs the SAME `evaluate` loop, and emits the
+//! SAME report shape — no real DB, no models, no setup. This is the CI-able,
+//! zero-setup search signal the regression guard (`scripts/tune-check.sh`)
+//! consumes: it is the runnable analogue of the `retrieval_eval_sample`
+//! integration test, deterministic on any machine. `--db`/`--queries` are
+//! ignored in this mode (the corpus and golden set are built in code).
 //!
 //! WEIGHT SWEEP (the point of the gate). Run the baseline, then re-run with
 //! one weight moved, and diff the two --json reports:
@@ -70,8 +81,13 @@ use photoproof_core::search::{FusionWeights, Searcher};
 const DEFAULT_K: usize = 10;
 
 struct Args {
-    db: PathBuf,
-    queries: PathBuf,
+    /// In `--synthetic` mode these two paths are unused (the corpus + golden
+    /// set are built in code); `Option` lets the parser leave them empty.
+    db: Option<PathBuf>,
+    queries: Option<PathBuf>,
+    /// Build a deterministic in-process corpus instead of opening a real DB —
+    /// the zero-setup, CI-able signal the regression guard runs.
+    synthetic: bool,
     k: Option<usize>,
     json: bool,
     weights: WeightOverrides,
@@ -104,6 +120,7 @@ impl WeightOverrides {
 fn usage() -> &'static str {
     "usage: pp-retrieval-eval --db <photoproof.db> --queries <queryset.json> \
      [--k N] [--json] [--s1 W] [--s2 W] [--s3 W] [--s4 W]\n\
+     or:    pp-retrieval-eval --synthetic [--k N] [--json] [--s1 W] ...\n\
      (paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET; args win)"
 }
 
@@ -112,6 +129,7 @@ fn parse_args() -> Result<Args, String> {
     // precedence so a one-off run can point elsewhere without unsetting env).
     let mut db = std::env::var_os("PP_RETRIEVAL_DB").map(PathBuf::from);
     let mut queries = std::env::var_os("PP_RETRIEVAL_QUERYSET").map(PathBuf::from);
+    let mut synthetic = false;
     let mut k: Option<usize> = None;
     let mut json = false;
     let mut weights = WeightOverrides::default();
@@ -131,6 +149,7 @@ fn parse_args() -> Result<Args, String> {
                 .map_err(|e| format!("flag {name}: {e}"))
         };
         match flag.as_str() {
+            "--synthetic" => synthetic = true,
             "--db" => db = Some(PathBuf::from(val("--db")?)),
             "--queries" => queries = Some(PathBuf::from(val("--queries")?)),
             "--k" => {
@@ -150,12 +169,23 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
-    let db = db.ok_or_else(|| format!("missing --db (or PP_RETRIEVAL_DB)\n{}", usage()))?;
-    let queries = queries
-        .ok_or_else(|| format!("missing --queries (or PP_RETRIEVAL_QUERYSET)\n{}", usage()))?;
+    // Real mode needs a DB + query set; synthetic mode builds both in code, so
+    // the paths stay optional and unvalidated there (any supplied are ignored).
+    if !synthetic {
+        if db.is_none() {
+            return Err(format!("missing --db (or PP_RETRIEVAL_DB)\n{}", usage()));
+        }
+        if queries.is_none() {
+            return Err(format!(
+                "missing --queries (or PP_RETRIEVAL_QUERYSET)\n{}",
+                usage()
+            ));
+        }
+    }
     Ok(Args {
         db,
         queries,
+        synthetic,
         k,
         json,
         weights,
@@ -163,17 +193,28 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let raw = std::fs::read_to_string(&args.queries)
-        .map_err(|e| format!("reading query set {}: {e}", args.queries.display()))?;
+    if args.synthetic {
+        return run_synthetic(args);
+    }
+
+    // SAFETY: parse_args guarantees both are Some in non-synthetic mode.
+    let db = args.db.as_ref().expect("db required in real mode");
+    let queries = args
+        .queries
+        .as_ref()
+        .expect("queries required in real mode");
+
+    let raw = std::fs::read_to_string(queries)
+        .map_err(|e| format!("reading query set {}: {e}", queries.display()))?;
     let query_set: QuerySet = serde_json::from_str(&raw)
-        .map_err(|e| format!("parsing query set {}: {e}", args.queries.display()))?;
+        .map_err(|e| format!("parsing query set {}: {e}", queries.display()))?;
 
     // Load the SAME centralized tuning config the app uses, so a sweep tunes
     // the REAL config and a winning `tuning.toml` is what ships. The live file
     // sits beside the journal DB in app-data; `--s1..--s4` flags then compose
     // ON TOP of the file's `[search].fusion` as the baseline (WeightOverrides::
     // apply folds onto `FusionWeights::default()`, which reads this config).
-    if let Some(app_data) = args.db.parent() {
+    if let Some(app_data) = db.parent() {
         photoproof_core::tuning::init_from(app_data);
     }
 
@@ -189,14 +230,50 @@ fn run(args: &Args) -> Result<(), String> {
         ..EvalConfig::default()
     };
 
-    let searcher = Searcher::open(&args.db)
-        .map_err(|e| format!("opening library DB {}: {e}", args.db.display()))?;
+    let searcher =
+        Searcher::open(db).map_err(|e| format!("opening library DB {}: {e}", db.display()))?;
 
     // Shared run->score loop (`retrieval_eval::evaluate`): the SAME entry point
     // pp-sweep drives, so the gate and the sweep can never diverge.
     let report = evaluate(&searcher, &query_set, config, k)?;
     if args.json {
-        print_json(&report, &weights, &args.db, &args.queries);
+        print_json(&report, &weights, db, queries);
+    } else {
+        print_table(&report, &weights);
+    }
+    Ok(())
+}
+
+/// `--synthetic`: build a deterministic in-process corpus + golden set, run the
+/// SAME `evaluate` loop, emit the SAME report. Zero setup, no models, no real
+/// DB — the CI-able search signal the regression guard consumes. This is the
+/// runnable analogue of the `retrieval_eval_sample` integration test: a tiny
+/// SQLite corpus (three seeded JPEGs), three distinctive remarks, three
+/// single-answer golden queries. On a healthy keyword rig every answer ranks
+/// first, so the mean metrics are 1.0 deterministically — a refactor that
+/// silently breaks fusion/ranking drops them, which is exactly what the guard
+/// catches.
+fn run_synthetic(args: &Args) -> Result<(), String> {
+    let fixture = synthetic::Fixture::build()?;
+    let query_set = fixture.golden_set();
+    let searcher = Searcher::open(&fixture.db).map_err(|e| format!("opening synthetic DB: {e}"))?;
+
+    // Synthetic mode never reads a tuning.toml (zero-setup, machine-independent):
+    // the `--s1..--s4` overrides fold onto the code-default FusionWeights, and
+    // rrf_k/beta come from the same code defaults. So the run is fully
+    // reproducible from the binary alone, which is what the guard's baseline
+    // pins against.
+    let k = args.k.unwrap_or(DEFAULT_K);
+    let weights = args.weights.apply();
+    let config = EvalConfig {
+        weights,
+        ..EvalConfig::default()
+    };
+
+    let report = evaluate(&searcher, &query_set, config, k)?;
+    let synth_path = std::path::Path::new("<synthetic>");
+    if args.json {
+        print_json(&report, &weights, synth_path, synth_path);
     } else {
         print_table(&report, &weights);
     }
@@ -290,6 +367,207 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(keep).collect();
     out.push('~');
     out
+}
+
+/// The deterministic in-process fixture for `--synthetic`. Mirrors the corpus
+/// the `retrieval_eval_sample` integration test builds, but standalone in the
+/// binary so the regression guard can run it with zero setup on any machine.
+mod synthetic {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use photoproof_core::library::{
+        FakeVolumeProbe, Library, LibraryOptions, PlatformIdKind, PlatformPlaceholderDetector,
+        ProbedVolume, QueueOptions, RawlerExtractor, ScanOptions,
+    };
+    use photoproof_core::retrieval_eval::{GoldenQuery, QuerySet};
+    use photoproof_core::{ContentHash, EventDraft, EventStore, RemarkSource, SessionContext};
+
+    /// The three distinctive remarks paired with the query whose obvious top
+    /// hit they should be. Each remark's keywords are non-overlapping so the
+    /// keyword (S2 bm25) path retrieves exactly one image per query — a healthy
+    /// rig scores MRR/nDCG 1.0, a broken one does not. WHY hard-coded here (not
+    /// loaded): the guard must run with no external file; this IS the golden set.
+    const SAMPLES: [(&str, &str); 3] = [
+        (
+            "the lighthouse at the harbor in heavy fog",
+            "lighthouse harbor fog",
+        ),
+        (
+            "a sunlit meadow full of wildflowers in spring",
+            "meadow wildflowers spring",
+        ),
+        (
+            "the snowy mountain summit above the clouds",
+            "snowy mountain summit",
+        ),
+    ];
+
+    pub struct Fixture {
+        /// Kept alive so the tempdir is not reaped while the Searcher reads it.
+        _tmp: TempDirGuard,
+        pub db: PathBuf,
+        /// Hash-sorted image hashes (the stable id space, matching the real
+        /// library and the sample test).
+        hashes: Vec<ContentHash>,
+    }
+
+    impl Fixture {
+        /// Build the corpus: three seeded JPEGs scanned + drained into a fresh
+        /// library, then three remarks appended targeting them. Deterministic
+        /// (seeded pixels, sorted hashes) so the metrics are identical run over
+        /// run on any machine.
+        pub fn build() -> Result<Self, String> {
+            let tmp = TempDirGuard::new()?;
+            let base = tmp.path.clone();
+            let corpus = base.join("photos");
+            std::fs::create_dir_all(&corpus).map_err(|e| format!("mkdir corpus: {e}"))?;
+            for seed in 0..3u32 {
+                std::fs::write(corpus.join(format!("img{seed}.jpg")), unique_jpeg(seed))
+                    .map_err(|e| format!("write fixture jpeg: {e}"))?;
+            }
+
+            // A FakeVolumeProbe hosting exactly the corpus dir — hermetic,
+            // identical identity every run (the pp_bench pattern).
+            let probe = FakeVolumeProbe::new();
+            probe.set_mounts(vec![ProbedVolume {
+                mount_point: corpus.clone(),
+                platform_id: Some("pp-synthetic-eval".into()),
+                platform_kind: PlatformIdKind::Heuristic,
+                label: Some("pp-synthetic".into()),
+                fs_type: None,
+                capacity_bytes: None,
+                read_only_flag: false,
+                is_system_root: true,
+                coarse_mtime: false,
+            }]);
+            let db = base.join("photoproof.db");
+            let lib = Arc::new(
+                Library::open_with(
+                    &db,
+                    base.join("previews"),
+                    LibraryOptions {
+                        probe: Arc::new(probe),
+                        placeholders: Arc::new(PlatformPlaceholderDetector),
+                        extractor: Arc::new(RawlerExtractor),
+                    },
+                )
+                .map_err(|e| format!("open library: {e}"))?,
+            );
+            let root = lib
+                .register_root(&corpus, Some("synthetic"))
+                .map_err(|e| format!("register root: {e}"))?;
+            lib.scan_root(&root, &ScanOptions::default())
+                .map_err(|e| format!("scan: {e}"))?;
+            lib.process_queue(&QueueOptions::default())
+                .map_err(|e| format!("drain: {e}"))?;
+
+            let mut hashes = lib.image_hashes().map_err(|e| format!("hashes: {e}"))?;
+            hashes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            if hashes.len() != 3 {
+                return Err(format!("fixture expected 3 images, got {}", hashes.len()));
+            }
+
+            // Append one remark per image over the SAME DB (the searcher reads
+            // the folded journal). Plain typed remarks: the keyword text is all
+            // the S2 path needs.
+            let store = EventStore::open(&db).map_err(|e| format!("open store: {e}"))?;
+            let session = store
+                .open_session(SessionContext {
+                    app_version: "pp-retrieval-eval-synthetic".into(),
+                    device_id: "00000000000000000000000000000000".into(),
+                    root_context: None,
+                })
+                .map_err(|e| format!("open session: {e}"))?;
+            for (i, (remark, _query)) in SAMPLES.iter().enumerate() {
+                store
+                    .append(
+                        &session,
+                        EventDraft::Remark {
+                            source: RemarkSource::Typed,
+                            text: (*remark).to_owned(),
+                            targets: vec![hashes[i].clone()],
+                        },
+                        None,
+                    )
+                    .map_err(|e| format!("append remark: {e}"))?;
+            }
+
+            Ok(Self {
+                _tmp: tmp,
+                db,
+                hashes,
+            })
+        }
+
+        /// The golden set: each query's single relevant id is the image its
+        /// remark targets — exactly the contract a real query-set file uses.
+        pub fn golden_set(&self) -> QuerySet {
+            let queries = SAMPLES
+                .iter()
+                .enumerate()
+                .map(|(i, (_remark, query))| GoldenQuery {
+                    query: (*query).to_owned(),
+                    relevant: vec![self.hashes[i].as_str().to_owned()],
+                    notes: None,
+                })
+                .collect();
+            QuerySet {
+                default_k: Some(5),
+                queries,
+            }
+        }
+    }
+
+    /// A small decodable JPEG whose bytes are unique per seed — identical to
+    /// the sample test's generator so the corpus shape matches.
+    fn unique_jpeg(seed: u32) -> Vec<u8> {
+        let mut img = image::RgbImage::new(16, 16);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let v = seed
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(x * 31 + y * 7);
+            *p = image::Rgb([
+                (v & 0xff) as u8,
+                ((v >> 8) & 0xff) as u8,
+                ((v >> 16) & 0xff) as u8,
+            ]);
+        }
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut std::io::Cursor::new(&mut out), 95)
+            .encode_image(&image::DynamicImage::ImageRgb8(img))
+            .expect("encode fixture jpeg");
+        out
+    }
+
+    /// A pid-unique tempdir, removed on drop (no tempfile dep in the bin path,
+    /// matching pp_bench). A crash leaves only litter the OS tempdir reaps.
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new() -> Result<Self, String> {
+            let path = std::env::temp_dir().join(format!(
+                "pp-retrieval-eval-synth-{}-{}",
+                std::process::id(),
+                // A nanosecond salt so repeated invocations in one process (the
+                // unit test) never collide on the same path.
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path).map_err(|e| format!("create tempdir: {e}"))?;
+            Ok(Self { path })
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 fn main() -> ExitCode {
