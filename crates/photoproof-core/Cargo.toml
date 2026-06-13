@@ -14,6 +14,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Centralized tuning config (tuning.rs): reads `<app-data>/tuning.toml` to
+# override the shipped ranking/preview defaults without a rebuild. Same crate
+# the connectors crate already uses; no heavy new dependency.
+toml = "0.8"
 # --- sidecar deps (owned by packet P2.1; append below this line only) ---
 # --- library deps (owned by packet P2.2; append below this line only) ---
 # --- search deps (owned by packet P3.1; append below this line only) ---

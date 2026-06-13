@@ -41,6 +41,13 @@ use rusqlite::types::Value;
 
 use crate::id::{ContentHash, UtcMillis};
 use crate::retrieval::instruct_query;
+use crate::tuning::tuning;
+
+// `FusionWeights` now lives in `crate::tuning` (its DEFAULT VALUES are part of
+// the centralized, file-overridable config — DESIGN-TUNING-CONFIG.md). It is
+// re-exported here so the type's long-standing path (`search::FusionWeights`,
+// `hybrid::FusionWeights`) and every existing caller are unchanged.
+pub use crate::tuning::FusionWeights;
 
 use super::filter::{FilterMode, compile};
 use super::query::fts_match_query;
@@ -49,47 +56,25 @@ use super::{
     QueryEcho, SearchError, SearchResults, SignalId, exec, parse,
 };
 
-/// §5.3 RRF constant.
-pub const RRF_K: f64 = 60.0;
-
-/// §5.3 amendment (founder dogfood, June 12 2026) — the dense-signal
-/// similarity tilt `β` in the RRF blend
-/// `contribution = w·(1/(k+rank))·(1 + β·(2·norm_sim − 1))`.
-///
-/// WHY this exists: pure RRF scores by RANK, not similarity, so a PERFECT
-/// cosine match and a tangential near-miss at the SAME rank score
-/// identically. In the founder's June 12 dogfood that rank-flatness meant a
-/// weak note-keyword hit at rank #1 (1.0/61 ≈ 0.016393) always buried a
-/// perfect CLIP visual match at rank #1 (then 0.5/61 ≈ 0.008197, and even at
-/// parity a plain multiplicative blend can only TIE it) — "any saved note
-/// outranks even a perfect visual match." We tilt each DENSE (vector/cosine)
-/// signal's per-image contribution around its RRF baseline by the
-/// similarity: `norm_sim` is centered at 0.5 (`2·norm_sim − 1` ∈ [−1, 1]), so
-/// a high-cosine hit lands ABOVE its rank baseline and a near-miss BELOW it.
-/// That is the bit that matters: a strong dense match can now BEAT — not just
-/// tie — a same-rank sparse keyword hit, which is exactly what the dogfood
-/// demanded.
-///
-/// WHY this shape (multiplicative tilt, not additive): scaling the RRF term
-/// keeps the contribution proportional to the rank discount, so the blend
-/// never lets a deep-rank dense hit leapfrog a top-rank one on similarity
-/// alone — RRF's rank skeleton (the spec's §5.3 model) still governs the
-/// gross order; similarity only breaks the rank-flat ties RRF leaves behind.
-///
-/// WHY β = 0.5: the multiplier spans [1−β, 1+β] = [0.5, 1.5] across the
-/// cosine range [0, 1]. A perfect match earns up to +50% over its rank
-/// baseline (enough to clear an equal-rank sparse hit); a near-zero-cosine
-/// hit is halved. Generous enough to un-bury strong matches, bounded enough
-/// not to dominate. It is a DEFAULT, not a finding — it lives beside the
-/// data-shaped `FusionWeights` because the §12 golden-set eval owns retuning
-/// it, never a magic constant in the loop.
-///
-/// Now the DEFAULT for the [`HybridOptions::beta`] field rather than a value
-/// read directly in the fusion loop: promoting it to a per-search knob sets up
-/// the eval-gated similarity-tilt control (search-as-scope Phase 4) without
-/// changing today's behavior — every caller that takes
-/// `HybridOptions::default()` still fuses with beta = 0.5.
-pub const SIM_BLEND_BETA: f64 = 0.5;
+// §5.3 RRF constant `k` and the §5.3-amendment dense-signal similarity tilt
+// `β` are now part of the centralized, file-overridable tuning config —
+// `crate::tuning` (DESIGN-TUNING-CONFIG.md). The fusion loop reads the LIVE
+// values from `tuning().search.{rrf_k,beta}`; the code DEFAULTS (k = 60, β =
+// 0.5) live in `tuning.rs`. `RRF_K` / `SIM_BLEND_BETA` are re-exported here for
+// API stability (every existing `search::RRF_K` / `core_search::SIM_BLEND_BETA`
+// reference keeps resolving to the code default).
+//
+// β rationale (unchanged): pure RRF scores by RANK, not similarity, so a
+// PERFECT cosine match and a tangential near-miss at the SAME rank scored
+// identically — "any saved note outranks even a perfect visual match" (founder
+// dogfood, June 12 2026). Each DENSE signal's per-image contribution is tilted
+// around its RRF baseline by `(2·norm_sim − 1) ∈ [−1, 1]`, so the multiplier
+// spans [1−β, 1+β] = [0.5, 1.5]: a high-cosine hit lands ABOVE baseline (can
+// BEAT a same-rank sparse hit), a near-miss BELOW. Multiplicative (not
+// additive) keeps it proportional to the rank discount, so RRF's rank skeleton
+// still governs gross order — similarity only breaks the rank-flat ties. β is a
+// DEFAULT, not a finding: the §12 golden-set eval owns retuning it.
+pub use crate::tuning::{RRF_K, SIM_BLEND_BETA};
 
 /// §5.2 candidate depth for the vector signals.
 const VECTOR_K: usize = 200;
@@ -100,44 +85,15 @@ const FUSED_LIMIT: usize = 100;
 /// §5.1 parse latency budget.
 const PARSE_BUDGET: Duration = Duration::from_millis(1500);
 
-/// §5.3 fusion weights. Defaults are the spec's — and explicitly defaults,
-/// not findings: the §12 golden-set eval is the named gate for tuning them
-/// (which is why they are data, not constants).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FusionWeights {
-    /// S1 `annotation_chunk` vectors — primary.
-    pub s1: f64,
-    /// S2 `event_fts` (FTS5).
-    pub s2: f64,
-    /// Each S3 sub-list (`summaries_fts`, `image_summary` vectors):
-    /// summaries are derived prose and must never outvote the
-    /// photographer's actual words.
-    pub s3_each: f64,
-    /// S4 `image_clip` (B69: always votes on semantic queries).
-    pub s4: f64,
-}
-
-impl Default for FusionWeights {
-    fn default() -> Self {
-        Self {
-            s1: 1.0,
-            s2: 1.0,
-            s3_each: 0.5,
-            // S4 raised 0.5 → 1.0 (founder dogfood, June 12 2026). Visual
-            // evidence is not half a note: a perfect CLIP match must vote at
-            // a note's full weight, not at half. Combined with the §5.3
-            // similarity blend (`SIM_BLEND_BETA`) this is the fix for the
-            // "any note buries any visual match" rank-flatness the dogfood
-            // surfaced. S3_each stays 0.5 deliberately — summaries are
-            // DERIVED prose (the model's words, not the photographer's) and
-            // the §5.3 invariant that they never outvote actual words holds;
-            // the similarity blend already lifts a strong S3 vector hit
-            // without granting derived prose note-level weight. The §12
-            // golden-set eval owns retuning all of these (they are data).
-            s4: 1.0,
-        }
-    }
-}
+// §5.3 fusion weights (`FusionWeights`) and their DEFAULT VALUES moved into
+// `crate::tuning` (the centralized, file-overridable config). The type is
+// re-exported at the top of this module so every existing reference is
+// unchanged; `FusionWeights::default()` now reads `tuning().search.fusion`.
+// Defaults are the spec's and explicitly defaults, not findings — the §12
+// golden-set eval is the named gate for tuning them, which is why they are
+// data, not constants. (WHY S4 = 1.0: visual evidence is not half a note;
+// WHY S3_each = 0.5: derived prose must never outvote the photographer's own
+// words — both documented in `tuning.rs`.)
 
 /// Per-search knobs for [`super::Searcher::hybrid_search`].
 #[derive(Debug, Clone)]
@@ -165,11 +121,18 @@ pub struct HybridOptions {
 
 impl Default for HybridOptions {
     fn default() -> Self {
+        // Pull the fusion weights AND β from the centralized tuning config
+        // (file-overridable). Absent a `tuning.toml` these are the code
+        // defaults — byte-identical to the old `FusionWeights::default()` /
+        // `SIM_BLEND_BETA` consts — so today's behavior is unchanged. The
+        // Phase-3 per-search `weights` payload still composes ON TOP of this
+        // default (search_wire.rs overrides the field).
+        let search = &tuning().search;
         Self {
             now: None,
             include_debug: false,
-            weights: FusionWeights::default(),
-            beta: SIM_BLEND_BETA,
+            weights: search.fusion,
+            beta: search.beta,
             parse_budget: PARSE_BUDGET,
             fuzzy: false,
         }
@@ -814,10 +777,15 @@ where
     // Which signals ranked each image — the per-result signal provenance
     // (§5.4 DebugScores): (signal, 1-based rank, raw score) in list order.
     let mut signals: HashMap<String, Vec<(SignalId, Option<u32>, f32)>> = HashMap::new();
+    // The LIVE RRF `k` from the centralized tuning config (file-overridable;
+    // its code default is `RRF_K` = 60). Read once outside the inner loop —
+    // β rides on `opts.beta`, already sourced from the same config via
+    // `HybridOptions::default()`.
+    let rrf_k = tuning().search.rrf_k;
     for list in &lists {
         for (idx, (hash, score)) in list.images.iter().enumerate() {
             let rank = idx as f64 + 1.0;
-            let rrf = list.weight / (RRF_K + rank);
+            let rrf = list.weight / (rrf_k + rank);
             // §5.3 amendment (founder dogfood): dense signals blend their
             // normalized cosine so a high-similarity hit outscores a
             // near-miss at the SAME rank; sparse (bm25) signals stay pure

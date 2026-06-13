@@ -43,13 +43,13 @@
 //! equality. Drop the real, library-specific set at the gitignored path
 //! `test-corpora/retrieval/` (private hashes never enter git).
 //!
-//! NOTE on the similarity-blend beta. The §5.3 dense-signal tilt
-//! `SIM_BLEND_BETA` is a compile-time constant in `search/hybrid.rs`, NOT a
-//! field of the `FusionWeights`/`HybridOptions` API this runner is restricted
-//! to. Sweeping beta therefore means editing that constant and rebuilding —
-//! this runner sweeps the four fusion WEIGHTS, which ARE in the API. The weight
-//! sweep already answers the B69 "how much should S4 vote" question the gate
-//! exists for; a beta sweep is a source edit the same report measures.
+//! NOTE on the similarity-blend beta. The §5.3 dense-signal tilt β now lives in
+//! the centralized tuning config (`crate::tuning`, file-overridable). This
+//! runner `init_from`s the same `tuning.toml` beside the DB, so β (and the
+//! fusion-weight baseline) come from the file the app reads — set `[search].beta`
+//! there to sweep it without a rebuild. The `--s1..--s4` flags then sweep the
+//! four fusion WEIGHTS on top of that baseline; the weight sweep already answers
+//! the B69 "how much should S4 vote" question the gate exists for.
 //!
 //! NOTE on signals. This runner uses the keyword-only rig (no embedders/LLM):
 //! the heavy real-model wiring (loading CLIP/text embedders + the parse LLM,
@@ -193,6 +193,15 @@ fn run(args: &Args) -> Result<(), String> {
         .map_err(|e| format!("reading query set {}: {e}", args.queries.display()))?;
     let query_set: QuerySet = serde_json::from_str(&raw)
         .map_err(|e| format!("parsing query set {}: {e}", args.queries.display()))?;
+
+    // Load the SAME centralized tuning config the app uses, so a sweep tunes
+    // the REAL config and a winning `tuning.toml` is what ships. The live file
+    // sits beside the journal DB in app-data; `--s1..--s4` flags then compose
+    // ON TOP of the file's `[search].fusion` as the baseline (WeightOverrides::
+    // apply folds onto `FusionWeights::default()`, which reads this config).
+    if let Some(app_data) = args.db.parent() {
+        photoproof_core::tuning::init_from(app_data);
+    }
 
     // k precedence: --k > query-set default_k > built-in DEFAULT_K.
     let k = args.k.or(query_set.default_k).unwrap_or(DEFAULT_K);

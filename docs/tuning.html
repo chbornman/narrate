@@ -59,26 +59,33 @@
 
 <div class="principle">
   <b>How to read this.</b> The CODE is the source of truth; this page is the
-  human index that points at it. Each row gives the current value, where it
-  lives, whether the user can change it, and <b>who owns the number</b> - the
-  &sect;12 golden-set retrieval eval (data-driven), the founder (a product
-  judgment), or "fixed" (a budget/contract, not really a knob). When you change
-  a value in code, update its row here. Defaults are starting points, not truths
-  - most of these are explicitly flagged in-code as "data, not findings."
+  human index that points at it. The consolidated ranking/preview knobs now have
+  ONE home: the typed <code>Tuning</code> config in
+  <code>crates/photoproof-core/src/tuning.rs</code> (the shipped defaults),
+  file-overridable at runtime via <code>tuning.toml</code> in app-data
+  (documented by <code>tuning.default.toml</code> at the repo root) - edit it,
+  restart, re-feel, no rebuild. UI-only knobs live in
+  <code>apps/desktop/src/lib/tuning.ts</code>. Each row gives the current value,
+  where it lives, whether the user can change it (<i>file</i> = override in
+  <code>tuning.toml</code>), and <b>who owns the number</b> - the &sect;12
+  golden-set retrieval eval (data-driven), the founder (a product judgment), or
+  "fixed" (a budget/contract, deliberately NOT in the editable file so an edit
+  can't silently break an invariant). When you change a default in code, update
+  its row here and <code>tuning.default.toml</code> in lockstep.
 </div>
 
 <h2>Search - hybrid fusion (B75) <span class="pill live">LIVE</span></h2>
 <p class="lede">Weighted similarity-aware RRF over four signals. The per-signal weights are now user-visible as on/off toggles (search Phase 3); continuous sliders + a beta control are deferred until the eval gives real numbers.</p>
 <table>
   <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
-  <tr><td class="knob">S1 - your words (note vectors)</td><td class="val">1.0</td><td class="where">hybrid.rs:123</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span></td></tr>
-  <tr><td class="knob">S2 - note keyword FTS</td><td class="val">1.0</td><td class="where">hybrid.rs:124</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span></td></tr>
-  <tr><td class="knob">S3 - derived summaries (each)</td><td class="val">0.5</td><td class="where">hybrid.rs:125</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span> derived prose never outvotes own words</td></tr>
-  <tr><td class="knob">S4 - image CLIP (visual)</td><td class="val">1.0</td><td class="where">hybrid.rs:137</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span> B69 - raised 0.5&rarr;1.0 at B75</td></tr>
-  <tr><td class="knob">RRF k</td><td class="val">60.0</td><td class="where">hybrid.rs:53</td><td class="uf-no">no</td><td><span class="owner">&sect;12 eval</span> rank-flatness constant</td></tr>
-  <tr><td class="knob">beta - similarity blend</td><td class="val">0.5</td><td class="where">hybrid.rs:92 / HybridOptions.beta :166</td><td class="uf-no">deferred</td><td><span class="owner">&sect;12 eval</span> dense signal tilt 1+beta&middot;cos; a per-search field now, slider eval-gated</td></tr>
-  <tr><td class="knob">as-you-type debounce</td><td class="val">50 ms</td><td class="where">GridHeader.svelte:39</td><td class="uf-no">no</td><td><span class="owner">fixed</span> UI &sect;5.1 ceiling inside the &lt;100ms budget</td></tr>
-  <tr><td class="knob">min query chars</td><td class="val">2</td><td class="where">app.svelte.ts:83</td><td class="uf-no">no</td><td><span class="owner">fixed</span></td></tr>
+  <tr><td class="knob">S1 - your words (note vectors)</td><td class="val">1.0</td><td class="where">tuning.toml [search.fusion].s1<br>tuning.rs</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span></td></tr>
+  <tr><td class="knob">S2 - note keyword FTS</td><td class="val">1.0</td><td class="where">tuning.toml [search.fusion].s2<br>tuning.rs</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span></td></tr>
+  <tr><td class="knob">S3 - derived summaries (each)</td><td class="val">0.5</td><td class="where">tuning.toml [search.fusion].s3_each<br>tuning.rs</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span> derived prose never outvotes own words</td></tr>
+  <tr><td class="knob">S4 - image CLIP (visual)</td><td class="val">1.0</td><td class="where">tuning.toml [search.fusion].s4<br>tuning.rs</td><td class="uf-yes">toggle</td><td><span class="owner">&sect;12 eval</span> B69 - raised 0.5&rarr;1.0 at B75</td></tr>
+  <tr><td class="knob">RRF k</td><td class="val">60.0</td><td class="where">tuning.toml [search].rrf_k<br>tuning.rs</td><td class="uf-no">no</td><td><span class="owner">&sect;12 eval</span> rank-flatness constant</td></tr>
+  <tr><td class="knob">beta - similarity blend</td><td class="val">0.5</td><td class="where">tuning.toml [search].beta<br>tuning.rs (HybridOptions.beta default)</td><td class="uf-no">file</td><td><span class="owner">&sect;12 eval</span> dense signal tilt 1+beta&middot;cos; now file-overridable, in-app slider eval-gated</td></tr>
+  <tr><td class="knob">as-you-type debounce</td><td class="val">50 ms</td><td class="where">tuning.ts (SEARCH_DEBOUNCE_MS)</td><td class="uf-no">no</td><td><span class="owner">fixed</span> UI &sect;5.1 ceiling inside the &lt;100ms budget</td></tr>
+  <tr><td class="knob">min query chars</td><td class="val">2</td><td class="where">tuning.ts (MIN_QUERY_CHARS)</td><td class="uf-no">no</td><td><span class="owner">fixed</span></td></tr>
   <tr><td class="knob">lexical vs semantic lane</td><td class="val">type=lexical, Enter=semantic</td><td class="where">searchmode.ts</td><td class="uf-no">no</td><td><span class="owner">fixed</span> protects the keystroke budget (P2)</td></tr>
   <tr><td class="knob">fuzzy (typo-tolerant metadata)</td><td class="val">off; additive</td><td class="where">P4 (building)</td><td class="uf-yes">~ toggle</td><td><span class="owner">founder</span> never default-on, never outranks exact</td></tr>
 </table>
@@ -119,9 +126,9 @@
 <table>
   <tr><th>Knob</th><th>Value</th><th>Where</th><th>User?</th><th>Owns / note</th></tr>
   <tr><td class="knob">voice chunking - rule2 trailing silence</td><td class="val">1.2 s</td><td class="where">pp-asr-server</td><td class="uf-no">no</td><td><span class="owner">data</span> "when does a sentence end"; tuning round open (BACKLOG)</td></tr>
-  <tr><td class="knob">embedded-preview accept edge</td><td class="val">2048 px</td><td class="where">preview.rs:44 (EMBEDDED_ACCEPT_EDGE)</td><td class="uf-no">no</td><td><span class="owner">fixed</span> when the in-RAW JPEG is "good enough"</td></tr>
-  <tr><td class="knob">display preview edge</td><td class="val">2560 px</td><td class="where">preview.rs:34 (DISPLAY_EDGE)</td><td class="uf-no">no</td><td><span class="owner">fixed</span></td></tr>
-  <tr><td class="knob">embedded aspect tolerance</td><td class="val">0.02</td><td class="where">preview.rs:643</td><td class="uf-no">no</td><td><span class="owner">fixed</span> geometry safety for strokes</td></tr>
+  <tr><td class="knob">embedded-preview accept edge</td><td class="val">2048 px</td><td class="where">tuning.toml [preview].embedded_accept_edge<br>tuning.rs</td><td class="uf-no">file</td><td><span class="owner">founder</span> when the in-RAW JPEG is "good enough"</td></tr>
+  <tr><td class="knob">display preview edge</td><td class="val">2560 px</td><td class="where">tuning.toml [preview].display_edge<br>tuning.rs</td><td class="uf-no">file</td><td><span class="owner">founder</span></td></tr>
+  <tr><td class="knob">embedded aspect tolerance</td><td class="val">0.02</td><td class="where">preview.rs (EMBEDDED_NATIVE_ASPECT_TOLERANCE)</td><td class="uf-no">no</td><td><span class="owner">fixed</span> geometry CONTRACT for strokes - deliberately NOT in tuning.toml</td></tr>
 </table>
 
 <h2>Future - the synthesis lens <span class="pill proposed">PROPOSED</span></h2>

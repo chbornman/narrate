@@ -1,0 +1,51 @@
+# PhotoProof tuning config — REFERENCE (the shipped defaults).
+#
+# This file documents the default values. It is NOT read at runtime: the LIVE
+# config lives in app-data at
+#
+#     ~/Library/Application Support/com.photoproof.desktop/tuning.toml
+#
+# (created/edited by hand — no copy is shipped, so a missing file means pure
+# code defaults). Copy any section you want to override into that path, restart
+# the app, and re-feel. Every field is optional: a partial file merges over
+# these defaults (so you can set just `[search].rrf_k` and leave the rest).
+#
+# Out-of-range values are rejected back to the default with a logged warning
+# (see logs/photoproof.log) — a typo can never inject a silent bad number.
+#
+# Source of truth is the Rust `Tuning` struct in
+# `crates/photoproof-core/src/tuning.rs`; the human view is `docs/tuning.html`.
+# If you change a default in code, update this file and tuning.html in lockstep.
+
+# ---------------------------------------------------------------------------
+# Search — hybrid-fusion ranking (RETRIEVAL §5.3). Owned by the §12 golden-set
+# eval (data-driven), not magic constants. `pp-retrieval-eval` reads THIS file.
+# ---------------------------------------------------------------------------
+[search]
+# RRF rank constant k: contribution = weight / (k + rank). Range [1, 10000].
+rrf_k = 60.0
+# Dense-signal similarity tilt β: a dense signal's per-image contribution is
+# multiplied by (1 + β·(2·cos − 1)), spanning [1−β, 1+β]. Range [0, 1].
+beta = 0.5
+
+[search.fusion]
+# Per-signal fusion weights. Non-negative multipliers, range [0, 1000].
+s1 = 1.0       # S1 annotation_chunk vectors — your own words (primary)
+s2 = 1.0       # S2 event_fts — note keyword FTS
+s3_each = 0.5  # each S3 sub-list — derived summaries (never outvote your words)
+s4 = 1.0       # S4 image_clip — visual match (B69: raised 0.5→1.0)
+
+# ---------------------------------------------------------------------------
+# Preview — display/embedded-preview sizing (LIBRARY §9). Pixel edges, range
+# [256, 16384].
+# ---------------------------------------------------------------------------
+[preview]
+display_edge = 2560          # display-tier preview longest edge, px
+embedded_accept_edge = 2048  # in-RAW JPEG is "good enough" at >= this px
+
+# Heatmap and graph sections will be added here when those features land
+# (their design docs already name the knobs); no empty dead sections for now.
+
+# FIXED contracts (deliberately NOT here — a config edit must never silently
+# break an invariant): the <100 ms search latency budget, and the embedded
+# aspect tolerance (0.02) that protects stroke geometry. See tuning.html.

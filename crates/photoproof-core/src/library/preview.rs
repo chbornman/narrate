@@ -31,7 +31,13 @@ pub const GENERATOR_VERSION: i64 = 2;
 
 pub const THUMB_EDGE: u32 = 512;
 pub const THUMB_QUALITY: f32 = 75.0;
-pub const DISPLAY_EDGE: u32 = 2560;
+// DISPLAY_EDGE moved to the centralized tuning config (`crate::tuning`,
+// DESIGN-TUNING-CONFIG.md): it is a display-size judgment knob, file-
+// overridable without a rebuild. `write_artifacts` reads
+// `tuning().preview.display_edge` (code default 2560). NOTE: THUMB_EDGE and
+// the WebP qualities/method stay fixed consts here — they are versioned
+// ENCODE parameters tied to `GENERATOR_VERSION` (changing them changes
+// artifact bytes and must bump the cache version), not runtime feel knobs.
 pub const DISPLAY_QUALITY: f32 = 87.0;
 /// libwebp effort level for both artifacts (see `encode_webp` for the
 /// pp-bench finding behind 2). Sits in this cluster because it is a
@@ -40,8 +46,11 @@ pub const DISPLAY_QUALITY: f32 = 87.0;
 /// would silently fork artifact reproducibility.
 const WEBP_METHOD: i32 = 2;
 
-/// §9.3 acceptability threshold: embedded preview longest edge ≥ 2048 px.
-pub const EMBEDDED_ACCEPT_EDGE: u32 = 2048;
+// §9.3 acceptability threshold (embedded preview longest edge ≥ N px) moved to
+// the centralized tuning config (`crate::tuning`): it is a "when is the in-RAW
+// JPEG good enough" judgment knob, file-overridable. The accept decision in
+// `library/mod.rs` reads `tuning().preview.embedded_accept_edge` (code default
+// 2048).
 
 #[derive(Debug, thiserror::Error)]
 pub enum PreviewError {
@@ -464,9 +473,12 @@ pub fn write_artifacts(
     let mut out = Vec::with_capacity(2);
     // Derive the thumb from the display-size render: one large resize, one
     // small one — and bitwise stability between the two artifacts' geometry.
+    // Display-tier longest edge from the centralized tuning config (code
+    // default 2560; file-overridable via `tuning.toml`).
+    let display_edge = crate::tuning::tuning().preview.display_edge;
     let display = metrics
         .resize
-        .time(|| resize_to_edge(display_oriented, DISPLAY_EDGE));
+        .time(|| resize_to_edge(display_oriented, display_edge));
     let thumb = metrics.resize.time(|| resize_to_edge(&display, THUMB_EDGE));
     for (kind, img, quality) in [
         (ArtifactKind::Display, &display, DISPLAY_QUALITY),
@@ -785,6 +797,11 @@ pub const EMBEDDED_NATIVE_QUALITY: u8 = 90;
 /// the aspect by well under 1%; a 90° disagreement inverts it entirely.
 /// `pub(crate)`: the full-decode pass reuses it as the geometry-safety
 /// assertion threshold against the display artifact (OD-1).
+///
+/// FIXED const, deliberately NOT in the tuning config (founder decision): this
+/// is a geometry CONTRACT that protects stroke coordinate safety, not a feel
+/// knob. A `tuning.toml` edit must never be able to silently loosen it and let
+/// a 90°-rotated preview serve under annotations. Stays "fixed" in tuning.html.
 pub(crate) const EMBEDDED_NATIVE_ASPECT_TOLERANCE: f64 = 0.02;
 
 /// The serve decision for the embedded-native route, pure: serve only when

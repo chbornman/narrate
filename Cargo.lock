@@ -4131,6 +4131,7 @@ dependencies = [
  "strsim",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.2",
  "tracing",
  "ulid",
  "ureq 3.3.0",
