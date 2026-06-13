@@ -33,6 +33,7 @@ import {
   type MicHoldState,
 } from "../logic/michold";
 import { scopeLabel, scopeTargets } from "../logic/scope";
+import { nextLane, type SearchLane } from "../logic/searchmode";
 import { afterCommit } from "../logic/advance";
 import {
   collectionRows,
@@ -156,6 +157,16 @@ export class Ui {
   /** True while the header search input holds focus (set by the bar's
    * focus/blur). Escape layer ordering reads it; the grid keymap does not. */
   barFocused = $state(false);
+  /** The lexical/semantic lane the grid's query is CURRENTLY scoped by (M3
+   * Phase 2 — the ONE explicit, centralized home for the live-lexical /
+   * commit-semantic split). Phase 1 spread the lane decision across the
+   * input/keydown/commit handlers and showed a static detail-row hint; this
+   * flag is the single truth the bar's status indicator derives from. The
+   * pure `nextLane` reducer (logic/searchmode.ts) moves it: every keystroke
+   * -> "lexical", Enter -> "semantic", a dropped scope -> "none". `runQueryScope`
+   * and the clear paths are the only writers, so the indicator can never
+   * disagree with the lane that actually fed the grid. */
+  searchLane = $state<SearchLane>("none");
 
   // -- drag-folder drop (featureset §6: register-root confirmation) -----------
   /** Paths dropped onto the window awaiting confirmation; null = closed. */
@@ -481,7 +492,9 @@ export class Ui {
       // committed with (the bar's commit state owns the lane choice). Phase
       // 1: re-run lexical — a background ingest refresh must never silently
       // upgrade a lexical scope to semantic (or pay vector latency for it).
-      await this.runQueryScope("lexical");
+      // transition=false: this is not a user keystroke, so the displayed lane
+      // (a committed "semantic" included) must not flip to lexical underneath.
+      await this.runQueryScope("lexical", false);
       return;
     }
     if (this.grid.rootId === null) return;
@@ -589,10 +602,14 @@ export class Ui {
   }
 
   /** Clear the bar's live input without touching the grid scope (used when
-   * switching source: the scope is already being replaced). */
+   * switching source: the scope is already being replaced). The lane drops to
+   * "none" too — wiping the text means the bar is no longer a scope, so the
+   * detail row must not keep naming a stale lexical/semantic lane. This is the
+   * single funnel for every explicit clear (Esc / residue / source switch). */
   private clearQueryInput() {
     this.query = "";
     this.chips = [];
+    this.searchLane = nextLane(this.searchLane, "clear");
   }
 
   /** The source a NEW query scopes over: when the grid already shows a
@@ -616,8 +633,15 @@ export class Ui {
    * (forced keyword, the budget floor), "semantic" on Enter (full hybrid).
    * An empty bar (no query, no chips) is NOT a scope — it returns the grid
    * to its underlying source (the quiet zero-config default).
+   *
+   * `transition` (default true) gates the user-facing lane indicator: a USER
+   * action (typing, Enter) moves the explicit lane via nextLane; a BACKGROUND
+   * re-list (refreshItems during ingest) re-runs the keyword query for fresh
+   * items but passes `false` so the displayed mode does not flip — a scope the
+   * user committed as "semantic" must keep reading "semantic" while ingest
+   * churns underneath it.
    */
-  async runQueryScope(mode: ipc.SearchMode) {
+  async runQueryScope(mode: ipc.SearchMode, transition = true) {
     const trimmed = this.query.trim();
     if (this.chips.length === 0 && trimmed.length < MIN_QUERY_CHARS) {
       // Below the threshold with no chips: not a query (yet). Return the grid
@@ -625,9 +649,19 @@ export class Ui {
       // mid-type (e.g. the first character of a fresh query), and clearing
       // this.query here would erase it under them (the input is bind:value'd).
       // Only an EXPLICIT clear (Esc / G / the residue button) wipes the text.
+      // The bar is no longer a scope, so the lane drops to "none" — the detail
+      // row stops naming a lane (returnToSource also clears it; this covers the
+      // never-formed-a-scope keystroke too).
+      if (transition) this.searchLane = nextLane(this.searchLane, "clear");
       if (this.gridScope.kind === "query") await this.returnToSource();
       return;
     }
+    // A real query is forming: move the explicit lane in lockstep with the
+    // lane that is about to feed the grid (type -> lexical, commit ->
+    // semantic). This is the single write the status indicator reads. A
+    // background refresh (transition=false) skips it so the label holds.
+    if (transition)
+      this.searchLane = nextLane(this.searchLane, mode === "semantic" ? "commit" : "type");
     const within = this.queryWithin();
     const wasQuery = this.gridScope.kind === "query";
     // Set the scope discriminator BEFORE the await: folderName, the bar's

@@ -10,7 +10,11 @@
    * As-you-type runs the LEXICAL keyword lane (50 ms debounce, the budget
    * floor); Enter commits the SEMANTIC full-hybrid lane. On focus-with-text
    * a thin detail row shows the `within:` residue (the folder/collection the
-   * query is scoped over, with one-key clear) and the active chips. The old
+   * query is scoped over, with one-key clear), the active chips, and a LANE
+   * STATUS indicator (M3 Phase 2) that names the live lane — "lexical · Enter
+   * for semantic" while typing, "semantic" after a commit, back to lexical on
+   * the next edit. The indicator derives from ui.searchLane (the one explicit
+   * lane flag) so it never disagrees with the lane that fed the grid. The old
    * SearchOverlay's entry/canvas two-stage model is gone: results render in
    * place as ordinary grid cells.
    */
@@ -20,6 +24,7 @@
   import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
   import { THUMB_STEPS } from "../../logic/sort";
+  import { laneStatus } from "../../logic/searchmode";
   import { tooltip } from "../../primitives/tooltip";
   import type { Filter } from "../../types/search";
 
@@ -79,6 +84,17 @@
   // or chips to refine against — a quiet, queryless header otherwise.
   const showDetail = $derived(
     ui.barFocused && (ui.query.trim().length > 0 || ui.chips.length > 0),
+  );
+
+  // The lane status indicator (M3 Phase 2): the detail row names the lane the
+  // grid is CURRENTLY scoped by. While typing -> "lexical · Enter for semantic";
+  // after Enter -> "semantic"; re-typing drops back to lexical. Derived from
+  // the ONE explicit lane flag (ui.searchLane) via the pure laneStatus map, so
+  // the indicator can never disagree with the lane that fed the grid. Before a
+  // scope forms (sub-threshold text, lane "none") the copy is empty and only
+  // the standing hint shows — the bar still tells you Enter upgrades.
+  const laneHint = $derived(
+    laneStatus(ui.searchLane) || "lexical · Enter for semantic",
   );
 
   /** The folder/collection a query is scoped over (the `within:` residue),
@@ -187,7 +203,12 @@
           >
         </span>
       {/each}
-      <span class="lane-hint">lexical · Enter for semantic</span>
+      <!-- The lane status indicator (M3 Phase 2): names the live lane. The
+           `committed` class lifts it out of the faint hint tone once a
+           semantic commit lands, so "semantic" reads as state, not a prompt. -->
+      <span class="lane-hint" class:committed={ui.searchLane === "semantic"}>
+        {laneHint}
+      </span>
     </div>
   {/if}
 </header>
@@ -305,5 +326,11 @@
   .lane-hint {
     margin-left: auto;
     color: var(--text-faint);
+    white-space: nowrap;
+  }
+  /* A committed semantic lane reads as the grid's current STATE, not a hint —
+     lift it to the dim tone so "semantic" is legible at a glance. */
+  .lane-hint.committed {
+    color: var(--text-dim);
   }
 </style>

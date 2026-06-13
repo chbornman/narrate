@@ -241,6 +241,63 @@ describe("search-as-scope (M3): the query is a grid scope", () => {
     expect(lastCall("search")?.args?.mode).toBe("lexical");
   });
 
+  it("as-you-type ONLY ever calls search with mode 'lexical' (Phase 2)", async () => {
+    // Simulate a real burst of keystrokes — the as-you-type path always runs
+    // the lexical lane, never semantic, even on a warm machine (D6). Every
+    // `search` invocation logged across the burst must be lexical.
+    for (const q of ["f", "fo", "fog", "fog ", "fog r", "fog ri"]) {
+      ui.query = q;
+      await ui.runQueryScope("lexical");
+    }
+    const searchModes = ipcLog.calls
+      .filter((c) => c.cmd === "search")
+      .map((c) => c.args?.mode);
+    expect(searchModes.length).toBeGreaterThan(0);
+    expect(searchModes.every((m) => m === "lexical")).toBe(true);
+  });
+
+  it("Enter commits with mode 'semantic'", async () => {
+    ui.query = "fog ridge";
+    await ui.runQueryScope("semantic");
+    expect(lastCall("search")?.args?.mode).toBe("semantic");
+  });
+
+  it("the lane indicator reflects the current mode (lexical -> semantic -> lexical)", async () => {
+    // Boots queryless: no lane to name.
+    expect(ui.searchLane).toBe("none");
+    // (a) typing runs lexical and the indicator says so.
+    ui.query = "fog";
+    await ui.runQueryScope("lexical");
+    expect(ui.searchLane).toBe("lexical");
+    // (b) Enter commits semantic; the indicator flips to "semantic".
+    await ui.runQueryScope("semantic");
+    expect(ui.searchLane).toBe("semantic");
+    // (c) editing after a commit drops back to lexical until the next Enter.
+    ui.query = "fog ridge";
+    await ui.runQueryScope("lexical");
+    expect(ui.searchLane).toBe("lexical");
+  });
+
+  it("a background ingest re-list does NOT flip a committed semantic lane", async () => {
+    // refreshItems re-runs the keyword query for fresh items under a query
+    // scope, but a scope the user committed as semantic must keep reading
+    // "semantic" while ingest churns (transition=false on the internal call).
+    ui.query = "fog";
+    await ui.runQueryScope("semantic");
+    expect(ui.searchLane).toBe("semantic");
+    await ui.refreshItems(); // the background re-list path
+    expect(ui.searchLane).toBe("semantic"); // label held
+  });
+
+  it("clearing the query drops the lane to 'none'", async () => {
+    ui.query = "fog";
+    await ui.runQueryScope("semantic");
+    expect(ui.searchLane).toBe("semantic");
+    ui.barFocused = true;
+    await ui.escape(); // clear-query-scope -> returnToSource -> clearQueryInput
+    expect(ui.searchLane).toBe("none");
+  });
+
   it("an empty bar is no scope — it returns the grid to its source", async () => {
     ui.query = "fog";
     await ui.runQueryScope("lexical");
