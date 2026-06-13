@@ -65,6 +65,28 @@ their original wording.
   subtle spot). Badges re-anchored to the image box. All retry/recycle/
   placeholder logic untouched. (Founder, June 12 2026.)
 
+### Night tooling (same wave, autonomous)
+
+- [x] **Em-dash creep gate** — landed `a60591a` (merge `c010179`): the
+  "NOT done: a CI grep-gate" sub-item of the em-dash rule. `scripts/check-no-
+  emdash.sh` scans `apps/desktop/src` for `—`/`–` in user-visible Svelte
+  template text + rendered attributes + TS/JS string literals, stripping
+  `<script>`/`<style>`/comments (with a `://` URL guard) and allowlisting the
+  `menus.ts` separator sentinel by exact form. Green on the current tree; wired
+  as `npm run check:emdash` and added to the BUILD-LOOP frontend gate line. No
+  GitHub Actions (CI policy left to the founder). (Coordinator, June 13 2026.)
+- [x] **Audiobook WER scorer** — landed `a4b9604` (merge `d6cf279`): the
+  remaining piece of the "Audiobook WER stress harness" backlog item. New
+  `photoproof_core::voice_wer` (normalize → word-level Levenshtein → S/D/I/N +
+  WER + hit rate, 10 unit tests) plus a `pp-voice-bench --expect <transcript>`
+  upgrade that drives the pipeline TWICE over one recording — GATED (production
+  VAD params, the path that can truncate) and RAW (gate forced open, the
+  model-accuracy ceiling) — and reports both WERs + the gating cost, with
+  `--json`. Back-compat preserved (no `--expect` = the old single-pass sweep
+  shape). The real Alice-corpus run is founder-machine (`$PP_VOICE_CORPUS` +
+  the gitignored wavs). Still open in the harness item: actually running it on
+  the corpus and reading the raw-vs-gated delta. (Coordinator, June 13 2026.)
+
 ## June 12 2026 — the evening waves (two parallel-agent builds + inline fixes)
 
 - [x] **B summons the overlay** — landed `c13f09b`: the key was dead

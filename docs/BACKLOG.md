@@ -254,6 +254,10 @@ work lives here.
   ch1 (LibriVox v8 solo, 64+128 kbps -> 16 kHz wavs) + the exact
   Gutenberg transcript + caveats README; the scorer is the remaining
   piece. (Founder, June 2026.)
+  SCORER LANDED `a4b9604` (June 13): `voice_wer` module + `pp-voice-bench
+  --expect <transcript>` scoring RAW vs GATED feeds (gating-cost delta),
+  `--json`, 10 unit tests. REMAINING: run it on the Alice corpus on the founder
+  machine and read the raw-vs-gated WER delta (needs the model + gitignored wavs).
 - [ ] **Import progressively: cards before hashes, previews in tiers** —
   big-folder import should SHOW something immediately: (a) discovery
   pass lists filenames and paints placeholder cards before hashing
