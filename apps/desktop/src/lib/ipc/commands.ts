@@ -25,7 +25,7 @@ import type {
   StrokeCommitDto,
   StrokePayloadWire,
 } from "../types/dto";
-import type { Filter, SearchResults } from "../types/search";
+import type { Filter, FusionWeights, SearchResults } from "../types/search";
 
 // -- scope & capture --------------------------------------------------------
 
@@ -81,11 +81,33 @@ export const addStroke = (hash: string, payload: StrokePayloadWire) =>
  * unchanged. */
 export type SearchMode = "lexical" | "semantic";
 
-export const search = (query: string, filters: Filter[], mode?: SearchMode) =>
-  invoke<SearchResults>(
-    "search",
-    mode === undefined ? { query, filters } : { query, filters, mode },
-  );
+/** Optional semantic-lane tuning (search-as-scope Phase 3 — the ⚙ "Ranking
+ * signals" popover). `weights` overrides the fusion's per-signal weights (an
+ * unchecked signal arrives as 0.0, excluded); `includeDebug` lights up
+ * `ImageResult.debug` so the popover can SHOW each result's per-signal
+ * contribution. Both are SEMANTIC-LANE ONLY — the lexical keystroke path never
+ * passes them, so the <100 ms budget is untouched. Omitting both preserves
+ * today's behavior exactly (the backend takes its own default fusion). */
+export interface SearchTuning {
+  weights?: FusionWeights;
+  includeDebug?: boolean;
+}
+
+export const search = (
+  query: string,
+  filters: Filter[],
+  mode?: SearchMode,
+  tuning?: SearchTuning,
+) => {
+  // Build the invoke payload sparsely: an absent field is omitted entirely so
+  // a plain (mode-less, untuned) call is byte-identical to the old wire — the
+  // Rust args are all Option, and a missing key deserializes to None.
+  const args: Record<string, unknown> = { query, filters };
+  if (mode !== undefined) args.mode = mode;
+  if (tuning?.weights !== undefined) args.weights = tuning.weights;
+  if (tuning?.includeDebug === true) args.includeDebug = true;
+  return invoke<SearchResults>("search", args);
+};
 
 /** Grid rows for an explicit hash list, IN THE ORDER GIVEN (M3): the query
  * grid runs `search` for fused-order result hashes, then this enriches them

@@ -21,12 +21,18 @@
   // Lucide (BACKLOG "Adopt Lucide icons").
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Search from "@lucide/svelte/icons/search";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
   import X from "@lucide/svelte/icons/x";
   import { ui } from "../../state/app.svelte";
   import { THUMB_STEPS } from "../../logic/sort";
   import { laneStatus } from "../../logic/searchmode";
   import { tooltip } from "../../primitives/tooltip";
   import type { Filter } from "../../types/search";
+  import RankingSignals from "./RankingSignals.svelte";
+
+  // The ⚙ "Ranking signals" popover anchor (Phase 3). The popover itself reads
+  // ui.rankingPopoverOpen; this only holds the element it floats from.
+  let signalBtn: HTMLButtonElement | undefined = $state();
 
   // Keystroke debounce. UI §5.1 allows a debounce of at most 50 ms inside
   // the <100 ms results budget — this value sits AT that spec ceiling.
@@ -161,6 +167,20 @@
       />
     </div>
 
+    <!-- ⚙ "Ranking signals" (Phase 3): on-demand, never on the keystroke path.
+         Toggling makes the B75 fusion weights visible; semantic-lane only. -->
+    <button
+      bind:this={signalBtn}
+      class="quiet"
+      class:active={ui.rankingPopoverOpen}
+      onclick={() => void ui.setRankingPopover(!ui.rankingPopoverOpen)}
+      aria-label="Ranking signals"
+      aria-pressed={ui.rankingPopoverOpen}
+      title="Ranking signals"
+    >
+      <Settings2 size={14} />
+    </button>
+
     <button
       bind:this={sortBtn}
       class="quiet"
@@ -212,6 +232,13 @@
     </div>
   {/if}
 </header>
+
+{#if ui.rankingPopoverOpen}
+  <!-- The ⚙ popover floats from the gear button (Phase 3). Closed by default;
+       its dismiss routes through ui.setRankingPopover so debug + state clean
+       up together. Escape is handled by the global ladder (logic/escape.ts). -->
+  <RankingSignals anchor={signalBtn ?? null} />
+{/if}
 
 <style>
   .grid-header {
@@ -271,6 +298,10 @@
     gap: 2px;
   }
   .quiet:hover {
+    color: var(--text);
+  }
+  /* The ⚙ reads as ON while its popover is open (the tuning is live). */
+  .quiet.active {
     color: var(--text);
   }
   .thumb-slider {
