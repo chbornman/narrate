@@ -31,6 +31,18 @@ impl ScopeKind {
             ScopeKind::Session => "session",
         }
     }
+
+    /// Scope derives mechanically from the target count (§3): 0 → session,
+    /// 1 → single, N ≥ 2 → multi. Shared by the ring push and by the
+    /// in-flight target union (engine `set_scope`) so a snapshot whose
+    /// targets grew across an image swap reports the right kind.
+    pub fn from_target_count(n: usize) -> Self {
+        match n {
+            0 => ScopeKind::Session,
+            1 => ScopeKind::Single,
+            _ => ScopeKind::Multi,
+        }
+    }
 }
 
 /// CAPTURE §3.1 `ScopeSnapshot`.
@@ -101,11 +113,7 @@ impl ScopeRing {
         now_mono: u64,
         now_wall: UtcMillis,
     ) -> &ScopeSnapshot {
-        let kind = match targets.len() {
-            0 => ScopeKind::Session,
-            1 => ScopeKind::Single,
-            _ => ScopeKind::Multi,
-        };
+        let kind = ScopeKind::from_target_count(targets.len());
         if self.ring.len() == RING_CAPACITY {
             self.ring.pop_front();
         }

@@ -227,6 +227,32 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
     /// snapshots it into the ring. Returns the echoed snapshot.
     pub fn set_scope(&mut self, targets: Vec<ContentHash>) -> &ScopeSnapshot {
         let (m, w) = (self.clock.mono_ms(), self.clock.wall());
+        // WHY union into open utterances: a single voice dictation that spans
+        // an image swap (the user starts speaking on image A, then
+        // arrow-navigates to B mid-sentence) belongs to EVERY image they were
+        // looking at while speaking — there are no per-word ASR timestamps to
+        // split the text on, so the verbatim note lands on every viewed image
+        // (founder decision, June 13 2026). The ring still records each
+        // snapshot for the normal onset lookup; this only ADDS the new
+        // targets to any utterance already in flight across the swap.
+        //
+        // Order is the order the images were VIEWED (onset image first, later
+        // images appended), and `event_targets.position` (which drives
+        // select-journal-targets and the note's target ordering) follows it,
+        // so we append first-seen and de-dup — A→B yields [A.., B..],
+        // A→B→A stays [A.., B..]. Every open utterance spanned this swap, so
+        // union into all of them.
+        for u in &mut self.in_flight {
+            for t in &targets {
+                if !u.snapshot.targets.contains(t) {
+                    u.snapshot.targets.push(t.clone());
+                }
+            }
+            // The held snapshot's kind tracks its grown target count, so the
+            // §11 indicator's bound-scope view stays accurate (single→multi
+            // once a second image joins an open utterance).
+            u.snapshot.kind = super::scope::ScopeKind::from_target_count(u.snapshot.targets.len());
+        }
         self.ring.push(targets, m, w)
     }
 

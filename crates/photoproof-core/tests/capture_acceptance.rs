@@ -121,9 +121,12 @@ fn drive(
 // §13.1 — binding under rapid selection change (the B1 script)
 // ---------------------------------------------------------------------------
 
-/// Segment 1 onset at T binds A despite the selection moving A→B at
-/// T+800 ms and finalization arriving at T+2000 ms; segment 2 onset at
-/// T+1100 ms binds B — regardless of finalization times. T = 1000.
+/// Segment 1's onset at T binds A, and because its utterance is still in
+/// flight when the selection moves A→B at T+800 ms, the swap unions B into it
+/// (founder decision, June 13 2026: a dictation spanning a swap targets every
+/// viewed image) ⇒ seg1 targets [A, B]; segment 2's onset at T+1100 ms is a
+/// SEPARATE utterance opening under B ⇒ [B]. Finalization times don't matter.
+/// T = 1000.
 #[test]
 fn c13_1_binding_b1_script_segments_bind_their_own_onsets() {
     let dir = tempfile::tempdir().unwrap();
@@ -173,15 +176,19 @@ fn c13_1_binding_b1_script_segments_bind_their_own_onsets() {
     let seg1 = &committed[0];
     let seg2 = &committed[1];
     assert_eq!(seg1.text.as_deref(), Some("lovely gesture here"));
-    assert_eq!(seg1.targets, vec![hash(0xA)], "onset T was under scope A");
+    assert_eq!(
+        seg1.targets,
+        vec![hash(0xA), hash(0xB)],
+        "onset under A, then the A→B swap arrived while seg1 was in flight ⇒ [A, B]"
+    );
     assert_eq!(seg2.text.as_deref(), Some("but this one has better light"));
     assert_eq!(
         seg2.targets,
         vec![hash(0xB)],
-        "onset T+1100 was under scope B"
+        "onset T+1100 opened a SEPARATE utterance under scope B"
     );
     assert_eq!(seg1.source, Source::Voice);
-    // The B1 monologue legitimately split across two images (§5.3).
+    // The B1 monologue legitimately split into two events (§5.3).
     assert_ne!(seg1.targets, seg2.targets);
 }
 
@@ -270,7 +277,10 @@ fn c13_1_binding_uses_estimated_onset_not_detection_time() {
 
 /// §5.1 cross-check: a late ASR token timestamp disagreeing with the VAD
 /// onset across a scope change is logged to the debug panel and NEVER
-/// silently rebinds.
+/// silently rebinds. The utterance spans the A→B swap (it is in flight at
+/// 1800), so the founder union adds B — but the held binding KEEPS A first
+/// (the VAD onset is authoritative); it is never replaced by the token
+/// onset's scope. Result: [A, B], not the token-onset's [B] alone.
 #[test]
 fn c13_1_token_time_disagreement_logs_and_never_rebinds() {
     let dir = tempfile::tempdir().unwrap();
@@ -302,8 +312,9 @@ fn c13_1_token_time_disagreement_logs_and_never_rebinds() {
     assert_eq!(committed.len(), 1);
     assert_eq!(
         committed[0].targets,
-        vec![hash(0xA)],
-        "the VAD onset is authoritative; token times never rebind"
+        vec![hash(0xA), hash(0xB)],
+        "VAD onset authoritative ⇒ A kept first; the swap unioned B; token \
+         time never rebinds it to [B] alone"
     );
     assert!(
         engine
@@ -1414,9 +1425,12 @@ fn c13_9_multi_select_rating_one_event_five_ordered_targets_dedupes() {
 // §11 — the indicator contract under streaming
 // ---------------------------------------------------------------------------
 
-/// §5.4: while an utterance is in flight the indicator shows the scope it
-/// is BOUND to even when the live selection has changed; it reverts when
-/// the segment finalizes. No text ever rides the indicator.
+/// §5.4 (as amended by the June 13 2026 founder decision): while an utterance
+/// is in flight the indicator shows the scope it is BOUND to. The onset image
+/// A stays first; a mid-utterance selection change to B is UNIONED into the
+/// binding (the note will target both), so the bound scope grows to [A, B].
+/// It reverts to the live scope when the segment finalizes. No text ever
+/// rides the indicator.
 #[test]
 fn indicator_streams_the_bound_scope_until_finalization() {
     let dir = tempfile::tempdir().unwrap();
@@ -1445,13 +1459,19 @@ fn indicator_streams_the_bound_scope_until_finalization() {
     let streaming = ind.streaming_utterance.expect("utterance in flight");
     assert_eq!(
         streaming.bound_scope.preview_hashes,
-        vec![hash(0xA)],
-        "the words in flight land on the snapshot at onset (§5.4)"
+        vec![hash(0xA), hash(0xB)],
+        "the words in flight bind A (onset) plus B (mid-utterance swap) — §5.4 \
+         as amended: a dictation spanning a swap targets every viewed image"
+    );
+    assert_eq!(
+        streaming.bound_scope.kind,
+        photoproof_core::capture::ScopeKind::Multi,
+        "two viewed images ⇒ the bound scope reports multi"
     );
     // Finalization reverts the indicator to the live scope alone.
     let committed = drive(&mut engine, &clock, &store, 3150, &[]);
     assert_eq!(committed.len(), 1);
-    assert_eq!(committed[0].targets, vec![hash(0xA)]);
+    assert_eq!(committed[0].targets, vec![hash(0xA), hash(0xB)]);
     let ind = engine.indicator();
     assert_eq!(ind.mic, MicState::ArmedIdle);
     assert!(ind.streaming_utterance.is_none());
@@ -1707,14 +1727,16 @@ fn c13_1_vad_split_asr_merge_binds_next_final_by_onset_proximity() {
     );
     assert_eq!(
         committed[0].targets,
-        vec![hash(0xA)],
-        "final#0 binds the FIRST onset's held snapshot"
+        vec![hash(0xA), hash(0xB)],
+        "final#0 binds the FIRST onset's held snapshot, which spanned the A→B \
+         swap at 6.5 s while still in flight (founder union ⇒ [A, B])"
     );
     assert_eq!(committed[1].text.as_deref(), Some("this one is sharper"));
     assert_eq!(
         committed[1].targets,
         vec![hash(0xC)],
-        "final#1 binds the THIRD onset's snapshot, not the stranded second"
+        "final#1's onset opened AFTER the A→C swap ⇒ binds C alone, not the \
+         stranded second onset"
     );
     assert_eq!(
         committed[1].ts,
@@ -2050,4 +2072,213 @@ fn c6_2_pre_roll_ships_the_audio_from_before_the_vad_onset() {
     );
     // And the shipped sequence is in order (the flush precedes the live frame).
     assert!(seen.windows(2).all(|w| w[0] < w[1]), "frames ship in order");
+}
+
+// ---------------------------------------------------------------------------
+// §5 — a single dictation that spans an image swap targets EVERY viewed image
+// (founder decision, June 13 2026): no per-word timestamps to split on, so the
+// verbatim note lands on each image the user looked at while speaking. The
+// engine unions live scope changes into any utterance already in flight.
+// ---------------------------------------------------------------------------
+
+/// Onset binds A; a mid-utterance `set_scope` to B arrives BEFORE the final;
+/// the final mints ONE voice event whose targets == [A, B] in view order, and
+/// the note is retrievable from BOTH A's and B's journal.
+#[test]
+fn c13_1_dictation_spanning_a_swap_targets_both_images() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 3000,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 3100,
+        event: ScriptedEvent::Segment(final_seg(1, "this one and that one", 1000, 2900)),
+    }]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(0xA)]);
+    engine.arm();
+    // The user arrow-navigates A→B at T+500, still mid-sentence (onset 1000,
+    // final 3100): one continuous utterance held across the swap.
+    let committed = drive(
+        &mut engine,
+        &clock,
+        &store,
+        3200,
+        &[(1500, vec![hash(0xB)])],
+    );
+    assert_eq!(committed.len(), 1, "one continuous utterance → one event");
+    assert_eq!(
+        committed[0].targets,
+        vec![hash(0xA), hash(0xB)],
+        "viewed-order union: onset image A first, then mid-utterance B"
+    );
+    assert_eq!(committed[0].text.as_deref(), Some("this one and that one"));
+    assert_eq!(committed[0].source, Source::Voice);
+    // The verbatim note appears in EACH viewed image's journal (one event
+    // row, an event_targets row per image — same path as multi-select).
+    for h in [hash(0xA), hash(0xB)] {
+        let events = store.events_for_image(&h).unwrap();
+        assert_eq!(events.len(), 1, "note lands in {h:?}'s journal");
+        assert_eq!(events[0].id, committed[0].id);
+    }
+}
+
+/// Sweeping A→B→C mid-utterance yields targets [A, B, C]; revisiting an
+/// already-viewed image (A→B→A) de-dupes and keeps first-seen order [A, B].
+#[test]
+fn c13_1_sweep_unions_in_view_order_and_dedupes() {
+    // A→B→C: three distinct images in the order viewed.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, session) = open_store(&dir);
+        let clock = FakeClock::new(WALL0);
+        let vad = MockVad::new(
+            SR,
+            vec![SpeechSpan {
+                onset: 1000,
+                end: 4000,
+            }],
+        );
+        let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+            at: 4100,
+            event: ScriptedEvent::Segment(final_seg(1, "all three of these", 1000, 3900)),
+        }]);
+        let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+        engine.set_scope(vec![hash(0xA)]);
+        engine.arm();
+        let committed = drive(
+            &mut engine,
+            &clock,
+            &store,
+            4200,
+            &[(1500, vec![hash(0xB)]), (2500, vec![hash(0xC)])],
+        );
+        assert_eq!(committed.len(), 1);
+        assert_eq!(
+            committed[0].targets,
+            vec![hash(0xA), hash(0xB), hash(0xC)],
+            "swept A→B→C ⇒ [A, B, C]"
+        );
+    }
+    // A→B→A: the revisit de-dupes; first-seen order stays [A, B].
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, session) = open_store(&dir);
+        let clock = FakeClock::new(WALL0);
+        let vad = MockVad::new(
+            SR,
+            vec![SpeechSpan {
+                onset: 1000,
+                end: 4000,
+            }],
+        );
+        let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+            at: 4100,
+            event: ScriptedEvent::Segment(final_seg(1, "back to the first", 1000, 3900)),
+        }]);
+        let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+        engine.set_scope(vec![hash(0xA)]);
+        engine.arm();
+        let committed = drive(
+            &mut engine,
+            &clock,
+            &store,
+            4200,
+            &[(1500, vec![hash(0xB)]), (2500, vec![hash(0xA)])],
+        );
+        assert_eq!(committed.len(), 1);
+        assert_eq!(
+            committed[0].targets,
+            vec![hash(0xA), hash(0xB)],
+            "A→B→A de-dupes to first-seen order [A, B]"
+        );
+    }
+}
+
+/// A scope change with NO open utterance (mic armed but silent) does NOT
+/// retroactively union into an already-finalized note: the first note stays
+/// single-target A, and only the second utterance (onset under B) targets B.
+#[test]
+fn c13_1_scope_change_between_utterances_does_not_retro_union() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![
+            SpeechSpan {
+                onset: 500,
+                end: 1500,
+            },
+            SpeechSpan {
+                onset: 3000,
+                end: 4000,
+            },
+        ],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![
+        // First final lands BEFORE the scope change, so utterance 1 is gone
+        // (no longer in flight) when A→B arrives at 2000.
+        ScriptEntry {
+            at: 1600,
+            event: ScriptedEvent::Segment(final_seg(1, "about the first", 500, 1400)),
+        },
+        ScriptEntry {
+            at: 4100,
+            event: ScriptedEvent::Segment(final_seg(2, "about the second", 3000, 3900)),
+        },
+    ]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(0xA)]);
+    engine.arm();
+    let committed = drive(
+        &mut engine,
+        &clock,
+        &store,
+        4200,
+        &[(2000, vec![hash(0xB)])], // change lands with NO utterance in flight
+    );
+    assert_eq!(committed.len(), 2);
+    assert_eq!(
+        committed[0].targets,
+        vec![hash(0xA)],
+        "the already-finalized note stays single-target A — no retro union"
+    );
+    assert_eq!(
+        committed[1].targets,
+        vec![hash(0xB)],
+        "the next utterance binds its own onset scope B"
+    );
+}
+
+/// Regression: an ordinary single-image dictation with NO swap still mints a
+/// single-target note (the union path is inert when scope never moves).
+#[test]
+fn c13_1_single_image_dictation_stays_single_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 1000,
+            end: 2500,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 2600,
+        event: ScriptedEvent::Segment(final_seg(1, "just this one", 1000, 2400)),
+    }]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(0xA)]);
+    engine.arm();
+    let committed = drive(&mut engine, &clock, &store, 2700, &[]);
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].targets, vec![hash(0xA)]);
 }
