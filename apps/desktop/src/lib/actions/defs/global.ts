@@ -36,8 +36,8 @@ export const GLOBAL_DEFS: ActionDef[] = [
   },
   {
     id: "toggle-graph",
-    verb: "Topic graph",
-    label: "Open or close the topic graph lens (semantic map)",
+    verb: "Visualizer",
+    label: "Open or close the Visualizer lens (semantic map)",
     keys: [{ key: "l" }],
     scope: "global",
     group: "panels",
