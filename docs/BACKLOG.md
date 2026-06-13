@@ -373,7 +373,17 @@ work lives here.
   concurrency matrix.
 - [ ] **Golden-query retrieval eval** (post-dogfood, M3 quality gate):
   founder-built query set over his real annotated library; settles S4
-  always-on weight (B69) and the reranker go/no-go.
+  always-on weight (B69) and the reranker go/no-go. HARNESS BUILT (awaiting
+  the real query set): pure IR metrics + golden-set format in
+  `crates/photoproof-core/src/retrieval_eval.rs` (P@k/R@k/MRR/nDCG, unit
+  tested), a CI-gated synthetic sample in
+  `crates/photoproof-core/tests/retrieval_eval_sample.rs`, and the runner
+  `pp-retrieval-eval` (`src/bin/pp_retrieval_eval.rs`). TO RUN THE GATE: drop
+  the real query set (JSON; format documented in `retrieval_eval.rs`) at the
+  gitignored `test-corpora/retrieval/`, then sweep weights, e.g.
+  `cargo run -p photoproof-core --bin pp-retrieval-eval -- --db <photoproof.db>
+  --queries test-corpora/retrieval/golden.json --json` and re-run with `--s4
+  0.5` (etc.) to diff the metric deltas. See `test-corpora/retrieval/`.
 
 ## Collections (B71 — the M3 curation thread)
 

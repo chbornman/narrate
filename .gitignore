@@ -29,6 +29,11 @@ bench-results.jsonl
 # for git, documented by the committed README beside them
 test-corpora/*
 !test-corpora/README.md
+# Retrieval golden-query gate: the directory note is committed; the actual
+# query set (real library hashes) stays out of git. (pp-retrieval-eval.)
+!test-corpora/retrieval/
+test-corpora/retrieval/*
+!test-corpora/retrieval/README.md
 
 # P6.3 spike: throwaway harness + GB-scale model artifacts (report goes to docs/)
 spike-p6.3/

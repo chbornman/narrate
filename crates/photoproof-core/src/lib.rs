@@ -13,6 +13,8 @@
 //! - `retrieval`: PPVEC vector storage + chunking (RETRIEVAL, P7.1)
 //! - `collections`: named collections + portability file (RETRIEVAL §10, P7.3)
 //! - `voice_wer`: word-error-rate scoring for the voice stress harness (BACKLOG)
+//! - `retrieval_eval`: pure IR metrics + golden-query-set format for the M3
+//!   retrieval-quality gate (RETRIEVAL §12; the `pp-retrieval-eval` runner)
 
 pub mod canonical;
 pub mod capture;
@@ -22,6 +24,7 @@ pub mod id;
 pub mod library;
 pub mod metrics;
 pub mod retrieval;
+pub mod retrieval_eval;
 pub mod runtime;
 pub mod search;
 pub mod sidecar;
