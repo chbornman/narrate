@@ -111,6 +111,12 @@ tempfile.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }
 serde_json.workspace = true
 rand = "0.8"
+# Property/fuzz testing: generates many inputs per property to catch edge cases
+# the example-based suite misses (search-firewall, sidecar round-trip, RAW
+# develop black-fix invariant, tuning bounds). Default features give the
+# `proptest!` macro + the `Strategy` combinators we use; deterministic seeds via
+# `ProptestConfig` keep CI stable.
+proptest = "1"
 # --- sidecar dev-deps (owned by packet P2.1; append below this line only) ---
 # --- library dev-deps (owned by packet P2.2; append below this line only) ---
 # --- search dev-deps (owned by packet P3.1; append below this line only) ---
