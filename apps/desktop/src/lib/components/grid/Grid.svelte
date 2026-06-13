@@ -21,6 +21,8 @@
   import * as stacks from "../../logic/stacks";
   import { infoStripHeight } from "../../logic/cellinfo";
   import { THUMB_STEPS } from "../../logic/sort";
+  import { PreviewPrioritizer } from "../../logic/previewprioritize";
+  import * as ipc from "../../ipc/commands";
   import Thumb from "./Thumb.svelte";
   import Marquee from "./Marquee.svelte";
 
@@ -65,6 +67,34 @@
   $effect(() => {
     ui.grid.gridCols = geom.cols;
     ui.grid.gridRowsPerPage = layout.rowsPerPage(geom, vh);
+  });
+
+  // ---- viewport-first preview generation (OD-2) -----------------------------
+
+  // Ask the backend to generate the previews the user is scrolled to FIRST.
+  // The ingest preview pass otherwise runs in scan order, so after a fresh scan
+  // or "Rebuild all previews" scrolling to row 200 waits on rows 1-199. The
+  // prioritizer debounces scroll-settle, sends ONLY hashes whose thumb isn't
+  // made yet (previewReady false), dedupes, and skips an unchanged window — so
+  // it reorders SERVER generation without fighting the ordinary `<img>` thumb
+  // load (a generated thumb still draws as a photoproof:// URL as before).
+  const prioritizer = new PreviewPrioritizer((hashes) => {
+    void ipc.prioritizePreviews(hashes).catch(() => {
+      // Best-effort: a failed prioritize only means the pump keeps its existing
+      // order; the thumb still heals off `previews-changed`. Never blocks the UI.
+    });
+  });
+  // `range` (visible window) and `units` (re-list / re-pair) drive this; the
+  // visible slice is the only scope the user is looking at, so we never
+  // prioritize an offscreen scope. A scope swap replaces `units`, producing a
+  // fresh window and a fresh send.
+  $effect(() => {
+    const visible = units.slice(range.start, range.end);
+    prioritizer.notify(visible);
+  });
+  $effect(() => {
+    // Cancel the debounce + forget the last-sent set when the grid unmounts.
+    return () => prioritizer.reset();
   });
 
   // ---- scroll anchor (featureset §1: position preserved) --------------------

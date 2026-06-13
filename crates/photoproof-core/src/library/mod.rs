@@ -2442,6 +2442,51 @@ impl Library {
         Ok(true)
     }
 
+    /// Viewport-first preview generation (OD-2, June 2026): the grid sends the
+    /// hashes the user is currently LOOKING at (visible + a small look-ahead
+    /// margin) so their thumbnails jump the queue. Right after a fresh scan or
+    /// "Rebuild all previews", hundreds of preview passes sit pending at
+    /// backfill priority in roughly scan order; without this, scrolling to row
+    /// 200 means waiting while the pump grinds through rows 1-199. This bumps
+    /// the PENDING preview rows for the given hashes up to the top interactive
+    /// priority (the same rank `request_full_decode` uses — a user staring at a
+    /// blank cell is as urgent as one staring at a develop spinner), so the
+    /// pump's `(priority, enqueued_at)` claim picks them next.
+    ///
+    /// Promotion only (§10.3 never demotes), and ONLY pending preview rows are
+    /// touched: a `running` row is regenerating right now, and `done` rows have
+    /// nothing left to do. Hashes without a pending preview row are silently a
+    /// no-op (already generated, or not a preview-bearing image). This reorders
+    /// SERVER generation; the frontend's `thumbqueue` independently orders the
+    /// client-side LOAD of already-generated thumbs, so the two cooperate
+    /// rather than fight: this gets the bytes made first, that gets them drawn
+    /// first. Returns the number of rows actually promoted.
+    ///
+    /// No pump nudge is needed: the pump polls at a fixed idle interval and the
+    /// next claim honors the bumped priority, exactly as `request_full_decode`
+    /// relies on (there is no wake channel; promotion is enough).
+    pub fn prioritize_previews(&self, hashes: &[ContentHash]) -> Result<usize, LibraryError> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.db.lock().expect("poisoned");
+        // One promote-shaped UPDATE per hash inside a single lock — matches the
+        // codebase's per-hash query style (list_images) rather than building an
+        // IN-list, and reuses the exact §10.3 promotion predicate: pending +
+        // strictly-worse priority only, so we never demote a P0 watcher row and
+        // never disturb running/done.
+        let mut promoted = 0usize;
+        for hash in hashes {
+            promoted += conn.execute(
+                "UPDATE ingest_passes SET priority = ?2
+                 WHERE image_hash = ?1 AND pass_name = 'preview'
+                   AND state = 'pending' AND priority > ?2",
+                params![hash.as_str(), ingest::PRIORITY_INTERACTIVE],
+            )?;
+        }
+        Ok(promoted)
+    }
+
     // -----------------------------------------------------------------------
     // Embedded-native full resolution (the /embedded protocol route —
     // founder backlog, dogfood round 2)

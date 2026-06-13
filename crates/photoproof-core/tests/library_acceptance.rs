@@ -2353,6 +2353,113 @@ fn rebuild_previews_repends_the_whole_root_and_drain_regenerates() {
     assert_eq!(pending_after, 0);
 }
 
+/// Viewport-first preview generation (OD-2): `prioritize_previews` bumps the
+/// PENDING preview rows for the hashes the user is scrolled to up to the top
+/// interactive priority (0), so the pump's `(priority, enqueued_at)` claim
+/// picks them ahead of the offscreen backfill. It must promote only — never
+/// demote a better priority — and must not disturb `running`/`done` rows or
+/// hashes without a pending preview. Mirrors the `rebuild_previews` re-pend
+/// assertions.
+#[test]
+fn prioritize_previews_bumps_only_pending_targets_to_interactive() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    env.write("photos/visible.jpg", &unique_jpeg(7401));
+    env.write("photos/offscreen.jpg", &unique_jpeg(7402));
+    env.write("photos/done.jpg", &unique_jpeg(7403));
+    env.scan(&root);
+    // Drain the whole queue so every preview is `done`; then re-pend the two
+    // we want pending back to scan priority — leaving one `done` row to prove
+    // the bump never revives finished work. (A direct UPDATE is the simplest
+    // way to set up the mixed pending/done state a real scan-then-partial-drain
+    // would produce.)
+    env.drain_queue();
+
+    let conn = env.conn();
+    let hash_of = |rel: &str| -> ContentHash {
+        let h: String = conn
+            .query_row(
+                "SELECT image_hash FROM paths WHERE rel_path = ?1 AND state = 'active'",
+                [rel],
+                |r| r.get(0),
+            )
+            .unwrap();
+        ContentHash::from_hex(&h).unwrap()
+    };
+    let visible = hash_of("photos/visible.jpg");
+    let offscreen = hash_of("photos/offscreen.jpg");
+    let done = hash_of("photos/done.jpg");
+
+    // Re-pend visible + offscreen previews to pending @ scan priority (2),
+    // mimicking the fresh-scan state; `done` stays done.
+    for hash in [&visible, &offscreen] {
+        conn.execute(
+            "UPDATE ingest_passes SET state = 'pending', priority = 2
+             WHERE image_hash = ?1 AND pass_name = 'preview'",
+            [hash.as_str()],
+        )
+        .unwrap();
+    }
+    let done_priority: i64 = conn
+        .query_row(
+            "SELECT priority FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'preview' AND state = 'done'",
+            [done.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Prioritize only the visible one.
+    let bumped = env
+        .lib
+        .prioritize_previews(std::slice::from_ref(&visible))
+        .unwrap();
+    assert_eq!(bumped, 1, "exactly the one pending visible row is promoted");
+
+    let prio = |hash: &ContentHash| -> i64 {
+        conn.query_row(
+            "SELECT priority FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'preview'",
+            [hash.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    // Visible row jumped to PRIORITY_INTERACTIVE (0); offscreen stays at scan
+    // priority (2); the done row is untouched (a re-prioritize cannot revive
+    // finished work).
+    assert_eq!(prio(&visible), 0, "visible preview promoted to interactive");
+    assert_eq!(
+        prio(&offscreen),
+        2,
+        "offscreen preview stays at scan priority"
+    );
+    assert_eq!(
+        prio(&done),
+        done_priority,
+        "done preview row is never disturbed"
+    );
+
+    // Re-prioritizing the already-interactive visible row is a no-op (promotion
+    // never demotes and never re-touches an equal/better priority).
+    let again = env
+        .lib
+        .prioritize_previews(std::slice::from_ref(&visible))
+        .unwrap();
+    assert_eq!(again, 0, "no row re-promoted; already at interactive");
+
+    // A hash with no pending preview row (the done one) and an empty list are
+    // both quiet no-ops.
+    assert_eq!(
+        env.lib
+            .prioritize_previews(std::slice::from_ref(&done))
+            .unwrap(),
+        0
+    );
+    assert_eq!(env.lib.prioritize_previews(&[]).unwrap(), 0);
+}
+
 /// Settings → Previews "Rebuild all previews" (`ClearKind::All`): the disk
 /// sweep removes EVERY tier and then re-pends the preview pass for every active
 /// root so the grid is not stranded on "?" placeholders (founder dogfood, June
