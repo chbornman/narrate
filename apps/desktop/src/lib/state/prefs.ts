@@ -282,6 +282,22 @@ export function saveAttentionMode(mode: AttentionMode) {
   safeSet("pp.graphAttention", mode);
 }
 
+// ---- semantic graph: per-topic influence field ------------------------------
+
+/** The per-topic INFLUENCE FIELD layer on the topic-graph (the soft colored
+ * glow showing each topic's power level where its strong images landed), default
+ * OFF. It is a SEPARATE layer from the Attention overlay (that one is attention;
+ * this is topic-affinity power) and the two coexist. Default off so the plain
+ * graph stays the first read and the founder opts INTO the painted view;
+ * persisted across the session like the other graph toggles. */
+export function loadGraphField(): boolean {
+  return loadBool("pp.graphField", false);
+}
+
+export function saveGraphField(on: boolean) {
+  saveBool("pp.graphField", on);
+}
+
 // ---- ranking signals (search-as-scope Phase 3) ------------------------------
 
 /** The ⚙ "Ranking signals" on/off state, persisted across the session like

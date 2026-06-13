@@ -20,6 +20,13 @@
   import { onMount, untrack } from "svelte";
   import { ui } from "../../state/app.svelte";
   import * as ipc from "../../ipc/commands";
+  import * as prefs from "../../state/prefs";
+  import {
+    computeTopicFields,
+    topicHue,
+    type FieldNode,
+    type TopicFields,
+  } from "../../logic/topicfield";
   import {
     aggregateToSuperNodes,
     coolHeat,
@@ -194,6 +201,39 @@
   let width = $state(800);
   let height = $state(600);
   let raf = 0;
+
+  // -- per-topic INFLUENCE FIELD (founder, June 2026) -------------------------
+  // A soft colored glow behind the nodes showing each topic's "power level"
+  // WHERE its strong images actually landed. Non-arbitrary by construction: we
+  // splat each node's REAL per-topic affinity into a low-res scalar buffer at
+  // the node's CURRENT (physics-placed) sim position, accumulate + blur (the
+  // pure logic/topicfield module). Because positions emerge from ALL topics'
+  // pulls, the field reflects the cross-pull reality and fades with distance.
+  // Each topic gets a distinct HUE; the per-topic fields COMPOSITE (lighten on
+  // dark chrome / multiply on light) so overlapping topics BLEND their hues into
+  // the "bridge" zones. It is a SEPARATE layer from the Attention overlay (that
+  // is attention; this is topic-affinity power) and the two coexist.
+  //
+  // Performance: a low-res grid (96x96) recomputed only on SETTLE / throttled,
+  // never per frame, rendered to a CACHED texture canvas; the field-layer draw
+  // is one scaled drawImage per topic in sim-space (transformed like the nodes).
+  let fieldEl: HTMLCanvasElement | null = $state(null);
+  /** The influence-field layer toggle. Persisted via prefs like the other graph
+   * toggles (no app.svelte.ts edit needed). Default OFF so the plain graph stays
+   * the first read and the founder opts INTO the painted view. */
+  let fieldOn = $state(prefs.loadGraphField());
+  /** The most recent computed per-topic fields (cached between recomputes), and
+   * a cached texture canvas PER topic so the per-frame draw is just placing the
+   * textures into the view transform, never re-running splat/blur. */
+  let topicFields: TopicFields | null = null;
+  let fieldTextures: HTMLCanvasElement[] = [];
+  /** Throttle handle so a flurry of settle/recompute calls coalesces into one
+   * field recompute (it is the expensive part), not one per frame. */
+  let fieldTimer: ReturnType<typeof setTimeout> | null = null;
+  const FIELD_GRID = 96;
+  /** Recompute throttle: long enough to skip the busy settling frames, short
+   * enough that the field appears promptly once the layout calms. */
+  const FIELD_THROTTLE_MS = 150;
   // Pan/zoom view transform (sim-space -> screen). Centered on the canvas.
   let zoom = 1;
   let panX = 0;
@@ -338,6 +378,25 @@
     heat = REHEAT_START;
   }
 
+  /** Toggle the influence-field layer + persist it (prefs, like the other graph
+   * toggles). Turning it ON triggers an immediate recompute from the current
+   * positions; turning it OFF clears the cached textures and the layer. */
+  function toggleField() {
+    fieldOn = !fieldOn;
+    prefs.saveGraphField(fieldOn);
+    if (fieldOn) {
+      recomputeField();
+    } else {
+      topicFields = null;
+      fieldTextures = [];
+      if (fieldTimer !== null) {
+        clearTimeout(fieldTimer);
+        fieldTimer = null;
+      }
+      drawField();
+    }
+  }
+
   // -- attention overlay: intensity fetch + synthesis -------------------------
   /** Monotone token so a slow intensity fetch cannot overwrite a newer scope's
    * (mirrors the heatmap's heatLoad guard). */
@@ -464,6 +523,10 @@
       // frames guard against an early-zero on the opening frame.
       if (energy < 1e-2 && heat <= 1.0001 && ++cool > 30) {
         cancelAnimationFrame(raf);
+        // The layout has SETTLED: recompute the influence field from the final
+        // node positions (throttled, so a quick re-settle coalesces). This is
+        // the cheap, non-per-frame recompute point the design calls for.
+        scheduleFieldRecompute();
         return;
       }
       raf = requestAnimationFrame(tick);
@@ -589,10 +652,181 @@
     ctx.restore();
   }
 
+  // -- influence field: recompute (throttled, on settle) + render ------------
+
+  /** Is the chrome theme DARK? We read the canvas background luminance from the
+   * theme tokens so the field compositing is theme-aware: on dark chrome we
+   * LIGHTEN (the hues glow out of the dark), on light chrome we MULTIPLY (the
+   * hues tint down into the light without washing out). One source: the same
+   * --bg token the rest of the app themes from. */
+  function isDarkTheme(): boolean {
+    const cs = canvasEl ? getComputedStyle(canvasEl) : null;
+    const bg = cs?.getPropertyValue("--bg").trim();
+    return luminanceOf(bg) < 0.5;
+  }
+
+  /** Rough relative luminance of a #rgb/#rrggbb token, 0..1; unknown ⇒ dark. */
+  function luminanceOf(hex: string | undefined): number {
+    if (hex === undefined || hex === "") return 0;
+    const m = hex.replace("#", "");
+    const full =
+      m.length === 3
+        ? m
+            .split("")
+            .map((c) => c + c)
+            .join("")
+        : m;
+    if (full.length < 6) return 0;
+    const r = parseInt(full.slice(0, 2), 16) / 255;
+    const g = parseInt(full.slice(2, 4), 16) / 255;
+    const b = parseInt(full.slice(4, 6), 16) / 255;
+    return 0.2126 * r + 0.7152 * g + 0.4126 * b;
+  }
+
+  /** HSL (h in degrees, s/l in [0,1]) -> [r,g,b] bytes, for the per-topic field
+   * hue. Pure helper so the texture bake stays a tight loop (no per-cell CSS
+   * color parsing). */
+  function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const hp = (((h % 360) + 360) % 360) / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    if (hp < 1) [r, g, b] = [c, x, 0];
+    else if (hp < 2) [r, g, b] = [x, c, 0];
+    else if (hp < 3) [r, g, b] = [0, c, x];
+    else if (hp < 4) [r, g, b] = [0, x, c];
+    else if (hp < 5) [r, g, b] = [x, 0, c];
+    else [r, g, b] = [c, 0, x];
+    const m = l - c / 2;
+    return [
+      Math.round((r + m) * 255),
+      Math.round((g + m) * 255),
+      Math.round((b + m) * 255),
+    ];
+  }
+
+  /** Schedule a throttled field recompute. Called when the layout SETTLES, when
+   * the field toggles on, and on a fresh node set. Coalesces a burst of calls
+   * into one recompute so the splat/blur runs once per settle, not per frame. */
+  function scheduleFieldRecompute() {
+    if (!fieldOn) return;
+    if (fieldTimer !== null) clearTimeout(fieldTimer);
+    fieldTimer = setTimeout(() => {
+      fieldTimer = null;
+      recomputeField();
+    }, FIELD_THROTTLE_MS);
+  }
+
+  /** Recompute the per-topic fields from the CURRENT node positions + real
+   * affinities (the pure module), then bake each topic's scalar field into a
+   * cached hue texture canvas. Runs the FULL detail set so a super-node's
+   * members each splat their own affinity at the cluster's position (the field
+   * reads the whole scope even in LOD mode). Off / no-topics ⇒ clear. */
+  function recomputeField() {
+    if (!fieldOn || topics.length === 0 || nodes.length === 0) {
+      topicFields = null;
+      fieldTextures = [];
+      drawField();
+      return;
+    }
+    // Splat from the LIVE node positions: a super-node carries its members'
+    // mean affinity at where the physics placed it, so the field still reflects
+    // where the cluster's strength landed (cheap, no per-member fan-out here).
+    const fieldNodes: FieldNode[] = nodes.map((n) => ({
+      x: n.x,
+      y: n.y,
+      affinity: n.affinity,
+    }));
+    topicFields = computeTopicFields(fieldNodes, topics.length, {
+      grid: FIELD_GRID,
+    });
+    bakeFieldTextures();
+    drawField();
+  }
+
+  /** Bake each topic's low-res scalar field into a small hue texture canvas
+   * (one per topic), so the per-frame draw is just placing the cached textures
+   * into the view transform. Alpha is the per-topic-normalized field value times
+   * a gentle ceiling, so a topic's glow reads as its power level without
+   * drowning the nodes. */
+  function bakeFieldTextures() {
+    const tf = topicFields;
+    if (tf === null) {
+      fieldTextures = [];
+      return;
+    }
+    const textures: HTMLCanvasElement[] = [];
+    // The translucent glow ceiling: the strongest field cell paints at this
+    // alpha, fading to 0 at the field edges. Soft on purpose (it sits UNDER the
+    // nodes and must not fight them).
+    const ALPHA_CEIL = 0.5;
+    for (let t = 0; t < tf.topicCount; t++) {
+      const tex = document.createElement("canvas");
+      tex.width = tf.width;
+      tex.height = tf.height;
+      const tctx = tex.getContext("2d");
+      if (tctx === null) {
+        textures.push(tex);
+        continue;
+      }
+      const peak = tf.max[t];
+      const img = tctx.createImageData(tf.width, tf.height);
+      const [r, g, b] = hslToRgb(topicHue(t), 0.7, 0.55);
+      const field = tf.fields[t];
+      for (let i = 0; i < field.length; i++) {
+        // Per-topic normalized intensity in [0,1] -> alpha; the hue is constant
+        // per topic so overlapping topics blend by their composited alphas.
+        const a = peak > 0 ? (field[i] / peak) * ALPHA_CEIL : 0;
+        const p = i * 4;
+        img.data[p] = r;
+        img.data[p + 1] = g;
+        img.data[p + 2] = b;
+        img.data[p + 3] = Math.round(a * 255);
+      }
+      tctx.putImageData(img, 0, 0);
+      textures.push(tex);
+    }
+    fieldTextures = textures;
+  }
+
+  /** Draw the cached field textures into the field-layer canvas, transformed to
+   * sim-space (panned + zoomed exactly like the nodes), compositing the topics
+   * so overlapping fields BLEND their hues. Cheap: one scaled drawImage per
+   * topic from the cached texture, no splat/blur on this path. */
+  function drawField() {
+    const ctx = fieldEl?.getContext("2d");
+    if (ctx === null || ctx === undefined) return;
+    ctx.clearRect(0, 0, width, height);
+    const tf = topicFields;
+    if (!fieldOn || tf === null || fieldTextures.length === 0) return;
+    // The field's sim-space rect mapped to screen, so it tracks pan/zoom with
+    // the nodes (the field IS in sim-space).
+    const [x0, y0] = toScreen(tf.bounds.minX, tf.bounds.minY);
+    const [x1, y1] = toScreen(tf.bounds.maxX, tf.bounds.maxY);
+    const dw = x1 - x0;
+    const dh = y1 - y0;
+    ctx.save();
+    // Composite the per-topic hues: LIGHTEN on dark chrome (hues glow out of the
+    // dark), MULTIPLY on light chrome (hues tint down without washing white).
+    ctx.globalCompositeOperation = isDarkTheme() ? "lighten" : "multiply";
+    // Smooth the low-res texture as it scales up into a soft continuous glow.
+    ctx.imageSmoothingEnabled = true;
+    for (const tex of fieldTextures) {
+      ctx.drawImage(tex, x0, y0, dw, dh);
+    }
+    ctx.restore();
+  }
+
   function draw() {
     // A finished thumb load bumps thumbReadyTick; reference it so a settled sim's
     // reactive redraw path observes new thumbnails (read is intentional).
     void thumbReadyTick;
+    // The influence-field layer (bottom): cheap cached-texture redraw so the
+    // field tracks pan/zoom + the live layout every frame; the EXPENSIVE
+    // splat/blur only re-runs on settle (scheduleFieldRecompute), never here.
+    drawField();
     const ctx = canvasEl?.getContext("2d");
     if (!ctx) return;
     const c = canvasColors();
@@ -1055,13 +1289,17 @@
     });
   });
 
-  // Keep the canvas backing store sized to its box.
+  // Keep both canvas backing stores (node layer + field layer) sized to the box.
   $effect(() => {
     if (canvasEl) {
       canvasEl.width = width;
       canvasEl.height = height;
-      draw();
     }
+    if (fieldEl) {
+      fieldEl.width = width;
+      fieldEl.height = height;
+    }
+    if (canvasEl) draw();
   });
 </script>
 
@@ -1135,6 +1373,20 @@
         >
       </div>
     </div>
+
+    <!-- Influence field layer toggle (DESIGN-SEMANTIC-GRAPH.md, founder June
+         2026): a soft colored glow behind the nodes showing each topic's power
+         level where its strong images landed. A SEPARATE layer from the
+         Attention overlay; the two coexist. Default off. Persisted via prefs. -->
+    <label class="field-toggle">
+      <input
+        type="checkbox"
+        checked={fieldOn}
+        onchange={toggleField}
+        aria-label="Topic influence field"
+      />
+      Field
+    </label>
 
     <button class="close" onclick={() => ui.closeGraph()} aria-label="Close topic graph">
       Close
@@ -1258,6 +1510,12 @@
     bind:clientWidth={width}
     bind:clientHeight={height}
   >
+    <!-- The influence-field layer: the BOTTOM canvas, drawn under the nodes +
+         overlay. Pointer-transparent so all gestures reach the node canvas on
+         top. Shows each topic's affinity power as a soft hued glow where its
+         strong images landed; topics composite so overlaps blend hues. -->
+    <canvas class="field-layer" bind:this={fieldEl}></canvas>
+
     <canvas
       bind:this={canvasEl}
       onpointerdown={(e) => {
@@ -1366,6 +1624,13 @@
     font-size: 12px;
   }
   .full-lib {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .field-toggle {
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1513,6 +1778,12 @@
     position: absolute;
     inset: 0;
     touch-action: none;
+  }
+  /* The influence-field layer sits UNDER the node canvas (DOM order = stacking
+     for these absolutely-positioned peers) and never intercepts pointer events,
+     so every gesture reaches the node canvas on top. */
+  .field-layer {
+    pointer-events: none;
   }
   /* The slider-to-collection bake panel: floats over the canvas (top-right),
      theme-aware (tokens only). */
