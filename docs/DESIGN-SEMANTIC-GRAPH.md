@@ -67,6 +67,10 @@ The force LAYOUT itself is frontend.
 1. **v1**: manual-seed topics + cheap suggestions (note n-grams, collection
    names) + the looks/said blend slider + live force layout on a COLLECTION.
    Click-topic-to-scope, click-image-to-open. Profile it.
+   **Then deliberately point v1 at the FULL LIBRARY (founder wants to feel the
+   scale issues early)** — even unoptimized, to see where the force sim / vector
+   scan / render falls over. That measurement, not a guess, picks the v2 LOD
+   strategy. Expect it to struggle at 10k+; that's the point of the spike.
 2. **v2**: cluster auto-topic labels; full-library LOD strategy from the v1
    profiling.
 3. **v3**: LLM topic suggestion (gated on Gemma being wired).
@@ -75,5 +79,6 @@ The force LAYOUT itself is frontend.
 - Anchor layout: topics on a ring (stable, readable) vs. topics themselves
   force-placed (organic but jumpier)? (lean ring for v1.)
 - Default α (looks vs said) — 50/50 start?
-- v1 scope: collection-only first (recommended), or attempt a sampled
-  full-library view immediately?
+- RESOLVED: collection-first to get it working, THEN run it on the full library
+  to surface the scale issues empirically before designing LOD (founder, June
+  13 2026).

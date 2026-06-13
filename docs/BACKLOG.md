@@ -362,6 +362,29 @@ work lives here.
 - **M5 (partner)**: right-edge dockable panel sharing the inspector slot;
   summon key reserved; obeys Tab lights-out unconditionally.
 
+## Visualization lenses (founder, June 13 2026 — design docs written)
+
+- [ ] **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.
+  Engagement-intensity per image from capped dwell (NEW local telemetry, 60s/
+  focus cap, tiered: Look-open full, grid-select far less) + annotation counts
+  (stroke COUNT small; effort dropped). Grid heat-tint toggle + sort-by-attention.
+  NOT gaze surveillance; dwell lives outside the journal, local-only, resettable.
+- [ ] **Semantic topic-graph** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. Force-
+  directed lens: images pulled toward named TOPIC anchors by similarity. Topics
+  from manual seed (v1) -> cluster labels (v2) -> LLM (v3). Looks-vs-said blend
+  slider (alpha), reusing the find_similar/search machinery with topic-phrase
+  embeddings. Collection-first, then full-library LOD. A new navigation surface.
+- [ ] **Heatmap x graph synthesis (FUTURE opportunity)** (founder, June 13 2026):
+  once both exist, combine them. Two payoffs the founder named: (a) **"hot
+  topics"** — overlay engagement intensity onto the topic-graph so the themes
+  you actually spend attention on light up (where heat clusters in the semantic
+  space); (b) **"missing themes from ignored images"** — the inverse: surface
+  topic regions / image clusters with LOW engagement (high semantic coherence
+  but little dwell/annotation), i.e. coherent groups of work you've been
+  neglecting. The graph gives the semantic structure, the heatmap gives the
+  attention field; multiplying them reveals both what's hot and what's been
+  overlooked. Design round of its own once the two primitives land.
+
 ## Lighting up M3 (the semantic-search chain, in order)
 
 - [ ] **Real embedder connector + backfill packet**: implement the

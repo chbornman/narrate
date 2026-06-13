@@ -30,21 +30,22 @@ SEPARATE per-image accumulator table, local-only:
 image_dwell ( image_hash TEXT PRIMARY KEY, dwell_ms INTEGER, focus_count INTEGER, last_ts TEXT )
 ```
 
-**A "focus episode"** = a continuous stretch where one image is the primary
-subject. RECOMMENDED definition (founder to confirm):
-- **Look-open is the strong signal** — opening an image in the single-image view
-  is "I am focusing on THIS." Accrue while it's the open image.
-- **Optionally** the single focused/centered image in the grid (weaker).
-- The episode ends on: leaving Look, switching to another image, **window blur**
+**A "focus episode"** = a continuous stretch where an image is in focus. Dwell
+is **TIERED by how strong the focus is** (founder, June 13 2026):
+- **Look-open = full weight (1.0x).** Opening an image in the single-image view
+  is the strongest "I am focusing on THIS."
+- **Grid selection = far less.** Clicking an image in the grid, OR multi-
+  selecting, DOES count, but at a small fraction (e.g. ~0.1-0.2x) of the
+  Look rate. For a multi-select, the (reduced) accrual is attributed to each
+  selected image (so a 10-image marquee doesn't crown any single one).
+- The episode ends on: leaving Look / deselecting / switching, **window blur**
   (app backgrounded), or a short idle (no input for ~N s). On end, add
-  `min(elapsed, 60_000) ms` to that image's `dwell_ms`, bump `focus_count`.
-- Window-blur pause + the 60 s cap together handle the walk-away case.
+  `min(tier_rate · elapsed, 60_000) ms` to each focused image's `dwell_ms` and
+  bump `focus_count`. The 60s cap is per episode per image.
+- Window-blur pause + the 60s cap together handle the walk-away case.
 
 This is the only genuinely new capture in the app; it's light, debounced, and
-never leaves the machine.
-
-OPEN: does grid-single-focus count, or Look-open only? (Look-only is cleaner and
-less noisy; I lean Look-only for v1.)
+never leaves the machine. The tier rates (Look vs grid) are tunable data.
 
 ## Rendering
 - **Grid heat-tint** — a warm glow / corner heat-bar on each cell scaled by
@@ -64,7 +65,9 @@ less noisy; I lean Look-only for v1.)
 3. Tuning pass on the weights against the founder's real library.
 
 ## Open decisions for the founder
-- Grid-focus dwell, or Look-open only? (lean Look-only)
-- Default weights (dwell-led; stroke-count small) — tune later.
+- RESOLVED: dwell is tiered — Look-open full weight, grid select/multiselect far
+  less (founder, June 13 2026).
+- Default weights + tier rates (dwell-led; stroke-count small; grid ~0.1-0.2x of
+  Look) — tune against the real library later.
 - Is dwell telemetry something to ever expose/reset in settings? (privacy hygiene
   even though it's local — probably yes, a "clear attention data" button.)
