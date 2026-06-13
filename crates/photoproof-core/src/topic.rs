@@ -500,6 +500,436 @@ pub fn scope_note_texts_by_hash(
 }
 
 // ---------------------------------------------------------------------------
+// suggest_collections — Phase 3 candidate GROUPINGS (DESIGN-TOPICS-COLLECTIONS.md)
+// ---------------------------------------------------------------------------
+//
+// Three EXTRA candidate signals beyond the v2 cluster topics, all computed on
+// the fly from data the app already has (annotation_events / sessions /
+// event_targets / images.capture_ts / paths / image_journal_stats):
+//
+//   1. CO-ANNOTATION IN A SESSION — images annotated within the same session
+//      co-occur; a session that touched a coherent set of photos is a candidate
+//      grouping ("worked together <date>").
+//   2. REPEATED PHRASES ACROSS NOTES — a salient note n-gram that recurs across
+//      multiple images: the set of images whose notes share it is a candidate
+//      ("images you called '<phrase>'"). Reuses the v2 `mine_ngrams` miner.
+//   3. TIME + FOLDER BURSTS — images close in CAPTURE TIME within one folder (a
+//      shoot): cluster by (folder, time gap) into bursts; a big burst is a
+//      candidate ("burst, <folder>, <date>").
+//
+// K14: this PROPOSES, it never auto-creates. Quiet by construction — pure
+// reducers over rows the command gathers, never a write. Empty/sparse libraries
+// yield few/none, never an error. The caps below keep the rail short and the
+// member lists sane; like the `suggest_topics` caps they shape a RAIL, not a
+// ranking, so they are plain consts (deliberately not tuning.toml knobs).
+
+/// At most this many candidates total across all three sources (the rail stays
+/// short — the human skims and commits, they do not wade).
+const MAX_COLLECTION_CANDIDATES: usize = 24;
+/// Cap each candidate's member list: a grouping the human reviews before baking
+/// should be glanceable, not a thousand-image dump. (A real shoot can exceed
+/// this; the candidate is a STARTING POINT the human refines, not a final set.)
+const MAX_CANDIDATE_MEMBERS: usize = 500;
+/// A session must have touched at least this many DISTINCT images to be a
+/// co-annotation candidate — one or two images is not a "set worked together".
+const MIN_SESSION_IMAGES: usize = 3;
+/// A note n-gram must span at least this many DISTINCT images to be a
+/// repeated-phrase candidate — a phrase on a single image is not a grouping
+/// (this is the cross-IMAGE recurrence floor, distinct from `suggest_topics`'
+/// cross-NOTE one).
+const MIN_PHRASE_IMAGES: usize = 3;
+/// A capture-time burst must hold at least this many images to be a candidate —
+/// a lone frame or a pair is not a "shoot".
+const MIN_BURST_IMAGES: usize = 4;
+/// The capture-time gap (ms) that splits one burst from the next within a
+/// folder: > 30 minutes between consecutive frames starts a new burst. 30 min
+/// mirrors the session idle boundary (CAPTURE §2.2) — the same "the
+/// photographer stepped away" intuition, applied to capture time.
+const BURST_GAP_MS: i64 = 30 * 60 * 1000;
+
+/// A proposed candidate GROUPING the human might bake into a collection
+/// (DESIGN-TOPICS-COLLECTIONS.md, autosuggest Phase 3). NOT a collection: it is
+/// a suggestion the human commits via the existing bake (K14: the machine
+/// proposes, the human authors). Computed on the fly; never stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionCandidate {
+    /// A human-readable name for the proposed grouping (no em-dashes — UI copy).
+    pub label: String,
+    /// The candidate member image hashes (lowercase hex), capped at
+    /// `MAX_CANDIDATE_MEMBERS`. Sorted ascending for a deterministic order.
+    pub members: Vec<String>,
+    /// Which signal proposed this: `"co_annotation"` | `"repeated_phrase"` |
+    /// `"time_folder"`. The rail can style each source differently.
+    pub source: String,
+    /// A simple coherence/size signal for ranking the rail (bigger / tighter
+    /// groupings first). Not a probability — just a sortable strength.
+    pub score: f64,
+}
+
+/// One annotation event's `(session_id, image_hash)` link, the raw input for the
+/// co-annotation candidate source. The command gathers these from the journal
+/// spine (live remark/rating/stroke/revision events joined to their targets).
+pub type SessionImageLink = (String, String);
+
+/// Co-annotation candidates: a session that touched >= `MIN_SESSION_IMAGES`
+/// DISTINCT images is a candidate grouping (the photographer worked that set
+/// together). `links` is `(session_id, image_hash)` for every live event/target
+/// in scope; `session_started` maps a session id to its start timestamp (for the
+/// "<date>" in the label) — a session absent from the map just gets no date.
+///
+/// PURE over its inputs (no DB) so it is unit-testable with planted links. The
+/// score is the distinct-image count (bigger sessions rank higher).
+fn co_annotation_candidates(
+    links: &[SessionImageLink],
+    session_started: &HashMap<String, i64>,
+) -> Vec<CollectionCandidate> {
+    // Group distinct images per session. A BTreeSet keeps members sorted +
+    // deduped (a session can touch the same image across many events).
+    let mut by_session: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    for (session, hash) in links {
+        by_session
+            .entry(session.clone())
+            .or_default()
+            .insert(hash.clone());
+    }
+    let mut out = Vec::new();
+    for (session, images) in by_session {
+        if images.len() < MIN_SESSION_IMAGES {
+            continue;
+        }
+        let date = session_started
+            .get(&session)
+            .map(|ms| date_label(*ms))
+            .unwrap_or_default();
+        // Label without an em-dash (UI copy rule). With a known date: "worked
+        // together 2026-06-13"; without: just "worked together".
+        let label = if date.is_empty() {
+            "worked together".to_owned()
+        } else {
+            format!("worked together {date}")
+        };
+        let score = images.len() as f64;
+        out.push(make_candidate(label, images, "co_annotation", score));
+    }
+    out
+}
+
+/// One image's `(image_hash, note_text)` row, the raw input for the
+/// repeated-phrase source. The command gathers these BY image (a multi-target
+/// remark applies to each image it targets, so it is counted per image here, not
+/// de-duped by event — exactly `scope_note_texts_by_hash`'s grouping).
+///
+/// Repeated-phrase candidates: a salient note n-gram (the v2 `mine_ngrams`
+/// miner) that recurs across >= `MIN_PHRASE_IMAGES` DISTINCT images becomes a
+/// candidate whose members are those images ("images you called '<phrase>'").
+/// The score is the distinct-image span. Only the STRONGEST phrase per image set
+/// is kept when several phrases pick out the same images, to avoid near-duplicate
+/// rail chips.
+fn repeated_phrase_candidates(
+    notes_by_hash: &HashMap<String, Vec<String>>,
+) -> Vec<CollectionCandidate> {
+    // For each salient n-gram, the set of images whose notes contain it. Mine
+    // each image's notes once (the same miner the v2 labels use) and union the
+    // resulting phrases into per-phrase image sets.
+    let mut images_by_phrase: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    for (hash, texts) in notes_by_hash {
+        // mine_ngrams returns phrase->count within THIS image's notes; we only
+        // care that the phrase appears at all for this image (cross-image
+        // recurrence is the signal, not within-image repetition).
+        for phrase in mine_ngrams(texts).into_keys() {
+            images_by_phrase
+                .entry(phrase)
+                .or_default()
+                .insert(hash.clone());
+        }
+    }
+    // Keep phrases spanning enough distinct images, strongest (widest span)
+    // first; a longer phrase breaks a span tie (more specific theme), then the
+    // phrase text for determinism.
+    let mut kept: Vec<(String, std::collections::BTreeSet<String>)> = images_by_phrase
+        .into_iter()
+        .filter(|(_, imgs)| imgs.len() >= MIN_PHRASE_IMAGES)
+        .collect();
+    kept.sort_by(|a, b| {
+        b.1.len()
+            .cmp(&a.1.len())
+            .then_with(|| b.0.split(' ').count().cmp(&a.0.split(' ').count()))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    // Drop a phrase whose member set is identical to one already emitted (two
+    // phrases picking out the SAME images are one grouping; keep the strongest,
+    // which sorts first). Cheap O(n^2) over the short kept list.
+    let mut out: Vec<CollectionCandidate> = Vec::new();
+    let mut emitted_sets: Vec<std::collections::BTreeSet<String>> = Vec::new();
+    for (phrase, imgs) in kept {
+        if emitted_sets.contains(&imgs) {
+            continue;
+        }
+        let score = imgs.len() as f64;
+        let label = format!("images you called \"{phrase}\"");
+        emitted_sets.push(imgs.clone());
+        out.push(make_candidate(label, imgs, "repeated_phrase", score));
+    }
+    out
+}
+
+/// One image's `(folder, capture_ms, image_hash)` row, the raw input for the
+/// time+folder burst source. `folder` is a stable per-folder key the command
+/// builds (root id + the file's parent dir), `capture_ms` is the EXIF capture
+/// time in epoch millis (images with no capture time are omitted by the command).
+pub type FolderTimeRow = (String, i64, String);
+
+/// Time + folder burst candidates: within ONE folder, images whose consecutive
+/// capture times are within `BURST_GAP_MS` form a burst (a shoot); a burst of at
+/// least `MIN_BURST_IMAGES` is a candidate ("burst, folder, date"). A gap larger
+/// than the threshold, or a different folder, SPLITS the burst.
+///
+/// PURE: sort each folder's rows by capture time, then walk splitting on the
+/// gap. The score is the burst size. The `<folder>` shown is the row's folder
+/// key's last path segment (a readable name, not the full key).
+fn time_folder_candidates(rows: &[FolderTimeRow]) -> Vec<CollectionCandidate> {
+    // Bucket by folder, then sort each bucket by capture time (then hash for a
+    // deterministic order on identical timestamps — burst-mate frames often
+    // share a second).
+    let mut by_folder: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (folder, ms, hash) in rows {
+        by_folder
+            .entry(folder.clone())
+            .or_default()
+            .push((*ms, hash.clone()));
+    }
+    let mut out = Vec::new();
+    // Deterministic folder order so the rail is stable across runs.
+    let mut folders: Vec<String> = by_folder.keys().cloned().collect();
+    folders.sort();
+    for folder in folders {
+        let mut frames = by_folder.remove(&folder).unwrap_or_default();
+        frames.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        // Walk consecutive frames, breaking a burst when the gap exceeds the
+        // threshold. Each closed burst >= the floor becomes a candidate.
+        let mut burst: Vec<(i64, String)> = Vec::new();
+        let folder_name = folder.rsplit('/').next().unwrap_or(&folder).to_owned();
+        let flush = |burst: &mut Vec<(i64, String)>, out: &mut Vec<CollectionCandidate>| {
+            if burst.len() >= MIN_BURST_IMAGES {
+                let start_ms = burst.first().map(|(ms, _)| *ms).unwrap_or_default();
+                let date = date_label(start_ms);
+                let members: std::collections::BTreeSet<String> =
+                    burst.iter().map(|(_, h)| h.clone()).collect();
+                let score = members.len() as f64;
+                let label = if date.is_empty() {
+                    format!("burst, {folder_name}")
+                } else {
+                    format!("burst, {folder_name}, {date}")
+                };
+                out.push(make_candidate(label, members, "time_folder", score));
+            }
+            burst.clear();
+        };
+        for frame in frames {
+            // A gap past the threshold from the previous frame closes the burst.
+            if let Some((prev_ms, _)) = burst.last()
+                && frame.0 - *prev_ms > BURST_GAP_MS
+            {
+                flush(&mut burst, &mut out);
+            }
+            burst.push(frame);
+        }
+        flush(&mut burst, &mut out);
+    }
+    out
+}
+
+/// Build a capped, deterministically-ordered candidate from a label, a sorted
+/// member set, a source tag, and a score. Shared by all three sources so the
+/// member cap + ordering are applied ONE way.
+fn make_candidate(
+    label: String,
+    members: std::collections::BTreeSet<String>,
+    source: &str,
+    score: f64,
+) -> CollectionCandidate {
+    // BTreeSet already yields ascending order; the cap keeps the list glanceable
+    // (the human refines a starting point, not a final set).
+    let members: Vec<String> = members.into_iter().take(MAX_CANDIDATE_MEMBERS).collect();
+    CollectionCandidate {
+        label,
+        members,
+        source: source.to_owned(),
+        score,
+    }
+}
+
+/// The `YYYY-MM-DD` date portion of an epoch-ms instant, for candidate labels.
+/// Empty string for a degenerate/zero instant (so the label drops the date
+/// rather than printing a misleading epoch date).
+fn date_label(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    // Reuse the canonical RFC3339 formatter and slice the date (first 10 bytes:
+    // "YYYY-MM-DD"), so the label's date matches the rest of the app's clock.
+    crate::UtcMillis::from_epoch_ms(ms)
+        .to_rfc3339()
+        .get(..10)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// `suggest_collections` (DESIGN-TOPICS-COLLECTIONS.md, autosuggest Phase 3):
+/// merge the three candidate sources into one ranked, capped rail. PURE over the
+/// gathered rows (the desktop command does the DB reads + scope enumeration and
+/// hands the rows in), so the whole proposal logic is unit-testable without a DB.
+///
+/// Ranking: by descending score (bigger / tighter groupings first), then source
+/// then label for a deterministic order. Capped at `MAX_COLLECTION_CANDIDATES`.
+/// Empty/sparse inputs yield few/none, never an error (K14 quiet posture).
+pub fn suggest_collections(
+    session_links: &[SessionImageLink],
+    session_started: &HashMap<String, i64>,
+    notes_by_hash: &HashMap<String, Vec<String>>,
+    folder_time_rows: &[FolderTimeRow],
+) -> Vec<CollectionCandidate> {
+    let mut out = co_annotation_candidates(session_links, session_started);
+    out.extend(repeated_phrase_candidates(notes_by_hash));
+    out.extend(time_folder_candidates(folder_time_rows));
+    // Strongest first, then a stable tie-break (source, then label) so the rail
+    // order never reshuffles between identical runs.
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    out.truncate(MAX_COLLECTION_CANDIDATES);
+    out
+}
+
+/// Pull `(session_id, image_hash)` for every LIVE event targeting any image in
+/// `scope`, for the co-annotation candidate source. Unlike `scope_note_texts`
+/// this counts ALL live event kinds (a rating or a stroke "touches" an image in
+/// a session just as a remark does — the session worked that image), de-duped to
+/// distinct `(session, image)` pairs. `redacted_by IS NULL` drops scrubbed
+/// events. An empty scope yields an empty vec, never an error.
+pub fn scope_session_image_links(
+    conn: &Connection,
+    scope: &[String],
+) -> rusqlite::Result<Vec<SessionImageLink>> {
+    if scope.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marks = vec!["?"; scope.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT e.session_id, t.image_hash
+         FROM annotation_events e
+         JOIN event_targets t ON t.event_id = e.id
+         WHERE e.redacted_by IS NULL
+           AND t.image_hash IN ({marks})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(scope.iter());
+    let rows = stmt.query_map(params, |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
+/// Map every session id that appears in `links` to its start instant (epoch ms),
+/// for the co-annotation candidate labels' "<date>". Sessions whose `started_ts`
+/// is absent/unparseable are simply omitted (the candidate then carries no date).
+pub fn session_start_millis(
+    conn: &Connection,
+    links: &[SessionImageLink],
+) -> rusqlite::Result<HashMap<String, i64>> {
+    if links.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Distinct session ids from the links (the set we need start times for).
+    let ids: std::collections::BTreeSet<&str> = links.iter().map(|(s, _)| s.as_str()).collect();
+    let ids: Vec<&str> = ids.into_iter().collect();
+    let marks = vec!["?"; ids.len()].join(",");
+    let sql = format!("SELECT id, started_ts FROM sessions WHERE id IN ({marks})");
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(ids.iter());
+    let rows = stmt.query_map(params, |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (id, started) = row?;
+        // started_ts is the canonical RFC3339; a parse failure just drops the
+        // date (the candidate is still valid, it just has no "<date>" label).
+        if let Ok(ms) = crate::UtcMillis::parse(&started) {
+            out.insert(id, ms.epoch_ms());
+        }
+    }
+    Ok(out)
+}
+
+/// Pull `(folder_key, capture_ms, image_hash)` for the in-scope images that have
+/// BOTH an active path (a folder) AND a capture timestamp, for the time+folder
+/// burst source. The folder key is `root_id` + the active path's PARENT
+/// directory (so two images in the same shoot directory share a key; the
+/// camera-DCIM-collision concern that GridItem.root_id guards against is handled
+/// by keying on root_id too). Images with no capture time or no active path are
+/// omitted (they cannot anchor a capture-time burst). Empty scope ⇒ empty vec.
+pub fn scope_folder_time_rows(
+    conn: &Connection,
+    scope: &[String],
+) -> rusqlite::Result<Vec<FolderTimeRow>> {
+    if scope.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marks = vec!["?"; scope.len()].join(",");
+    // Join images (capture_ts) to its active path (root_id + rel_path). One row
+    // per image: a multi-path image picks its first active path (MIN(rel_path))
+    // so the folder key is deterministic. capture_ts NOT NULL filters undated
+    // images out of the burst math.
+    let sql = format!(
+        "SELECT i.image_hash, i.capture_ts,
+                COALESCE(p.root_id, '') AS root_id, p.rel_path
+         FROM images i
+         JOIN paths p ON p.image_hash = i.image_hash AND p.state = 'active'
+         WHERE i.capture_ts IS NOT NULL
+           AND i.image_hash IN ({marks})
+           AND p.rel_path = (
+             SELECT MIN(p2.rel_path) FROM paths p2
+             WHERE p2.image_hash = i.image_hash AND p2.state = 'active'
+           )"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(scope.iter());
+    let rows = stmt.query_map(params, |r| {
+        Ok((
+            r.get::<_, String>(0)?, // image_hash
+            r.get::<_, String>(1)?, // capture_ts (RFC3339)
+            r.get::<_, String>(2)?, // root_id ('' if none)
+            r.get::<_, String>(3)?, // rel_path
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (hash, capture_ts, root_id, rel_path) = row?;
+        // A capture_ts that does not parse is treated as undated (skip it — it
+        // cannot sit in a time-ordered burst).
+        let Ok(ms) = crate::UtcMillis::parse(&capture_ts) else {
+            continue;
+        };
+        // Folder key = root_id + the file's PARENT directory. The parent is
+        // rel_path with its last '/'-segment (the filename) stripped; a file at
+        // the root has an empty parent. Keying on root_id keeps identical camera
+        // paths under different roots distinct (the GridItem.root_id concern).
+        let parent = match rel_path.rsplit_once('/') {
+            Some((dir, _file)) => dir,
+            None => "",
+        };
+        let folder_key = format!("{root_id}/{parent}");
+        out.push((folder_key, ms.epoch_ms(), hash));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // cluster_topics — v2 cluster auto-labels (note-grounded auto-topics)
 // ---------------------------------------------------------------------------
 //
@@ -1201,6 +1631,207 @@ mod tests {
     fn cluster_empty_or_unembedded_returns_empty() {
         let notes: HashMap<String, Vec<String>> = HashMap::new();
         assert!(cluster_topics(&[], &notes, None, 2, 12).is_empty());
+    }
+
+    // ---- suggest_collections (Phase 3 candidate groupings) ----------------
+
+    fn h(seed: &str) -> String {
+        // A 64-hex content hash from a short seed (the candidate sources only
+        // care about distinctness + ordering, not the bytes).
+        seed.repeat(64 / seed.len().max(1))[..64].to_owned()
+    }
+
+    /// Co-annotation: a session that touched >= MIN_SESSION_IMAGES distinct
+    /// images is a candidate; a smaller session is not. Members are exactly that
+    /// session's distinct images; the label carries the start date.
+    #[test]
+    fn co_annotation_groups_a_multi_image_session() {
+        let (s_big, s_small) = ("s_big", "s_small");
+        let links = vec![
+            (s_big.to_owned(), h("a")),
+            (s_big.to_owned(), h("b")),
+            (s_big.to_owned(), h("c")),
+            // A repeated (session, image) pair must count once (distinct images).
+            (s_big.to_owned(), h("c")),
+            // A two-image session is below the floor → no candidate.
+            (s_small.to_owned(), h("d")),
+            (s_small.to_owned(), h("e")),
+        ];
+        let mut started = HashMap::new();
+        // 2026-06-13T00:00:00.000Z in epoch ms.
+        let ms = crate::UtcMillis::parse("2026-06-13T08:00:00.000Z")
+            .unwrap()
+            .epoch_ms();
+        started.insert(s_big.to_owned(), ms);
+        let cands = co_annotation_candidates(&links, &started);
+        assert_eq!(cands.len(), 1, "only the >=3-image session is a candidate");
+        let c = &cands[0];
+        assert_eq!(c.source, "co_annotation");
+        assert_eq!(c.members, vec![h("a"), h("b"), h("c")]);
+        assert_eq!(c.score, 3.0);
+        assert!(c.label.contains("2026-06-13"), "label: {}", c.label);
+        assert!(!c.label.contains('—'), "no em-dash in UI copy: {}", c.label);
+    }
+
+    /// A session with no start time still yields a (dateless) candidate, never a
+    /// misleading epoch date.
+    #[test]
+    fn co_annotation_dateless_session_has_no_date_in_label() {
+        let links = vec![
+            ("s".to_owned(), h("a")),
+            ("s".to_owned(), h("b")),
+            ("s".to_owned(), h("c")),
+        ];
+        let cands = co_annotation_candidates(&links, &HashMap::new());
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].label, "worked together");
+    }
+
+    /// Repeated phrase: an n-gram spanning >= MIN_PHRASE_IMAGES distinct images
+    /// is a candidate whose members are those images; a phrase on too few images
+    /// is dropped; identical-member phrases collapse to the strongest.
+    #[test]
+    fn repeated_phrase_groups_images_sharing_an_ngram() {
+        let mut notes: HashMap<String, Vec<String>> = HashMap::new();
+        // "the fog series" wording on three images → a candidate.
+        notes.insert(h("a"), vec!["quiet fog series at dawn".to_owned()]);
+        notes.insert(h("b"), vec!["more fog series light".to_owned()]);
+        notes.insert(h("c"), vec!["fog series again".to_owned()]);
+        // A phrase on a single image is below the cross-image floor.
+        notes.insert(h("d"), vec!["a lonely tugboat".to_owned()]);
+        let cands = repeated_phrase_candidates(&notes);
+        // The "fog series" 2-gram (and "fog"/"series" 1-grams) all span a,b,c —
+        // the same member set, so they collapse to ONE candidate.
+        assert!(!cands.is_empty());
+        let fog = cands
+            .iter()
+            .find(|c| c.label.contains("fog series"))
+            .or_else(|| cands.first())
+            .expect("a fog candidate");
+        assert_eq!(fog.source, "repeated_phrase");
+        assert_eq!(fog.members, vec![h("a"), h("b"), h("c")]);
+        assert_eq!(fog.score, 3.0);
+        // No member set with fewer than the floor's images escaped.
+        assert!(cands.iter().all(|c| c.members.len() >= MIN_PHRASE_IMAGES));
+        // Identical-member phrases collapsed (no two candidates share a set).
+        for i in 0..cands.len() {
+            for j in (i + 1)..cands.len() {
+                assert_ne!(
+                    cands[i].members, cands[j].members,
+                    "identical member sets must collapse"
+                );
+            }
+        }
+    }
+
+    /// Time + folder: frames close in time within one folder form a burst; a big
+    /// time gap splits a burst; a different folder splits it; sub-floor bursts
+    /// are dropped.
+    #[test]
+    fn time_folder_groups_a_burst_and_splits_on_gap_and_folder() {
+        let base = crate::UtcMillis::parse("2026-06-13T08:00:00.000Z")
+            .unwrap()
+            .epoch_ms();
+        let min = 60_000i64;
+        // Folder F1: a 5-frame burst (1 min apart), then a >30min gap, then a
+        // 2-frame tail (below the burst floor → not its own candidate).
+        let mut rows: Vec<FolderTimeRow> = Vec::new();
+        for (i, seed) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            rows.push(("F1".to_owned(), base + (i as i64) * min, h(seed)));
+        }
+        // 40-minute gap, then two more frames in F1 → a separate, too-small burst.
+        rows.push(("F1".to_owned(), base + 45 * min, h("f")));
+        rows.push(("F1".to_owned(), base + 46 * min, h("g")));
+        // Folder F2: a 4-frame burst at the same times as F1's first burst —
+        // SAME times, DIFFERENT folder must be its own candidate, not merged.
+        for (i, seed) in ["p", "q", "r", "s"].iter().enumerate() {
+            rows.push(("root2/F2".to_owned(), base + (i as i64) * min, h(seed)));
+        }
+        let cands = time_folder_candidates(&rows);
+        // Two candidates: F1's 5-frame burst + F2's 4-frame burst. F1's 2-frame
+        // tail is below MIN_BURST_IMAGES and the F2 set never merges with F1.
+        assert_eq!(cands.len(), 2, "got: {:?}", cands);
+        let f1 = cands
+            .iter()
+            .find(|c| c.members.contains(&h("a")))
+            .expect("F1 burst");
+        assert_eq!(f1.source, "time_folder");
+        assert_eq!(f1.members.len(), 5, "the 5-frame burst, gap-split tail out");
+        assert!(!f1.members.contains(&h("f")), "post-gap frame excluded");
+        assert!(f1.label.starts_with("burst, F1"), "label: {}", f1.label);
+        assert!(f1.label.contains("2026-06-13"));
+        let f2 = cands
+            .iter()
+            .find(|c| c.members.contains(&h("p")))
+            .expect("F2 burst");
+        assert_eq!(
+            f2.members.len(),
+            4,
+            "F2 is its own burst, not merged into F1"
+        );
+    }
+
+    /// The whole rail: merged, ranked by descending score, capped, and an empty
+    /// library yields an empty rail (never an error).
+    #[test]
+    fn suggest_collections_merges_ranks_and_caps() {
+        // One co-annotation (score 4), one repeated-phrase (score 3), one burst
+        // (score 5) → the burst ranks first.
+        let session_links = vec![
+            ("s".to_owned(), h("a")),
+            ("s".to_owned(), h("b")),
+            ("s".to_owned(), h("c")),
+            ("s".to_owned(), h("d")),
+        ];
+        let mut notes: HashMap<String, Vec<String>> = HashMap::new();
+        for seed in ["m", "n", "o"] {
+            notes.insert(h(seed), vec!["the harbor mist again".to_owned()]);
+        }
+        let base = crate::UtcMillis::parse("2026-06-13T08:00:00.000Z")
+            .unwrap()
+            .epoch_ms();
+        let mut rows: Vec<FolderTimeRow> = Vec::new();
+        for (i, seed) in ["u", "v", "w", "x", "y"].iter().enumerate() {
+            rows.push(("F".to_owned(), base + (i as i64) * 60_000, h(seed)));
+        }
+        let cands = suggest_collections(&session_links, &HashMap::new(), &notes, &rows);
+        assert_eq!(cands.len(), 3);
+        // Descending score: burst (5) > co-annotation (4) > phrase (3).
+        assert_eq!(cands[0].source, "time_folder");
+        assert_eq!(cands[0].score, 5.0);
+        assert_eq!(cands[1].source, "co_annotation");
+        assert_eq!(cands[2].source, "repeated_phrase");
+
+        // Empty inputs → an empty rail, never an error.
+        let empty = suggest_collections(&[], &HashMap::new(), &HashMap::new(), &[]);
+        assert!(empty.is_empty());
+    }
+
+    /// The member cap holds: a burst larger than MAX_CANDIDATE_MEMBERS is
+    /// truncated, the rest of the candidate intact.
+    #[test]
+    fn candidate_member_cap_holds() {
+        let base = crate::UtcMillis::parse("2026-06-13T08:00:00.000Z")
+            .unwrap()
+            .epoch_ms();
+        // MAX_CANDIDATE_MEMBERS + 50 frames 1 second apart (all one burst).
+        let n = MAX_CANDIDATE_MEMBERS + 50;
+        let mut rows: Vec<FolderTimeRow> = Vec::with_capacity(n);
+        for i in 0..n {
+            // Distinct 64-hex hashes from the index.
+            let hash = format!("{i:064x}");
+            rows.push(("F".to_owned(), base + (i as i64) * 1000, hash));
+        }
+        let cands = time_folder_candidates(&rows);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(
+            cands[0].members.len(),
+            MAX_CANDIDATE_MEMBERS,
+            "member list capped"
+        );
+        // The score still reflects the FULL burst size (the cap trims the member
+        // list shown, not the strength signal).
+        assert_eq!(cands[0].score, n as f64);
     }
 
     // ---- suggest_topics_llm (v3 seam) -------------------------------------
