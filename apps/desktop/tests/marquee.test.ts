@@ -68,6 +68,27 @@ describe("rect → indices hit-test", () => {
     const hits = marquee.hitTest({ x: p.x + 2, y: p.y + 2, w: 0, h: 0 }, g, 100);
     expect(hits).toEqual([5]);
   });
+
+  it("with an info strip on top, a rect over the IMAGE box hits but one over only the strip misses", () => {
+    // Same geometry, info=32: the strip sits at the row top, the image box
+    // starts g.info below it. Row 0 image box top is pad + info.
+    const gi = layout.snap(1000, 240, 8, 10, 32);
+    const p = layout.position(gi, 0); // row-top y = pad
+    // A rect entirely inside the strip (above the image box) hits nothing.
+    const stripOnly = marquee.hitTest(
+      { x: p.x + 5, y: p.y + 2, w: 10, h: gi.info - 4 },
+      gi,
+      100,
+    );
+    expect(stripOnly).toEqual([]);
+    // A point inside the image box (below the strip) hits the cell.
+    const onImage = marquee.hitTest(
+      { x: p.x + 5, y: p.y + gi.info + 5, w: 0, h: 0 },
+      gi,
+      100,
+    );
+    expect(onImage).toEqual([0]);
+  });
 });
 
 describe("merge into the selection (Ctrl = additive — featureset §1)", () => {

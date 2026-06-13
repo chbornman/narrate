@@ -15,9 +15,14 @@
 export interface GridGeometry {
   /** Integer column count, ≥ 1. */
   cols: number;
-  /** Snapped cell size (fractional px allowed — rows fill exactly). */
+  /** Snapped cell size (fractional px allowed — rows fill exactly). This is
+   * the square IMAGE box side; the info strip is added on TOP of it. */
   cell: number;
-  /** Row stride: cell + gap. */
+  /** Info-strip height (px) reserved ABOVE the image box — 0 when cell-info
+   * is off. Global/all-cells, so every row reserves the same strip and rows
+   * stay uniform (cellinfo.ts infoStripHeight). */
+  info: number;
+  /** Row stride: cell + info + gap. */
   rowH: number;
   gap: number;
   pad: number;
@@ -30,11 +35,14 @@ export function snap(
   target: number,
   gap: number,
   pad: number,
+  info = 0,
 ): GridGeometry {
   const avail = containerW - pad * 2;
   const cols = Math.max(1, Math.round((avail + gap) / (target + gap)));
   const cell = Math.max(1, (avail - (cols - 1) * gap) / cols);
-  return { cols, cell, rowH: cell + gap, gap, pad };
+  // The strip lives inside the row stride ON TOP of the square image box, so
+  // the cell (image side) is unchanged and rows stay uniform.
+  return { cols, cell, info, rowH: cell + info + gap, gap, pad };
 }
 
 /** Canvas-space position of cell `index`. */

@@ -33,6 +33,7 @@
     selected,
     active,
     size,
+    infoStrip,
     onpointerselect,
     onopen,
     onstacktoggle,
@@ -55,7 +56,11 @@
     rating: number | null;
     selected: boolean;
     active: boolean;
+    /** The square IMAGE box side (px). */
     size: number;
+    /** Fixed info-strip height (px) reserved ABOVE the image; 0 when off.
+     * The cell GROWS by this so the image is never overlaid (cellinfo.ts). */
+    infoStrip: number;
     onpointerselect: (e: MouseEvent) => void;
     onopen: () => void;
     onstacktoggle: () => void;
@@ -157,7 +162,7 @@
   class:selected
   class:active
   style:width="{size}px"
-  style:height="{size}px"
+  style:height="{size + infoStrip}px"
   onclick={onpointerselect}
   ondblclick={onopen}
   {oncontextmenu}
@@ -167,57 +172,73 @@
   role="gridcell"
   tabindex="-1"
 >
-  {#if ready}
-    <img
-      bind:this={el}
-      {src}
-      alt=""
-      draggable="false"
-      loading="eager"
-      decoding="async"
-      class:loaded
-      onload={() => {
-        // A load event can arrive for the PREVIOUS occupant's src after the
-        // slot was recycled — mark loaded only when the element's bitmap is
-        // this hash's (recycled-img guard above).
-        if (el !== undefined && srcHash(el.currentSrc) === hash) loadedHash = hash;
-      }}
-      onerror={handleError}
-    />
-  {/if}
-  {#if info.name !== null}
-    <span class="info">
+  {#if info.name !== null && infoStrip > 0}
+    <!-- Info strip at the TOP, IN-FLOW (fixed px): the cell grows downward so
+         the image below stays fully visible, never overlaid (founder). -->
+    <span class="info" style:height="{infoStrip}px">
       <span class="info-name">{info.name}</span>
       {#if info.state !== null}<span class="info-state">{info.state}</span>{/if}
     </span>
   {/if}
-  <!-- badges paint over the info strip so the dot never disappears -->
-  {#if hasJournal}<span class="journal-dot"></span>{/if}
-  {#if offline}<span class="offline-badge"><Unplug size={11} /></span>{/if}
-  {#if stack !== "solo"}
-    <!-- the expand/collapse CONTROL, not a badge (featureset §5).
-         count: D1 pairs strictly one JPEG with one RAW — always 2. -->
-    <StackChevron collapsed={stack === "collapsed"} count={2} onactivate={onstacktoggle} />
-  {/if}
+  <!-- The square IMAGE box holds the <img> and all badges, which anchor to
+       the image (not the taller cell). -->
+  <div class="image" style:height="{size}px">
+    {#if ready}
+      <img
+        bind:this={el}
+        {src}
+        alt=""
+        draggable="false"
+        loading="eager"
+        decoding="async"
+        class:loaded
+        onload={() => {
+          // A load event can arrive for the PREVIOUS occupant's src after the
+          // slot was recycled — mark loaded only when the element's bitmap is
+          // this hash's (recycled-img guard above).
+          if (el !== undefined && srcHash(el.currentSrc) === hash) loadedHash = hash;
+        }}
+        onerror={handleError}
+      />
+    {/if}
+    <!-- badges anchor to the IMAGE box, top/bottom edges of the thumbnail -->
+    {#if hasJournal}<span class="journal-dot"></span>{/if}
+    {#if offline}<span class="offline-badge"><Unplug size={11} /></span>{/if}
+    {#if stack !== "solo"}
+      <!-- the expand/collapse CONTROL, not a badge (featureset §5).
+           count: D1 pairs strictly one JPEG with one RAW — always 2. -->
+      <StackChevron collapsed={stack === "collapsed"} count={2} onactivate={onstacktoggle} />
+    {/if}
+  </div>
 </div>
 
 <style>
   .thumb {
-    position: relative;
+    /* Column: the info strip stacks ABOVE the square image box, in flow, so
+       the cell grows downward and the image is never overlaid (founder). */
+    display: flex;
+    flex-direction: column;
     background: var(--bg-raised); /* neutral placeholder, no layout shift */
     border: 1px solid transparent;
     border-radius: 2px;
     overflow: hidden;
     cursor: default;
   }
-  .thumb img {
+  /* The square IMAGE box: badges anchor here (to the thumbnail), not to the
+     taller cell. */
+  .image {
+    position: relative;
+    width: 100%;
+    flex: none;
+  }
+  .image img {
     width: 100%;
     height: 100%;
     object-fit: contain;
     display: block;
     opacity: 0; /* placeholder until first successful load; no broken icon */
   }
-  .thumb img.loaded {
+  .image img.loaded {
     opacity: 1;
   }
   .thumb.selected {
@@ -248,15 +269,17 @@
     display: flex; /* size the badge box to the svg, no baseline gap */
     pointer-events: none;
   }
-  /* T cell-info strip (logic/cellinfo.ts) — dimmed, pointer-inert. */
+  /* T cell-info strip (logic/cellinfo.ts) — IN-FLOW at the TOP of the cell,
+     fixed px, dimmed, pointer-inert. The cell grows by this strip so the
+     image below stays fully visible. */
   .info {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    flex: none;
     display: flex;
     flex-direction: column;
-    padding: 2px 5px;
+    justify-content: center;
+    overflow: hidden;
+    padding: 1px 5px;
+    box-sizing: border-box;
     background: var(--bg-overlay);
     opacity: 0.92;
     pointer-events: none;

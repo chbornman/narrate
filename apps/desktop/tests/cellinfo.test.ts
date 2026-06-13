@@ -4,7 +4,12 @@
  * stay the quiet baseline (UI §3.5); the levels are an explicit opt-in.
  */
 import { describe, expect, it } from "vitest";
-import { CELL_INFO_CYCLE, infoLine, nextLevel } from "../src/lib/logic/cellinfo";
+import {
+  CELL_INFO_CYCLE,
+  infoLine,
+  infoStripHeight,
+  nextLevel,
+} from "../src/lib/logic/cellinfo";
 
 describe("the T cycle", () => {
   it("walks none → minimal → annotated and wraps", () => {
@@ -12,6 +17,14 @@ describe("the T cycle", () => {
     expect(nextLevel("minimal")).toBe("annotated");
     expect(nextLevel("annotated")).toBe("none");
     expect(CELL_INFO_CYCLE).toEqual(["none", "minimal", "annotated"]);
+  });
+});
+
+describe("info-strip height (the cell grows by this — founder)", () => {
+  it("none reserves no strip; minimal < annotated (one line vs two)", () => {
+    expect(infoStripHeight("none")).toBe(0);
+    expect(infoStripHeight("minimal")).toBeLessThan(infoStripHeight("annotated"));
+    expect(infoStripHeight("minimal")).toBeGreaterThan(0);
   });
 });
 

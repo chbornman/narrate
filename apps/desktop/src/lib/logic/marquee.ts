@@ -65,7 +65,9 @@ export function hitTest(rect: Rect, g: GridGeometry, count: number): number[] {
       const idx = row * g.cols + col;
       if (idx >= count) break;
       const x = g.pad + col * stride;
-      const y = g.pad + row * g.rowH;
+      // The info strip sits at the TOP of the cell, so the IMAGE box starts
+      // g.info below the row top — marquee targets the image, not the strip.
+      const y = g.pad + row * g.rowH + g.info;
       const overlapsX = rect.x <= x + g.cell && rect.x + rect.w >= x;
       const overlapsY = rect.y <= y + g.cell && rect.y + rect.h >= y;
       if (overlapsX && overlapsY) hits.push(idx);
