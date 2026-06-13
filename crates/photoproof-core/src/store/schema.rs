@@ -590,6 +590,28 @@ CREATE TABLE IF NOT EXISTS topics (
 );
 "#;
 
+/// Migration slot for the per-topic note log (founder decision: give topics
+/// their own append-only running note, mirroring `collection_notes`). Only the
+/// topic-notes packet edits this constant.
+///
+/// A topic note is the user's authored text ABOUT the topic — its definition,
+/// what it is for, the refinement intent — keyed to the topic id, exactly the
+/// shape `collection_notes` has for a collection. Append-only, never edited or
+/// deleted (K14: the record preserves the user's own words). WHY this is the
+/// ONE thing topics now persist that survives more than a retype: unlike the
+/// saved phrase (cheap, regenerable intent — see TOPICS_SCHEMA_SQL above), a
+/// note is curated authored text, so it is real user truth on the topic id.
+const TOPIC_NOTES_SCHEMA_SQL: &str = r#"
+-- IF NOT EXISTS: migrations re-run on user_version regressions (the v5
+-- downgrade-simulation test) and an authored note must survive that re-run.
+CREATE TABLE IF NOT EXISTS topic_notes ( -- append-only, like collection_notes
+  id       TEXT PRIMARY KEY,             -- ULID
+  topic_id TEXT NOT NULL REFERENCES topics(id),
+  ts       TEXT NOT NULL,
+  text     TEXT NOT NULL
+);
+"#;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -725,6 +747,14 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
         }
         run_pragma(conn, "PRAGMA user_version = 14")?;
     }
+    if version < 15 {
+        // v15: the per-topic note log (topic_notes), mirroring collection_notes
+        // (user_version 9). A topic gets an append-only running note keyed to
+        // its id; this adds the table only, never touching how topic membership
+        // /affinity is computed (still always read-time, never stored).
+        conn.execute_batch(TOPIC_NOTES_SCHEMA_SQL)?;
+        run_pragma(conn, "PRAGMA user_version = 15")?;
+    }
     Ok(version)
 }
 
@@ -790,9 +820,11 @@ mod tests {
             [],
         )
         .expect("v14 CHECK admits 'archived'");
+        // A full migrate lands on the LATEST version (bumped to 15 by the
+        // topic_notes migration, which runs after the v14 roots rebuild).
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 }

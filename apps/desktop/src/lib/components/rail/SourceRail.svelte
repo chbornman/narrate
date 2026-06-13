@@ -21,6 +21,7 @@
   import CollectionList from "./CollectionList.svelte";
   import CollectionNotes from "./CollectionNotes.svelte";
   import TopicList from "./TopicList.svelte";
+  import TopicNotes from "./TopicNotes.svelte";
 
   const secs = $derived(ui.railSections());
   const collectionRows = $derived(ui.railCollectionRows());
@@ -264,6 +265,13 @@
          rows on the Collections tab, a sibling of the inspector journal -->
     {#if tab === "collections"}
       <CollectionNotes />
+    {/if}
+
+    <!-- the open topic's append-only note log: sits below the rows on the
+         Topics tab, mirroring the Collections-tab note pane. Surfaces only
+         when a saved topic is open (TopicNotes gates on ui.topicDetailId) -->
+    {#if tab === "topics"}
+      <TopicNotes />
     {/if}
 
     <!-- emphasized (a full bordered button against the quiet rows) but

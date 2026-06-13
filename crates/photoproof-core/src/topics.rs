@@ -105,6 +105,20 @@ pub struct TopicRecord {
     pub created_ts: String,
 }
 
+/// One `topic_notes` row: append-only, never edited or deleted (the
+/// `collection_notes` NoteEntry shape, mirrored for topics). A topic note is
+/// the user's authored text ABOUT the topic — its definition, intent, what it
+/// is for. WHY topics carry this when they otherwise persist nothing durable:
+/// the saved phrase is regenerable intent, but a note is curated user truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicNote {
+    /// ULID.
+    pub id: String,
+    /// RFC 3339 UTC.
+    pub ts: String,
+    pub text: String,
+}
+
 /// The manual-topics engine: its own connection over the shared photoproof
 /// database (the `collections` pattern), but with no portability file — a saved
 /// phrase is rebuildable-index state, not user truth (see the module docs).
@@ -195,6 +209,71 @@ impl Topics {
         }
         Ok(())
     }
+
+    /// Append a note to a topic (append-only — there is no edit or delete, the
+    /// `Collections::add_note` posture). The text is trimmed; an empty note is
+    /// rejected. A missing topic id is `NotFound` (the FK guard, mirroring the
+    /// collections `require_collection` check). ULID id + RFC 3339 UTC ts,
+    /// exactly like a collection note.
+    pub fn add_note(
+        &self,
+        topic_id: &str,
+        text: &str,
+        now: UtcMillis,
+    ) -> Result<TopicNote, TopicsError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(TopicsError::Invalid("note text is empty".into()));
+        }
+        let note = TopicNote {
+            id: Ulid::new().to_string(),
+            ts: now.to_rfc3339(),
+            text: text.to_owned(),
+        };
+        {
+            let conn = self.conn.lock().expect("topics mutex");
+            // FK guard: a note must hang off a real topic (the collections
+            // require_collection precedent), so a stale id surfaces, never
+            // silently writes an orphan row.
+            let exists: bool = conn.query_row(
+                "SELECT count(*) > 0 FROM topics WHERE id = ?1",
+                params![topic_id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(TopicsError::NotFound(topic_id.to_owned()));
+            }
+            conn.execute(
+                "INSERT INTO topic_notes (id, topic_id, ts, text) VALUES (?1, ?2, ?3, ?4)",
+                params![note.id, topic_id, note.ts, note.text],
+            )?;
+        }
+        Ok(note)
+    }
+
+    /// A topic's notes in id order (ULID order = time order), the
+    /// `Collections::notes` shape. A missing topic id is `NotFound`.
+    pub fn notes(&self, topic_id: &str) -> Result<Vec<TopicNote>, TopicsError> {
+        let conn = self.conn.lock().expect("topics mutex");
+        let exists: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM topics WHERE id = ?1",
+            params![topic_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(TopicsError::NotFound(topic_id.to_owned()));
+        }
+        let mut stmt =
+            conn.prepare("SELECT id, ts, text FROM topic_notes WHERE topic_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![topic_id], |r| {
+            Ok(TopicNote {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                text: r.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +335,125 @@ mod tests {
         ));
         let t = topics.add("  fog  ", TopicSpace::Blend, now).unwrap();
         assert_eq!(t.phrase, "fog", "phrase is trimmed");
+    }
+
+    /// Topic notes round-trip: append + list, ORDERED BY id (the
+    /// collection_notes contract), append-only, keyed to the topic id. The note
+    /// id is a fresh `Ulid::new()` (wall clock, like a collection note), NOT
+    /// minted from the passed `now`, so the test asserts the actual guarantee —
+    /// the list is sorted ascending by id — rather than which note happened to
+    /// win the same-millisecond random tail.
+    #[test]
+    fn topic_notes_append_and_list_in_time_order() {
+        let (_dir, topics) = open();
+        let t = topics
+            .add(
+                "harbor",
+                TopicSpace::Blend,
+                UtcMillis::from_epoch_ms(1_000_000),
+            )
+            .unwrap();
+
+        let n0 = topics
+            .add_note(
+                &t.id,
+                "what this topic is for",
+                UtcMillis::from_epoch_ms(2_000_000),
+            )
+            .unwrap();
+        let n1 = topics
+            .add_note(
+                &t.id,
+                "refine toward dusk shots",
+                UtcMillis::from_epoch_ms(2_000_001),
+            )
+            .unwrap();
+        assert_ne!(n0.id, n1.id);
+
+        let listed = topics.notes(&t.id).unwrap();
+        assert_eq!(listed.len(), 2);
+        // The ordering guarantee: ascending id (= time order, the journal
+        // precedent). Both appended notes are present, round-tripping verbatim.
+        let ids: Vec<&str> = listed.iter().map(|n| n.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "notes list ascending by id");
+        let texts: std::collections::HashSet<&str> =
+            listed.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["what this topic is for", "refine toward dusk shots"]
+                .into_iter()
+                .collect()
+        );
+        // RFC 3339 UTC ts, derived from the passed `now`, exactly like a
+        // collection note.
+        let by_text = |want: &str| listed.iter().find(|n| n.text == want).unwrap();
+        assert_eq!(
+            by_text("what this topic is for").ts,
+            UtcMillis::from_epoch_ms(2_000_000).to_rfc3339()
+        );
+        assert_eq!(
+            by_text("refine toward dusk shots").ts,
+            UtcMillis::from_epoch_ms(2_000_001).to_rfc3339()
+        );
+    }
+
+    /// An empty / whitespace-only note is rejected and the text is trimmed
+    /// before saving (the collections add_note contract).
+    #[test]
+    fn topic_note_empty_rejected_and_trimmed() {
+        let (_dir, topics) = open();
+        let now = UtcMillis::now();
+        let t = topics.add("fog", TopicSpace::Blend, now).unwrap();
+        assert!(matches!(
+            topics.add_note(&t.id, "   ", now),
+            Err(TopicsError::Invalid(_))
+        ));
+        let n = topics.add_note(&t.id, "  the morning haze  ", now).unwrap();
+        assert_eq!(n.text, "the morning haze", "note text is trimmed");
+    }
+
+    /// A note must hang off a real topic: appending to (or listing) a missing
+    /// id is NotFound, never a silent orphan row (the FK guard).
+    #[test]
+    fn topic_note_requires_an_existing_topic() {
+        let (_dir, topics) = open();
+        let now = UtcMillis::now();
+        assert!(matches!(
+            topics.add_note("01MISSING", "orphan", now),
+            Err(TopicsError::NotFound(_))
+        ));
+        assert!(matches!(
+            topics.notes("01MISSING"),
+            Err(TopicsError::NotFound(_))
+        ));
+    }
+
+    /// The v15 migration applies cleanly on an EXISTING (pre-topic-notes) db:
+    /// open the store twice over the same file (the second open re-runs the
+    /// idempotent migration), and notes written under the first open survive.
+    #[test]
+    fn topic_notes_migration_applies_on_existing_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("photoproof.db");
+        let id;
+        let note_id;
+        {
+            let topics = Topics::open(&db).unwrap();
+            let now = UtcMillis::from_epoch_ms(1_000_000);
+            let t = topics.add("ridge line", TopicSpace::Blend, now).unwrap();
+            let n = topics.add_note(&t.id, "the alpine series", now).unwrap();
+            id = t.id;
+            note_id = n.id;
+        }
+        // Re-open the same file: Topics::open runs the EventStore migration
+        // again (idempotent), and the prior note must be intact.
+        let topics = Topics::open(&db).unwrap();
+        let listed = topics.notes(&id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, note_id);
+        assert_eq!(listed[0].text, "the alpine series");
     }
 
     /// `TopicSpace::parse` maps the command layer's optional string to a space,
