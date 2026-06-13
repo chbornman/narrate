@@ -90,7 +90,7 @@
     >
     <button
       class="chrome"
-      aria-label="Inspector — Metadata"
+      aria-label="Inspector - Metadata"
       aria-pressed={ui.inspector.open === "metadata"}
       class:on={ui.inspector.open === "metadata"}
       onclick={() => perform("open-inspector", "metadata")}
@@ -99,7 +99,7 @@
     >
     <button
       class="chrome"
-      aria-label="Inspector — Journal"
+      aria-label="Inspector - Journal"
       aria-pressed={ui.inspector.open === "journal"}
       class:on={ui.inspector.open === "journal"}
       onclick={() => perform("open-inspector", "journal")}

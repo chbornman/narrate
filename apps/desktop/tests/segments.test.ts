@@ -109,7 +109,7 @@ describe("the mic segment renders CAPTURE §6.4/§11 (P6.1)", () => {
     const idle = micSeg({ micState: "armedIdle" });
     expect(idle?.tone).toBeUndefined();
     expect(idle?.title).toBe(
-      "Listening — audio is transcribed on this device and never written to disk.",
+      "Listening - audio is transcribed on this device and never written to disk.",
     );
     const speaking = micSeg({ micState: "armedSpeaking" });
     expect(speaking?.tone).toBe("live");
@@ -119,7 +119,7 @@ describe("the mic segment renders CAPTURE §6.4/§11 (P6.1)", () => {
     const degraded = micSeg({ micState: "disarmedError", asrUnavailable: true });
     expect(degraded?.tone).toBe("dim");
     expect(degraded?.title).toBe(
-      "Voice capture unavailable — typed notes and pencil still work.",
+      "Voice capture unavailable - typed notes and pencil still work.",
     );
     // No transcript content ever rides the indicator (§11): the segment
     // carries a Lucide glyph name (no emoji, ever) + a FIXED label.

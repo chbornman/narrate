@@ -86,14 +86,14 @@ function micSeat(micState: MicState, asrReady: boolean): StationSeat | null {
         ...base,
         icon: "mic",
         title:
-          "Listening — audio is transcribed on this device and never written to disk.",
+          "Listening - audio is transcribed on this device and never written to disk.",
       };
     case "armedSpeaking":
       return {
         ...base,
         icon: "mic",
         title:
-          "Listening — audio is transcribed on this device and never written to disk.",
+          "Listening - audio is transcribed on this device and never written to disk.",
         tone: "live",
       };
     case "arming":
@@ -102,7 +102,7 @@ function micSeat(micState: MicState, asrReady: boolean): StationSeat | null {
       return {
         ...base,
         icon: "mic-off",
-        title: "Voice capture unavailable — typed notes and pencil still work.",
+        title: "Voice capture unavailable - typed notes and pencil still work.",
         tone: "dim",
       };
     default:
@@ -124,12 +124,12 @@ export function stationModel(input: StationInput): StationModel {
       activities.push({
         id: "ingest",
         kind: "ingest",
-        text: `Indexing — ${ing.done.toLocaleString()} of ${ing.total.toLocaleString()}`,
+        text: `Indexing - ${ing.done.toLocaleString()} of ${ing.total.toLocaleString()}`,
         hint: ing.errors > 0 ? `${ing.errors.toLocaleString()} errors` : undefined,
         fraction: Math.min(1, ing.done / ing.total),
       });
     } else {
-      activities.push({ id: "ingest", kind: "ingest", text: "Indexing — scanning…" });
+      activities.push({ id: "ingest", kind: "ingest", text: "Indexing - scanning…" });
     }
   }
 
@@ -142,7 +142,7 @@ export function stationModel(input: StationInput): StationModel {
     activities.push({
       id: `digest:${p.name}`,
       kind: "digest",
-      text: `${sentence(KIND_LABELS[p.name] ?? p.name)} — ${p.remaining.toLocaleString()} remaining`,
+      text: `${sentence(KIND_LABELS[p.name] ?? p.name)} - ${p.remaining.toLocaleString()} remaining`,
     });
   }
 
@@ -157,7 +157,7 @@ export function stationModel(input: StationInput): StationModel {
       activities.push({
         id: `download:${m.id}`,
         kind: "download",
-        text: `Downloading ${m.id} — ${pct}%`,
+        text: `Downloading ${m.id} - ${pct}%`,
         // The pump keeps state=downloading across retries; `error` carries
         // the retry detail when one is in flight.
         hint: m.error ?? undefined,
@@ -167,7 +167,7 @@ export function stationModel(input: StationInput): StationModel {
       activities.push({
         id: `download:${m.id}`,
         kind: "download-failed",
-        text: `Download failed — ${m.id}`,
+        text: `Download failed - ${m.id}`,
         hint: m.error ?? "retry from Settings",
       });
     }
@@ -182,13 +182,13 @@ export function stationModel(input: StationInput): StationModel {
       activities.push({ id: "mic", kind: "mic", text: "Listening…" });
       break;
     case "armedSpeaking":
-      activities.push({ id: "mic", kind: "mic", text: "Listening — speech detected" });
+      activities.push({ id: "mic", kind: "mic", text: "Listening - speech detected" });
       break;
     case "disarmedError":
       activities.push({
         id: "mic",
         kind: "mic",
-        text: "Voice capture unavailable — typed notes and pencil still work.",
+        text: "Voice capture unavailable - typed notes and pencil still work.",
       });
       break;
     default:
@@ -201,7 +201,7 @@ export function stationModel(input: StationInput): StationModel {
     activities.push({
       id: "utterance",
       kind: "utterance",
-      text: `Capturing — words land on ● ${scopeLabel(input.streaming.kind, input.streaming.count)}`,
+      text: `Capturing - words land on ● ${scopeLabel(input.streaming.kind, input.streaming.count)}`,
     });
   }
 
@@ -225,7 +225,7 @@ export function stationModel(input: StationInput): StationModel {
       id: "info",
       actionId: "toggle-station-detail",
       icon: "info",
-      title: "What's happening — click to pin the detail open",
+      title: "What's happening - click to pin the detail open",
     });
   }
   seats.push({ id: "note", actionId: "summon-note", icon: "pencil", title: "Write a note" });

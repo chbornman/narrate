@@ -55,7 +55,7 @@ describe("session grouping (UI §8.2)", () => {
     expect(groups[0].rows.map((r) => r.id)).toEqual(["01C", "01D"]);
     expect(groups[1].rows.map((r) => r.id)).toEqual(["01A", "01B"]);
     expect(groups[0].dateLabel).toBe("4 Jun 2026");
-    expect(groups[0].timeRange).toBe("14:02–14:09");
+    expect(groups[0].timeRange).toBe("14:02 - 14:09");
     expect(groups[1].dateLabel).toBe("12 Jan 2026");
   });
 
@@ -218,7 +218,7 @@ describe("timestamp formatting (local time)", () => {
         entry({ id: "01A", ts: ts(2026, 6, 4, 14, 2) }),
         entry({ id: "01B", ts: ts(2026, 6, 4, 14, 9) }),
       ]),
-    ).toBe("14:02–14:09");
+    ).toBe("14:02 - 14:09");
   });
 
   it("collapses a single-moment session to one time", () => {
@@ -239,11 +239,11 @@ describe("sanctioned-toast copy (UI §7.5 — exactly three triggers)", () => {
       "Redacted from journal, sidecars, and indexes",
     );
     expect(redactionToastText({ ...base, offlinePending: ["Archive2019"] })).toBe(
-      "Redacted from journal, sidecars, and indexes — 1 offline sidecar pending",
+      "Redacted from journal, sidecars, and indexes - 1 offline sidecar pending",
     );
     expect(
       redactionToastText({ ...base, offlinePending: ["Archive2019", "Vault"] }),
-    ).toBe("Redacted from journal, sidecars, and indexes — 2 offline sidecars pending");
+    ).toBe("Redacted from journal, sidecars, and indexes - 2 offline sidecars pending");
   });
 
   it("offline-completion toast names the volume", () => {

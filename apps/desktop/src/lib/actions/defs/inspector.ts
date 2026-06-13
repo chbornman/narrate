@@ -32,7 +32,7 @@ export const INSPECTOR_DEFS: ActionDef[] = [
   {
     id: "open-inspector",
     verb: "Inspector",
-    label: "Inspector — I Metadata · J Journal (Esc closes)",
+    label: "Inspector - I Metadata · J Journal (Esc closes)",
     keys: [
       { key: "i", arg: "metadata" },
       { key: "j", arg: "journal" },

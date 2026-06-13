@@ -192,7 +192,7 @@ describe("JournalEntry hover actions (UI §8.3)", () => {
       onaction: () => {},
       oncorrect: () => {},
     });
-    expect(screen.getByTitle("Linked — drawn and spoken together")).toBeTruthy();
+    expect(screen.getByTitle("Linked - drawn and spoken together")).toBeTruthy();
 
     // … and the earlier stroke shows the resolved incoming link too
     // (the backend traverses the one-way pointer in both directions).
@@ -207,7 +207,7 @@ describe("JournalEntry hover actions (UI §8.3)", () => {
       onaction: () => {},
       oncorrect: () => {},
     });
-    expect(screen.getByTitle("Linked — drawn and spoken together")).toBeTruthy();
+    expect(screen.getByTitle("Linked - drawn and spoken together")).toBeTruthy();
 
     // Unlinked rows show no mark — silence while marking is common.
     document.body.innerHTML = "";
@@ -216,7 +216,7 @@ describe("JournalEntry hover actions (UI §8.3)", () => {
       onaction: () => {},
       oncorrect: () => {},
     });
-    expect(screen.queryByTitle("Linked — drawn and spoken together")).toBeNull();
+    expect(screen.queryByTitle("Linked - drawn and spoken together")).toBeNull();
   });
 
   it("editing renders a textarea seeded with the folded text; Enter commits", async () => {

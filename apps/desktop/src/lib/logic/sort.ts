@@ -13,7 +13,7 @@ export type SortMode =
 export const SORT_MODES: { mode: SortMode; label: string }[] = [
   { mode: "capture-desc", label: "Capture date · newest first" },
   { mode: "capture-asc", label: "Capture date · oldest first" },
-  { mode: "filename", label: "Filename A–Z" },
+  { mode: "filename", label: "Filename A-Z" },
   { mode: "added", label: "Date added" },
 ];
 

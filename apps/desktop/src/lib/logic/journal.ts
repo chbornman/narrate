@@ -168,7 +168,7 @@ export function formatSessionDate(ts: string): string {
 export function sessionTimeRange(rows: JournalEntryDto[]): string {
   const first = formatTime(rows[0].ts);
   const last = formatTime(rows[rows.length - 1].ts);
-  return first === last ? first : `${first}–${last}`;
+  return first === last ? first : `${first} - ${last}`;
 }
 
 // ---- sanctioned-toast copy (UI §7.5 — exactly three triggers) -----------------
@@ -182,7 +182,7 @@ export function redactionToastText(report: RedactReportDto): string {
   const base = "Redacted from journal, sidecars, and indexes";
   const n = report.offlinePending.length;
   if (n === 0) return base;
-  return `${base} — ${n} offline sidecar${n === 1 ? "" : "s"} pending`;
+  return `${base} - ${n} offline sidecar${n === 1 ? "" : "s"} pending`;
 }
 
 /** Toast 3: a pending offline-volume redaction completing on mount. */

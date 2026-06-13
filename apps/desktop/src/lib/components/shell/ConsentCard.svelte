@@ -28,7 +28,7 @@
       ({formatGb(model.totalBytes)} download).
     </p>
     <p class="dim">
-      Skipping changes nothing about journaling — typed notes, the pencil,
+      Skipping changes nothing about journaling - typed notes, the pencil,
       ratings, and keyword search are fully functional without any models;
       voice capture and semantic search light up later if models are added
       (Settings → Models).

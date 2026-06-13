@@ -95,7 +95,7 @@ describe("the row set (featureset §3 enumeration)", () => {
       "Captured", "Camera", "Lens", "Focal length", "Exposure",
       "Aperture", "ISO", "Dimensions", "Location",
     ]) {
-      expect(rows.get(label)?.value, label).toBe("—");
+      expect(rows.get(label)?.value, label).toBe("-");
       expect(rows.get(label)?.dim, label).toBe(true);
     }
   });
@@ -124,9 +124,9 @@ describe("formatters", () => {
   });
 
   it("previewLine names the source and the backfill state", () => {
-    expect(previewLine("embedded", true)).toBe("Embedded preview — full decode pending");
+    expect(previewLine("embedded", true)).toBe("Embedded preview - full decode pending");
     expect(previewLine("full-decode", false)).toBe("Full-decode preview");
     expect(previewLine("original", false)).toBe("Preview from original");
-    expect(previewLine(null, true)).toBe("No preview yet — full decode pending");
+    expect(previewLine(null, true)).toBe("No preview yet - full decode pending");
   });
 });

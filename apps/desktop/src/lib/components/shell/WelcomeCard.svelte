@@ -57,7 +57,7 @@
       <h2>How your data is stored</h2>
 
       <p>
-        Everything you write — notes, ratings, marks — is saved in small
+        Everything you write - notes, ratings, marks - is saved in small
         sidecar files named like the image plus
         <code>.photoproof.json</code>, sitting <strong>beside</strong> your
         photos. Those sidecar files <strong>are</strong> your data: back
@@ -67,21 +67,21 @@
       <p>
         Sidecars follow your photos by <strong>filename</strong>. If you
         rename or move a photo outside Photoproof while it isn’t running,
-        the app has to guess to reconnect the photo with its journal — it
+        the app has to guess to reconnect the photo with its journal - it
         usually gets it right, but renaming inside the watched folders
         while Photoproof is open is the safe way.
       </p>
 
       <p>
         Photoproof’s own database is only an index. It can always be
-        rebuilt from your images and their sidecars — losing it never loses
+        rebuilt from your images and their sidecars - losing it never loses
         your work.
       </p>
 
       <!-- collections over folders (founder, June 2026): the card states
            the hierarchy of importance once, quietly -->
       <p>
-        Folders here are mechanical — just where files happen to sit.
+        Folders here are mechanical - just where files happen to sit.
         <strong>Collections</strong> are what matter: gather images by
         intent, with the notes and context you collect. They live in the
         rail, beside Folders.

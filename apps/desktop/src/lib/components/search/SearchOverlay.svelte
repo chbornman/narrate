@@ -67,7 +67,7 @@
       case "date":
         return f.relative !== undefined
           ? `date: ${f.relative.season ?? f.relative.unit}`
-          : `date: ${f.absolute?.start ?? "…"} – ${f.absolute?.end ?? "…"}`;
+          : `date: ${f.absolute?.start ?? "…"} - ${f.absolute?.end ?? "…"}`;
       case "camera":
         return `camera: ${f.value}`;
       case "lens":

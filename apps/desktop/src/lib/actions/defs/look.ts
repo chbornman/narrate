@@ -116,7 +116,7 @@ export const LOOK_DEFS: ActionDef[] = [
   {
     id: "pencil-eraser",
     verb: "Eraser",
-    label: "Eraser — hold E, tap a stroke to retract it",
+    label: "Eraser - hold E, tap a stroke to retract it",
     keys: [{ key: "e" }],
     scope: "look",
     group: "capture",

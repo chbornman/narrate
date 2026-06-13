@@ -193,7 +193,7 @@ describe("quote provenance", () => {
     // No sentinel characters leak into the DOM.
     expect(container.textContent).not.toContain("⟦");
     // Date renders per the layout sketch (§5.1).
-    expect(container.textContent).toContain("— 12 Jan 2026");
+    expect(container.textContent).toContain("- 12 Jan 2026");
   });
 
   it("never injects HTML from quote text (no raw HTML through IPC)", () => {

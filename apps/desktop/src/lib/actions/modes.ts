@@ -40,14 +40,14 @@ export const MODES: readonly ModeDef[] = [
             text: "mic on",
             icon: "mic",
             title:
-              "Listening — audio is transcribed on this device and never written to disk.",
+              "Listening - audio is transcribed on this device and never written to disk.",
           };
         case "armedSpeaking":
           return {
             text: "mic live",
             icon: "mic",
             title:
-              "Listening — audio is transcribed on this device and never written to disk.",
+              "Listening - audio is transcribed on this device and never written to disk.",
             tone: "live",
           };
         case "arming":
@@ -56,7 +56,7 @@ export const MODES: readonly ModeDef[] = [
           return {
             text: "mic unavailable",
             icon: "mic-off",
-            title: "Voice capture unavailable — typed notes and pencil still work.",
+            title: "Voice capture unavailable - typed notes and pencil still work.",
             tone: "dim",
           };
         default:
