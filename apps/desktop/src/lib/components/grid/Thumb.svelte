@@ -69,6 +69,18 @@
 
   const info = $derived(infoLine(cellInfo, { fileName, rating, hasJournal }));
 
+  // Per-cell shimmer phase: a stable negative animation-delay (0..1 of the
+  // cycle) derived from the hash desyncs neighbours so a wall of placeholders
+  // never sweeps in lockstep. Pure CSS once applied — no per-frame JS, and the
+  // delay is constant per cell so it costs nothing. Negative delay starts the
+  // animation already mid-cycle, so there is no initial pause before the sweep.
+  const shimmerDelay = $derived.by(() => {
+    let h = 0;
+    for (let i = 0; i < hash.length; i++) h = (h * 31 + hash.charCodeAt(i)) | 0;
+    // 1.6s cycle (see thumb-shimmer); spread the phase across it.
+    return `-${((Math.abs(h) % 160) / 100).toFixed(2)}s`;
+  });
+
   // During ingest a thumb's preview may not exist yet (the protocol 404s).
   // Retry with backoff via a cache-busting param; until the first successful
   // load the neutral placeholder shows instead of the webview's broken-image
@@ -183,6 +195,17 @@
   <!-- The square IMAGE box holds the <img> and all badges, which anchor to
        the image (not the taller cell). -->
   <div class="image" style:height="{size}px">
+    {#if !loaded}
+      <!-- Building shimmer (BACKLOG "Import progressively" b): a quiet sweep
+           over the placeholder while the preview artifact is still being
+           built/loaded. Shown for BOTH the pre-ready state (artifact not yet
+           known to exist) and the in-flight load, so the card reads as
+           "working", not stalled. Removed the instant `loaded` flips, so it
+           never animates over a real bitmap. Pure CSS (one GPU transform on a
+           ::after band) — hundreds of cells shimmer with no per-frame JS.
+           prefers-reduced-motion drops the sweep for a static placeholder. -->
+      <div class="shimmer" style:--shimmer-delay={shimmerDelay} aria-hidden="true"></div>
+    {/if}
     {#if ready}
       <img
         bind:this={el}
@@ -240,6 +263,60 @@
   }
   .image img.loaded {
     opacity: 1;
+  }
+  /* Building shimmer: the placeholder reads as "working", not stalled, while
+     the preview artifact is built/loaded. The layer fills the image box; a
+     single lighter band (::after) sweeps across via a GPU transform. Only one
+     animated property (translate) so many cells can run at once without jank.
+     Achromatic, faint — fits the quiet philosophy. The base is the existing
+     --bg-raised placeholder token; the band is a low-alpha light glaze. */
+  .shimmer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background: var(--bg-raised);
+    pointer-events: none;
+  }
+  .shimmer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    /* faint lighter band; transparent edges so it reads as a soft sweep, not a
+       hard bar. A low-alpha light glaze (same translucency idiom as --scrim /
+       --marquee) lifts --bg-raised toward --chrome's value without a hard tint,
+       so it stays achromatic and quiet across every surround level. */
+    background: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.045) 50%,
+      transparent 70%
+    );
+    /* start fully off the left edge; the keyframe sweeps it across and off */
+    transform: translateX(-100%);
+    will-change: transform;
+    /* negative delay (per-cell, from hash) starts each cell at a different
+       point in the cycle so neighbours never sweep in lockstep. */
+    animation: thumb-shimmer 1.6s ease-in-out infinite;
+    animation-delay: var(--shimmer-delay, 0s);
+  }
+  @keyframes thumb-shimmer {
+    /* hold off-screen for most of the cycle (the "pause"), then one calm pass:
+       a long quiet gap keeps a wall of cells from feeling busy or flashy. */
+    0%,
+    40% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
+  }
+  /* Reduced motion (correctness, not optional): no sweep at all. The band
+     parks just off-screen so the placeholder is a calm static --bg-raised. */
+  @media (prefers-reduced-motion: reduce) {
+    .shimmer::after {
+      animation: none;
+      transform: translateX(-100%);
+    }
   }
   .thumb.selected {
     border-color: var(--selection);
