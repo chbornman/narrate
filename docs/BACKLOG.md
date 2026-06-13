@@ -68,10 +68,13 @@ work lives here.
   Key finding — NO new dependency: rawler 0.7.2 already exposes WB
   coeffs, cam→XYZ matrix, CFA, levels; we write the develop arithmetic
   (black/scale→WB→demosaic→matrix→sRGB→gamma) as a cancellable
-  `full-raw-decode` pass draining like the embedding queue. Three founder
-  decisions open (see plan): (1) "1:1" = 2560px display artifact vs also
-  full-sensor for deep-zoom; (2) phase-1 quality bar (bilinear+WB+matrix
-  OK?); (3) decode-pool width + memory cap. ORIGINAL DIAGNOSIS:
+  `full-raw-decode` pass draining like the embedding queue. FOUNDER
+  DECISIONS RESOLVED (June 12, in the plan): (1) "1:1" = FULL SENSOR
+  resolution, deep-zoom like LR/darktable 100% (not just 2560px); (2)
+  quality = typical neutral decode, "just need real resolution"; (3)
+  memory = Lightroom's model (develop once → cache full-res artifact to
+  disk → serve zoom from cache; one develop in flight, tiled-demosaic
+  fallback on low RAM). READY TO BUILD. ORIGINAL DIAGNOSIS:
   "154 RAWs left to decode" reads as stuck — it's an UNBUILT pass,
   not a stall: (founder: "154 raws left to decode that seem stuck").
   DIAGNOSED: `ingest_passes` has 154 `full-raw-decode` rows in state
@@ -110,6 +113,23 @@ work lives here.
   `SourceRail.svelte` — reuse its create path, then chain
   add-to-collection). This is also the natural feeder for the
   autosuggest/encourage-collecting thesis. (Founder, June 12 2026.)
+- [ ] **Review "done work": exports-folder path + foreign edit sidecars**
+  (founder, June 12 2026: "the main point of the app should be to review
+  DONE work… we may want to support reading in sidecar edit files from
+  Lightroom/darktable"). In TENSION with a neutral RAW develop: an edited
+  RAW shown via our neutral develop looks WRONG vs the editor. Honest
+  scoping (see PLAN-RAW-DECODE.md "foreign edit sidecars"): (a) FIRST-CLASS
+  the export-folder review path — done work is usually exported JPEG/TIFF
+  with the edit baked in, which the app already handles; cheapest, highest
+  fidelity. (b) Faithful XMP/`.xmp` render = reimplementing Adobe/darktable
+  = NOT feasible. (c) Pragmatic middle: read the PORTABLE subset from the
+  sidecar — crop, orientation/flip, rating/label/color (and maybe basic
+  exposure/WB) — approximated on the neutral develop, labeled "approximate";
+  crop+orientation+rating is the high-value low-risk slice (matches the
+  photographer's keep/reject intent even if tone differs). (d) Prefer an
+  editor-written embedded full-res preview when present. SEPARATE from the
+  develop pass — must not block it. Needs a design round. (Founder, June
+  12 2026.)
 - [ ] **Grid right-click submenus are janky** (founder: "submenus don't
   stick out the side, don't always open/close smoothly"). The whole
   context menu is `ContextMenuHost.svelte` (a 1 KB stub) — submenus

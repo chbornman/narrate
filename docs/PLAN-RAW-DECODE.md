@@ -304,24 +304,90 @@ tied to the build-loop honesty gate (BUILD-LOOP "What 'tested' can mean"):
 - **Phase 3 (only if a real gap appears):** libraw FFI for any format rawler
   decodes but we can't faithfully develop (LIBRARY 9.4's named fallback).
 
-## Open decisions for the founder
+## Founder decisions (June 12 2026 — RESOLVED)
 
-- **OD-1 — What is "1:1"?** (a) a better-quality 2560 display artifact (cheap,
-  fits the existing two-artifact contract, geometry-safe), or (b) ALSO a
-  full-sensor-resolution `full-decode` artifact for deep-zoom in Look
-  (parallels the on-demand embedded-native route)? The founder's "true 1:1
-  preview / zoom" wording leans (b); (a) is the smaller, safer first slice.
-  **Recommend: ship (a) in phase 1, add (b) in phase 2 behind the same
-  on-demand serve gate as `embedded_native_acceptable`.**
-- **OD-2 — Quality bar for phase 1.** Bilinear demosaic + WB + matrix +
-  gamma, clip-only highlights — accepted as "neutral 1:1" for viewing, with
-  better demosaic/highlights deferred? (Recommend yes; it resolves the bug
-  now and is honestly labeled.)
-- **OD-3 — Concurrency/memory cap.** Confirm the decode pool width
-  (`max(2, cores/2)`) and whether to cap in-flight decode bytes on lower-RAM
-  machines, given a single full-sensor develop can hold hundreds of MB.
-- **OD-4 (minor) — Versioning axis.** Does the develop algorithm get its own
-  version field, or fold into `preview::GENERATOR_VERSION` (every develop
-  change bumps the global preview version and regenerates ALL caches, not
-  just RAW)? (Recommend a develop-specific reason but reuse the existing
-  `GENERATOR_VERSION` regeneration machinery to avoid a second re-pend path.)
+- **OD-1 — "1:1" = FULL SENSOR RESOLUTION.** Decided (b): a full-sensor-res
+  `full-decode` artifact, deep-zoomable in Look exactly like 100% in
+  Lightroom/darktable. Not just the 2560 display tier. Phase 1 still ships
+  the display tier first, but the full-res artifact is the actual goal, not
+  a phase-2 maybe.
+- **OD-2 — Quality bar: typical neutral RAW decode is enough.** "Nothing
+  crazy, just need to see real resolution." Bilinear demosaic + WB + matrix
+  + gamma, clip-only highlights — accepted. Better demosaic/highlights stay
+  deferred; the point is reviewing finished work at true resolution, not
+  re-developing it.
+- **OD-3 — see "Memory & concurrency" below** (how LR/darktable do it).
+- **OD-4 (minor) — Versioning:** develop-specific reason, reuse the existing
+  `GENERATOR_VERSION` regeneration machinery (no second re-pend path).
+
+## Memory & concurrency — how Lightroom and darktable handle full-res develop
+
+The founder asked how the editors solve OD-3. They take two different
+stances; we want Lightroom's, not darktable's:
+
+- **Lightroom — develop once, CACHE the result to disk.** LR builds a
+  full-res "1:1 preview" on demand or in batch and stores it in the
+  `.lrdata` preview cache (effectively a high-quality JPEG). Zoom to 100%
+  serves the cached artifact instantly; it is NOT re-developed on every
+  zoom, and the full-res float buffer is not held in RAM after the build.
+  LR famously lets you discard 1:1 previews after N days because they are
+  big on disk. Develop is GPU-accelerated where available.
+- **darktable — interactive pixelpipe, develop on demand, NOT cached
+  full-res.** For the lighttable grid it uses mipmaps; for darkroom it runs
+  a live float pipeline (two pipes: a downsampled preview pipe + the
+  display/zoom pipe). A 60 MP image is ~720 MB as 32-bit RGBA per buffer
+  and the pipe holds several, so darktable **tiles**: when a module's
+  memory exceeds the budget it splits the image into overlapping regions,
+  processes each, and stitches — bounding RAM at a speed cost. This is the
+  interactive-editor tax we do NOT need to pay.
+
+**Our posture (we review, we don't edit): Lightroom's model, simplified.**
+Develop each RAW to a full-res artifact **once**, write it to the
+`previews/` cache (a high-quality JPEG or similar), free the float buffers,
+and serve Look's deep-zoom from the cached artifact. There is no
+interactive pipe, so peak memory = **one full-res develop in flight at a
+time**, which is the OD-3 answer: serialize full-decode to a small pool
+(`max(2, cores/2)`, likely 1–2 in practice) and, on lower-RAM machines,
+fall back to **tiled demosaic** (darktable's escape hatch) rather than
+holding the whole float image. Cache-on-disk means a re-zoom never
+re-develops. This is strictly cheaper than either editor because we never
+re-render interactively.
+
+## OPEN scoping question raised by the founder: reading foreign edit sidecars
+
+The founder: *"the main point of the app should be to review DONE work… we
+may want to support reading in sidecar edit files from Lightroom/darktable."*
+This is important and partly in TENSION with a neutral develop: if a RAW was
+edited in Lightroom (XMP) or darktable (`.xmp`), our **neutral** develop will
+look DIFFERENT from what the photographer sees in their editor — wrong, for
+an app whose job is reviewing finished work. Honest assessment of the paths:
+
+1. **Review the EXPORTS, not the RAWs (cheapest, highest fidelity).** Done
+   work is usually exported to JPEG/TIFF with the edit baked in — which the
+   app already handles perfectly. For "review done work," pointing the app
+   at an export folder beats any RAW-sidecar scheme. Worth saying out loud
+   before building a develop pipeline whose neutral output won't match an
+   edited RAW anyway.
+2. **Apply the sidecar's edit faithfully = reimplement the editor. NOT
+   feasible.** Lightroom XMP carries Camera Raw settings; darktable `.xmp`
+   carries darktable module params. Rendering them faithfully means
+   reimplementing Adobe's (proprietary) or darktable's pipeline — out of
+   scope, and a moving target.
+3. **Apply the PORTABLE subset (pragmatic middle).** Crop, orientation/flip,
+   rating/label/color, and maybe basic exposure/WB/B&W are legible from XMP
+   and approximable on top of our neutral develop — partial fidelity,
+   honestly labeled "approximate." Crop + orientation + rating/label is the
+   high-value, low-risk slice (it makes the review match the photographer's
+   keep/reject intent even if tone differs).
+4. **Use the editor's embedded preview if present.** Some export/edit flows
+   write a full-res JPEG preview reflecting the edit; when one exists, prefer
+   it over developing. (Camera-embedded previews are the UNedited capture, so
+   this only helps when the editor refreshed it.)
+
+RECOMMENDATION: keep the neutral full-res develop (this plan) for *seeing
+real resolution* — it's the right primitive and unblocks DNG-never-loads
+now. Treat foreign-edit fidelity as a SEPARATE thread: first-class the
+"review an exports folder" path (cheap, already works), and scope sidecar
+reading to the portable subset (crop/orientation/rating) rather than
+promising edit-accurate RAW rendering we can't deliver. Flagged as its own
+backlog item; do not let it block the develop pass.
