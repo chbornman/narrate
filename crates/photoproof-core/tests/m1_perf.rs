@@ -266,6 +266,7 @@ fn search_p95(n_files: usize, n_notes: usize) {
     let opts = SearchOptions {
         now: Some(UtcMillis::now()),
         include_debug: false,
+        ..SearchOptions::default()
     };
     // Query mix: single terms, prefixes (search-as-you-type), phrases,
     // filter-combined — measured individually for the p50/p95.

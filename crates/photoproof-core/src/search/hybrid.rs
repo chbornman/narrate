@@ -155,6 +155,12 @@ pub struct HybridOptions {
     /// §5.1: the parse must complete in < 1.5 s; a slower one is discarded
     /// in favor of the fallback even though it answered.
     pub parse_budget: Duration,
+    /// The `~` quiet-toggle (search-as-scope Phase 4): additive typo-tolerant
+    /// camera/lens/filename widening on the LEXICAL lane only. Default false =
+    /// today's behavior. Set only by the lexical keyword path (the as-you-type
+    /// lane); the semantic rig never widens (its vectors already generalize),
+    /// so this can never tax the keystroke budget on a warm machine.
+    pub fuzzy: bool,
 }
 
 impl Default for HybridOptions {
@@ -165,6 +171,7 @@ impl Default for HybridOptions {
             weights: FusionWeights::default(),
             beta: SIM_BLEND_BETA,
             parse_budget: PARSE_BUDGET,
+            fuzzy: false,
         }
     }
 }
@@ -691,7 +698,23 @@ where
     // case) reuse the M1 executor wholesale: same statement shape, same
     // grouping, same provenance.
     let keywords = parsed.keywords.clone().unwrap_or_default();
-    let mut base = exec::run_search(conn, &keywords, &parsed.filters, now, opts.include_debug)?;
+    // Fuzzy widening rides the LEXICAL lane only: the keyword-only rig
+    // (`any_vector_signal()` false) hits the degenerate early-return below and
+    // ships `base` straight through, so widening it here reaches exactly the
+    // as-you-type path. When ANY vector signal is live (the semantic lane) we
+    // pass `fuzzy: false` to `exec::run_search` — the fused pipeline must see
+    // the unwidened exact set as its S2 candidate list, and the vectors already
+    // generalize past typos, so widening there would be both redundant and a
+    // budget risk on the commit path.
+    let fuzzy_here = opts.fuzzy && !rig.any_vector_signal();
+    let mut base = exec::run_search(
+        conn,
+        &keywords,
+        &parsed.filters,
+        now,
+        opts.include_debug,
+        fuzzy_here,
+    )?;
 
     let semantic = parsed.semantic.clone().filter(|s| !s.is_empty());
     let match_q = fts_match_query(&keywords);

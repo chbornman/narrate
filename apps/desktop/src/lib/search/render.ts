@@ -89,12 +89,15 @@ export type ProvenanceDisplay =
   | { kind: "quote"; runs: Run[]; dateLabel: string; source: "voice" | "typed" }
   | { kind: "stroke"; dateLabel: string }
   | { kind: "visual-match" }
-  | { kind: "filter-only" };
+  | { kind: "filter-only" }
+  | { kind: "fuzzy-meta"; field: "camera" | "lens" | "filename" };
 
 /**
  * RETRIEVAL §6: FTS/vector hit → verbatim quote + date; stroke-only →
  * stroke reference; clip-only → labeled "visual match", honestly, never a
- * generated caption; filter-only → "matches your filters".
+ * generated caption; filter-only → "matches your filters"; fuzzy-meta → an
+ * honest "approximate" label naming the metadata field that fuzzily matched
+ * (the `~` quiet-toggle, Phase 4) so a widened hit never poses as an exact one.
  */
 export function provenanceDisplay(p: Provenance): ProvenanceDisplay {
   switch (p.type) {
@@ -111,7 +114,15 @@ export function provenanceDisplay(p: Provenance): ProvenanceDisplay {
       return { kind: "visual-match" };
     case "filter_only":
       return { kind: "filter-only" };
+    case "fuzzy_meta":
+      return { kind: "fuzzy-meta", field: p.field };
   }
+}
+
+/** The `~` fuzzy quiet-toggle's approximate-match label (Phase 4): names the
+ * metadata field that fuzzily matched, honestly flagged as approximate. */
+export function fuzzyMetaLabel(field: "camera" | "lens" | "filename"): string {
+  return `approximate ${field} match`;
 }
 
 /** UI §5.2: the single dimmed zero-result line. Nothing else. */

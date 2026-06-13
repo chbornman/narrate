@@ -342,10 +342,10 @@ work lives here.
   downstream consumer. (b) region-conditioned visual embeddings — embed
   the CIRCLED CROP, not the frame: visual search conditioned on where the
   photographer's attention went. Both M3+/M4 candidates.
-- **M3 additions (founder, dogfood round 2)**: free-text/fuzzy matching
-  over metadata fields (camera/lens/filename — typo-tolerant) as a QUIET
-  TOGGLE: never default-on, never outranks exact matches, never blocks the
-  <100 ms FTS path. **M3 design decision to make**: when collections become
+- **M3 additions (founder, dogfood round 2)**: the fuzzy quiet-toggle over
+  metadata (camera/lens/filename, typo-tolerant) LANDED — see LANDED.md
+  (additive widening below exact FTS, never default-on, lexical-lane only).
+  **M3 design decision still to make**: when collections become
   browsable grids ("collection view"), does search turn contextual — e.g.
   a right sidebar scoped to the collection — instead of the full-canvas
   destination? (Tension: the right edge is reserved for journal/partner;

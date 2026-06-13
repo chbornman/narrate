@@ -186,6 +186,16 @@ export class Ui {
    * disagree with the lane that actually fed the grid. */
   searchLane = $state<SearchLane>("none");
 
+  /** The `~` fuzzy quiet-toggle (search-as-scope Phase 4). OFF by default
+   * (never default-on — the whole point of the feature). When armed, the
+   * as-you-type LEXICAL search passes `fuzzy: true`, which appends a
+   * typo-tolerant camera/lens/filename metadata pass AFTER the exact FTS hits
+   * (additive widening, never reordering). LEXICAL-LANE ONLY by construction:
+   * runQueryScope sends it only for the lexical mode, so a committed semantic
+   * search never widens and the <100 ms keystroke budget stays protected.
+   * Persisted across the session like every other UI pref (prefs.fuzzy). */
+  fuzzyMode = $state(false);
+
   // -- ranking signals (search-as-scope Phase 3: B75 weights made visible) ----
   // The ⚙ "Ranking signals" popover's on/off state — one boolean per fusion
   // signal (S1/S2/S3/S4). Checked = the signal's B75 default weight; unchecked
@@ -235,6 +245,7 @@ export class Ui {
     if (this.shell.uiZoom !== 1) void this.applyUiZoom();
     this.autoAdvance = prefs.loadAutoAdvance();
     this.signalToggles = prefs.loadSignalToggles();
+    this.fuzzyMode = prefs.loadFuzzy();
     try {
       this.applySettings(await ipc.settingsGet());
     } catch {
@@ -759,8 +770,13 @@ export class Ui {
             includeDebug: this.rankingPopoverOpen,
           }
         : undefined;
+    // The `~` fuzzy quiet-toggle rides the LEXICAL lane only: when armed, the
+    // as-you-type search widens with typo-tolerant metadata matches appended
+    // below the exact set. The semantic lane never widens (its vectors already
+    // generalize past typos), so this can never tax the commit path.
+    const fuzzy = mode === "lexical" && this.fuzzyMode;
     const load = ++this.gridLoad;
-    const results = await ipc.search(this.query, this.chips, mode, tuning);
+    const results = await ipc.search(this.query, this.chips, mode, tuning, fuzzy);
     if (load !== this.gridLoad) return; // a newer scope owns the grid now
     // Retain per-result signal provenance for the cells' contribution hint —
     // only while the popover asked for it; otherwise keep the map empty so the
@@ -887,6 +903,19 @@ export class Ui {
     // where there is no scope (the quiet, queryless default stays quiet).
     if (this.gridScope.kind === "query" && this.searchLane === "semantic")
       await this.runQueryScope("semantic", false);
+  }
+
+  /** Arm/disarm the `~` fuzzy quiet-toggle (Phase 4) and persist. When a
+   * LEXICAL query scope is live, re-run it so the widening appears (or vanishes)
+   * immediately. NEVER re-runs the semantic lane: fuzzy is lexical-only, so a
+   * committed semantic scope is left untouched (the next edit, which drops back
+   * to lexical, will pick up the new state). */
+  async setFuzzyMode(on: boolean) {
+    if (this.fuzzyMode === on) return;
+    this.fuzzyMode = on;
+    prefs.saveFuzzy(on);
+    if (this.gridScope.kind === "query" && this.searchLane === "lexical")
+      await this.runQueryScope("lexical", false);
   }
 
   /** Flip one signal's checkbox and persist. A change re-runs the live

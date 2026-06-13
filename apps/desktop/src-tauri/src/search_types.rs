@@ -72,6 +72,14 @@ pub enum Provenance {
     VisualMatch,
     /// Pure structured-filter query.
     FilterOnly,
+    /// Fuzzy (typo-tolerant) metadata match from the `~` quiet-toggle
+    /// (search-as-scope Phase 4): a camera/lens/filename widening, appended
+    /// BELOW the exact set. Labeled honestly as approximate so the UI never
+    /// presents a widened gear/filename match as an exact one.
+    FuzzyMeta {
+        /// "camera" | "lens" | "filename" — which field fuzzily matched.
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

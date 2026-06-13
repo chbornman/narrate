@@ -179,6 +179,22 @@
       />
     </div>
 
+    <!-- ~ fuzzy quiet-toggle (Phase 4): dim until armed. When on, the
+         as-you-type lexical search widens with typo-tolerant camera/lens/
+         filename matches, appended BELOW the exact hits. Off by default;
+         lexical-lane only, so it never taxes the keystroke budget. No
+         em-dashes in the tooltip (gate: check:emdash). -->
+    <button
+      class="quiet fuzzy"
+      class:active={ui.fuzzyMode}
+      onclick={() => void ui.setFuzzyMode(!ui.fuzzyMode)}
+      aria-label="Fuzzy search"
+      aria-pressed={ui.fuzzyMode}
+      title="fuzzy: typo-tolerant camera/lens/filename matching"
+    >
+      ~
+    </button>
+
     <!-- ⚙ "Ranking signals" (Phase 3): on-demand, never on the keystroke path.
          Toggling makes the B75 fusion weights visible; semantic-lane only. -->
     <button
@@ -326,6 +342,15 @@
   /* The ⚙ reads as ON while its popover is open (the tuning is live). */
   .quiet.active {
     color: var(--text);
+  }
+  /* The ~ glyph: a monospace tilde that sits on the icons' midline. Dim until
+     armed (inherits .quiet's faint tone), bright via .active when on. */
+  .quiet.fuzzy {
+    font-family:
+      ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 15px;
+    line-height: 1;
+    padding: 0 2px;
   }
   .thumb-slider {
     width: 90px;

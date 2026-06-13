@@ -114,6 +114,7 @@ pub(crate) fn run_search(
     filters: &[Filter],
     now: UtcMillis,
     include_debug: bool,
+    fuzzy: bool,
 ) -> Result<SearchResults, SearchError> {
     let match_q = fts_match_query(raw);
     let echo = QueryEcho {
@@ -127,10 +128,63 @@ pub(crate) fn run_search(
             fallback: false,
         },
     };
-    match match_q {
-        Some(q) => fts_search(conn, echo, &q, raw, filters, now, include_debug),
-        None => browse(conn, echo, filters, now),
+    let mut results = match match_q {
+        Some(q) => fts_search(conn, echo, &q, raw, filters, now, include_debug)?,
+        None => browse(conn, echo, filters, now)?,
+    };
+    // Additive fuzzy-metadata widening (the `~` quiet-toggle, Phase 4): runs
+    // AFTER the exact set is fully assembled, appends typo-tolerant
+    // camera/lens/filename matches BELOW it, and never touches the exact
+    // images' order or provenance. Off by default ⇒ this is a no-op and the
+    // result is byte-identical to today.
+    if fuzzy {
+        append_fuzzy_metadata(conn, &mut results, raw, filters, now)?;
     }
+    Ok(results)
+}
+
+/// Append fuzzy-metadata hits AFTER the exact images, de-duplicated against
+/// them. Exact-first is enforced structurally: the exact `results.images` are
+/// already ordered and placed; fuzzy hits are pushed onto the END with their
+/// own `FuzzyMeta` provenance, and any hash already in the exact set is skipped
+/// (an exact hit is never demoted to a fuzzy one). The fuzzy pass carries the
+/// exact set's hashes so the de-dup is exact-wins.
+fn append_fuzzy_metadata(
+    conn: &Connection,
+    results: &mut SearchResults,
+    raw: &str,
+    filters: &[Filter],
+    now: UtcMillis,
+) -> Result<(), SearchError> {
+    let already: std::collections::HashSet<String> = results
+        .images
+        .iter()
+        .map(|i| i.image_hash.to_string())
+        .collect();
+    let fuzzy_hits = super::fuzzy::fuzzy_metadata_hits(conn, raw, filters, now, &already)?;
+    if fuzzy_hits.is_empty() {
+        return Ok(());
+    }
+    let hashes: Vec<String> = fuzzy_hits.iter().map(|h| h.image_hash.clone()).collect();
+    let last_ts = fetch_last_annotated(conn, &hashes)?;
+    for h in fuzzy_hits {
+        let hash = ContentHash::from_hex(&h.image_hash).map_err(corrupt)?;
+        results.images.push(ImageResult {
+            preview: PreviewRef {
+                image_hash: hash.clone(),
+            },
+            last_annotated_ts: last_ts.get(&h.image_hash).copied(),
+            image_hash: hash,
+            // Fuzzy hits sort BELOW every exact hit: exact scores are bm25
+            // (negative, best-first ascending), so any non-negative score lands
+            // a fuzzy hit last. 0.0 is honest — there is no relevance score for
+            // a metadata widening, only the approximate-match provenance.
+            score: 0.0,
+            provenance: Provenance::FuzzyMeta { field: h.field },
+            debug: None,
+        });
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

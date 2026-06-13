@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use photoproof_core::id::UtcMillis;
-use photoproof_core::search::{Comparison, Filter, Searcher};
+use photoproof_core::search::{Comparison, Filter, SearchOptions, Searcher};
 use photoproof_core::store::EventStore;
 use rusqlite::{Connection, params};
 
@@ -538,6 +538,82 @@ fn lexical_lane_search_as_you_type_stays_under_budget() {
         assert!(
             p95 < 100.0,
             "lexical lane p95 {p95:.2} ms exceeds the 100 ms as-you-type budget"
+        );
+    }
+}
+
+/// The `~` quiet-toggle's budget guardrail (search-as-scope Phase 4). The
+/// fuzzy metadata pass rides the LEXICAL lane (`search_with { fuzzy: true }`)
+/// and must stay inside the same 100 ms as-you-type budget — the whole design
+/// premise is that the camera/lens/filename column space is tiny and
+/// low-cardinality next to the full annotation-text corpus, so a Levenshtein
+/// pass over the DISTINCT values is microsecond-cheap. This pins that premise
+/// on the >1M-row corpus: the fuzzy-armed keystroke stream must not regress past
+/// the budget the always-visible bar's live re-scope is held to.
+#[test]
+#[ignore = "generates a >1M-row corpus; run in release with --ignored"]
+fn fuzzy_armed_lexical_lane_stays_under_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.db");
+    let (total_rows, _fts_rows) = build_corpus(&path);
+    assert!(total_rows >= 1_000_000, "corpus must reach 1M rows");
+
+    let searcher = Searcher::open(&path).unwrap();
+    let chip = [Filter::Rating(Comparison::Gte(3))];
+    let fuzzy = SearchOptions {
+        fuzzy: true,
+        ..SearchOptions::default()
+    };
+
+    // The same as-you-type keystroke stream, run with fuzzy ARMED. The corpus
+    // seeds 5 distinct cameras + 5 distinct lenses (build_corpus), so the
+    // distinct-value scan the fuzzy pass adds is a handful of rows — exactly the
+    // low-cardinality space the budget argument relies on.
+    let mut rng = Rng(0xFACE_FEED_F00D_D00D);
+    let mut keystrokes: Vec<(String, bool)> = Vec::new();
+    for q in 0..60 {
+        let w1 = VOCAB[rng.skewed(VOCAB.len() as u64) as usize];
+        let w2 = VOCAB[rng.skewed(VOCAB.len() as u64) as usize];
+        let full = format!("{w1} {w2}");
+        let with_chip = q % 2 == 0;
+        for end in 2..=full.chars().count() {
+            let prefix: String = full.chars().take(end).collect();
+            if prefix
+                .split_whitespace()
+                .last()
+                .is_none_or(|t| t.chars().count() < 2)
+            {
+                continue;
+            }
+            keystrokes.push((prefix, with_chip));
+        }
+    }
+
+    // Warm (cold first-query excluded from the budget, RETRIEVAL §1.3).
+    for (q, with_chip) in keystrokes.iter().take(20) {
+        let filters: &[Filter] = if *with_chip { &chip } else { &[] };
+        searcher.search_with(q, filters, &fuzzy).unwrap();
+    }
+
+    let mut samples_ms: Vec<f64> = Vec::with_capacity(keystrokes.len());
+    for (q, with_chip) in &keystrokes {
+        let filters: &[Filter] = if *with_chip { &chip } else { &[] };
+        let t = Instant::now();
+        searcher.search_with(q, filters, &fuzzy).unwrap();
+        samples_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples_ms.sort_by(f64::total_cmp);
+    let p95 = percentile(&samples_ms, 0.95);
+    println!(
+        "fuzzy-armed lexical lane p95 {p95:.2} ms over {} keystroke queries",
+        samples_ms.len()
+    );
+
+    // Same §13.1 budget; release-only assertion (debug reports without failing).
+    if !cfg!(debug_assertions) {
+        assert!(
+            p95 < 100.0,
+            "fuzzy-armed lexical lane p95 {p95:.2} ms exceeds the 100 ms as-you-type budget"
         );
     }
 }

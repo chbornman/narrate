@@ -75,6 +75,7 @@ pub fn run_search(
     mode: SearchMode,
     weights: Option<dto::FusionWeightsWire>,
     include_debug: bool,
+    fuzzy: bool,
 ) -> CmdResult<dto::SearchResults> {
     // The lexical lane forces the keyword rig REGARDLESS of embedder warmth
     // — this is the <100 ms guardrail: a warm machine must not pay vector
@@ -84,7 +85,9 @@ pub fn run_search(
     // it cannot reach this lexical early return, so tuning can never tax the
     // keystroke budget.
     if mode == SearchMode::Lexical {
-        return run_search_keyword(&app.searcher, raw, filters);
+        // Fuzzy widening rides the lexical lane ONLY — this is the one place
+        // it is honored, so it can never tax the semantic/commit path.
+        return run_search_keyword(&app.searcher, raw, filters, fuzzy);
     }
 
     let text = app.runtime.embedders.text();
@@ -95,8 +98,10 @@ pub fn run_search(
         // byte-for-byte (`run_search_keyword`). This branch must never
         // diverge from P7.2 behavior — the search tests pin it. (Auto and
         // Semantic both land here when nothing is warm — the rig is the
-        // same degenerate keyword pipeline either way.)
-        return run_search_keyword(&app.searcher, raw, filters);
+        // same degenerate keyword pipeline either way.) The Auto lane carries
+        // `fuzzy` too: it IS the as-you-type lane on a cold machine, so the
+        // toggle must still widen there.
+        return run_search_keyword(&app.searcher, raw, filters, fuzzy);
     }
 
     // Semantic rig: the ready embedders + the vector store. `llm: None`
@@ -153,17 +158,22 @@ fn run_search_keyword(
     searcher: &Searcher,
     raw: String,
     filters: Vec<dto::Filter>,
+    fuzzy: bool,
 ) -> CmdResult<dto::SearchResults> {
     let core_filters: Vec<CoreFilter> = filters
         .iter()
         .map(filter_to_core)
         .collect::<CmdResult<_>>()?;
-    let results = searcher.hybrid_search(
-        &raw,
-        &core_filters,
-        &core_search::keyword_only_rig(),
-        &core_search::HybridOptions::default(),
-    )?;
+    // `fuzzy` flows through `HybridOptions` into the keyword-only rig, which
+    // hits the engine's degenerate early-return and ships the exact set with
+    // the additive fuzzy-metadata pass appended (off by default ⇒ identical to
+    // today's `HybridOptions::default()`).
+    let opts = core_search::HybridOptions {
+        fuzzy,
+        ..core_search::HybridOptions::default()
+    };
+    let results =
+        searcher.hybrid_search(&raw, &core_filters, &core_search::keyword_only_rig(), &opts)?;
     Ok(results_to_dto(results, filters))
 }
 
@@ -310,6 +320,9 @@ fn image_to_dto(i: core_search::ImageResult) -> dto::ImageResult {
             },
             core_search::Provenance::VisualMatch => dto::Provenance::VisualMatch,
             core_search::Provenance::FilterOnly => dto::Provenance::FilterOnly,
+            core_search::Provenance::FuzzyMeta { field } => dto::Provenance::FuzzyMeta {
+                field: field.as_str().to_owned(),
+            },
         },
         last_annotated_ts: i.last_annotated_ts.map(|t| t.to_string()),
         debug: i.debug.map(|d| dto::DebugScores {
@@ -381,7 +394,7 @@ mod tests {
             .unwrap();
 
         let searcher = Searcher::open(&db).unwrap();
-        let out = run_search_keyword(&searcher, "fog ba".into(), Vec::new()).unwrap();
+        let out = run_search_keyword(&searcher, "fog ba".into(), Vec::new(), false).unwrap();
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].image_hash, target.to_string());
         match &out.images[0].provenance {
@@ -436,7 +449,7 @@ mod tests {
         let chip = dto::Filter::Collection {
             name: "quiet hours".into(),
         };
-        let out = run_search_keyword(&searcher, "fog".into(), vec![chip]).unwrap();
+        let out = run_search_keyword(&searcher, "fog".into(), vec![chip], false).unwrap();
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].image_hash, member.to_string());
         assert!(out.query.dropped.is_empty());
@@ -444,7 +457,7 @@ mod tests {
         let bad = dto::Filter::Collection {
             name: "zzz qqq".into(),
         };
-        let err = run_search_keyword(&searcher, "fog".into(), vec![bad]).unwrap_err();
+        let err = run_search_keyword(&searcher, "fog".into(), vec![bad], false).unwrap_err();
         assert!(
             err.to_string().contains("'zzz qqq' not found"),
             "unresolvable chip errors instead of broadening: {err}"

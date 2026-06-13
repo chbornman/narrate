@@ -25,6 +25,13 @@ use crate::search_wire::SearchMode;
 /// `include_debug` lights up `ImageResult::debug` so the popover can SHOW each
 /// result's per-signal contribution while open. Neither reaches the lexical
 /// keystroke lane, so the <100 ms budget is untouched.
+///
+/// `fuzzy` (Phase 4 — the `~` quiet-toggle): optional, default false (today's
+/// behavior, byte-identical). When true, the LEXICAL lane appends a
+/// typo-tolerant camera/lens/filename metadata pass AFTER the exact FTS hits —
+/// additive widening that never reorders the exact set. Honored on the lexical
+/// (as-you-type) lane only; the semantic rig ignores it (its vectors already
+/// generalize), so the keystroke budget stays protected.
 #[tauri::command]
 pub fn search(
     app: S<'_>,
@@ -33,6 +40,7 @@ pub fn search(
     mode: Option<String>,
     weights: Option<FusionWeightsWire>,
     include_debug: Option<bool>,
+    fuzzy: Option<bool>,
 ) -> CmdResult<SearchResults> {
     app.touch()?;
     app.searcher.interrupt();
@@ -44,6 +52,7 @@ pub fn search(
         mode,
         weights,
         include_debug.unwrap_or(false),
+        fuzzy.unwrap_or(false),
     )?;
     *app.last_search.lock().expect("last_search mutex") = Some(results.query.clone());
     Ok(results)

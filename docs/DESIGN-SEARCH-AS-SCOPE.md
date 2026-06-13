@@ -152,11 +152,30 @@ so each cell can show its per-signal contribution. Guardrail: the popover is
 **semantic-lane only** — S1/S3/S4 don't exist on the lexical keystroke path, so
 tuning weights can never touch the <100ms budget. Default-closed, default-weights.
 
-### 2.6 The fuzzy quiet-toggle
+### 2.6 The fuzzy quiet-toggle — BUILT (Phase 4 fuzzy piece)
 A dim `~` glyph. Off by default. When armed, typo-tolerant fuzzy over metadata
 (camera/lens/filename), per the backlog: never default-on, never outranks exact
 matches, never blocks FTS. Rides as a flag; exact-match runs first and
-unconditionally, fuzzy is additive widening. Backend FTS-fuzzy is its own packet.
+unconditionally, fuzzy is additive widening.
+
+LANDED implementation:
+- **Backend:** a new `search/fuzzy.rs` runs an ADDITIVE pass AFTER the exact FTS
+  set is assembled (`exec::run_search`): it scans the DISTINCT camera
+  (`camera_make`/`camera_model`), lens (`lens_model`), and active-path filename
+  basenames — a tiny, low-cardinality space vs the full text corpus — and keeps
+  values within a length-scaled Levenshtein budget (`strsim`, already in-tree for
+  §10.3). Matched values resolve to image hashes via indexed equality under the
+  same hard filters (Browse compile). Hits are appended below the exact set,
+  de-duplicated against it (exact-wins, never demoted), with a new
+  `Provenance::FuzzyMeta { field }`. Threaded as `fuzzy: bool` through
+  `SearchOptions`/`HybridOptions` → the `search` command; default false is
+  byte-identical to today. LEXICAL-LANE ONLY (`hybrid::run` passes it only when
+  no vector signal is live), so it never taxes the <100 ms keystroke budget — a
+  fuzzy-armed latency test on the >1M-row corpus pins this.
+- **Frontend:** a `~` toggle in `GridHeader.svelte` (dim until armed), persisted
+  via `prefs.fuzzy` (`ui.fuzzyMode` / `setFuzzyMode`); `runQueryScope` sends
+  `fuzzy: true` only on the lexical lane. Fuzzy hits render an honest
+  "approximate <field> match" provenance label (`render.ts`).
 
 ---
 

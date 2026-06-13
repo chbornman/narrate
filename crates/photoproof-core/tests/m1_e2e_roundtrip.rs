@@ -54,6 +54,7 @@ fn run_searches(env: &M1Env) -> Vec<SearchResults> {
     let opts = SearchOptions {
         now: Some(UtcMillis::parse("2026-06-10T12:00:00.000Z").unwrap()),
         include_debug: false,
+        ..SearchOptions::default()
     };
     let mut out = Vec::new();
     for (q, filters) in [
