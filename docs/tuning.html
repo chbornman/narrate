@@ -29,6 +29,8 @@
     padding: 2px 7px; border-radius: 20px; vertical-align: middle; margin-left: 8px; }
   .pill.live { color: var(--green); border: 1px solid var(--green); }
   .pill.proposed { color: var(--amber); border: 1px solid var(--amber); }
+  .pill.locked { color: var(--red); border: 1px solid var(--red); }
+  td.breaks { color: #d6a3a0; }
   .lede { color: var(--dim); margin: 0 0 18px; max-width: 78ch; }
   table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
   th { text-align: left; color: var(--faint); font-weight: 600; font-size: 11.5px;
@@ -128,7 +130,18 @@
   <tr><td class="knob">voice chunking - rule2 trailing silence</td><td class="val">1.2 s</td><td class="where">pp-asr-server</td><td class="uf-no">no</td><td><span class="owner">data</span> "when does a sentence end"; tuning round open (BACKLOG)</td></tr>
   <tr><td class="knob">embedded-preview accept edge</td><td class="val">2048 px</td><td class="where">tuning.toml [preview].embedded_accept_edge<br>tuning.rs</td><td class="uf-no">file</td><td><span class="owner">founder</span> when the in-RAW JPEG is "good enough"</td></tr>
   <tr><td class="knob">display preview edge</td><td class="val">2560 px</td><td class="where">tuning.toml [preview].display_edge<br>tuning.rs</td><td class="uf-no">file</td><td><span class="owner">founder</span></td></tr>
-  <tr><td class="knob">embedded aspect tolerance</td><td class="val">0.02</td><td class="where">preview.rs (EMBEDDED_NATIVE_ASPECT_TOLERANCE)</td><td class="uf-no">no</td><td><span class="owner">fixed</span> geometry CONTRACT for strokes - deliberately NOT in tuning.toml</td></tr>
+</table>
+
+<h2>Contracts - locked invariants <span class="pill locked">LOCKED</span></h2>
+<p class="lede">These are NOT preference dials. Each encodes a promise or a correctness rule, so it is deliberately kept as a hard constant in code (NOT in the editable <code>tuning.toml</code>) - a stray file edit must never be able to silently break an invariant. Listed here with their value, location, and what breaks if you change them, so a locked number is never an undocumented one.</p>
+<table>
+  <tr><th>Contract</th><th>Value</th><th>Where</th><th>If you change it</th></tr>
+  <tr><td class="knob">search latency budget</td><td class="val">&lt; 100 ms</td><td class="where">tests/search_latency.rs (assertion literal)</td><td class="breaks">search stops feeling instant - the as-you-type promise; the latency test fails by design</td></tr>
+  <tr><td class="knob">stroke geometry tolerance</td><td class="val">0.02</td><td class="where">preview.rs (EMBEDDED_NATIVE_ASPECT_TOLERANCE)</td><td class="breaks">strokes stop landing where you drew them - the strokes-land-where-drawn invariant (LIBRARY 9.4)</td></tr>
+  <tr><td class="knob">artifact generator version</td><td class="val">2</td><td class="where">preview.rs:30 (GENERATOR_VERSION)</td><td class="breaks">a bump regenerates EVERY cached preview; it is also the ONLY sanctioned way to regenerate a substrate a stroke was drawn over - never edit casually</td></tr>
+  <tr><td class="knob">as-you-type debounce ceiling</td><td class="val">&le; 50 ms</td><td class="where">tuning.ts (SEARCH_DEBOUNCE_MS)</td><td class="breaks">raising it past 50 ms breaks the &lt;100ms budget (lowering is safe); it is a ceiling, not a dial</td></tr>
+  <tr><td class="knob">session idle boundary</td><td class="val">30 min</td><td class="where">capture (CAPTURE &sect;2.2-2.3)</td><td class="breaks">redefines what a "session" span is - the unit the heatmap and the M4 timeline both read</td></tr>
+  <tr><td class="knob">stroke point cap</td><td class="val">&le; 8192 pts</td><td class="where">event.rs (EVENTS &sect;3.3)</td><td class="breaks">a schema validation contract; an over-cap stroke is rejected at append</td></tr>
 </table>
 
 <h2>Future - the synthesis lens <span class="pill proposed">PROPOSED</span></h2>
