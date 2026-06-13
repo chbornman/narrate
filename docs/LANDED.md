@@ -67,6 +67,48 @@ discrete BACKLOG checkboxes; recorded here for the changelog.
   Station, TopicList, StrokePreview, JournalTab rate buttons. No layout/behavior
   changes. (Founder, June 12 2026.)
 
+## June 13 2026 — Dogfood round 5: cache recovery, dictation, view unification
+
+- [x] **Clear-previews: live cache-bust + auto-rebuild** — merge `8677907` (work
+  `02f1af1`). "Clear all previews" left the grid stale until restart (webview
+  immutable cache) then stuck at "?" forever (clear didn't re-pend generation).
+  Fix: clear emits a global `previews-changed` (empty `hashes` = bump every thumb's
+  `?p=` cache-bust so the webview re-requests past the immutable header); and
+  `ClearKind::All` re-pends the preview pass for all active roots so thumbnails
+  regenerate. Button relabeled "Clear all previews" -> "Rebuild all previews".
+  (Founder, June 13 2026.)
+- [x] **Viewport-first preview generation** — merge `c2bbf13` (work `edb395e`). As
+  the grid viewport changes, the visible (preview-missing) hashes' ingest preview
+  pass is bumped above backfill priority (debounced `prioritize_previews` command),
+  so after a rebuild the rows you are looking at generate first. Cooperates with the
+  client-side thumbqueue load order. (Founder backlog, June 13 2026.)
+- [x] **Dictation spanning an image swap targets all viewed images** — merge
+  `1acf6d2` (work `75e7600`). A dictation that crosses an arrow-nav (A->B mid
+  sentence) used to mint only on A (target frozen at speech onset). Now
+  `engine.set_scope` unions the new image into every open in-flight utterance's
+  held snapshot, so the note lands on every image viewed during the utterance
+  (founder chose "attach to both/all viewed"; no per-word timestamps for a precise
+  split). Order-preserving, de-duped. (Founder, June 13 2026.)
+- [x] **Visualizer node selection + capture scope** — merge `111dcd9` (work
+  `7bc7963`). Single-click a graph node selects it (glow + sets capture scope so
+  dictation/rating land on it), double-click/Enter opens Look, Esc deselects then
+  closes. Opening the lens neutralizes scope so dictation never hits a stale image.
+  Fixed a latent bug: the Visualizer never set scope before. (Founder, June 13 2026.)
+- [x] **Topic note log** — merge `1d76407` (work `844da57`). Topics get an
+  append-only note log mirroring the existing `collection_notes`: new `topic_notes`
+  table (v15 migration), store methods, commands, IPC, a `TopicNotesSlice`, and a
+  `TopicNotes.svelte` rail surface shown when a topic detail is open (selecting a
+  saved topic both scopes the grid and surfaces its notes, like collections). Typed
+  text only. (Founder, June 13 2026.)
+- [x] **Unify views: scope x viewMode** — merge `11ea509` (work `137efe5`); design
+  `docs/DESIGN-VIEW-MODES.md`. Replaced `surface` (grid|look) + the bolted-on
+  `graphOpen` overlay with one `viewMode` (grid|visualizer|look) orthogonal to
+  `gridScope`, plus a shared `activeHash` seeded on each view switch so the same
+  photo carries across grid<->visualizer<->look. `graphSelection` -> `viewSelection`.
+  A future `compare` mode now slots in additively (the litmus in the design doc).
+  Reconciled the earlier neutralize-on-open: the visualizer seeds from the active
+  photo (not stale), neutral only when nothing is focused. (Founder, June 13 2026.)
+
 ## June 13 2026 — Visualization lenses
 
 - [x] **Attention / engagement heatmap** — see `docs/DESIGN-ATTENTION-HEATMAP.md`.
