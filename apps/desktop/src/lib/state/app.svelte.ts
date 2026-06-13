@@ -22,6 +22,7 @@
 import * as ipc from "../ipc/commands";
 import * as sel from "../logic/selection";
 import * as note from "../logic/note";
+import * as topicbake from "../logic/topicbake";
 import { isMac } from "../logic/platform";
 import { escapeAction, type EscapeContext } from "../logic/escape";
 import { navigationSet } from "../logic/looknav";
@@ -65,6 +66,7 @@ import type {
   IngestStatus,
   RootDto,
   StrokePayloadWire,
+  TopicDto,
 } from "../types/dto";
 import type { Filter } from "../types/search";
 import { MIN_QUERY_CHARS } from "../tuning";
@@ -108,7 +110,16 @@ export type GridScope =
   // the query image; `filename` is captured at dispatch so the residue can
   // say "similar to <name>" without a later lookup; `within` records the
   // source one-key clear returns to (the query scope's `within` precedent).
-  | { kind: "similar"; hash: string; filename: string; within: GridScope };
+  | { kind: "similar"; hash: string; filename: string; within: GridScope }
+  // Topic scope (DESIGN-TOPICS-COLLECTIONS.md): selecting a topic in the
+  // Topics rail tab scopes the grid to that topic's RANKED images (highest
+  // blended affinity first). A FIFTH scope variant rendered exactly like
+  // query/similar — ordinary cells in ranked (relevance) order — so it reuses
+  // the same feeder/residue/clear machinery (the residue reads "topic:
+  // <phrase>", one-key clear / Escape returns to `within`). A topic is fuzzy
+  // (computed affinity, never stored membership); the bake gesture commits a
+  // threshold of it into a durable collection (createCollectionFromTopic).
+  | { kind: "topic"; phrase: string; within: GridScope };
 
 export class Ui {
   // -- slices (contracts frozen by FOUNDATIONS) -------------------------------
@@ -163,7 +174,9 @@ export class Ui {
   collectionId = $derived<string | null>(
     this.gridScope.kind === "collection"
       ? this.gridScope.id
-      : (this.gridScope.kind === "query" || this.gridScope.kind === "similar") &&
+      : (this.gridScope.kind === "query" ||
+            this.gridScope.kind === "similar" ||
+            this.gridScope.kind === "topic") &&
           this.gridScope.within.kind === "collection"
         ? this.gridScope.within.id
         : null,
@@ -183,6 +196,15 @@ export class Ui {
    * folder's items — or vice versa — because awaits reorder arrivals
    * while the mode fields already describe the newer view. */
   private gridLoad = 0;
+
+  // -- topics (DESIGN-TOPICS-COLLECTIONS.md — rail Topics tab) -----------------
+  /** The saved MANUAL topics (`list_topics`), newest first. A topic is a saved
+   * phrase, like a saved search; its images are ALWAYS computed affinity
+   * (`topic_ranked_images`), never stored membership. Editable/removable in the
+   * Topics rail tab. The autosuggested (cluster) topics are computed on demand
+   * by the Topics tab / graph (clusterTopics), not held here — only the durable
+   * manual set persists in this store. Replaced whole on every CRUD. */
+  topics = $state<TopicDto[]>([]);
 
   // -- attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md) --------------
   // A focused, clearly-named region (kept localized for the parallel
@@ -335,6 +357,14 @@ export class Ui {
       this.collections = (await ipc.listCollections()) ?? [];
     } catch {
       /* backend unavailable (tests/dev): no collections yet */
+    }
+    // Saved manual topics (the Topics rail tab) — rail furniture like
+    // collections, fetched after the folder is on screen. `?? []`: test mocks
+    // resolve unknown commands to null.
+    try {
+      this.topics = (await ipc.listTopics()) ?? [];
+    } catch {
+      /* backend unavailable (tests/dev): no saved topics yet */
     }
     await this.reportScope();
   }
@@ -685,6 +715,13 @@ export class Ui {
       await this.runSimilarScope(scope.hash, scope.filename);
       return;
     }
+    if (scope.kind === "topic") {
+      // A live re-list under a topic view re-ranks the SAME phrase so
+      // newly-embedded images can enter (and re-rank) the set. The underlying
+      // source is unchanged — re-feed against the same topic phrase.
+      await this.runTopicScope(scope.phrase);
+      return;
+    }
     if (this.grid.rootId === null) return;
     const load = ++this.gridLoad;
     const items = await ipc.listFolder(this.grid.rootId, this.grid.folder);
@@ -771,7 +808,11 @@ export class Ui {
       await this.leaveLook();
       return;
     }
-    if (this.gridScope.kind === "query" || this.gridScope.kind === "similar") {
+    if (
+      this.gridScope.kind === "query" ||
+      this.gridScope.kind === "similar" ||
+      this.gridScope.kind === "topic"
+    ) {
       await this.clearQueryScope();
       return;
     }
@@ -802,12 +843,15 @@ export class Ui {
   }
 
   /** The underlying folder/collection source the current scope rests on —
-   * the thing one-key clear returns to. A query or a similar scope is never
-   * the source for a new derived scope (you return PAST it, not to it), so
-   * both unwrap to their own `within`; a plain folder/collection IS the
-   * source. Shared by `runQueryScope` and `runSimilarScope`. */
+   * the thing one-key clear returns to. A DERIVED scope (query / similar /
+   * topic) is never the source for a new derived scope (you return PAST it,
+   * not to it), so each unwraps to its own `within`; a plain folder/collection
+   * IS the source. Shared by `runQueryScope` / `runSimilarScope` /
+   * `runTopicScope`. */
   private scopeSource(): GridScope {
-    return this.gridScope.kind === "query" || this.gridScope.kind === "similar"
+    return this.gridScope.kind === "query" ||
+      this.gridScope.kind === "similar" ||
+      this.gridScope.kind === "topic"
       ? this.gridScope.within
       : this.gridScope;
   }
@@ -955,6 +999,139 @@ export class Ui {
     await this.reportScope();
   }
 
+  /**
+   * Topic scope (DESIGN-TOPICS-COLLECTIONS.md): re-scope the grid to a topic
+   * phrase's RANKED images (highest blended affinity first). The SIXTH
+   * `setItems` feeder, deliberately the same two-step shape as
+   * `runSimilarScope` — `topic_ranked_images` returns hash+score in descending
+   * affinity, then `list_images` enriches the hashes into the same GridItems
+   * folders and queries render. Guarded by the SAME monotone `gridLoad` token so
+   * a slow rank can't overwrite a newer scope.
+   *
+   * `within` is the source one-key clear / Escape returns to: when invoked from
+   * a derived scope we keep THAT scope's underlying source (a topic view is
+   * never the thing you "return to"), mirroring `runSimilarScope`. Ranked order
+   * IS the relevance order — the same pass-through the query scope uses
+   * (sortItems preserves the fed order under "relevance"). The ranked replies
+   * are also cached on `topicScored` so the Topics-tab bake bar can threshold
+   * over them without a second fetch. An un-embedded scope yields an empty grid,
+   * never an error.
+   *
+   * Surface-safe like runSimilarScope: triggered from the rail, it swaps the
+   * grid scope; the caller leaves Look first when that is the intent.
+   */
+  async runTopicScope(phrase: string) {
+    const within = this.scopeSource();
+    // Set the discriminator BEFORE the await: the residue and the sort menu key
+    // off it immediately; a stale async result is fenced by gridLoad.
+    this.gridScope = { kind: "topic", phrase, within };
+    // Ranked (descending-affinity) order IS the relevance order — the same
+    // pass-through the query/similar scopes use.
+    this.grid.sort = "relevance";
+    // A fresh topic view clears the bar's live input: the bar is not the scope
+    // here, and a stale lexical/semantic lane label would mislead.
+    this.clearQueryInput();
+    const scope = this.graphScope();
+    const load = ++this.gridLoad;
+    let ranked: import("../types/dto").RankedImageDto[] = [];
+    try {
+      ranked = (await ipc.topicRankedImages(phrase, scope)) ?? [];
+    } catch {
+      ranked = []; // unreachable backend / empty index: an honest empty grid
+    }
+    if (load !== this.gridLoad) return; // a newer scope owns the grid now
+    // Cache the ranked scores for the Topics-tab bake bar (threshold -> count ->
+    // members) so the bake thresholds over the SAME numbers the grid was fed.
+    this.topicScored = topicbake.rankedToScored(ranked);
+    const hashes = topicbake.rankedHashes(ranked);
+    const items = hashes.length === 0 ? [] : ((await ipc.listImages(hashes)) ?? []);
+    if (load !== this.gridLoad) return;
+    this.grid.setItems(items);
+    await this.reportScope();
+  }
+
+  // ---------------------------------------------------------------------------
+  // topics CRUD + the topic -> collection bake (DESIGN-TOPICS-COLLECTIONS.md).
+  // Manual topics persist (a saved phrase); the bake is a ONE-WAY commit of a
+  // threshold into an ordinary evented collection (provenance recorded by the
+  // backend). The Topics rail tab + the graph share these methods.
+  // ---------------------------------------------------------------------------
+
+  /** The ranked affinity scores the CURRENT topic scope was fed (hash + score,
+   * descending). The Topics-tab bake bar thresholds over these so its live count
+   * + bake membership agree with what the grid shows. Empty outside a topic
+   * scope (or before the rank resolves). Plain field reflected into $state via
+   * the setter below so the tab's count re-renders. */
+  topicScored = $state<topicbake.ScoredImage[]>([]);
+
+  /** Save a phrase as a manual topic (the Topics rail tab's add-topic input,
+   * and the "promote a suggestion" click). NO catch: saving a topic is user
+   * truth like createCollection — a real persistence failure must surface, not
+   * vanish as a test mock. A blank phrase or an already-saved one is a no-op
+   * (the rail also guards, belt-and-braces). Refreshes the snapshot directly
+   * (awaited + deterministic for tests). */
+  async addTopic(phrase: string): Promise<void> {
+    const trimmed = phrase.trim();
+    if (trimmed === "") return;
+    if (this.topics.some((t) => t.phrase === trimmed)) return;
+    await ipc.addTopic(trimmed);
+    this.topics = (await ipc.listTopics()) ?? [];
+  }
+
+  /** Remove a saved manual topic (the Topics rail tab's per-topic remove). If
+   * the removed topic is the one currently scoping the grid, fall back to its
+   * source so the grid never sits on a deleted topic. */
+  async removeTopic(id: string): Promise<void> {
+    const removed = this.topics.find((t) => t.id === id);
+    await ipc.removeTopic(id);
+    this.topics = (await ipc.listTopics()) ?? [];
+    if (
+      removed !== undefined &&
+      this.gridScope.kind === "topic" &&
+      this.gridScope.phrase === removed.phrase
+    )
+      await this.clearQueryScope();
+  }
+
+  /** Select a topic in the rail -> scope the grid to its ranked images. Leaves
+   * Look first (the rail drives the grid surface), like openFolder. */
+  async openTopic(phrase: string): Promise<void> {
+    if (this.surface === "look") await this.leaveLook();
+    await this.runTopicScope(phrase);
+  }
+
+  /**
+   * The bake (DESIGN-TOPICS-COLLECTIONS.md): commit a topic threshold into an
+   * evented collection. Members are the in-scope images scoring >= `threshold`;
+   * the backend records the provenance (phrase + threshold + alpha) and returns
+   * an ordinary INDEPENDENT collection (ONE-WAY, no live link back). The graph
+   * slider and the Topics tab both call this. `name` defaults to the phrase at
+   * the call site. Refreshes the collections snapshot so the new collection
+   * appears in the rail immediately (the collections-changed event is the
+   * cross-window catch-all). NO catch: a bake is a user-truth write.
+   *
+   * Resolves to the new collection (so the caller can surface a toast / select
+   * it), or null on a blank name / empty selection (nothing to bake).
+   */
+  async bakeTopicCollection(
+    phrase: string,
+    threshold: number,
+    name: string,
+    alpha?: number,
+  ): Promise<CollectionDto | null> {
+    const trimmed = name.trim();
+    if (trimmed === "") return null;
+    const created = await ipc.createCollectionFromTopic(
+      phrase,
+      this.graphScope(),
+      threshold,
+      trimmed,
+      alpha,
+    );
+    await this.onCollectionsChanged((await ipc.listCollections()) ?? []);
+    return created ?? null;
+  }
+
   // ---------------------------------------------------------------------------
   // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md) — a focused, clearly
   // named region so the parallel heatmap merge into this file stays mechanical.
@@ -1028,7 +1205,12 @@ export class Ui {
    * and peel two Esc layers at once. No-op when the scope is not derived (a
    * plain folder/collection has nowhere to return to). */
   private async returnToSource() {
-    if (this.gridScope.kind !== "query" && this.gridScope.kind !== "similar") return;
+    if (
+      this.gridScope.kind !== "query" &&
+      this.gridScope.kind !== "similar" &&
+      this.gridScope.kind !== "topic"
+    )
+      return;
     const within = this.gridScope.within;
     this.gridScope = within;
     if (within.kind === "folder") {
@@ -1049,7 +1231,9 @@ export class Ui {
    * the residue's whole point is that you SEE where you land. */
   async clearQueryScope() {
     const wasDerived =
-      this.gridScope.kind === "query" || this.gridScope.kind === "similar";
+      this.gridScope.kind === "query" ||
+      this.gridScope.kind === "similar" ||
+      this.gridScope.kind === "topic";
     this.clearQueryInput();
     // returnToSource re-lists AND reports when it was a derived scope; when it
     // wasn't (defensive — callers gate) the input still cleared, so report
@@ -1469,11 +1653,13 @@ export class Ui {
       debugPanelOpen: this.shell.debugOpen,
       rankingPopoverOpen: this.rankingPopoverOpen,
       inspectorOpen: this.inspector.open !== false,
-      // A derived scope (query OR similar) is what first Esc / the residue
-      // peels back to source — the similar scope shares the query residue's
-      // one-key clear layer.
+      // A derived scope (query OR similar OR topic) is what first Esc / the
+      // residue peels back to source — similar and topic scopes share the query
+      // residue's one-key clear layer.
       queryScopeActive:
-        this.gridScope.kind === "query" || this.gridScope.kind === "similar",
+        this.gridScope.kind === "query" ||
+        this.gridScope.kind === "similar" ||
+        this.gridScope.kind === "topic",
       searchBarFocused: this.barFocused,
       surface: this.surface,
       hasSelection: this.grid.sel.order.length > 0,
@@ -1584,10 +1770,13 @@ export class Ui {
       asrReady: this.shell.asrReady, // live from runtime-status (P6.2, §8.3)
       sort: this.grid.sort,
       // The `relevance` sort row is offered for any RELEVANCE-ORDERED scope:
-      // a query (fused order) OR a similar scope (similarity order). Both feed
-      // the grid in a backend-chosen order that "relevance" preserves.
+      // a query (fused order), a similar scope (similarity order), OR a topic
+      // scope (ranked affinity order). All feed the grid in a backend-chosen
+      // order that "relevance" preserves.
       queryActive:
-        this.gridScope.kind === "query" || this.gridScope.kind === "similar",
+        this.gridScope.kind === "query" ||
+        this.gridScope.kind === "similar" ||
+        this.gridScope.kind === "topic",
       heatOn: this.heatOn,
       heatAllTime: this.heatAllTime,
       thumbStep: this.grid.thumbStep,

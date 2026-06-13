@@ -1,15 +1,16 @@
 <script lang="ts">
   /**
    * The left source rail (featureset §3): a PUSH Panel — resizable,
-   * width-persisted, `\` toggles (D5). Two PEER tabs (founder, June 2026):
-   * Folders and Collections — collections are the point (intent, gathered
-   * context); folders are just where files happen to sit. Folder rows
-   * render through SourceList over logic/sources.ts sections; collection
-   * rows through CollectionList over the collections snapshot. Right-click
-   * on a folder row opens the rail-folder seat. The footer carries the
-   * visible tab's one standing affordance: "Add folder…" (founder, dogfood
-   * rounds 1+2 — no Settings round-trip) or the inline "New collection…"
-   * input (same idiom, text instead of a picker).
+   * width-persisted, `\` toggles (D5). THREE PEER tabs (founder, June 2026;
+   * Topics added June 13 2026): Folders, Collections, Topics. Collections are
+   * the point (intent, gathered context); folders are just where files happen
+   * to sit; topics are the machine's fuzzy lenses (saved phrases + cluster
+   * suggestions). Folder rows render through SourceList over logic/sources.ts
+   * sections; collection rows through CollectionList; topic rows through
+   * TopicList (manual + suggested). Right-click on a folder row opens the
+   * rail-folder seat. The footer carries the visible tab's one standing
+   * affordance: "Add folder…", the inline "New collection…" input, or the
+   * inline "Add topic…" input (same idiom across all three).
    */
   import { tick } from "svelte";
   import { ui } from "../../state/app.svelte";
@@ -19,6 +20,7 @@
   import SourceList from "./SourceList.svelte";
   import CollectionList from "./CollectionList.svelte";
   import CollectionNotes from "./CollectionNotes.svelte";
+  import TopicList from "./TopicList.svelte";
 
   const secs = $derived(ui.railSections());
   const collectionRows = $derived(ui.railCollectionRows());
@@ -102,12 +104,43 @@
       endCreate();
     }
   }
+
+  // ---- inline add-topic (the rail's footer affordance, Topics tab) -------
+  // The collection-creator idiom, text instead of a picker: a saved manual
+  // topic is a phrase (DESIGN-TOPICS-COLLECTIONS.md). Kept separate from the
+  // collection-create state so the two footers never alias.
+  let addingTopic = $state(false);
+  let topicDraft = $state("");
+  let topicInputEl: HTMLInputElement | undefined = $state();
+
+  async function beginAddTopic() {
+    addingTopic = true;
+    topicDraft = "";
+    await tick();
+    topicInputEl?.focus();
+  }
+
+  function endAddTopic() {
+    addingTopic = false;
+    topicDraft = "";
+  }
+
+  function onTopicKeydown(e: KeyboardEvent) {
+    e.stopPropagation(); // the input owns its keys (the collection-creator pattern)
+    if (e.key === "Enter") {
+      const phrase = topicDraft;
+      endAddTopic();
+      void ui.addTopic(phrase); // a blank/duplicate phrase is a no-op in the store
+    } else if (e.key === "Escape") {
+      endAddTopic();
+    }
+  }
 </script>
 
 <!-- lights-out hides this through the root's panel snapshot, not a gate -->
 <Panel id="rail" edge="left" open={ui.shell.railOpen} label="Sources">
   <div class="rail-body">
-    <!-- two PEER tabs; the strip is the rail's one piece of standing chrome -->
+    <!-- three PEER tabs; the strip is the rail's one piece of standing chrome -->
     <div class="tabs" role="tablist" aria-label="Source kind">
       <button
         role="tab"
@@ -125,6 +158,14 @@
       >
         Collections
       </button>
+      <button
+        role="tab"
+        aria-selected={tab === "topics"}
+        class:current={tab === "topics"}
+        onclick={() => ui.shell.setRailTab("topics")}
+      >
+        Topics
+      </button>
     </div>
 
     <div class="rows">
@@ -138,13 +179,15 @@
           onopen={onOpen}
           oncontextmenu={onContextMenu}
         />
-      {:else}
+      {:else if tab === "collections"}
         <CollectionList
           rows={collectionRows}
           focusKey={ui.shell.railFocusKey}
           currentKey={ui.collectionId === null ? null : collectionKey(ui.collectionId)}
           onopen={onOpenCollection}
         />
+      {:else}
+        <TopicList />
       {/if}
     </div>
 
@@ -160,7 +203,7 @@
       <button class="footer-verb" onclick={() => void ui.perform({ kind: "add-root" })}>
         Add folder…
       </button>
-    {:else if creating}
+    {:else if tab === "collections" && creating}
       <input
         bind:this={inputEl}
         bind:value={draft}
@@ -170,9 +213,23 @@
         onkeydown={onCreateKeydown}
         onblur={endCreate}
       />
-    {:else}
+    {:else if tab === "collections"}
       <button class="footer-verb" onclick={() => void beginCreate()}>
         New collection…
+      </button>
+    {:else if addingTopic}
+      <input
+        bind:this={topicInputEl}
+        bind:value={topicDraft}
+        class="footer-input"
+        placeholder="Topic phrase"
+        aria-label="New topic phrase"
+        onkeydown={onTopicKeydown}
+        onblur={endAddTopic}
+      />
+    {:else}
+      <button class="footer-verb" onclick={() => void beginAddTopic()}>
+        Add topic…
       </button>
     {/if}
   </div>

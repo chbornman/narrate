@@ -137,12 +137,14 @@ export function saveRailOpen(open: boolean) {
   saveBool("pp.railOpen", open);
 }
 
-/** Rail tab — Folders | Collections as peers (founder, June 2026).
- * Persisted like railOpen: the rail comes back the way it was left. */
-export type RailTab = "folders" | "collections";
+/** Rail tab — Folders | Collections | Topics as peers (founder, June 2026;
+ * Topics added June 13 2026 per DESIGN-TOPICS-COLLECTIONS.md). Persisted like
+ * railOpen: the rail comes back the way it was left. */
+export type RailTab = "folders" | "collections" | "topics";
 
 export function loadRailTab(): RailTab {
-  return safeGet("pp.railTab") === "collections" ? "collections" : "folders";
+  const v = safeGet("pp.railTab");
+  return v === "collections" || v === "topics" ? v : "folders";
 }
 
 export function saveRailTab(tab: RailTab) {
