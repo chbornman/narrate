@@ -148,6 +148,7 @@ fn c2_interrupted_ingest_resumes_then_relinks_after_external_move() {
             &SearchOptions {
                 now: Some(UtcMillis::now()),
                 include_debug: false,
+                ..SearchOptions::default()
             },
         )
         .unwrap();

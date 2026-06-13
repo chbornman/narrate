@@ -203,6 +203,19 @@ export function saveAutoAdvance(on: boolean) {
   saveBool("pp.autoAdvance", on);
 }
 
+// ---- fuzzy quiet-toggle (search-as-scope Phase 4) ---------------------------
+
+/** The `~` fuzzy quiet-toggle, default OFF (never default-on — the whole point
+ * of the feature). Persisted across the session like every other UI pref so an
+ * armed user keeps it armed; an absent/malformed value falls back to off. */
+export function loadFuzzy(): boolean {
+  return loadBool("pp.fuzzy", false);
+}
+
+export function saveFuzzy(on: boolean) {
+  saveBool("pp.fuzzy", on);
+}
+
 export function loadSurround(): SurroundLevel {
   return parseSurround(safeGet("pp.surround")) ?? DEFAULT_SURROUND;
 }

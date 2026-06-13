@@ -351,6 +351,64 @@ describe("search-as-scope (M3): the query is a grid scope", () => {
     void ui.perform({ kind: "open-search" });
     expect(ui.focusBarRequest).toBe(before + 1);
   });
+
+  // -- the `~` fuzzy quiet-toggle (Phase 4) -----------------------------------
+
+  it("fuzzy is OFF by default: lexical search omits the fuzzy flag", async () => {
+    expect(ui.fuzzyMode).toBe(false);
+    ui.query = "leica";
+    await ui.runQueryScope("lexical");
+    // An unarmed call is byte-identical to today — `fuzzy` is omitted entirely
+    // (the sparse payload sends it only when armed).
+    expect(lastCall("search")?.args?.fuzzy).toBeUndefined();
+  });
+
+  it("armed: as-you-type lexical search sends fuzzy:true", async () => {
+    await ui.setFuzzyMode(true);
+    expect(ui.fuzzyMode).toBe(true);
+    ui.query = "leics"; // a camera typo
+    await ui.runQueryScope("lexical");
+    expect(lastCall("search")?.args?.fuzzy).toBe(true);
+  });
+
+  it("armed fuzzy NEVER rides the semantic lane (lexical-only guardrail)", async () => {
+    await ui.setFuzzyMode(true);
+    ui.query = "leics";
+    await ui.runQueryScope("semantic");
+    // The commit lane must not carry the fuzzy widening — the semantic rig
+    // already generalizes, and widening there would risk the budget.
+    expect(lastCall("search")?.args?.fuzzy).toBeUndefined();
+    expect(lastCall("search")?.args?.mode).toBe("semantic");
+  });
+
+  it("the toggle persists across the session (localStorage)", async () => {
+    await ui.setFuzzyMode(true);
+    // A fresh Ui boots with the armed state restored from prefs.
+    const fresh = new Ui();
+    fresh.fuzzyMode = false; // prove init() is what arms it
+    await fresh.init();
+    expect(fresh.fuzzyMode).toBe(true);
+  });
+
+  it("arming with a live lexical scope re-runs it (the widening appears live)", async () => {
+    ui.query = "leica";
+    await ui.runQueryScope("lexical");
+    ipcLog.calls.length = 0;
+    await ui.setFuzzyMode(true);
+    // A live lexical scope re-runs so the fuzzy hits appear immediately.
+    expect(lastCall("search")?.args?.fuzzy).toBe(true);
+    expect(lastCall("search")?.args?.mode).toBe("lexical");
+  });
+
+  it("arming does NOT re-run a committed semantic scope", async () => {
+    ui.query = "leica";
+    await ui.runQueryScope("semantic");
+    ipcLog.calls.length = 0;
+    await ui.setFuzzyMode(true);
+    // Fuzzy is lexical-only: a committed semantic scope is left untouched (the
+    // next edit drops back to lexical and picks up the armed state).
+    expect(lastCall("search")).toBeUndefined();
+  });
 });
 
 describe('"More like this" (B69): the similar scope is a grid scope', () => {

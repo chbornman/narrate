@@ -28,6 +28,7 @@
 
 mod exec;
 mod filter;
+mod fuzzy;
 mod hybrid;
 mod parse;
 mod query;
@@ -42,6 +43,7 @@ use thiserror::Error;
 use crate::id::{ContentHash, EventId, SessionId, UtcMillis};
 use crate::store::schema;
 
+pub use fuzzy::FuzzyField;
 pub use hybrid::{
     FusionWeights, HybridOptions, HybridRig, NoModel, RRF_K, SIM_BLEND_BETA, keyword_only_rig,
 };
@@ -261,6 +263,13 @@ pub enum Provenance {
     VisualMatch,
     /// Pure structured-filter query.
     FilterOnly,
+    /// Fuzzy (typo-tolerant) metadata match from the `~` quiet-toggle —
+    /// camera/lens/filename widening (search-as-scope Phase 4). Carried ONLY by
+    /// images appended AFTER the exact set; an exact hit keeps its real
+    /// provenance. Labeled honestly as APPROXIMATE so the UI never presents a
+    /// widened gear/filename match as an exact one (§6: a result never lies
+    /// about why it matched).
+    FuzzyMeta { field: FuzzyField },
 }
 
 /// The `Provenance::Quote` fields (§5.4), shared with [`SessionHit`].
@@ -364,6 +373,11 @@ impl From<rusqlite::Error> for SearchError {
 pub struct SearchOptions {
     pub now: Option<UtcMillis>,
     pub include_debug: bool,
+    /// The `~` quiet-toggle (search-as-scope Phase 4): when true, append a
+    /// typo-tolerant camera/lens/filename metadata pass AFTER the exact FTS
+    /// hits (additive widening, never reordering). Default false =
+    /// byte-identical to today's exact-only behavior.
+    pub fuzzy: bool,
 }
 
 /// M1 search over the shared photoproof database (RETRIEVAL §4): one
@@ -416,7 +430,7 @@ impl Searcher {
         let mut conn = self.conn.lock().expect("searcher mutex poisoned");
         // One read snapshot for the statement sequence (WAL).
         let tx = conn.transaction().map_err(SearchError::from)?;
-        let result = exec::run_search(&tx, raw_query, filters, now, opts.include_debug);
+        let result = exec::run_search(&tx, raw_query, filters, now, opts.include_debug, opts.fuzzy);
         drop(tx); // read-only; rollback
         result
     }

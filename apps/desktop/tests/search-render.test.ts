@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   FILTER_ONLY_LABEL,
   formatDate,
+  fuzzyMetaLabel,
   provenanceDisplay,
   quoteRuns,
   rangeRuns,
@@ -121,6 +122,18 @@ describe("provenance variants (RETRIEVAL §6: no result without a readable why)"
       kind: "filter-only",
     });
     expect(FILTER_ONLY_LABEL).toBe("matches your filters");
+  });
+
+  it("fuzzy-meta → an honest 'approximate' label naming the field", () => {
+    // The `~` quiet-toggle's widened hits never pose as exact: each carries an
+    // approximate-match label naming the metadata field that fuzzily matched.
+    expect(provenanceDisplay({ type: "fuzzy_meta", field: "camera" })).toEqual({
+      kind: "fuzzy-meta",
+      field: "camera",
+    });
+    expect(fuzzyMetaLabel("camera")).toBe("approximate camera match");
+    expect(fuzzyMetaLabel("lens")).toBe("approximate lens match");
+    expect(fuzzyMetaLabel("filename")).toBe("approximate filename match");
   });
 });
 

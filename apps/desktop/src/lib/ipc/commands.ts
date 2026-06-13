@@ -99,6 +99,7 @@ export const search = (
   filters: Filter[],
   mode?: SearchMode,
   tuning?: SearchTuning,
+  fuzzy?: boolean,
 ) => {
   // Build the invoke payload sparsely: an absent field is omitted entirely so
   // a plain (mode-less, untuned) call is byte-identical to the old wire — the
@@ -107,6 +108,11 @@ export const search = (
   if (mode !== undefined) args.mode = mode;
   if (tuning?.weights !== undefined) args.weights = tuning.weights;
   if (tuning?.includeDebug === true) args.includeDebug = true;
+  // The `~` fuzzy quiet-toggle (Phase 4): the lexical lane's additive
+  // typo-tolerant camera/lens/filename widening. Sent only when armed, so an
+  // unarmed call stays byte-identical to today; the backend honors it on the
+  // lexical lane only, never the semantic/commit path.
+  if (fuzzy === true) args.fuzzy = true;
   return invoke<SearchResults>("search", args);
 };
 

@@ -177,6 +177,7 @@ fn worked_example_7_2_fog_ba_with_rating_chip() {
             &photoproof_core::search::SearchOptions {
                 now: None,
                 include_debug: true,
+                ..photoproof_core::search::SearchOptions::default()
             },
         )
         .unwrap();

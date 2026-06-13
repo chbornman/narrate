@@ -65,7 +65,11 @@ export type Provenance =
   | ({ type: "quote" } & Quote)
   | { type: "stroke"; event_id: string; session_id: string; ts: string }
   | { type: "visual_match" }
-  | { type: "filter_only" };
+  | { type: "filter_only" }
+  /** The `~` fuzzy quiet-toggle's approximate metadata match (Phase 4):
+   * camera/lens/filename widening, appended below the exact set. `field` names
+   * which metadata fuzzily matched so the cell can label it honestly. */
+  | { type: "fuzzy_meta"; field: "camera" | "lens" | "filename" };
 
 export interface SessionHit {
   session_id: string;

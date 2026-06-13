@@ -95,6 +95,7 @@ fn c4_redaction_scrubs_db_wal_fts_sidecars_and_search() {
     let opts = SearchOptions {
         now: Some(UtcMillis::now()),
         include_debug: false,
+        ..SearchOptions::default()
     };
     let hits = env.searcher.search_with("zanzibar", &[], &opts).unwrap();
     assert_eq!(hits.images.len(), 1, "secret findable before redaction");
@@ -305,6 +306,7 @@ fn r13_5_one_redaction_scrubs_fts_vectors_summaries_sentiment_and_sidecars() {
     let opts = SearchOptions {
         now: Some(UtcMillis::now()),
         include_debug: false,
+        ..SearchOptions::default()
     };
     assert_eq!(
         env.searcher
