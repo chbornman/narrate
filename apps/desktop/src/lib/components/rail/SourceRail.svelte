@@ -18,6 +18,7 @@
   import Panel from "../../primitives/Panel.svelte";
   import SourceList from "./SourceList.svelte";
   import CollectionList from "./CollectionList.svelte";
+  import CollectionNotes from "./CollectionNotes.svelte";
 
   const secs = $derived(ui.railSections());
   const collectionRows = $derived(ui.railCollectionRows());
@@ -146,6 +147,12 @@
         />
       {/if}
     </div>
+
+    <!-- the viewed collection's append-only notes (B71): sits below the
+         rows on the Collections tab, a sibling of the inspector journal -->
+    {#if tab === "collections"}
+      <CollectionNotes />
+    {/if}
 
     <!-- emphasized (a full bordered button against the quiet rows) but
          token-only; the folder verb is also seated on the rail-folder menu -->
