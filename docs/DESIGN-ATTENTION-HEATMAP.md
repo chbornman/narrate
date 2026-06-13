@@ -18,8 +18,10 @@ scope (collection / folder), from two families of signal:
    - Available today from `image_journal_stats` (`event_count`, `has_text`,
      `has_strokes`, `last_ts`); stroke-count needs a cheap addition.
 
-`intensity = w_dwell·dwell_capped + w_events·event_count + w_strokes·stroke_count`
-(+ optional recency decay). Weights are data we can tune; dwell leads.
+`intensity = w_dwell·dwell_capped + w_events·event_count + w_strokes·stroke_count`,
+**recency-weighted by default** (recent attention burns hotter) unless the UI
+**"All-time"** toggle is on (then flat, no decay). Weights are data we can tune;
+dwell leads.
 
 ## The new backend bit: dwell capture
 We do NOT store dwell in the annotation event log — the journal is the user's
@@ -53,6 +55,10 @@ never leaves the machine. The tier rates (Look vs grid) are tunable data.
   cycle) shows/hides it; off by default.
 - **"Sort by attention"** — a new sort mode (composes with the search/collection
   scope we already have).
+- **"All-time" toggle (founder, June 13 2026)** — the recency control as a simple
+  UI switch, not a slider: DEFAULT = recency-weighted intensity ("what am I
+  working on NOW" - recent dwell + annotation count for more); toggled ON = flat
+  all-time intensity ("what mattered most ever"). Persisted like the heat toggle.
 - Siblings (later, different views, noted not built): a TEMPORAL heatmap
   (sessions-as-spans + events-as-marks, the M4 timeline) and an IN-IMAGE stroke
   density map (strokes carry x,y points) — both real but separate features.
@@ -67,6 +73,8 @@ never leaves the machine. The tier rates (Look vs grid) are tunable data.
 ## Open decisions for the founder
 - RESOLVED: dwell is tiered — Look-open full weight, grid select/multiselect far
   less (founder, June 13 2026).
+- RESOLVED: recency is a UI "All-time" toggle — default recency-weighted, ON =
+  flat all-time (founder, June 13 2026).
 - Default weights + tier rates (dwell-led; stroke-count small; grid ~0.1-0.2x of
   Look) — tune against the real library later.
 - Is dwell telemetry something to ever expose/reset in settings? (privacy hygiene
