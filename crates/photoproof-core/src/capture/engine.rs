@@ -711,7 +711,14 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
                 dur_ms: u32::try_from(end_mono - onset_mono).unwrap_or(u32::MAX),
                 linked_event,
             },
-            text: seg.text.clone(),            // verbatim (§6.5)
+            // Trimmed, not raw: BPE-style ASR tokens carry their word-
+            // boundary space, so every utterance's first token decodes as
+            // " Slow" and untrimmed finals saved a leading " " on EVERY
+            // voice note (founder dogfood, June 12 2026 — confirmed in the
+            // store). §6.5 "verbatim" protects the user's WORDS from
+            // paraphrase; tokenizer plumbing at the edges is not words.
+            // Interior spacing is untouched.
+            text: seg.text.trim().to_owned(),
             targets: snapshot.targets.clone(), // session snapshot ⇒ zero targets
         };
         match store.append(&self.session, draft, Some(minted)) {

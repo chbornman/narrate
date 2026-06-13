@@ -1595,6 +1595,40 @@ fn c6_3_trailing_silence_reaches_the_endpointer_so_finals_mint_while_armed() {
     assert!(!engine.stream_open());
 }
 
+/// §6.5 verbatim protects the user's WORDS, not the tokenizer's plumbing:
+/// BPE-style ASR tokens carry their word-boundary space, so real servers
+/// deliver finals like " Slow down" — and untrimmed minting saved a
+/// leading space on EVERY voice note (founder dogfood, June 12 2026,
+/// confirmed in the store). Edges trim; interior spacing is untouched.
+#[test]
+fn voice_finals_mint_edge_trimmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, session) = open_store(&dir);
+    let clock = FakeClock::new(WALL0);
+    let vad = MockVad::new(
+        SR,
+        vec![SpeechSpan {
+            onset: 100,
+            end: 900,
+        }],
+    );
+    let transcriber = MockTranscriber::new("mock-asr", SR).with_script(vec![ScriptEntry {
+        at: 2100,
+        event: ScriptedEvent::Segment(final_seg(0, " Slow  down ", 100, 900)),
+    }]);
+    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
+    engine.set_scope(vec![hash(1)]);
+    assert_eq!(engine.arm(), MicState::ArmedIdle);
+
+    let committed = drive(&mut engine, &clock, &store, 4_000, &[]);
+    assert_eq!(committed.len(), 1);
+    assert_eq!(
+        committed[0].text.as_deref(),
+        Some("Slow  down"),
+        "edges trimmed, interior spacing verbatim"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // §5.1/§6.3 — VAD/ASR segment-count disagreement: onset-proximity association
 // ---------------------------------------------------------------------------
