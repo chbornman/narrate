@@ -15,6 +15,48 @@
  * clarity over cleverness, and no heap to get subtly wrong.
  */
 
+/** A large constant added to an OFF-SCREEN node's priority so every node
+ * currently inside the viewport sorts strictly AHEAD of every off-screen node,
+ * regardless of distance-to-center (founder: initial preview loading should fill
+ * what's VISIBLE first). Within each band the smaller value (nearer the center /
+ * nearer the viewport edge) still wins, so the fill is visible-first then
+ * nearest-first. Far larger than any realistic squared sim-distance. */
+export const OFFSCREEN_PRIORITY_BASE = 1e12;
+
+/**
+ * The load priority for a node given its SCREEN position and the viewport box
+ * (lower = loaded sooner). A node inside the viewport gets its squared distance
+ * to the viewport CENTER (so the middle of the screen fills first); a node
+ * outside gets that distance plus a large constant offset, so it always queues
+ * behind every visible node. Pure (screen coords in, number out) so the
+ * visible-first ordering unit-tests without a canvas.
+ *
+ * @param sx,sy   the node's screen position (px)
+ * @param width,height the viewport size (px)
+ * @param margin a slack band (px) around the viewport so a node just off the
+ *   edge (about to scroll in) still counts as "visible" and preloads — a smooth
+ *   fill as the user pans, no hard pop at the edge.
+ */
+export function viewportPriority(
+  sx: number,
+  sy: number,
+  width: number,
+  height: number,
+  margin = 0,
+): number {
+  const cx = width / 2;
+  const cy = height / 2;
+  const dx = sx - cx;
+  const dy = sy - cy;
+  const distToCenter = dx * dx + dy * dy;
+  const inView =
+    sx >= -margin &&
+    sx <= width + margin &&
+    sy >= -margin &&
+    sy <= height + margin;
+  return inView ? distToCenter : OFFSCREEN_PRIORITY_BASE + distToCenter;
+}
+
 export class ThumbQueue {
   /** hash -> its best (smallest) priority while pending. A hash is "in the
    * queue" iff it is a key here. */
