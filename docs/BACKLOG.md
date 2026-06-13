@@ -72,7 +72,8 @@ work lives here.
   that won't arrive. For DNG specifically, verify rawler's DNG path and
   whether a larger embedded preview exists to show meanwhile. (Founder,
   June 12 2026.)
-- [ ] **Add-to-collection from the grid must offer "New collection…"**
+- [x] **Add-to-collection from the grid offers "New collection…"** — landed `589a0fd`: new `new-collection-add` thumb seat (available even at zero collections), captures targets synchronously, reuses the rail's inline name input (one create UX), runs create-then-add in order; blank name leaves nothing empty.
+  ORIGINAL ASK:
   (founder: "if I right click on image(s) in grid, I want to add to a
   collection even if none exists / add to new collection"). Today the
   thumb context menu's add-to-collection only lists EXISTING collections
