@@ -19,6 +19,7 @@
   import * as layout from "../../logic/gridlayout";
   import * as marquee from "../../logic/marquee";
   import * as stacks from "../../logic/stacks";
+  import { infoStripHeight } from "../../logic/cellinfo";
   import { THUMB_STEPS } from "../../logic/sort";
   import Thumb from "./Thumb.svelte";
   import Marquee from "./Marquee.svelte";
@@ -34,7 +35,11 @@
   let vw = $state(0);
   let vh = $state(0);
 
-  const geom = $derived(layout.snap(vw, THUMB_STEPS[ui.grid.thumbStep], GAP, PAD));
+  // Cell-info is GLOBAL (one level for all cells), so its strip height is a
+  // single fixed value reserved on EVERY row — rows stay uniform and the
+  // virtualizer math is unchanged beyond the larger rowH.
+  const infoStrip = $derived(infoStripHeight(ui.grid.cellInfo));
+  const geom = $derived(layout.snap(vw, THUMB_STEPS[ui.grid.thumbStep], GAP, PAD, infoStrip));
   const units = $derived(ui.grid.units);
   // EXPANDED pair members read as linked (featureset §5 dogfood round 1):
   // adjacency math is pure (stacks.expandedLinks); rendering = an inward
@@ -141,7 +146,8 @@
     prevFocusNav = nav;
     if (!restored || f < 0 || viewportEl === undefined) return;
     const top = layout.position(geom, f).y;
-    const bottom = top + geom.cell;
+    // The cell is the strip plus the image box; scroll the WHOLE cell into view.
+    const bottom = top + geom.info + geom.cell;
     if (top < viewportEl.scrollTop) setScroll(top - GAP);
     else if (bottom > viewportEl.scrollTop + vh) setScroll(bottom - vh + GAP);
   });
@@ -299,6 +305,7 @@
           selected={sel.isSelected(ui.grid.sel, unit.primary.hash)}
           active={ui.grid.sel.focus === s.idx}
           size={geom.cell}
+          infoStrip={geom.info}
           onpointerselect={(e) => onThumbClick(unit.primary.hash, e)}
           onopen={onThumbOpen}
           onstacktoggle={() => onChevron(unit.primary.hash)}
@@ -309,7 +316,7 @@
                the line reads continuous across both cells (token color) -->
           <div
             class="stack-link"
-            style:top="{geom.cell + 2}px"
+            style:top="{geom.info + geom.cell + 2}px"
             style:width="{geom.cell + (link.right ? GAP - 2 * NUDGE : 0)}px"
           ></div>
         {/if}

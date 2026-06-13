@@ -100,6 +100,42 @@ describe("virtualizer window (UI §3.3: +1 screen overscan)", () => {
   });
 });
 
+describe("cell-info strip grows the row (founder: image stays visible)", () => {
+  const INFO = 32; // annotated-level strip (cellinfo.ts infoStripHeight)
+  const vh = 600;
+
+  it("rowH = cell + info + gap; the IMAGE box (cell) is unchanged vs info=0", () => {
+    const base = layout.snap(1000, 240, GAP, PAD); // info defaults to 0
+    const grown = layout.snap(1000, 240, GAP, PAD, INFO);
+    // Same width/target → same column snap and same square image box.
+    expect(grown.cols).toBe(base.cols);
+    expect(grown.cell).toBeCloseTo(base.cell, 10);
+    expect(grown.info).toBe(INFO);
+    expect(grown.rowH).toBeCloseTo(grown.cell + INFO + GAP, 10);
+    // Width-fill is untouched: the strip never touches cell/cols.
+    const filled = grown.cols * grown.cell + (grown.cols - 1) * GAP + 2 * PAD;
+    expect(Math.abs(filled - 1000)).toBeLessThan(0.001);
+  });
+
+  it("position.y, totalHeight, rowsPerPage scale with the larger rowH", () => {
+    const g = layout.snap(1000, 240, GAP, PAD, INFO);
+    expect(layout.position(g, g.cols).y).toBeCloseTo(PAD + g.rowH, 10);
+    expect(layout.totalHeight(g, 9)).toBeCloseTo(3 * g.rowH + 2 * PAD, 10);
+    expect(layout.rowsPerPage(g, g.rowH * 3 + 10)).toBe(3);
+  });
+
+  it("the recycling pool still covers the window (ring collision-free) with a strip", () => {
+    for (const target of [96, 160, 240, 320]) {
+      const gg = layout.snap(1280, target, GAP, PAD, INFO);
+      const pool = layout.poolSize(gg, vh);
+      for (let st = 0; st < 50 * gg.rowH; st += 37) {
+        const r = layout.visibleRange(gg, st, vh, 10_000);
+        expect(r.end - r.start).toBeLessThanOrEqual(pool);
+      }
+    }
+  });
+});
+
 describe("scroll anchors (position preserved — featureset §1)", () => {
   const g = layout.snap(1000, 240, GAP, PAD); // 4 cols
   const vh = 600;

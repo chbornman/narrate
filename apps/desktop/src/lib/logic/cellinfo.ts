@@ -14,6 +14,19 @@ export function nextLevel(level: CellInfoLevel): CellInfoLevel {
   return CELL_INFO_CYCLE[(i + 1) % CELL_INFO_CYCLE.length];
 }
 
+/**
+ * Info-strip height (px) for a level — the SINGLE SOURCE OF TRUTH the grid
+ * layout and Thumb both read. The strip sits ABOVE the image so the cell
+ * GROWS downward and the thumbnail is never overlaid (founder, June 2026).
+ * Fixed px per level (not scaled with zoom) for v1: one text line at
+ * minimal (filename), two at annotated (filename + state).
+ */
+export function infoStripHeight(level: CellInfoLevel): number {
+  if (level === "minimal") return 18;
+  if (level === "annotated") return 32;
+  return 0;
+}
+
 export interface CellFacts {
   fileName: string;
   rating: number | null;
