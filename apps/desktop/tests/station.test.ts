@@ -7,6 +7,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  borderState,
+  missingModels,
   stationModel,
   transitionPops,
   type StationInput,
@@ -271,5 +273,228 @@ describe("transitionPops — the generalized pop move", () => {
         { mic: "disarmedError", streaming: false },
       ),
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Station 2.0 (DESIGN-STATION.md): the border-priority resolver, the
+// transient icons (active/retire), missing-model detection + surfacing, and
+// the count/progress mapping.
+// ---------------------------------------------------------------------------
+
+describe("borderState — the collapsed pill's priority resolver", () => {
+  it("mic armed beats everything (red)", () => {
+    expect(borderState({ micArmed: true, hasError: true, working: true })).toBe("mic");
+  });
+  it("error beats working when the mic is not armed (amber)", () => {
+    expect(borderState({ micArmed: false, hasError: true, working: true })).toBe("error");
+  });
+  it("working when only background work is live (cool hue)", () => {
+    expect(borderState({ micArmed: false, hasError: false, working: true })).toBe("working");
+  });
+  it("idle = no border", () => {
+    expect(borderState({ micArmed: false, hasError: false, working: false })).toBe("none");
+  });
+
+  it("the full priority ladder, mic > error > working > idle", () => {
+    const ladder: Array<[Parameters<typeof borderState>[0], string]> = [
+      [{ micArmed: true, hasError: false, working: false }, "mic"],
+      [{ micArmed: false, hasError: true, working: false }, "error"],
+      [{ micArmed: false, hasError: false, working: true }, "working"],
+      [{ micArmed: false, hasError: false, working: false }, "none"],
+    ];
+    for (const [input, want] of ladder) expect(borderState(input)).toBe(want);
+  });
+});
+
+describe("the border resolves end-to-end through stationModel", () => {
+  it("mic armed paints the mic border even while ingest works (mic wins)", () => {
+    const m = stationModel({
+      ...base,
+      asrReady: true,
+      micState: "armedIdle",
+      ingest: { running: true, done: 1, total: 9, errors: 0, passes: [], scanning: false, discovered: 0 },
+    });
+    expect(m.border).toBe("mic");
+  });
+
+  it("a needed-but-missing model paints amber over working", () => {
+    const m = stationModel({
+      ...base,
+      // a still-queued non-embed pass = working; the missing CLIP = error
+      ingest: {
+        running: false,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [{ name: "preview", remaining: 40 }],
+        scanning: false,
+        discovered: 0,
+      },
+      runtime: runtime([model({ id: "dfn5b", role: "embedder", state: "not-downloaded" })]),
+    });
+    expect(m.border).toBe("error");
+  });
+
+  it("a failed download is the error border", () => {
+    const m = stationModel({ ...base, runtime: runtime([model({ state: "failed" })]) });
+    expect(m.border).toBe("error");
+  });
+
+  it("only background work → the working border; settled → none", () => {
+    const working = stationModel({
+      ...base,
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+    });
+    expect(working.border).toBe("working");
+    expect(stationModel(base).border).toBe("none");
+  });
+});
+
+describe("missingModels — a feature's model is absent", () => {
+  it("backend dark (null runtime) surfaces nothing", () => {
+    expect(missingModels(null)).toEqual([]);
+  });
+
+  it("an installed or downloading needed model is NOT missing", () => {
+    expect(
+      missingModels(runtime([model({ role: "embedder", state: "installed" })])),
+    ).toEqual([]);
+    expect(
+      missingModels(runtime([model({ role: "embedder", state: "downloading" })])),
+    ).toEqual([]);
+  });
+
+  it("a not-downloaded CLIP embedder surfaces with its feature + size", () => {
+    const out = missingModels(
+      runtime([
+        model({
+          id: "dfn5b",
+          role: "embedder",
+          state: "not-downloaded",
+          totalBytes: 1_200_000_000,
+          acceptanceRequired: true,
+          accepted: false,
+        }),
+      ]),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe("dfn5b");
+    expect(out[0].feature).toBe("Semantic search needs the CLIP model");
+    expect(out[0].sizeLabel).toBe("1.2 GB");
+    // gates on a license the user has not accepted: the prompt offers Accept.
+    expect(out[0].needsLicense).toBe(true);
+  });
+
+  it("an accepted-license model needs no license step", () => {
+    const out = missingModels(
+      runtime([model({ role: "embedder", state: "failed", acceptanceRequired: true, accepted: true })]),
+    );
+    expect(out[0].needsLicense).toBe(false);
+  });
+
+  it("roles the app does not rely on are never 'missing' (e.g. *-alt, llm)", () => {
+    expect(
+      missingModels(
+        runtime([
+          model({ role: "text-embedder-alt", state: "not-downloaded" }),
+          model({ role: "llm", state: "not-downloaded" }),
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  it("MB-scale models read in MB, not a 0.0 GB", () => {
+    const out = missingModels(
+      runtime([model({ role: "text-embedder", state: "not-downloaded", totalBytes: 316_000_000 })]),
+    );
+    expect(out[0].sizeLabel).toBe("316 MB");
+    expect(out[0].feature).toBe("Semantic search needs the text model");
+  });
+});
+
+describe("transient icons — active while live, then retire", () => {
+  it("a settled library has no transients", () => {
+    expect(stationModel(base).transients).toEqual([]);
+  });
+
+  it("ingest = the work icon with a count badge + a 0..1 arc fraction", () => {
+    const m = stationModel({
+      ...base,
+      ingest: { running: true, done: 1240, total: 5000, errors: 0, passes: [], scanning: false, discovered: 5000 },
+    });
+    const work = m.transients.find((t) => t.id === "work");
+    expect(work?.icon).toBe("loader");
+    expect(work?.count).toBe(5000); // the sized total
+    expect(work?.fraction).toBeCloseTo(1240 / 5000);
+  });
+
+  it("unsized discovery shows the discovered count, no arc", () => {
+    const m = stationModel({
+      ...base,
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 312 },
+    });
+    const work = m.transients.find((t) => t.id === "work");
+    expect(work?.count).toBe(312);
+    expect(work?.fraction).toBeUndefined();
+  });
+
+  it("embedding passes get their OWN icon, separate from ingest/digest", () => {
+    const m = stationModel({
+      ...base,
+      ingest: {
+        running: false,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [
+          { name: "preview", remaining: 40 },
+          { name: "image-embedding", remaining: 800 },
+          { name: "text-embedding", remaining: 200 },
+        ],
+        scanning: false,
+        discovered: 0,
+      },
+    });
+    const ids = m.transients.map((t) => t.id);
+    expect(ids).toContain("work"); // the non-embed digest backlog
+    const embed = m.transients.find((t) => t.id === "embed");
+    expect(embed?.icon).toBe("sparkles");
+    expect(embed?.count).toBe(1000); // image + text embedding rolled up
+    // the work icon's badge counts only the non-embed backlog (preview: 40)
+    expect(m.transients.find((t) => t.id === "work")?.count).toBe(40);
+  });
+
+  it("a download = the download icon with the aggregate byte arc", () => {
+    const m = stationModel({
+      ...base,
+      runtime: runtime([
+        model({ state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
+        model({ id: "b", state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
+      ]),
+    });
+    const dl = m.transients.find((t) => t.id === "download");
+    expect(dl?.icon).toBe("download");
+    expect(dl?.fraction).toBeCloseTo(0.25); // (250+250)/(1000+1000)
+  });
+
+  it("a missing model = the amber warning transient", () => {
+    const m = stationModel({
+      ...base,
+      runtime: runtime([model({ role: "embedder", state: "not-downloaded" })]),
+    });
+    const warn = m.transients.find((t) => t.id === "missing");
+    expect(warn?.icon).toBe("triangle-alert");
+    expect(warn?.warn).toBe(true);
+    expect(m.missingModels).toHaveLength(1);
+  });
+
+  it("retire: once installed, the missing transient is gone", () => {
+    const m = stationModel({
+      ...base,
+      runtime: runtime([model({ role: "embedder", state: "installed" })]),
+    });
+    expect(m.transients.find((t) => t.id === "missing")).toBeUndefined();
+    expect(m.missingModels).toEqual([]);
   });
 });

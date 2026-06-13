@@ -32,6 +32,12 @@
   import MicOff from "@lucide/svelte/icons/mic-off";
   import Pencil from "@lucide/svelte/icons/pencil";
   import Search from "@lucide/svelte/icons/search";
+  // Station 2.0 transient icons (DESIGN-STATION.md): work · embed · download
+  // · missing-model warning. Fade in + pulse only while live, then retire.
+  import Loader from "@lucide/svelte/icons/loader";
+  import Sparkles from "@lucide/svelte/icons/sparkles";
+  import Download from "@lucide/svelte/icons/download";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import { ui } from "../../state/app.svelte";
   import { segments } from "../../logic/segments";
   import { stationModel } from "../../logic/station";
@@ -156,6 +162,31 @@
   {#if expanded && capsuleEl !== undefined}
     <Popover anchor={capsuleEl} placement="top-end" ondismiss={() => ui.shell.closeStation()}>
       <div class="body">
+        {#if model.missingModels.length > 0}
+          <!-- Missing-model prompts, FIRST-CLASS (DESIGN-STATION.md): a model
+               a feature needs is absent, so the feature is silently dark. The
+               Station is where that surfaces AND resolves — the fix is inline
+               (Accept license first when gated, then Download), wired to the
+               same runtime_* path Settings → Models drives. No faked progress;
+               the row flips to the download transient on the next status. -->
+          {#each model.missingModels as mm (mm.id)}
+            <div class="missing">
+              <span class="missing-icon"><TriangleAlert size={13} aria-hidden="true" /></span>
+              <div class="missing-text">
+                <span class="missing-feature">{mm.feature}</span>
+                {#if mm.needsLicense}
+                  <button class="missing-action" onclick={() => void ui.acceptModelLicense(mm.id)}>
+                    Accept license
+                  </button>
+                {:else}
+                  <button class="missing-action" onclick={() => void ui.downloadMissingModel(mm.id)}>
+                    Download{mm.sizeLabel !== undefined ? ` (${mm.sizeLabel})` : ""}
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        {/if}
         {#if scopeSeg !== undefined}
           <!-- the one clickable element in the body: the indicator↔inspector
                bridge, kept exactly (everything else is read-only context) -->
@@ -197,7 +228,13 @@
     </Popover>
   {/if}
 
-  <div bind:this={capsuleEl} class="capsule" class:breathing={model.pulsing} class:pulsing>
+  <div
+    bind:this={capsuleEl}
+    class="capsule"
+    class:breathing={model.pulsing}
+    class:pulsing
+    data-border={model.border}
+  >
     {#if hairline !== undefined}
       <span class="hairline" title={hairline.title}>
         <span
@@ -234,6 +271,36 @@
         </span>
       </button>
     {/each}
+    {#each model.transients as t (t.id)}
+      <!-- transient icons (DESIGN-STATION.md): fade in + gently pulse only
+           while their thing is live, then retire. Read-only status (no
+           registry action) — the seats are the click targets. A count badge
+           + a progress arc ride the ingest/digest "work" icon. -->
+      <span class="transient" class:warn={t.warn} title={t.title} aria-label={t.title}>
+        {#if t.fraction !== undefined}
+          <!-- progress arc: a conic ring whose swept angle is the fraction,
+               sitting behind the glyph (no SVG, token-colored). -->
+          <span
+            class="arc"
+            style:--arc="{Math.round((t.fraction ?? 0) * 360)}deg"
+          ></span>
+        {/if}
+        <span class="t-glyph">
+          {#if t.icon === "loader"}
+            <Loader size={13} aria-hidden="true" />
+          {:else if t.icon === "sparkles"}
+            <Sparkles size={13} aria-hidden="true" />
+          {:else if t.icon === "download"}
+            <Download size={13} aria-hidden="true" />
+          {:else}
+            <TriangleAlert size={13} aria-hidden="true" />
+          {/if}
+        </span>
+        {#if t.count !== undefined}
+          <span class="badge">{t.count > 999 ? "999+" : t.count.toLocaleString()}</span>
+        {/if}
+      </span>
+    {/each}
     {#each modeSegs as seg (seg.id)}
       <!-- visible modes (auto-advance, pencil) — status text, not seats;
            rendered as TEXT so the note seat keeps the only pencil glyph -->
@@ -255,17 +322,32 @@
     position: relative;
     display: flex;
     align-items: center;
-    height: 24px;
-    padding: 0 4px;
-    border-radius: 12px;
+    /* Station 2.0: a larger collapsed footprint so the status border +
+     * transient icons read at a glance (DESIGN-STATION.md). */
+    height: 30px;
+    padding: 0 6px;
+    border-radius: 15px;
     background: var(--bg-overlay);
-    border: 1px solid var(--chrome);
+    /* A 2px ring so the status color (data-border) reads at a glance. */
+    border: 2px solid var(--chrome);
     overflow: hidden;
-    transition: border-color 120ms ease-out;
+    transition: border-color 160ms ease-out;
+  }
+  /* The collapsed pill's border = the most salient active state, by priority
+   * resolved in logic/station.ts (borderState). Token-driven, theme-aware. */
+  .capsule[data-border="mic"] {
+    border-color: var(--station-mic);
+  }
+  .capsule[data-border="error"] {
+    border-color: var(--station-error);
+  }
+  .capsule[data-border="working"] {
+    border-color: var(--station-working);
   }
   /* The §7.4 commit pulse, relocated from the scope text to the capsule
-   * edge (the scope dot lives in the hover now): one short brighten. */
-  .capsule.pulsing {
+   * edge (the scope dot lives in the hover now): one short brighten. It only
+   * shows when no status border owns the edge — a status color must win. */
+  .capsule.pulsing[data-border="none"] {
     border-color: var(--text-dim);
   }
   /* The something-is-happening breath: ONE pulse driver, gated on the
@@ -339,6 +421,87 @@
     transition: width 300ms linear;
   }
 
+  /* ---- transient icons (Station 2.0) ------------------------------------ */
+  /* Fade in on mount and gently pulse while live; Svelte retires the node
+   * when the source state clears (the {#each} key drops it). Quiet,
+   * photography-app restrained — opacity only, nothing slides. */
+  .transient {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin: 0 1px;
+    color: var(--text-dim);
+    animation:
+      transient-in 240ms ease-out,
+      transient-pulse 2.6s ease-in-out 240ms infinite;
+  }
+  /* The missing-model warning reads in the error/amber hue, not the cool
+   * working gray — it is a call to act, not just "work in progress". */
+  .transient.warn {
+    color: var(--station-error);
+  }
+  @keyframes transient-in {
+    from {
+      opacity: 0;
+      transform: scale(0.7);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @keyframes transient-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
+  }
+  .t-glyph {
+    display: inline-flex;
+    align-items: center;
+    position: relative;
+    z-index: 1;
+  }
+  /* The progress arc: a conic ring swept to the fraction, behind the glyph.
+   * --arc (set inline) is the swept angle; the cool working hue draws it. */
+  .arc {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(
+      var(--station-working) var(--arc, 0deg),
+      var(--chrome) 0
+    );
+    /* punch out the centre so it reads as a thin ring, not a pie */
+    -webkit-mask: radial-gradient(circle, transparent 7px, #000 7px);
+    mask: radial-gradient(circle, transparent 7px, #000 7px);
+    opacity: 0.9;
+  }
+  /* The count badge: a small numeric chip clinging to the icon's corner. */
+  .badge {
+    position: absolute;
+    bottom: -2px;
+    right: -3px;
+    min-width: 12px;
+    height: 12px;
+    padding: 0 2px;
+    box-sizing: border-box;
+    font-size: 9px;
+    line-height: 12px;
+    text-align: center;
+    color: var(--text);
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome);
+    border-radius: 6px;
+    z-index: 2;
+  }
+
   /* ---- the expansion body (read-only context) --------------------------- */
   .body {
     display: flex;
@@ -347,6 +510,44 @@
     min-width: 240px;
     max-width: 360px;
     padding: 8px 10px;
+  }
+  /* Missing-model prompt (first-class): the amber warning + the inline fix. */
+  .missing {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome);
+    border-radius: 6px;
+  }
+  .missing-icon {
+    display: inline-flex;
+    color: var(--station-error);
+    margin-top: 1px;
+  }
+  .missing-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .missing-feature {
+    font-size: 12px;
+    color: var(--text);
+  }
+  .missing-action {
+    align-self: flex-start;
+    font-size: 11px;
+    color: var(--text);
+    background: var(--bg-overlay);
+    border: 1px solid var(--chrome-strong);
+    border-radius: 5px;
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+  .missing-action:hover {
+    border-color: var(--station-error);
+    color: var(--station-error);
   }
   .scope-btn {
     display: flex;

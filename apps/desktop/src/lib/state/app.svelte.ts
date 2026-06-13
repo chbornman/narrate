@@ -366,6 +366,39 @@ export class Ui {
     void this.reportScope();
   }
 
+  // ---------------------------------------------------------------------------
+  // Station 2.0 missing-model fix (DESIGN-STATION.md) — the hover prompt's
+  // inline Download / Accept-license actions. IPC lives ONLY here (the shell
+  // slice is pure state); the existing runtime_* commands are reused verbatim,
+  // so no fake download — the same path Settings → Models drives. The fresh
+  // RuntimeStatus the command echoes flows straight back through onRuntimeStatus
+  // so the Station re-renders (downloading transient, border) immediately.
+  // ---------------------------------------------------------------------------
+
+  /** Accept a gated model's license from the Station prompt (the Settings
+   * Models flow, inline): records the acceptance, then the prompt offers
+   * Download. Echoes fresh status so `needsLicense` flips off live. */
+  async acceptModelLicense(modelId: string) {
+    try {
+      this.shell.onRuntimeStatus(await ipc.runtimeAcceptLicense(modelId));
+    } catch {
+      /* backend unavailable (tests/dev): the prompt keeps its prior state */
+    }
+  }
+
+  /** Kick a needed-but-missing model's download from the Station prompt.
+   * Reuses runtime_download_model (the same command Settings → Models calls)
+   * — genuine wiring, no faked progress. The echoed status flips the row to
+   * "downloading", so the missing transient retires and the download
+   * transient + working border take over on the next render. */
+  async downloadMissingModel(modelId: string) {
+    try {
+      this.shell.onRuntimeStatus(await ipc.runtimeDownloadModel(modelId));
+    } catch {
+      /* backend unavailable (tests/dev): the prompt stays, no progress faked */
+    }
+  }
+
   get folderName(): string {
     if (this.collectionId !== null) {
       const c = this.collections.find((c) => c.id === this.collectionId);
