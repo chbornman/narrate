@@ -389,6 +389,30 @@ work lives here.
   neglecting. The graph gives the semantic structure, the heatmap gives the
   attention field; multiplying them reveals both what's hot and what's been
   overlooked. Design round of its own once the two primitives land.
+- [ ] **Compare module (4th view mode)** (founder, June 13 2026 - deferred, not
+  high priority yet): a side-by-side compare view. ARCHITECTURE IS READY - it
+  drops onto the `viewMode` axis (`grid|visualizer|look|compare`) as ~5 additive
+  edits per the `docs/DESIGN-VIEW-MODES.md` litmus (a `ViewMode` member, one
+  App.svelte render arm, an `activeHash` + `dwellRefocus` arm, an
+  `enterCompare`/`leaveCompare` pair on the `openVisualizer` template + a trigger,
+  a `CompareSurface.svelte`, and optionally one `scope.ts` rule). DEFAULTS already
+  reasoned: 2-up side-by-side, 3-4 in a small grid, synced zoom/pan on with a
+  toggle, click a pane to focus it. THE DICTATION/NOTES QUESTION the founder flagged
+  ("tag the other photo's hash, similar to multiselect"): a compare note can reuse
+  the existing multi-target `event_targets` (ordered by `position`, no schema
+  change) - the focused pane is the subject (position 0) and the comparand(s) ride
+  along tagged (positions 1+), so the note shows in both journals. THREE options to
+  decide when picked up: (1) focused-primary + tagged comparand (recommended - note
+  is A's, framed as "compared from A" in B's journal); (2) equal multi-target like
+  multiselect (identical on both, no subject); (3) focused-only (single target, no
+  comparison link). OPEN QUESTIONS raised but not resolved: whether the
+  "compared from <subject>" back-reference in the comparand's journal is wanted or
+  noise; one shared note across both panes vs noting each pane separately (two
+  independent notes each tagging the other); how rating works (rate the focused
+  pane, or a "pick this one" verb that ranks A over B); strictly 2-up vs genuine
+  N-up (changes "the other hash" from singular to plural); and whether compare is a
+  persistent view you return to or a transient "hold these two up" gesture. Needs a
+  short design round on those before building. (Founder, June 13 2026.)
 
 ## Lighting up M3 (the semantic-search chain, in order)
 
