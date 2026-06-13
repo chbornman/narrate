@@ -75,6 +75,46 @@ The force LAYOUT itself is frontend.
    profiling.
 3. **v3**: LLM topic suggestion (gated on Gemma being wired).
 
+## v2 — built (June 13 2026)
+- **Cluster auto-labels.** `cluster_topics(scope, k?, space?)` runs a small,
+  deterministic k-means (farthest-first seeding by index, fixed iteration order
+  — no RNG, so labels are reproducible and testable) over the in-scope image
+  vectors. Clusters the ANNOTATION space (`image_summary`) by default since the
+  labels are note-grounded; CLIP is optional. k = `clamp(round(sqrt(n/2)),
+  cluster_k_min, cluster_k_max)` unless passed. Each cluster is LABELED by the
+  most representative salient n-gram in its members' notes (reusing v1's
+  `mine_ngrams` miner; most frequent, then longer phrase, then alphabetical),
+  with a generic `Group N` fallback when a cluster has no notes. Returns
+  `[{ label, size, centroid_affinity }]` feeding the suggestion rail as smarter,
+  note-grounded auto-topics above the v1 n-gram chips. Empty/un-embedded scope
+  returns empty, never errors. Reads STORED vectors (no embed pass): the model
+  id comes from the active embedder when loaded, else any stored row.
+- **Full-library LOD.** Past `graph.lod_threshold` nodes (default 1500) the
+  frontend AGGREGATES images into SUPER-NODES (binned by dominant topic; a
+  super-node's mass = member count, position = members' affinity-weighted
+  centroid). The pure force sim weights repulsion by the product of masses and
+  divides each node's acceleration by its own mass, so an aggregate of N images
+  behaves like the cluster it replaces — and a single image (mass 1) recovers
+  the v1 integrator exactly. A super-node EXPANDS into its members on click or
+  on zoom past `LOD_ZOOM_EXPAND`, and COLLAPSES on zoom-out; the sim runs over
+  the current (mixed) node set, within the budget the v1 spike measured. The v1
+  banner now reads "LOD active (showing N clusters of M images)" instead of the
+  scale-spike warning, keeping the node-count + scan-time telemetry.
+  **FOUNDER-REVIEW:** the 1500 default is a placeholder picked just above v1's
+  ~1200-node strain banner. Reconcile it with the REAL full-library scale-spike
+  numbers once the founder profiles the spike (DESIGN's whole premise: the
+  measurement, not a guess, picks the LOD threshold).
+- **v3 LLM seam (scaffold only).** `suggest_topics_llm(scope)` exists end-to-end
+  (command + IPC + a hidden rail) but the Gemma connector is NOT wired (mocked in
+  M1), so it always returns the explicit `Unavailable` state and the UI shows the
+  cluster + n-gram suggestions meanwhile. The `TopicLlm` trait + `WiredTopicLlm`
+  placeholder mark the seam; `// TODO(v3): wire when the LLM connector lands`.
+  LLM suggestions appear on the rail ONLY when the connector becomes real.
+
+## New tuning knobs (`[graph]`)
+- `cluster_k_min` (2) / `cluster_k_max` (12): k-means k bounds. Range [1, 64].
+- `lod_threshold` (1500): node count past which LOD aggregates. Range [50, 1e6].
+
 ## Open decisions for the founder
 - Anchor layout: topics on a ring (stable, readable) vs. topics themselves
   force-placed (organic but jumpier)? (lean ring for v1.)
@@ -82,3 +122,5 @@ The force LAYOUT itself is frontend.
 - RESOLVED: collection-first to get it working, THEN run it on the full library
   to surface the scale issues empirically before designing LOD (founder, June
   13 2026).
+- OPEN (v2): reconcile `graph.lod_threshold` (placeholder 1500) with the real
+  full-library scale-spike numbers once profiled.

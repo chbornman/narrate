@@ -21,8 +21,11 @@
   import { ui } from "../../state/app.svelte";
   import * as ipc from "../../ipc/commands";
   import {
+    aggregateToSuperNodes,
+    expandSuperNode,
     ringAnchors,
     seedNodes,
+    shouldUseLod,
     step,
     type ForceConfig,
     type ImageNode,
@@ -33,6 +36,14 @@
   let topics = $state<string[]>([]);
   let topicInput = $state("");
   let suggestions = $state<ipc.TopicSuggestion[]>([]);
+  /** v2 note-grounded auto-topics (k-means cluster labels) for the rail. These
+   * sit ABOVE the cheap n-gram/collection suggestions: smarter, "connected to
+   * notes". */
+  let clusterSuggestions = $state<ipc.ClusterTopic[]>([]);
+  /** v3 SEAM: LLM-suggested theme phrases. Stays empty until the Gemma connector
+   * is wired (the backend returns "unavailable" meanwhile), so the rail is
+   * hidden and the cluster + n-gram suggestions stand in. */
+  let llmSuggestions = $state<string[]>([]);
   let alpha = $state(0.5);
   /** Point the lens at the WHOLE library (the scale spike) vs the current grid
    * scope. The founder flips this to "feel the scale wall" (DESIGN §scale). */
@@ -43,16 +54,24 @@
   let nodeCount = $state(0);
   let visualReady = $state(false);
   let annotationReady = $state(false);
-  /** A visible note when the scope is large enough that the lens struggles (the
-   * scale spike: do NOT silently cap; SAY where it falls over). */
+  /** A visible note about the layout: past the LOD threshold it reads "LOD
+   * active (showing N clusters of M images)"; below it is null (full detail). */
   let scaleNote = $state<string | null>(null);
+  /** True when the lens is running in LOD mode (super-nodes), so the banner +
+   * interaction (click-to-expand) switch on. */
+  let lodActive = $state(false);
 
   // -- sim data ---------------------------------------------------------------
   let tuning = $state<ipc.GraphTuning | null>(null);
   let nodes: ImageNode[] = [];
   let anchors: TopicAnchor[] = [];
-  /** hash -> per-topic affinity row, matching the topics array order. */
+  /** hash -> per-topic affinity row, matching the topics array order. The FULL
+   * detail set (every image), kept even in LOD mode so a super-node can expand
+   * back into its members with their real per-image affinity. */
   let affinity = new Map<string, number[]>();
+  /** The total image count behind the current layout (M), even when the sim runs
+   * over far fewer super-nodes (N = nodeCount). The status reports both. */
+  let imageTotal = $state(0);
 
   // -- canvas -----------------------------------------------------------------
   let canvasEl: HTMLCanvasElement | null = $state(null);
@@ -64,10 +83,13 @@
   let panX = 0;
   let panY = 0;
 
-  // A node-count past which the live sim + N^2 repulsion visibly strain on a
-  // typical machine. NOT a cap (we still run it); just the honesty threshold for
-  // the scale-note banner (DESIGN wants the wall felt and named, at what N).
-  const STRAIN_NODES = 1200;
+  // The LOD threshold comes from GraphTuning (graph.lod_threshold, default
+  // 1500). Past it the lens AGGREGATES images into super-nodes so the live sim +
+  // O(N^2) repulsion stay within the budget the v1 scale spike measured, instead
+  // of running over every image and straining. A fallback const covers the
+  // pre-tuning-load window.
+  const LOD_THRESHOLD_FALLBACK = 1500;
+  const lodThreshold = (): number => tuning?.lod_threshold ?? LOD_THRESHOLD_FALLBACK;
 
   const scope = (): ipc.GraphScope =>
     fullLibrary ? { kind: "library" } : ui.graphScope();
@@ -102,28 +124,51 @@
     const elapsed = Math.round(performance.now() - t0);
     visualReady = report.visual_ready;
     annotationReady = report.annotation_ready;
-    nodeCount = report.images.length;
 
     affinity = new Map(report.images.map((i) => [i.image_hash, i.scores.map((s) => s.affinity)]));
     const hashes = report.images.map((i) => i.image_hash);
+    imageTotal = hashes.length;
     anchors = ringAnchors(topics.length, forceConfig().ringRadius);
-    nodes = seedNodes(hashes, affinity, topics.length);
 
-    // Scale spike: SAY when it struggles, and at what N + scan cost (the wall,
-    // named, not hidden). Mirrors the backend's logged telemetry.
-    if (nodeCount >= STRAIN_NODES) {
-      scaleNote = `${nodeCount.toLocaleString()} images in scope (affinity scan ${elapsed} ms). The live force layout runs unoptimized past ~${STRAIN_NODES.toLocaleString()} nodes and will feel heavy. This is the scale spike.`;
+    // LOD (DESIGN v2): past the threshold, AGGREGATE images into super-nodes so
+    // the live sim + O(N^2) repulsion stay within the budget the v1 scale spike
+    // measured, instead of running over every image. Below the threshold the v1
+    // full-detail layout runs unchanged.
+    const fullNodes = seedNodes(hashes, affinity, topics.length);
+    lodActive = shouldUseLod(imageTotal, lodThreshold());
+    if (lodActive) {
+      nodes = aggregateToSuperNodes(fullNodes, topics.length);
+      // Banner now reports the LOD state, not a "scale spike" warning: it is
+      // handled, not just named. Keeps the telemetry (N clusters of M images +
+      // scan time), mirroring the backend log.
+      scaleNote = `LOD active (showing ${nodes.length.toLocaleString()} clusters of ${imageTotal.toLocaleString()} images, affinity scan ${elapsed} ms). Click a cluster to expand it.`;
+    } else {
+      nodes = fullNodes;
+      scaleNote = null;
     }
+    nodeCount = nodes.length;
+
     loading = false;
     restartLoop();
   }
 
   async function loadSuggestions() {
-    try {
-      suggestions = await ipc.suggestTopics(scope());
-    } catch {
-      suggestions = [];
-    }
+    const sc = scope();
+    // Cheap candidates (note n-grams + collection names) + v2 cluster auto-labels
+    // in parallel. Each degrades to empty on its own so a slow/absent half never
+    // blocks the rail.
+    const [cheap, clusters, llm] = await Promise.all([
+      ipc.suggestTopics(sc).catch(() => [] as ipc.TopicSuggestion[]),
+      ipc.clusterTopics(sc).catch(() => [] as ipc.ClusterTopic[]),
+      ipc
+        .suggestTopicsLlm(sc)
+        .catch(() => ({ state: "unavailable", reason: "" }) as ipc.LlmSuggestions),
+    ]);
+    suggestions = cheap;
+    clusterSuggestions = clusters;
+    // v3 seam: only surface LLM themes when the connector is REAL (state ready).
+    // Until then the rail stays empty and the cluster + n-gram rails stand in.
+    llmSuggestions = llm.state === "ready" ? llm.topics : [];
   }
 
   // -- topic mutations --------------------------------------------------------
@@ -174,18 +219,33 @@
     const ctx = canvasEl?.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, width, height);
-    // image nodes
-    for (const n of nodes) {
-      const [sx, sy] = toScreen(n.x, n.y);
-      ctx.beginPath();
-      ctx.arc(sx, sy, n.fixed === true ? 5 : 3.2, 0, Math.PI * 2);
-      ctx.fillStyle = n.fixed === true ? "#d6d6d6" : "#8a8a8a";
-      ctx.fill();
-    }
-    // topic anchors (drawn on top, with labels)
+    // image nodes. A LOD super-node (members present) draws as a larger disc
+    // sized by member count, labeled with that count, so the aggregation is
+    // legible (DESIGN: "a super-node's size reflects its member count").
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "12px system-ui, sans-serif";
+    for (const n of nodes) {
+      const [sx, sy] = toScreen(n.x, n.y);
+      const isSuper = n.members !== undefined;
+      const radius = isSuper
+        ? Math.min(22, 5 + Math.sqrt(n.members!.length) * 1.5)
+        : n.fixed === true
+          ? 5
+          : 3.2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+      ctx.fillStyle = isSuper ? "#2a2a2a" : n.fixed === true ? "#d6d6d6" : "#8a8a8a";
+      ctx.fill();
+      if (isSuper) {
+        ctx.strokeStyle = "#cfcfcf";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = "#d6d6d6";
+        ctx.fillText(String(n.members!.length), sx, sy);
+      }
+    }
+    // topic anchors (drawn on top, with labels)
     for (const a of anchors) {
       const [sx, sy] = toScreen(a.x, a.y);
       ctx.beginPath();
@@ -246,6 +306,16 @@
       restartLoop();
     }
   }
+
+  /** Expand a LOD super-node into its member image nodes (DESIGN v2). The
+   * members spill out from the super-node's position with their real per-image
+   * affinity; the sim re-runs over the mixed set (this cluster expanded, the
+   * rest still aggregated), staying within the budget. */
+  function expandSuper(node: ImageNode) {
+    nodes = expandSuperNode(nodes, node.hash, affinity, topics.length);
+    nodeCount = nodes.length;
+    restartLoop();
+  }
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return;
     const [sx, sy] = localXY(e);
@@ -260,15 +330,52 @@
     node.fixed = false;
     dragging = null;
     canvasEl?.releasePointerCapture(e.pointerId);
-    // A quick press-release with little movement is a CLICK -> open in Look;
-    // a drag just releases the node back into the physics.
-    if (performance.now() - downAt < 250) void ui.openFromGraph(node.hash);
+    // A quick press-release with little movement is a CLICK. On a LOD super-node
+    // a click EXPANDS it into its members; on a single image it opens Look. A
+    // drag just releases the node back into the physics.
+    if (performance.now() - downAt < 250) {
+      if (node.members !== undefined) {
+        expandSuper(node);
+      } else {
+        void ui.openFromGraph(node.hash);
+      }
+    }
   }
+
+  // Zoom level past which LOD super-nodes auto-expand into members, and below
+  // which an expanded view re-collapses to super-nodes (DESIGN v2: "expand past
+  // a zoom threshold; collapse on zoom-out"). Only acts while LOD is active.
+  const LOD_ZOOM_EXPAND = 2.0;
+  const LOD_ZOOM_COLLAPSE = 1.2;
 
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     zoom = Math.max(0.2, Math.min(5, zoom * factor));
+    if (lodActive) {
+      const anyExpanded = nodes.some((n) => n.members === undefined);
+      const anyAggregated = nodes.some((n) => n.members !== undefined);
+      if (zoom >= LOD_ZOOM_EXPAND && anyAggregated) {
+        // Zoomed in: expand every remaining super-node into its members.
+        for (const n of [...nodes]) {
+          if (n.members !== undefined) {
+            nodes = expandSuperNode(nodes, n.hash, affinity, topics.length);
+          }
+        }
+        nodeCount = nodes.length;
+        restartLoop();
+      } else if (zoom <= LOD_ZOOM_COLLAPSE && anyExpanded) {
+        // Zoomed out: re-aggregate the full detail set back into super-nodes.
+        const fullNodes = seedNodes(
+          [...affinity.keys()],
+          affinity,
+          topics.length,
+        );
+        nodes = aggregateToSuperNodes(fullNodes, topics.length);
+        nodeCount = nodes.length;
+        restartLoop();
+      }
+    }
     draw();
   }
 
@@ -376,6 +483,41 @@
     </div>
   {/if}
 
+  <!-- v2 cluster auto-labels: note-grounded auto-topics, click to add as an
+       anchor. Shown above the cheap rail (smarter, "connected to notes"). -->
+  {#if clusterSuggestions.length > 0}
+    <div class="rail cluster-rail" aria-label="Auto topics from clusters">
+      <span class="rail-label">auto topics</span>
+      {#each clusterSuggestions as c (c.label)}
+        {#if !topics.includes(c.label)}
+          <button
+            class="chip suggest cluster"
+            onclick={() => addTopic(c.label)}
+            title={`cluster of ${c.size} images (tightness ${c.centroid_affinity.toFixed(2)})`}
+          >
+            {c.label}
+            <span class="chip-count">{c.size}</span>
+          </button>
+        {/if}
+      {/each}
+    </div>
+  {/if}
+
+  <!-- v3 SEAM: the LLM topic-suggestion rail. The Gemma connector is not wired
+       yet (mocked in M1), so this degrades to a one-line note and the cluster +
+       n-gram suggestions stand in. It appears as real suggestions only once the
+       connector lands. -->
+  {#if llmSuggestions.length > 0}
+    <div class="rail llm-rail" aria-label="LLM suggested topics">
+      <span class="rail-label">themes</span>
+      {#each llmSuggestions as phrase (phrase)}
+        {#if !topics.includes(phrase)}
+          <button class="chip suggest" onclick={() => addTopic(phrase)}>{phrase}</button>
+        {/if}
+      {/each}
+    </div>
+  {/if}
+
   <!-- suggestion chip rail: click to add as an anchor -->
   {#if suggestions.length > 0}
     <div class="rail" aria-label="Suggested topics">
@@ -394,12 +536,15 @@
     </div>
   {/if}
 
-  <!-- readiness honesty + scale-spike note -->
+  <!-- readiness honesty + LOD note -->
   <div class="status">
     {#if loading}
       <span>computing affinities...</span>
     {:else}
-      <span>{nodeCount.toLocaleString()} images</span>
+      <span>{imageTotal.toLocaleString()} images</span>
+      {#if lodActive}
+        <span class="dim">rendering {nodeCount.toLocaleString()} nodes</span>
+      {/if}
       {#if topics.length === 0}
         <span class="dim">add a topic to pull the images apart</span>
       {:else}
@@ -534,6 +679,23 @@
   }
   .chip.from-collection {
     border-style: dashed;
+  }
+  .rail-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-faint);
+    align-self: center;
+  }
+  .chip.cluster {
+    border-color: var(--chrome-strong);
+  }
+  .chip-count {
+    font-size: 10px;
+    color: var(--text-faint);
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 0 5px;
   }
   .status {
     display: flex;

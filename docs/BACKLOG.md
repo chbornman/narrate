@@ -369,11 +369,16 @@ work lives here.
   focus cap, tiered: Look-open full, grid-select far less) + annotation counts
   (stroke COUNT small; effort dropped). Grid heat-tint toggle + sort-by-attention.
   NOT gaze surveillance; dwell lives outside the journal, local-only, resettable.
-- [ ] **Semantic topic-graph (v2/v3)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. v1
-  LANDED (see LANDED.md): manual-seed topics + cheap suggestions + looks/said
-  blend slider + live force layout, collection-first AND a full-library scale
-  spike. REMAINING: v2 cluster auto-labels + a full-library LOD strategy chosen
-  from the v1 profiling; v3 LLM topic suggestion (gated on Gemma being wired).
+- [ ] **Semantic topic-graph (v3)** — see `docs/DESIGN-SEMANTIC-GRAPH.md`. v1 +
+  v2 LANDED (see LANDED.md): v1 = manual-seed topics + cheap suggestions +
+  looks/said blend slider + live force layout + full-library scale spike; v2 =
+  `cluster_topics` note-grounded auto-labels (deterministic k-means) + a
+  full-library LOD (super-node aggregation / expand-on-click) + the v3 seam
+  scaffold. REMAINING: v3 LLM topic suggestion — wire the real Gemma connector
+  into the existing `suggest_topics_llm` seam (it returns `Unavailable` until
+  then). ALSO OPEN (v2 founder-review): reconcile `graph.lod_threshold`
+  (placeholder 1500) with the real full-library scale-spike numbers once the
+  founder profiles the spike.
 - [ ] **Heatmap x graph synthesis (FUTURE opportunity)** (founder, June 13 2026):
   once both exist, combine them. Two payoffs the founder named: (a) **"hot
   topics"** — overlay engagement intensity onto the topic-graph so the themes

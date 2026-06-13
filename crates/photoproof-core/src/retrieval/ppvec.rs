@@ -567,6 +567,27 @@ impl PpvecStore {
         .map_err(db_err)
     }
 
+    /// The model id of ANY live row in an image-keyed space, or `None` when the
+    /// space is empty. WHY: the topic-graph clustering (v2) reads stored
+    /// vectors and so needs the model id of the space to read, but it must work
+    /// even when the embedder is NOT loaded into memory (clustering over
+    /// vectors that already exist on disk is a read-side concern, like
+    /// `image_clip_model_id`). The active embedder's id is preferred when it IS
+    /// loaded (it matches the live write path); this is the graceful fallback so
+    /// the lens clusters an embedded-but-models-unloaded library.
+    pub fn any_model_id(&self, vec_kind: VecKind) -> VectorStoreResult<Option<String>> {
+        let conn = self.db.lock().expect("poisoned");
+        conn.query_row(
+            "SELECT model_id FROM vectors
+             WHERE vec_kind = ?1 AND deleted = 0
+             LIMIT 1",
+            params![vec_kind_str(vec_kind)],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)
+    }
+
     /// Score a SPECIFIC set of image hashes against a topic query embedding,
     /// over one image-keyed space (`ImageClip` or `ImageSummary`). Returns a
     /// `(image_hash -> cosine)` map carrying only the hashes that HAVE a live
@@ -668,6 +689,90 @@ impl PpvecStore {
                 acc += f32::from(*b as i8) * w;
             }
             out.insert(hash, acc + bias);
+        }
+        Ok(out)
+    }
+
+    /// Read the RAW (dequantized) stored vectors for a SPECIFIC set of image
+    /// hashes over one image-keyed space, in ONE critical section. Returns
+    /// `(image_hash, vector)` pairs carrying only the hashes that HAVE a live
+    /// stored vector; a hash with no row is simply absent.
+    ///
+    /// WHY a bulk sibling of `fetch` (which reads ONE row, re-locking and
+    /// re-mmapping per call): the topic-graph clustering (v2) needs the actual
+    /// vectors for thousands of in-scope images to run k-means over. Fetching
+    /// them one at a time would re-acquire the connection mutex, the file lock,
+    /// and a fresh mmap per image. This walks exactly the requested rows under a
+    /// SINGLE lock/mmap pair, dequantizing each through the same kernel as
+    /// `fetch`, so the clustering sees the same int8-quantized vectors retrieval
+    /// scores with (§1.3) — no second vector definition.
+    ///
+    /// Graceful by construction (DESIGN-SEMANTIC-GRAPH.md): an empty space, a
+    /// missing file, or an empty hash set all yield an empty vec, never an error
+    /// — clustering over an un-embedded scope returns nothing, not a crash.
+    pub fn read_image_vectors(
+        &self,
+        space: VecSpace,
+        image_hashes: &[String],
+    ) -> VectorStoreResult<Vec<(String, Vec<f32>)>> {
+        if image_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.file_path(&space);
+        // One critical section (connection + file lock), mirroring `score_images`:
+        // a compaction remap between the pointer reads and the byte snapshot
+        // would pair dense new file_rows with the old bytes.
+        let conn = self.db.lock().expect("poisoned");
+        let _io = file_io_lock();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut f = File::open(&path)?;
+        let header = read_header(&mut f)?;
+        let dims = header.dims as usize;
+        // SAFETY: identical to `score_images` — one process owns the files and we
+        // hold the FILE_IO lock for the mapping's lifetime (this function).
+        let mmap = unsafe { memmap2::Mmap::map(&f)? };
+        let data = &mmap[header.data_offset() as usize..];
+
+        // Resolve the requested hashes to their live file rows in ONE query.
+        let marks = vec!["?"; image_hashes.len()].join(",");
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT image_hash, file_row FROM vectors
+                     WHERE vec_kind = ?1 AND model_id = ?2 AND deleted = 0
+                       AND image_hash IN ({marks})"
+                ))
+                .map_err(db_err)?;
+            let mut params: Vec<Value> = vec![
+                Value::Text(vec_kind_str(space.vec_kind).to_owned()),
+                Value::Text(space.model_id.clone()),
+            ];
+            params.extend(image_hashes.iter().map(|h| Value::Text(h.clone())));
+            let mapped = stmt
+                .query_map(rusqlite::params_from_iter(params), |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map_err(db_err)?;
+            mapped.collect::<Result<_, _>>().map_err(db_err)?
+        };
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (hash, file_row) in rows {
+            let start = file_row as usize * dims;
+            let Some(row) = data.get(start..start + dims) else {
+                return Err(VectorStoreError::Corrupt(format!(
+                    "{}: file_row {file_row} beyond file end",
+                    path.display()
+                )));
+            };
+            let vector: Vec<f32> = row
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| dequantize(b as i8, i, &header))
+                .collect();
+            out.push((hash, vector));
         }
         Ok(out)
     }
