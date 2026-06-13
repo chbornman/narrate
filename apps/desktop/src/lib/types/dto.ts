@@ -154,6 +154,22 @@ export interface AppSettings {
    * "Open in external editor" verb hands the original off to. null = the
    * OS default handler (settings.rs external_editor twin). */
   externalEditor: string | null;
+  /** 1:1 preview cache budget in BYTES (DESIGN-PREVIEW-POLICY.md): keep
+   * full-res 1:1 develop artifacts until the on-disk cache exceeds this, then
+   * evict least-recently-viewed. The UI edits it in GB; defaults to 20 GB
+   * (settings.rs previewCacheBudgetBytes twin). */
+  previewCacheBudgetBytes: number;
+}
+
+/** Settings → Previews cache-size readout (DESIGN-PREVIEW-POLICY.md). All
+ * sizes in bytes; the UI formats GB/MB. `full*` is the budgeted 1:1 tier,
+ * `totalBytes` the whole previews footprint, `budgetBytes` the configured cap
+ * (so the readout shows "X of Y" without a second round-trip). */
+export interface PreviewCacheStatsDto {
+  fullBytes: number;
+  fullFiles: number;
+  totalBytes: number;
+  budgetBytes: number;
 }
 
 export interface ExportReportDto {

@@ -72,6 +72,76 @@ pub fn set_external_editor(
     Ok(next)
 }
 
+/// Settings → Previews: set the 1:1 preview cache budget in BYTES
+/// (DESIGN-PREVIEW-POLICY.md). Persists in settings.json and immediately runs
+/// one eviction pass so a LOWERED budget takes effect now (trims the cache
+/// under the new cap) rather than waiting for the next develop. Returns the
+/// updated settings (the UI re-reads the persisted value). No `settings-changed`
+/// emit: the budget is consumed only by the backend evictor, not by any live
+/// main-window view.
+#[tauri::command]
+pub async fn set_preview_cache_budget(app: S<'_>, bytes: u64) -> CmdResult<AppSettings> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let next = {
+            let mut s = app.settings.lock().expect("settings mutex");
+            s.preview_cache_budget_bytes = bytes;
+            crate::settings::save(&app.app_data, &s)?;
+            s.clone()
+        };
+        // Apply the new cap immediately: lowering the budget should reclaim
+        // disk now, not on the next view-time develop.
+        app.library
+            .evict_preview_cache(next.preview_cache_budget_bytes);
+        Ok(next)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Settings → Previews cache-size readout (DESIGN-PREVIEW-POLICY.md): current
+/// 1:1 cache size + file count, the total previews footprint, and the
+/// configured budget (so the UI shows "X of Y" without a second call). Cheap
+/// (one stat pass over `previews/`).
+#[tauri::command]
+pub async fn preview_cache_stats(app: S<'_>) -> CmdResult<crate::dto::PreviewCacheStatsDto> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = app.library.full_cache_stats();
+        let budget = app
+            .settings
+            .lock()
+            .expect("settings mutex")
+            .preview_cache_budget_bytes;
+        Ok(crate::dto::PreviewCacheStatsDto {
+            full_bytes: stats.full_bytes,
+            full_files: stats.full_files,
+            total_bytes: stats.total_bytes,
+            budget_bytes: budget,
+        })
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Settings → Previews "Clear 1:1 cache" / "Clear all previews"
+/// (DESIGN-PREVIEW-POLICY.md). `kind` = `"full"` (just the 1:1 tier) | `"all"`
+/// (1:1 + display + thumb). SAFE — every removed artifact re-derives on next
+/// view; strokes live in vector coords, never in an artifact. Returns the
+/// number of files removed. An unknown `kind` is rejected so a typo cannot
+/// silently nuke the whole cache.
+#[tauri::command]
+pub async fn clear_preview_cache(app: S<'_>, kind: String) -> CmdResult<u64> {
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let kind = photoproof_core::library::ClearKind::parse(&kind)
+            .ok_or_else(|| CmdError::Invalid(format!("unknown clear kind: {kind}")))?;
+        Ok(app.library.clear_preview_cache_kind(kind)?)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 /// The RUNTIME contract (P6.2): tier, consent, per-model rows with
 /// license + progress, readiness gates. Settings renders the Models
 /// section from this; the one-time consent card reads the same snapshot.

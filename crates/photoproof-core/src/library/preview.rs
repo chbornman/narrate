@@ -256,6 +256,225 @@ pub fn sweep_temp_files(cache_dir: &Path) -> io::Result<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// 1:1 full-decode cache policy (DESIGN-PREVIEW-POLICY.md)
+// ---------------------------------------------------------------------------
+//
+// The thumb + display tiers are small and always kept; only the full-res
+// `-full.{webp,jpg}` artifacts are large and user-variable, so they are the
+// only tier that gets a retention policy: a single size budget, evict
+// LEAST-RECENTLY-VIEWED when the on-disk cache exceeds it. Eviction is always
+// SAFE — a discarded 1:1 re-derives on next view and strokes live in
+// display-oriented VECTOR coords, never in the cached artifact — so we just
+// delete files.
+//
+// WHY mtime is the LRU signal (not atime): atime is unreliable across the
+// platforms/mounts we target — `noatime`/`relatime` (Linux), and macOS volumes
+// frequently do not update it on read. We therefore TOUCH each `-full.*` file's
+// mtime when it is SERVED (see `touch_full_artifact` / the `/full-decode` route)
+// so "least-recently-modified" tracks "least-recently-VIEWED" reliably,
+// independent of the OS atime policy.
+
+/// Whether a directory entry is a full-decode 1:1 artifact (`<hash>-full.webp`
+/// or `<hash>-full.jpg`). The tier the cache policy governs — the small
+/// `-thumb`/`-disp` tiers are always kept and are never matched here.
+fn is_full_artifact(name: &str) -> bool {
+    name.ends_with("-full.webp") || name.ends_with("-full.jpg")
+}
+
+/// One full-decode artifact on disk: its path, byte size, and last-VIEWED
+/// signal (mtime, see the module note on why not atime). Used to rank the
+/// LRU eviction order.
+#[derive(Debug, Clone)]
+struct FullArtifactEntry {
+    path: PathBuf,
+    bytes: u64,
+    /// Last-modified time; we touch it on serve so it tracks last-viewed.
+    /// `SystemTime::UNIX_EPOCH` when the filesystem cannot report it (treated
+    /// as oldest → evicted first, which is the safe direction).
+    modified: std::time::SystemTime,
+}
+
+/// Walk the `previews/` tree once and collect every full-decode 1:1 artifact
+/// with its size + last-viewed mtime. The small thumb/display tiers are
+/// skipped (they are always kept). Missing tree → empty vec, never an error.
+fn collect_full_artifacts(cache_dir: &Path) -> Vec<FullArtifactEntry> {
+    let previews = cache_dir.join("previews");
+    let mut out = Vec::new();
+    if !previews.exists() {
+        return out;
+    }
+    for entry in walkdir::WalkDir::new(&previews).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !is_full_artifact(name) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        out.push(FullArtifactEntry {
+            path: entry.path().to_path_buf(),
+            bytes: meta.len(),
+            modified: meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        });
+    }
+    out
+}
+
+/// On-disk size + file count of the preview cache, split by tier. Surfaced to
+/// Settings → Previews (the cache-size readout) so the user can see what the
+/// 1:1 cache costs without opening a file manager.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviewCacheStats {
+    /// Bytes held by the full-res 1:1 (`-full.*`) artifacts — the tier the
+    /// budget governs.
+    pub full_bytes: u64,
+    /// Count of full-res 1:1 artifacts.
+    pub full_files: u64,
+    /// Bytes held by ALL previews (1:1 + display + thumb) under `previews/`.
+    pub total_bytes: u64,
+}
+
+/// Compute [`PreviewCacheStats`]: the full-res 1:1 cache size/count plus the
+/// total previews footprint. One pass over `previews/` (cheap — it stats, it
+/// does not read bytes). A missing tree reports all-zero.
+pub fn preview_cache_stats(cache_dir: &Path) -> PreviewCacheStats {
+    let previews = cache_dir.join("previews");
+    let mut stats = PreviewCacheStats::default();
+    if !previews.exists() {
+        return stats;
+    }
+    for entry in walkdir::WalkDir::new(&previews).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        // Temp files are mid-write scratch, not cache the user "has" — skip.
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name.starts_with(TMP_PREFIX) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let len = meta.len();
+        stats.total_bytes += len;
+        if is_full_artifact(name) {
+            stats.full_bytes += len;
+            stats.full_files += 1;
+        }
+    }
+    stats
+}
+
+/// Which tier(s) a manual clear removes. `Full` = just the big 1:1 cache;
+/// `All` = 1:1 + display + thumb (the whole `previews/` tree). Both are SAFE:
+/// every tier re-derives from the original on next view, and strokes never
+/// live in an artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearKind {
+    /// Only the full-res 1:1 (`-full.*`) artifacts.
+    Full,
+    /// Every preview artifact (1:1 + display + thumb).
+    All,
+}
+
+impl ClearKind {
+    /// Parse the IPC string (`"full"` | `"all"`); unknown values are rejected
+    /// so a typo cannot silently nuke the whole cache. (Named `parse`, not
+    /// `from_str`, to avoid shadowing the `FromStr` trait method — this returns
+    /// `Option`, not `Result`, and is only ever called on the IPC string.)
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "full" => Some(ClearKind::Full),
+            "all" => Some(ClearKind::All),
+            _ => None,
+        }
+    }
+}
+
+/// Manually clear the preview cache: the full-res 1:1 tier only ([`ClearKind::Full`])
+/// or every preview artifact ([`ClearKind::All`]). Returns the number of files
+/// removed. SAFE — every removed artifact re-derives on next view. Temp files
+/// (`.pp-tmp-*`) are left to `sweep_temp_files` (a clear should not race a
+/// concurrent write's scratch file). A missing tree removes nothing.
+pub fn clear_preview_cache(cache_dir: &Path, kind: ClearKind) -> io::Result<u64> {
+    let previews = cache_dir.join("previews");
+    if !previews.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in walkdir::WalkDir::new(&previews).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name.starts_with(TMP_PREFIX) {
+            continue;
+        }
+        let target = match kind {
+            ClearKind::Full => is_full_artifact(name),
+            ClearKind::All => true,
+        };
+        if target {
+            std::fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Trim the full-res 1:1 cache to `budget_bytes` by evicting
+/// LEAST-RECENTLY-VIEWED artifacts first (oldest mtime; see the module note on
+/// the mtime-as-last-viewed choice). No-op when already under budget — it never
+/// evicts a cache that fits. Returns the number of files evicted. SAFE: each
+/// evicted 1:1 re-derives on next view, strokes are unaffected. Errors from a
+/// single `remove_file` are swallowed (a racing clear/develop may have removed
+/// it); the pass still drives the rest of the cache under budget.
+pub fn evict_preview_cache(cache_dir: &Path, budget_bytes: u64) -> u64 {
+    let mut entries = collect_full_artifacts(cache_dir);
+    let total: u64 = entries.iter().map(|e| e.bytes).sum();
+    // Under budget: nothing to do — the common, hot path (most reviews never
+    // breach the budget, and we run this after every develop).
+    if total <= budget_bytes {
+        return 0;
+    }
+    // Oldest-viewed first: ascending mtime is the LRU eviction order.
+    entries.sort_by_key(|e| e.modified);
+    let mut live = total;
+    let mut evicted = 0;
+    for e in &entries {
+        if live <= budget_bytes {
+            break;
+        }
+        // remove_file failures (a concurrent clear/develop won the race) do
+        // not stop the pass — we still account the bytes as gone and move on.
+        let _ = std::fs::remove_file(&e.path);
+        live = live.saturating_sub(e.bytes);
+        evicted += 1;
+    }
+    evicted
+}
+
+/// Bump a full-decode artifact's mtime to NOW — the explicit touch-on-serve
+/// that makes "least-recently-modified" mean "least-recently-VIEWED" (see the
+/// module note: we cannot trust atime across the platforms/mounts we target).
+/// Called by the `/full-decode` serve route. Best-effort: a failure (the file
+/// vanished, read-only volume) is not worth failing a serve over — the LRU
+/// signal degrades gracefully, the image still loads.
+pub fn touch_full_artifact(path: &Path) {
+    // `set_modified` to the current instant; filetime keeps this one syscall.
+    let _ = filetime::set_file_mtime(path, filetime::FileTime::now());
+}
+
+// ---------------------------------------------------------------------------
 // Orientation
 // ---------------------------------------------------------------------------
 
@@ -1078,6 +1297,199 @@ mod tests {
         let tiff = synthetic_tiff(&[(b"definitely not jpeg data".to_vec(), None)]);
         let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
         assert!(largest_chained_jpeg(&source).is_none());
+    }
+
+    // ---- 1:1 full-decode cache policy (DESIGN-PREVIEW-POLICY.md) ----------
+
+    /// Write a `<hash>-full.<ext>` artifact of `bytes` length into the fanned
+    /// cache layout, with an explicit mtime so the LRU order is deterministic
+    /// (tests cannot rely on write-order timestamps at filesystem resolution).
+    fn write_full(cache_dir: &Path, seed: &[u8], ext: &str, bytes: usize, mtime_secs: i64) {
+        let h = ContentHash::from_bytes_of(seed);
+        let dest = full_artifact_path(
+            cache_dir,
+            &h,
+            if ext == "jpg" {
+                FullDecodeFormat::Jpeg
+            } else {
+                FullDecodeFormat::Webp
+            },
+        );
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, vec![0u8; bytes]).unwrap();
+        filetime::set_file_mtime(&dest, filetime::FileTime::from_unix_time(mtime_secs, 0)).unwrap();
+    }
+
+    /// Write a small `<hash>-{disp,thumb}.webp` artifact (the always-kept
+    /// tiers) so tests can prove the policy NEVER touches them.
+    fn write_small(cache_dir: &Path, seed: &[u8], kind: ArtifactKind, bytes: usize) {
+        let h = ContentHash::from_bytes_of(seed);
+        let dest = artifact_path(cache_dir, &h, kind);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, vec![0u8; bytes]).unwrap();
+    }
+
+    #[test]
+    fn evictor_is_a_noop_under_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        write_full(dir.path(), b"a", "webp", 1000, 100);
+        write_full(dir.path(), b"b", "webp", 1000, 200);
+        // 2000 bytes, budget 5000: nothing evicted, both survive.
+        assert_eq!(evict_preview_cache(dir.path(), 5000), 0);
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats.full_files, 2);
+        assert_eq!(stats.full_bytes, 2000);
+    }
+
+    #[test]
+    fn evictor_trims_oldest_first_to_under_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three 1000-byte 1:1s, distinct mtimes: a oldest, c newest.
+        write_full(dir.path(), b"a", "webp", 1000, 100);
+        write_full(dir.path(), b"b", "jpg", 1000, 200);
+        write_full(dir.path(), b"c", "webp", 1000, 300);
+        // Budget 1500: must drop the two oldest (a, then b) to land at 1000.
+        let evicted = evict_preview_cache(dir.path(), 1500);
+        assert_eq!(evicted, 2);
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats.full_files, 1);
+        assert_eq!(stats.full_bytes, 1000);
+        // The survivor is the NEWEST-viewed (c) — least-recently-viewed went.
+        let c = full_artifact_path(
+            dir.path(),
+            &ContentHash::from_bytes_of(b"c"),
+            FullDecodeFormat::Webp,
+        );
+        assert!(c.exists(), "newest-viewed 1:1 must survive");
+        let a = full_artifact_path(
+            dir.path(),
+            &ContentHash::from_bytes_of(b"a"),
+            FullDecodeFormat::Webp,
+        );
+        assert!(!a.exists(), "oldest-viewed 1:1 must be evicted first");
+    }
+
+    #[test]
+    fn evictor_never_touches_small_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_full(dir.path(), b"a", "webp", 5000, 100);
+        write_small(dir.path(), b"a", ArtifactKind::Display, 400);
+        write_small(dir.path(), b"a", ArtifactKind::Thumb, 100);
+        // Budget 0: evict the entire 1:1 cache…
+        assert_eq!(evict_preview_cache(dir.path(), 0), 1);
+        // …but the thumb/display tiers are untouched (always kept).
+        assert!(
+            artifact_path(
+                dir.path(),
+                &ContentHash::from_bytes_of(b"a"),
+                ArtifactKind::Display
+            )
+            .exists()
+        );
+        assert!(
+            artifact_path(
+                dir.path(),
+                &ContentHash::from_bytes_of(b"a"),
+                ArtifactKind::Thumb
+            )
+            .exists()
+        );
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats.full_files, 0);
+        assert_eq!(stats.full_bytes, 0);
+        // total still counts the surviving small tiers.
+        assert_eq!(stats.total_bytes, 500);
+    }
+
+    #[test]
+    fn stats_split_full_from_total_and_ignore_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_full(dir.path(), b"a", "webp", 1000, 100);
+        write_full(dir.path(), b"b", "jpg", 2000, 200);
+        write_small(dir.path(), b"a", ArtifactKind::Display, 300);
+        // A mid-write temp scratch file must NOT count toward either total.
+        let tmp = dir
+            .path()
+            .join("previews")
+            .join(format!("{TMP_PREFIX}999-x-full.webp"));
+        std::fs::create_dir_all(tmp.parent().unwrap()).unwrap();
+        std::fs::write(&tmp, vec![0u8; 9999]).unwrap();
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats.full_files, 2);
+        assert_eq!(stats.full_bytes, 3000);
+        assert_eq!(stats.total_bytes, 3300, "small tier counted, temp ignored");
+    }
+
+    #[test]
+    fn stats_on_missing_tree_is_all_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats, PreviewCacheStats::default());
+        // And the evictor is a no-op on an empty/absent cache.
+        assert_eq!(evict_preview_cache(dir.path(), 0), 0);
+    }
+
+    #[test]
+    fn clear_full_removes_only_the_1to1_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        write_full(dir.path(), b"a", "webp", 1000, 100);
+        write_full(dir.path(), b"b", "jpg", 2000, 200);
+        write_small(dir.path(), b"a", ArtifactKind::Display, 300);
+        write_small(dir.path(), b"a", ArtifactKind::Thumb, 100);
+        // Clear "full": both 1:1s go, the small tiers stay.
+        assert_eq!(clear_preview_cache(dir.path(), ClearKind::Full).unwrap(), 2);
+        let stats = preview_cache_stats(dir.path());
+        assert_eq!(stats.full_files, 0);
+        assert_eq!(stats.total_bytes, 400, "display+thumb survive a Full clear");
+    }
+
+    #[test]
+    fn clear_all_removes_every_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        write_full(dir.path(), b"a", "webp", 1000, 100);
+        write_small(dir.path(), b"a", ArtifactKind::Display, 300);
+        write_small(dir.path(), b"a", ArtifactKind::Thumb, 100);
+        // Clear "all": every preview artifact removed.
+        assert_eq!(clear_preview_cache(dir.path(), ClearKind::All).unwrap(), 3);
+        assert_eq!(
+            preview_cache_stats(dir.path()),
+            PreviewCacheStats::default()
+        );
+    }
+
+    #[test]
+    fn clear_kind_parses_known_and_rejects_typos() {
+        assert_eq!(ClearKind::parse("full"), Some(ClearKind::Full));
+        assert_eq!(ClearKind::parse("all"), Some(ClearKind::All));
+        assert_eq!(ClearKind::parse("everything"), None);
+        assert_eq!(ClearKind::parse(""), None);
+    }
+
+    #[test]
+    fn touch_on_serve_makes_a_file_freshly_viewed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two 1:1s; "old" is the least-recently-viewed by initial mtime.
+        write_full(dir.path(), b"old", "webp", 1000, 100);
+        write_full(dir.path(), b"new", "webp", 1000, 200);
+        let old = full_artifact_path(
+            dir.path(),
+            &ContentHash::from_bytes_of(b"old"),
+            FullDecodeFormat::Webp,
+        );
+        // Serving "old" touches it → it becomes the most-recently-viewed.
+        touch_full_artifact(&old);
+        // Now "new" is the oldest. A 1500 budget must evict "new", keep "old".
+        assert_eq!(evict_preview_cache(dir.path(), 1500), 1);
+        assert!(old.exists(), "the just-touched (served) 1:1 must survive");
+        let new = full_artifact_path(
+            dir.path(),
+            &ContentHash::from_bytes_of(b"new"),
+            FullDecodeFormat::Webp,
+        );
+        assert!(
+            !new.exists(),
+            "the un-served 1:1 is now least-recently-viewed"
+        );
     }
 
     #[test]

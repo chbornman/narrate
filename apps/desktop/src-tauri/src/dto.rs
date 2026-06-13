@@ -120,6 +120,20 @@ pub struct PreviewsChanged {
     pub hashes: Vec<String>,
 }
 
+/// Settings → Previews cache-size readout (DESIGN-PREVIEW-POLICY.md). Bytes on
+/// the wire (the UI formats GB/MB); `fullBytes`/`fullFiles` are the budgeted
+/// 1:1 tier, `totalBytes` is the whole previews footprint (1:1 + display +
+/// thumb). The configured budget rides along so the UI can show "X of Y GB"
+/// without a second round-trip.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCacheStatsDto {
+    pub full_bytes: u64,
+    pub full_files: u64,
+    pub total_bytes: u64,
+    pub budget_bytes: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStatus {

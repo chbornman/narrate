@@ -44,10 +44,11 @@ pub use placeholder::{
 // centralized tuning config (`crate::tuning`, file-overridable). Their consume
 // sites read `tuning().preview.*` directly.
 pub use preview::{
-    ArtifactKind, EmbeddedOrientationReason, EmbeddedPreviewExtractor, ExtractedPreview,
-    FullDecodeFormat, GENERATOR_VERSION, PreviewError, PreviewSource, RawlerExtractor, THUMB_EDGE,
-    apply_exif_orientation, artifact_path, embedded_orientation_decision, existing_full_artifact,
-    full_artifact_path, oriented_dims,
+    ArtifactKind, ClearKind, EmbeddedOrientationReason, EmbeddedPreviewExtractor, ExtractedPreview,
+    FullDecodeFormat, GENERATOR_VERSION, PreviewCacheStats, PreviewError, PreviewSource,
+    RawlerExtractor, THUMB_EDGE, apply_exif_orientation, artifact_path, clear_preview_cache,
+    embedded_orientation_decision, evict_preview_cache, existing_full_artifact, full_artifact_path,
+    oriented_dims, preview_cache_stats, touch_full_artifact,
 };
 pub use raw_develop::DevelopError;
 pub use scan::{ClockShiftReport, ScanOptions, ScanReport};
@@ -236,6 +237,37 @@ impl Library {
 
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
+    }
+
+    /// Settings → Previews: on-disk size + count of the preview cache, split
+    /// into the full-res 1:1 tier (the budgeted one) and the total footprint.
+    /// Cheap (one stat pass, no byte reads) so the Settings readout can call it
+    /// on every open. Distinct from `preview_cache_stats` above, which counts
+    /// the `preview_artifacts` DB rows (thumb/display): the 1:1 tier is
+    /// disk-only and has no rows, so its size is measured on the filesystem.
+    pub fn full_cache_stats(&self) -> preview::PreviewCacheStats {
+        preview::preview_cache_stats(&self.cache_dir)
+    }
+
+    /// DESIGN-PREVIEW-POLICY.md: trim the full-res 1:1 cache to `budget_bytes`,
+    /// evicting LEAST-RECENTLY-VIEWED first. No-op under budget. Returns the
+    /// number of files evicted. Runs after each on-demand develop and is SAFE
+    /// (every evicted 1:1 re-derives on next view; strokes live in vector
+    /// coords, never in the artifact).
+    pub fn evict_preview_cache(&self, budget_bytes: u64) -> u64 {
+        preview::evict_preview_cache(&self.cache_dir, budget_bytes)
+    }
+
+    /// Settings → Previews "Clear 1:1 cache" / "Clear all previews": remove the
+    /// full-res 1:1 tier ([`preview::ClearKind::Full`]) or every preview
+    /// artifact ([`preview::ClearKind::All`]). Returns the number of files
+    /// removed. SAFE — every removed artifact re-derives on next view. Distinct
+    /// from the per-hash [`Library::clear_preview_cache`] below (that one also
+    /// re-pends the preview pass for a single image; this one is the whole-cache
+    /// disk sweep with no DB touch — the 1:1 tier has no DB rows, and the
+    /// thumb/display rows re-derive on next view via the doctor pattern).
+    pub fn clear_preview_cache_kind(&self, kind: preview::ClearKind) -> std::io::Result<u64> {
+        preview::clear_preview_cache(&self.cache_dir, kind)
     }
 
     fn now(&self) -> UtcMillis {
