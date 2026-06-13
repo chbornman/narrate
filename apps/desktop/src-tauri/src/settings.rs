@@ -21,7 +21,21 @@ pub enum StackDisplay {
     Raw,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Default 1:1 preview cache budget: 20 GB. Generous on purpose — the user
+/// REVIEWS (opens many RAWs, builds many full-res 1:1s) and should not babysit
+/// storage (DESIGN-PREVIEW-POLICY.md). The evictor only bites past this, and
+/// even then SAFELY (a discarded 1:1 re-derives on next view).
+pub const DEFAULT_PREVIEW_CACHE_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+/// serde `default` for `preview_cache_budget_bytes`: a settings.json written
+/// before this field existed (or with the key absent) loads the 20 GB default
+/// rather than 0 — a 0 budget would otherwise evict the entire 1:1 cache on the
+/// first develop.
+fn default_preview_cache_budget_bytes() -> u64 {
+    DEFAULT_PREVIEW_CACHE_BUDGET_BYTES
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     pub last_export_ts: Option<String>,
@@ -34,6 +48,28 @@ pub struct AppSettings {
     /// pre-existing settings.json files — written before this field — load
     /// it as None instead of failing to parse.
     pub external_editor: Option<String>,
+    /// 1:1 preview cache budget in BYTES (DESIGN-PREVIEW-POLICY.md): keep
+    /// full-res 1:1 develop artifacts until the on-disk cache exceeds this,
+    /// then evict least-recently-viewed. The one knob the policy exposes — the
+    /// small thumb/display tiers are always kept and are not governed by it.
+    /// Stored in bytes (the UI edits GB); defaults to 20 GB via
+    /// `default_preview_cache_budget_bytes` so a legacy/absent key never reads
+    /// as a 0 budget (which would evict everything).
+    #[serde(default = "default_preview_cache_budget_bytes")]
+    pub preview_cache_budget_bytes: u64,
+}
+
+/// Manual `Default` (not derived): the budget defaults to 20 GB, not the `u64`
+/// zero that a derive would give — a 0 budget evicts the whole 1:1 cache.
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            last_export_ts: None,
+            stack_display: StackDisplay::default(),
+            external_editor: None,
+            preview_cache_budget_bytes: DEFAULT_PREVIEW_CACHE_BUDGET_BYTES,
+        }
+    }
 }
 
 pub fn settings_path(app_data: &Path) -> PathBuf {
@@ -87,16 +123,24 @@ mod tests {
     fn settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).last_export_ts, None);
+        // A fresh load carries the 20 GB budget default, not 0.
+        assert_eq!(
+            load(dir.path()).preview_cache_budget_bytes,
+            DEFAULT_PREVIEW_CACHE_BUDGET_BYTES
+        );
         let s = AppSettings {
             last_export_ts: Some("2026-06-09T12:00:00Z".into()),
             stack_display: StackDisplay::Raw,
             external_editor: Some("Affinity Photo".into()),
+            preview_cache_budget_bytes: 50 * 1024 * 1024 * 1024,
         };
         save(dir.path(), &s).unwrap();
         let loaded = load(dir.path());
         assert_eq!(loaded.last_export_ts, s.last_export_ts);
         assert_eq!(loaded.stack_display, StackDisplay::Raw);
         assert_eq!(loaded.external_editor.as_deref(), Some("Affinity Photo"));
+        // The edited budget round-trips through settings.json.
+        assert_eq!(loaded.preview_cache_budget_bytes, 50 * 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -111,6 +155,21 @@ mod tests {
     }
 
     #[test]
+    fn preview_cache_budget_defaults_to_20gb_for_pre_existing_files() {
+        // A settings.json written before this field existed has no
+        // previewCacheBudgetBytes key; the custom serde default must load it as
+        // 20 GB, NOT 0 (a 0 budget would evict the whole 1:1 cache on the first
+        // develop).
+        let legacy = r#"{ "stackDisplay": "raw" }"#;
+        let s: AppSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            s.preview_cache_budget_bytes,
+            DEFAULT_PREVIEW_CACHE_BUDGET_BYTES
+        );
+        assert_eq!(DEFAULT_PREVIEW_CACHE_BUDGET_BYTES, 20 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
     fn stack_display_defaults_to_jpeg_and_speaks_lowercase_json() {
         // Pre-existing settings.json files (no stackDisplay key) load with
         // the JPEG default; the wire form matches the TS union "jpeg"|"raw".
@@ -120,9 +179,12 @@ mod tests {
             last_export_ts: None,
             stack_display: StackDisplay::Raw,
             external_editor: None,
+            preview_cache_budget_bytes: DEFAULT_PREVIEW_CACHE_BUDGET_BYTES,
         })
         .unwrap();
         assert!(json.contains("\"stackDisplay\":\"raw\""), "got: {json}");
+        // The budget serializes camelCase too (the UI reads it back).
+        assert!(json.contains("\"previewCacheBudgetBytes\":"), "got: {json}");
     }
 
     #[test]

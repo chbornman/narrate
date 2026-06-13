@@ -295,6 +295,20 @@ fn drain_raw_decode(app: &App, handle: &AppHandle) -> usize {
                             .collect(),
                     },
                 );
+                // DESIGN-PREVIEW-POLICY.md: a develop just wrote (at least) one
+                // new full-res 1:1 artifact, so the 1:1 cache may now exceed
+                // its budget — trim it back to the user's cap, evicting
+                // least-recently-VIEWED first. We run it HERE (right after the
+                // write, only when something landed) rather than on a schedule:
+                // the cache can only grow on a develop, so this is exactly when
+                // a check is warranted. SAFE — every evicted 1:1 re-derives on
+                // next view.
+                let budget = app
+                    .settings
+                    .lock()
+                    .expect("settings mutex")
+                    .preview_cache_budget_bytes;
+                app.library.evict_preview_cache(budget);
             }
             report.processed
         }

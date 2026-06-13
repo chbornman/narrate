@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 use photoproof_core::ContentHash;
 use photoproof_core::library::{
-    ArtifactKind, ImageFormat, Library, artifact_path, existing_full_artifact,
+    ArtifactKind, ImageFormat, Library, artifact_path, existing_full_artifact, touch_full_artifact,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +153,16 @@ pub fn serve(library: &Library, path: &str) -> http::Response<Vec<u8>> {
         // "developing..." state — the frontend has already enqueued the
         // develop via `request_full_decode` and retries.
         Some((Route::FullDecode, hash)) => existing_full_artifact(library.cache_dir(), &hash)
-            .and_then(|(file, format)| std::fs::read(file).ok().map(|bytes| (bytes, format)))
+            .and_then(|(file, format)| {
+                // Touch-on-serve: bump the artifact's mtime to NOW so the 1:1
+                // cache's LRU evictor (DESIGN-PREVIEW-POLICY.md) treats this as
+                // freshly VIEWED. We touch on the read path rather than trust
+                // atime, which is unreliable across the mounts we target
+                // (noatime/relatime, macOS volumes). Best-effort: a touch
+                // failure must never block the serve.
+                touch_full_artifact(&file);
+                std::fs::read(file).ok().map(|bytes| (bytes, format))
+            })
             .map(|(bytes, format)| respond_ok(bytes, format.content_type()))
             .unwrap_or_else(respond_not_found),
         None => respond_not_found(),

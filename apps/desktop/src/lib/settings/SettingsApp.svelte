@@ -21,7 +21,24 @@
   import AckButton from "../primitives/AckButton.svelte";
   import { theme } from "../theme/theme-store.svelte";
   import { THEME_LABELS, THEME_MODES, type ThemeMode } from "../theme/theme";
-  import type { AppSettings, RootDto, RuntimeStatus } from "../types/dto";
+  import type {
+    AppSettings,
+    PreviewCacheStatsDto,
+    RootDto,
+    RuntimeStatus,
+  } from "../types/dto";
+
+  /** Bytes per GB (binary, matching the backend's 20 * 1024^3 default). The
+   * 1:1 cache budget is edited in GB but stored/measured in bytes. */
+  const BYTES_PER_GB = 1024 * 1024 * 1024;
+
+  /** Human-readable size for the cache readout: GB once past ~1 GB, MB below
+   * (the 1:1 cache is large, but an empty/fresh cache should read "0 MB"
+   * rather than "0.00 GB"). */
+  function formatBytes(bytes: number): string {
+    if (bytes >= BYTES_PER_GB) return `${(bytes / BYTES_PER_GB).toFixed(2)} GB`;
+    return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+  }
 
   /** Same chrome split as Titlebar.svelte (UI §2.3): on macOS this window
    * is built with native decorations + Overlay traffic lights
@@ -55,6 +72,11 @@
   let settings = $state<AppSettings | null>(null);
   let removeWarnFor = $state<string | null>(null);
   let rebuildConfirm = $state(false);
+  // Previews (DESIGN-PREVIEW-POLICY.md): the 1:1 cache readout + budget knob.
+  let cacheStats = $state<PreviewCacheStatsDto | null>(null);
+  // The budget input edits GB locally; we commit (persist + re-evict) on blur
+  // so a multi-keystroke edit is one backend call, not one per digit.
+  let budgetGb = $state(20);
   let exportNote = $state("");
   let busy = $state(false);
 
@@ -80,6 +102,32 @@
     roots = await ipc.listRoots();
     runtime = await ipc.runtimeStatus();
     settings = await ipc.settingsGet();
+    // Seed the GB input from the persisted byte budget, and read the live
+    // cache size (refreshed on every open, per the design's "visible
+    // cache-size readout"). Guard the optional chain so a settings fetch that
+    // resolves null/partial (test mocks, a future thinner payload) cannot
+    // throw and abort the refresh.
+    budgetGb = Math.round(
+      (settings?.previewCacheBudgetBytes ?? 20 * BYTES_PER_GB) / BYTES_PER_GB,
+    );
+    cacheStats = await ipc.previewCacheStats();
+  }
+
+  /** Settings → Previews: commit the edited GB budget (clamped to a sane
+   * minimum so a 0 cannot wipe the cache by typo). Persists in bytes and
+   * re-evicts immediately, then refreshes the readout. */
+  async function commitBudget() {
+    const gb = Math.max(1, Math.floor(budgetGb || 0));
+    budgetGb = gb;
+    settings = await ipc.setPreviewCacheBudget(gb * BYTES_PER_GB);
+    cacheStats = await ipc.previewCacheStats();
+  }
+
+  /** Settings → Previews "Clear 1:1 cache" / "Clear all previews": SAFE (every
+   * removed artifact re-derives on next view). Refresh the readout after. */
+  async function clearCache(kind: "full" | "all") {
+    await ipc.clearPreviewCache(kind);
+    cacheStats = await ipc.previewCacheStats();
   }
 
   async function addFolder() {
@@ -265,6 +313,56 @@
     <p class="helper">
       System follows your operating system's light or dark setting.
     </p>
+  </section>
+
+  <!-- 1c. Previews (DESIGN-PREVIEW-POLICY.md): the one knob for the on-disk
+       cost of full-res 1:1 develops. Thumbnails and display previews are
+       small and always kept; only the big 1:1 artifacts get a budget. No
+       em-dashes in copy (gate: check:emdash). -->
+  <section>
+    <h2>Previews</h2>
+    <div class="row pref">
+      <span class="name">1:1 cache budget</span>
+      <input
+        type="number"
+        class="budget-input"
+        aria-label="1:1 preview cache budget in gigabytes"
+        min="1"
+        step="1"
+        bind:value={budgetGb}
+        onblur={() => void commitBudget()}
+      />
+      <span class="dim">GB</span>
+    </div>
+    <p class="helper">
+      Full resolution previews build as you zoom in and are cached on disk.
+      They are kept until the cache passes this size, then the
+      least-recently-viewed ones are removed. Removing them is always safe:
+      each one rebuilds the next time you view it, and your marks are never
+      stored in a preview.
+    </p>
+    {#if cacheStats !== null}
+      <p class="dim">
+        1:1 cache: {formatBytes(cacheStats.fullBytes)} in {cacheStats.fullFiles}
+        {cacheStats.fullFiles === 1 ? "file" : "files"} (budget {formatBytes(
+          cacheStats.budgetBytes,
+        )}). All previews on disk: {formatBytes(cacheStats.totalBytes)}.
+      </p>
+    {/if}
+    <div class="row">
+      <AckButton
+        quiet
+        label="Clear 1:1 cache"
+        doneLabel="Cleared"
+        verb={() => clearCache("full")}
+      />
+      <AckButton
+        quiet
+        label="Clear all previews"
+        doneLabel="Cleared"
+        verb={() => clearCache("all")}
+      />
+    </div>
   </section>
 
   <!-- 2. Microphone — hidden until ASR is installed (UI §2.4 / RUNTIME) -->
@@ -500,6 +598,12 @@
   .editor-input {
     flex: 1;
     min-width: 0;
+    margin-left: 8px;
+  }
+  /* The 1:1 budget is a short numeric field (a couple of digits + GB), so it
+     stays narrow rather than stretching like the editor path input. */
+  .budget-input {
+    width: 72px;
     margin-left: 8px;
   }
   /* Segmented control (System / Light / Dark): three peer buttons in a hairline

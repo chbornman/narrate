@@ -18,6 +18,7 @@ import type {
   IndicatorState,
   IngestStatus,
   JournalEntryDto,
+  PreviewCacheStatsDto,
   RebuildReportDto,
   RedactReportDto,
   RootDto,
@@ -292,6 +293,20 @@ export const setStackDisplay = (display: "jpeg" | "raw") =>
  * Empty/whitespace clears the pref back to the OS default handler. */
 export const setExternalEditor = (editor: string) =>
   invoke<AppSettings>("set_external_editor", { editor });
+/** Settings → Previews: set the 1:1 preview cache budget in BYTES
+ * (DESIGN-PREVIEW-POLICY.md). Persists and immediately re-evicts so a lowered
+ * budget reclaims disk now. Returns the updated settings. */
+export const setPreviewCacheBudget = (bytes: number) =>
+  invoke<AppSettings>("set_preview_cache_budget", { bytes });
+/** Settings → Previews cache-size readout: current 1:1 cache size + count,
+ * total previews footprint, and the configured budget. */
+export const previewCacheStats = () =>
+  invoke<PreviewCacheStatsDto>("preview_cache_stats");
+/** Settings → Previews "Clear 1:1 cache" / "Clear all previews". `kind` =
+ * "full" (just the 1:1 tier) | "all" (1:1 + display + thumb). SAFE — every
+ * removed artifact re-derives on next view. Returns files removed. */
+export const clearPreviewCache = (kind: "full" | "all") =>
+  invoke<number>("clear_preview_cache", { kind });
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 /** §10.2–10.3: the ONE consent decision — Download now / Later / Never.
  * No download starts without it; Never is remembered; skipping changes

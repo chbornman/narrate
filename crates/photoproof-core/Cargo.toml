@@ -30,6 +30,11 @@ quick-xml = { version = "0.40", default-features = false }
 rayon = "1.12.0"
 notify = "8.2.0"
 walkdir = "2.5.0"
+# Touch-on-serve for the 1:1 cache LRU (preview.rs): set a `-full.*` artifact's
+# mtime to now when it is served, so "least-recently-modified" reliably means
+# "least-recently-viewed" (atime is unreliable across the mounts we target).
+# Already in the lock tree transitively; pinned here as a direct dep.
+filetime = "0.2.29"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp", "rayon"] }
 webp = "0.3.1"
 kamadak-exif = "0.6.1"
