@@ -9,8 +9,17 @@ work lives here.
 
 ## Dogfood round 4 (founder, June 12 2026 evening — second live session)
 
-- [ ] **Search ranking is rank-flat: any note outranks a perfect CLIP
-  match** (founder, THE headline bug): "ANY saved note in the image
+- [x] **Search ranking is rank-flat: any note outranks a perfect CLIP
+  match** — landed `0907fe7` (B75): similarity-aware RRF — dense
+  (cosine) signals tilt their contribution by `w·(1/(k+rank))·(1+β·cos)`
+  (β=0.5, so a perfect match earns up to +50% over its rank baseline
+  and can BEAT, not just tie, a same-rank keyword hit); sparse bm25
+  signals stay pure RRF; S4 raised 0.5→1.0 (visual = a note's full
+  weight), S3 held at 0.5 (derived prose never outvotes own words).
+  Spec deviation in DECISIONS B75 + RETRIEVAL §5.3; regression test
+  pins the founder scenario. NOTE: weights/β are data the §12 eval
+  still owns; the search-UI overhaul will make them user-visible.
+  ORIGINAL: (founder, THE headline bug): "ANY saved note in the image
   journal is outranking even perfect semantic visual clip search."
   ROOT CAUSE FOUND (`search/hybrid.rs` FusionWeights): weighted RRF
   with k=60. S2 (note keyword FTS) and S1 (note own-words vectors) are
@@ -54,8 +63,17 @@ work lives here.
   into `tracing` while there so one sink captures everything. Surface
   the log path in the debug panel / settings for "reveal in Finder."
   (Founder, June 12 2026.)
-- [ ] **"154 RAWs left to decode" reads as stuck — it's an UNBUILT pass,
-  not a stall** (founder: "154 raws left to decode that seem stuck").
+- [ ] **Full RAW decode (1:1 preview) — PLAN WRITTEN `docs/PLAN-RAW-DECODE.md`**
+  (`ffd118a`): the founder asked to build it (not just hide the count).
+  Key finding — NO new dependency: rawler 0.7.2 already exposes WB
+  coeffs, cam→XYZ matrix, CFA, levels; we write the develop arithmetic
+  (black/scale→WB→demosaic→matrix→sRGB→gamma) as a cancellable
+  `full-raw-decode` pass draining like the embedding queue. Three founder
+  decisions open (see plan): (1) "1:1" = 2560px display artifact vs also
+  full-sensor for deep-zoom; (2) phase-1 quality bar (bilinear+WB+matrix
+  OK?); (3) decode-pool width + memory cap. ORIGINAL DIAGNOSIS:
+  "154 RAWs left to decode" reads as stuck — it's an UNBUILT pass,
+  not a stall: (founder: "154 raws left to decode that seem stuck").
   DIAGNOSED: `ingest_passes` has 154 `full-raw-decode` rows in state
   `pending`, `attempts=0`, no error — they were enqueued and NEVER
   claimed, because `ingest::claim_next` drains only `Exif` + `Preview`;
