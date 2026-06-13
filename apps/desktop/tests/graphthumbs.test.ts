@@ -12,10 +12,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   GraphThumbCache,
   nodeBaseSizePx,
+  nodeDrawRect,
   THUMB_BASE_PX,
   THUMB_DRAG_PX,
 } from "../src/lib/logic/graphthumbs";
-import { ThumbQueue } from "../src/lib/logic/thumbqueue";
+import {
+  OFFSCREEN_PRIORITY_BASE,
+  ThumbQueue,
+  viewportPriority,
+} from "../src/lib/logic/thumbqueue";
 
 describe("ThumbQueue — nearest-first scheduling", () => {
   it("pops in ascending priority (most urgent / nearest first)", () => {
@@ -201,5 +206,77 @@ describe("nodeBaseSizePx — draw-size mapping (draw + hit-test source of truth)
     });
     expect(one).toBeGreaterThanOrEqual(THUMB_BASE_PX);
     expect(huge).toBeLessThanOrEqual(64); // SUPER_MAX_PX
+  });
+});
+
+describe("nodeDrawRect — native aspect ratio (founder: not forced square)", () => {
+  it("a square image draws exactly side×side (the prior behavior)", () => {
+    expect(nodeDrawRect(34, 100, 100)).toEqual({ w: 34, h: 34 });
+  });
+
+  it("a landscape image is a WIDE rect: long edge = side, height scales down", () => {
+    // 200x100 (2:1): width caps at side, height is half.
+    expect(nodeDrawRect(40, 200, 100)).toEqual({ w: 40, h: 20 });
+  });
+
+  it("a portrait image is a TALL rect: long edge = side, width scales down", () => {
+    // 100x200 (1:2): height caps at side, width is half.
+    expect(nodeDrawRect(40, 100, 200)).toEqual({ w: 20, h: 40 });
+  });
+
+  it("the long edge is capped at side and the short edge never exceeds it", () => {
+    const wide = nodeDrawRect(50, 300, 100);
+    expect(wide.w).toBe(50); // long edge capped at side
+    expect(wide.h).toBeLessThan(50); // short edge scaled down
+    const tall = nodeDrawRect(50, 100, 300);
+    expect(tall.h).toBe(50);
+    expect(tall.w).toBeLessThan(50);
+  });
+
+  it("unknown/zero natural dims fall back to a neutral square (placeholder)", () => {
+    // Before decode the natural dims are 0; the box stays square so there is no
+    // layout jump when the aspect later resolves.
+    expect(nodeDrawRect(34, 0, 0)).toEqual({ w: 34, h: 34 });
+    expect(nodeDrawRect(34, 0, 100)).toEqual({ w: 34, h: 34 });
+    expect(nodeDrawRect(34, 100, 0)).toEqual({ w: 34, h: 34 });
+  });
+});
+
+describe("viewportPriority — visible-first thumb fill", () => {
+  const W = 800;
+  const H = 600;
+
+  it("an in-viewport node sorts strictly AHEAD of any off-screen node", () => {
+    const inView = viewportPriority(400, 300, W, H); // dead center
+    const farInView = viewportPriority(10, 10, W, H); // a corner, still on screen
+    const offScreen = viewportPriority(-500, 300, W, H); // off the left edge
+    expect(inView).toBeLessThan(offScreen);
+    expect(farInView).toBeLessThan(offScreen);
+    expect(offScreen).toBeGreaterThanOrEqual(OFFSCREEN_PRIORITY_BASE);
+  });
+
+  it("within the viewport, the center fills first (nearest-to-center wins)", () => {
+    const center = viewportPriority(400, 300, W, H);
+    const edge = viewportPriority(780, 580, W, H);
+    expect(center).toBeLessThan(edge);
+    expect(center).toBe(0); // dead center: zero distance
+  });
+
+  it("the preload margin keeps a node just off the edge in the visible band", () => {
+    // 50px past the right edge, within a 200px margin: still treated as visible.
+    const justOff = viewportPriority(W + 50, 300, W, H, 200);
+    const wayOff = viewportPriority(W + 500, 300, W, H, 200);
+    expect(justOff).toBeLessThan(OFFSCREEN_PRIORITY_BASE);
+    expect(wayOff).toBeGreaterThanOrEqual(OFFSCREEN_PRIORITY_BASE);
+  });
+
+  it("feeds the queue so visible nodes pop before off-screen ones", () => {
+    const q = new ThumbQueue();
+    q.push("offscreen", viewportPriority(-500, 300, W, H));
+    q.push("edge", viewportPriority(780, 580, W, H));
+    q.push("center", viewportPriority(400, 300, W, H));
+    expect(q.pop()).toBe("center"); // visible, nearest center
+    expect(q.pop()).toBe("edge"); // visible, farther
+    expect(q.pop()).toBe("offscreen"); // off-screen, last
   });
 });

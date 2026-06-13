@@ -50,7 +50,13 @@
     type OverlayMode,
     type TopicAttention,
   } from "../../logic/synthesis";
-  import { GraphThumbCache, nodeBaseSizePx } from "../../logic/graphthumbs";
+  import {
+    GraphThumbCache,
+    nodeBaseSizePx,
+    nodeDrawRect,
+  } from "../../logic/graphthumbs";
+  import { viewportPriority } from "../../logic/thumbqueue";
+  import { AffinityCache } from "../../logic/affinitycache";
   import {
     countAboveThreshold,
     DEFAULT_BAKE_THRESHOLD,
@@ -59,7 +65,14 @@
   } from "../../logic/topicbake";
 
   // -- topic + scope state ----------------------------------------------------
-  let topics = $state<string[]>([]);
+  // One topic SOURCE for both surfaces (founder): the graph anchors ARE the
+  // persisted Topics-tab set (ui.topics, written via ui.addTopic). A topic
+  // added in the graph shows up in the Topics sidebar, and a topic added in the
+  // tab appears as a graph anchor — no ephemeral, graph-only topic list. We
+  // derive the phrase list OLDEST-first (ui.topics is newest-first) so a fresh
+  // append lands at the END, keeping the ring's seed order stable (a new anchor
+  // does not reshuffle the existing ones; ringAnchors seeds end-stably).
+  let topics = $derived(ui.topics.map((t) => t.phrase).reverse());
   let topicInput = $state("");
   let suggestions = $state<ipc.TopicSuggestion[]>([]);
   /** v2 note-grounded auto-topics (k-means cluster labels) for the rail. These
@@ -95,6 +108,12 @@
    * detail set (every image), kept even in LOD mode so a super-node can expand
    * back into its members with their real per-image affinity. */
   let affinity = new Map<string, number[]>();
+  /** Per-(topic-set, scope, alpha) cache of the fetched AffinityReport, so
+   * re-adding a topic you just removed or re-viewing the same set does NOT
+   * re-run the backend embed+scan (founder: cache affinities for performance).
+   * The cache invalidates wholesale on a scope or alpha change (those change
+   * every row). One instance per graph view. */
+  const affinityCache = new AffinityCache<ipc.AffinityReport>();
   /** The total image count behind the current layout (M), even when the sim runs
    * over far fewer super-nodes (N = nodeCount). The status reports both. */
   let imageTotal = $state(0);
@@ -254,6 +273,10 @@
   // super-node loads ONE representative member's thumb (not all members), so the
   // load budget stays bounded at scale.
   let thumbReadyTick = $state(0);
+  /** A slack band (screen px) around the viewport: a node just off the edge
+   * still counts as "visible" for thumb prioritization, so the fill stays a step
+   * ahead of a pan instead of popping in at the edge. */
+  const PRELOAD_MARGIN = 200;
   const thumbs = new GraphThumbCache(() => {
     // A thumb finished loading: bump a tick so a settled (non-ticking) sim still
     // repaints to swap the placeholder for the image, and request a frame.
@@ -319,14 +342,28 @@
     loading = true;
     scaleNote = null;
     const sc = scope();
+    // Keep the topic-watcher's key in sync REGARDLESS of what triggered this
+    // recompute (mount, alpha, scope, or a topic change), so the $effect does
+    // not fire a duplicate recompute for the set we are about to lay out.
+    lastTopicKey = topics.join(" ");
     const t0 = performance.now();
     let report: ipc.AffinityReport;
-    try {
-      report = await ipc.topicAffinities(sc, topics, alpha);
-    } catch {
-      // A degraded/unreachable backend leaves an empty, honest layout rather
-      // than throwing under the user (the graceful M1 posture).
-      report = { images: [], visual_ready: false, annotation_ready: false };
+    // Affinity cache: a hit (same topic-set + scope + alpha as a prior view)
+    // skips the backend embed+scan entirely. A miss fetches, then stores the
+    // result so re-adding/undoing a topic is instant on the next view.
+    const cached = affinityCache.get(topics, sc, alpha);
+    if (cached !== undefined) {
+      report = cached;
+    } else {
+      try {
+        report = await ipc.topicAffinities(sc, topics, alpha);
+        affinityCache.set(topics, sc, alpha, report);
+      } catch {
+        // A degraded/unreachable backend leaves an empty, honest layout rather
+        // than throwing under the user (the graceful M1 posture). NOT cached, so
+        // a transient failure can recover on the next view.
+        report = { images: [], visual_ready: false, annotation_ready: false };
+      }
     }
     const elapsed = Math.round(performance.now() - t0);
     visualReady = report.visual_ready;
@@ -491,20 +528,42 @@
   }
 
   // -- topic mutations --------------------------------------------------------
+  // Both mutations go through the PERSISTED store (ui.addTopic / ui.removeTopic
+  // write the `topics` table), so a graph-created topic survives + appears in
+  // the Topics sidebar, and the change to ui.topics re-derives `topics` here,
+  // which the $effect below picks up to recompute the layout. We do NOT touch
+  // the local list directly anymore (it is derived) — one source of truth.
   function addTopic(phrase: string) {
     const p = phrase.trim();
     if (p === "" || topics.includes(p)) return;
-    topics = [...topics, p];
-    void recompute();
+    void ui.addTopic(p);
   }
+  /** Remove the topic at graph-order index `i` (oldest-first). Maps the index
+   * back to its persisted TopicDto id and removes it from the store. */
   function removeTopic(i: number) {
-    topics = topics.filter((_, j) => j !== i);
-    void recompute();
+    const phrase = topics[i];
+    const dto = ui.topics.find((t) => t.phrase === phrase);
+    if (dto !== undefined) void ui.removeTopic(dto.id);
   }
   function onSubmitTopic(e: SubmitEvent) {
     e.preventDefault();
     addTopic(topicInput);
     topicInput = "";
+  }
+
+  // -- pan redraw (rAF-coalesced) ---------------------------------------------
+  // Panning changes ONLY the view transform, so it needs a redraw but no
+  // physics tick. pointermove can fire faster than the display refreshes, so we
+  // coalesce: a move schedules at most one draw per frame instead of drawing
+  // synchronously on every event. This keeps a populated graph's pan smooth
+  // (founder: "panning is janky") without touching the sim or the field.
+  let panRaf = 0;
+  function requestPanDraw() {
+    if (panRaf !== 0) return;
+    panRaf = requestAnimationFrame(() => {
+      panRaf = 0;
+      draw();
+    });
   }
 
   // -- the rAF physics loop ---------------------------------------------------
@@ -595,25 +654,29 @@
     ctx.closePath();
   }
 
-  /** Two offset rounded squares BEHIND a super-node's thumbnail, so a cluster
-   * reads as a pile of images (a subtle stacked-card look). */
+  /** Two offset rounded rects BEHIND a super-node's thumbnail, so a cluster
+   * reads as a pile of images (a subtle stacked-card look). Sized to the
+   * super-node's actual drawn rectangle (halfW×halfH), so the stack matches the
+   * representative thumbnail's native aspect, not a forced square. */
   function drawCardBack(
     ctx: CanvasRenderingContext2D,
     sx: number,
     sy: number,
-    half: number,
+    halfW: number,
+    halfH: number,
     fill: string,
     stroke: string,
   ) {
+    const radius = Math.min(8, halfW, halfH);
     for (const off of [6, 3]) {
       ctx.beginPath();
       roundedRectPath(
         ctx,
-        sx - half + off,
-        sy - half - off,
-        half * 2,
-        half * 2,
-        Math.min(8, half),
+        sx - halfW + off,
+        sy - halfH - off,
+        halfW * 2,
+        halfH * 2,
+        radius,
       );
       ctx.fillStyle = fill;
       ctx.fill();
@@ -848,9 +911,6 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "11px system-ui, sans-serif";
-    // The viewport center in sim-space, so thumb loads are requested
-    // NEAREST-FIRST (the visible region fills before off-screen nodes).
-    const [cx, cy] = fromScreen(width / 2, height / 2);
     for (const n of nodes) {
       const [sx, sy] = toScreen(n.x, n.y);
       const isSuper = n.members !== undefined;
@@ -877,16 +937,30 @@
         : false;
       const effGlow = bakeActive ? (inGlow ? 1 : 0) : ov.glow;
       const side = baseSide * ov.sizeScale;
-      const half = side / 2;
 
-      // Request this node's representative thumbnail, prioritized by squared
-      // distance to the viewport center (nearest loads first). A super-node only
+      // Request this node's representative thumbnail, prioritized VISIBLE-FIRST:
+      // a node inside the viewport always loads before any off-screen node, and
+      // within the viewport the center fills first (founder: initial preview
+      // loading was slow — fill what's on screen first). A super-node only
       // requests ITS ONE rep, never all members, so the budget stays bounded.
       const rh = repHash(n);
-      const dx = n.x - cx;
-      const dy = n.y - cy;
-      thumbs.request(rh, dx * dx + dy * dy);
+      thumbs.request(rh, viewportPriority(sx, sy, width, height, PRELOAD_MARGIN));
       const img = thumbs.get(rh);
+
+      // NATIVE aspect ratio (founder: "not forced square"): once the thumb is
+      // decoded, fit it within the base SIDE so a landscape photo is a wide
+      // rounded-rect and a portrait a tall one (long edge = side, short edge
+      // scales). Until the image is known the placeholder stays a neutral square
+      // (nodeDrawRect returns side×side for unknown/zero dims). The half-extents
+      // drive both the draw box AND the hit-test, one source of truth.
+      const { w, h } = nodeDrawRect(
+        side,
+        img?.naturalWidth ?? 0,
+        img?.naturalHeight ?? 0,
+      );
+      const halfW = w / 2;
+      const halfH = h / 2;
+      const rectRadius = Math.min(8, halfW, halfH);
 
       // A node is "lit" when it carries glow (attention overlay weight, or the
       // bake's above-threshold membership) and "dimmed" when an overlay/bake is
@@ -906,20 +980,22 @@
       ctx.globalAlpha = bodyAlpha;
 
       // A LOD super-node gets a subtle STACKED-CARD backing (two offset
-      // rounded squares) so it reads as a pile of images, not a single one.
+      // rounded rects) so it reads as a pile of images, not a single one.
       if (isSuper) {
-        drawCardBack(ctx, sx, sy, half, c.superFill, c.stroke);
+        drawCardBack(ctx, sx, sy, halfW, halfH, c.superFill, c.stroke);
       }
 
-      // The thumbnail, clipped to a rounded square centered on the node. Until
-      // it loads, the placeholder DOT (the old marker) fills the same box.
+      // The thumbnail, clipped to a rounded rect at the image's NATIVE aspect,
+      // centered on the node. Until it loads, the placeholder DOT (the old
+      // marker) fills the same (square) box.
       ctx.beginPath();
-      roundedRectPath(ctx, sx - half, sy - half, side, side, Math.min(8, half));
+      roundedRectPath(ctx, sx - halfW, sy - halfH, w, h, rectRadius);
       if (img !== null) {
         ctx.save();
         ctx.clip();
-        // Cover-fit: scale the (square-ish) thumb to fill the box, center-cropped.
-        ctx.drawImage(img, sx - half, sy - half, side, side);
+        // FIT the whole thumb into the box (no crop): the box already carries
+        // the image's aspect, so a plain stretch-to-box draws it undistorted.
+        ctx.drawImage(img, sx - halfW, sy - halfH, w, h);
         ctx.restore();
       } else {
         // Placeholder: the prior dot, tinted by glow/super/drag state.
@@ -941,7 +1017,7 @@
       ctx.shadowBlur = 0;
       ctx.globalAlpha = Math.min(1, bodyAlpha + 0.2);
       ctx.beginPath();
-      roundedRectPath(ctx, sx - half, sy - half, side, side, Math.min(8, half));
+      roundedRectPath(ctx, sx - halfW, sy - halfH, w, h, rectRadius);
       ctx.strokeStyle =
         effGlow > 0
           ? c.glow
@@ -952,10 +1028,11 @@
       ctx.stroke();
       ctx.restore();
 
-      // The member-count badge on a super-node, so the aggregation stays legible
-      // even as a thumbnail (DESIGN: "a super-node's size reflects its count").
+      // The member-count badge at the super-node's top-right CORNER (the actual
+      // drawn rectangle's corner, so it tracks the native aspect), keeping the
+      // aggregation legible even as a thumbnail.
       if (isSuper) {
-        drawCountBadge(ctx, sx + half - 2, sy - half + 2, n.members!.length, c);
+        drawCountBadge(ctx, sx + halfW - 2, sy - halfH + 2, n.members!.length, c);
       }
     }
     // topic anchors (drawn on top, with labels). In an overlay mode an anchor
@@ -1020,10 +1097,12 @@
    * a move is a drag (pin the anchor / reposition the node). */
   let moved = false;
 
-  /** A node's drawn half-side in SCREEN px (its hit radius): the same base-size
-   * mapping the draw loop uses, times the overlay size scale, times zoom — so
-   * the pickable area matches exactly what is drawn, thumbnail and all. */
-  function nodeHitHalf(n: ImageNode): number {
+  /** A node's drawn half-EXTENTS (halfW, halfH) in SCREEN px: the SAME base-size
+   * + overlay-scale mapping AND the SAME native-aspect rect the draw loop uses,
+   * so the pickable rectangle matches exactly what is drawn (founder: not forced
+   * square). Reads the loaded thumb's natural dims via the cache (square
+   * placeholder until known), so the hit box tracks the visible thumbnail. */
+  function nodeHitExtent(n: ImageNode): { halfW: number; halfH: number } {
     const isSuper = n.members !== undefined;
     const base = nodeBaseSizePx({
       isSuper,
@@ -1034,20 +1113,24 @@
       overlay() !== "off"
         ? nodeOverlay(n, intensity, overlay(), overlookedByTopic)
         : { sizeScale: 1 };
-    // Drawn side is in screen px already (the box is not scaled by zoom in the
-    // draw loop); use half-side as the square's pick radius.
-    return (base * ov.sizeScale) / 2;
+    const side = base * ov.sizeScale;
+    const img = thumbs.get(repHash(n));
+    const { w, h } = nodeDrawRect(
+      side,
+      img?.naturalWidth ?? 0,
+      img?.naturalHeight ?? 0,
+    );
+    return { halfW: w / 2, halfH: h / 2 };
   }
 
   function pickNode(sx: number, sy: number): ImageNode | null {
     // Topmost-drawn wins on overlap: iterate in reverse draw order and take the
-    // first node whose drawn box contains the point (square hit-test matching the
-    // rounded-square thumbnail).
+    // first node whose drawn RECTANGLE (native aspect) contains the point.
     for (let i = nodes.length - 1; i >= 0; i--) {
       const n = nodes[i];
       const [px, py] = toScreen(n.x, n.y);
-      const half = nodeHitHalf(n);
-      if (Math.abs(px - sx) <= half && Math.abs(py - sy) <= half) return n;
+      const { halfW, halfH } = nodeHitExtent(n);
+      if (Math.abs(px - sx) <= halfW && Math.abs(py - sy) <= halfH) return n;
     }
     return null;
   }
@@ -1107,14 +1190,18 @@
   function onPointerMove(e: PointerEvent) {
     const [sx, sy] = localXY(e);
     if (panning) {
-      // Pan the view by the raw screen delta (pan is in screen px, so no zoom
-      // division). Past the threshold this counts as a real gesture.
+      // A PAN moves only the VIEW transform, not the layout: nothing physical
+      // changed, so we must NOT re-run the force sim, reheat, or recompute the
+      // influence FIELD here (that expensive splat/blur only runs on settle).
+      // We just update the pan offset and request a redraw, rAF-COALESCED so a
+      // burst of pointermove events (which can outpace the display) collapses
+      // to at most one repaint per frame — the fix for janky panning.
       const dx = sx - panning.startX;
       const dy = sy - panning.startY;
       if (Math.abs(dx) > MOVE_THRESHOLD || Math.abs(dy) > MOVE_THRESHOLD) moved = true;
       panX = panning.panX0 + dx;
       panY = panning.panY0 + dy;
-      draw();
+      requestPanDraw();
       return;
     }
     const [x, y] = fromScreen(sx, sy);
@@ -1251,6 +1338,7 @@
     })();
     return () => {
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(panRaf);
       // Detach in-flight thumb loads so a completing load can't repaint a dead
       // canvas after teardown.
       thumbs.dispose();
@@ -1263,6 +1351,22 @@
     void alpha;
     untrack(() => {
       if (tuning !== null) void recompute();
+    });
+  });
+
+  // The topic SET is now derived from the persisted store (ui.topics), so a
+  // change to it (added in the graph OR in the Topics tab) re-runs the layout.
+  // We key on the joined phrase list so only a real membership/order change
+  // retriggers, and guard the very first run (the onMount recompute already
+  // covers the initial set, and tuning===null means we are pre-load).
+  let lastTopicKey = "";
+  $effect(() => {
+    const key = topics.join(" ");
+    untrack(() => {
+      if (tuning !== null && key !== lastTopicKey) {
+        lastTopicKey = key;
+        void recompute();
+      }
     });
   });
 

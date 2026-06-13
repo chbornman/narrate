@@ -25,10 +25,13 @@
 import { thumbUrl } from "../ipc/urls";
 import { ThumbQueue } from "./thumbqueue";
 
-/** How many thumb loads may be in flight at once. Small on purpose: enough to
- * keep the pipe full without flooding the protocol handler (mirrors the grid's
- * restraint on a network volume). A tunable const, not magic at the call site. */
-const MAX_CONCURRENT = 6;
+/** How many thumb loads may be in flight at once. Raised 6 -> 12 (founder:
+ * initial preview loading was slow): a freshly-opened graph has a screenful of
+ * visible nodes whose SMALL thumbs are cheap, so a wider pipe fills the viewport
+ * noticeably faster while staying bounded (NOT the thousands-at-once flood the
+ * queue exists to prevent — the grid uses the same restraint on a network
+ * volume). A tunable const, not magic at the call site. */
+const MAX_CONCURRENT = 12;
 
 /** The per-hash load state. A node draws its placeholder dot until its entry
  * reaches "ready"; "error" settles permanently on the placeholder (no retry
@@ -209,4 +212,38 @@ export function nodeBaseSizePx(opts: {
     return Math.min(SUPER_MAX_PX, Math.max(SUPER_MIN_PX, grown));
   }
   return opts.isDragged ? THUMB_DRAG_PX : THUMB_BASE_PX;
+}
+
+// ---------------------------------------------------------------------------
+// Native-aspect draw rect (founder: "not forced square") — a node draws its
+// thumbnail at its REAL aspect ratio so a landscape photo is a wide rounded-rect
+// and a portrait is a tall one, instead of clipping every preview to a square.
+// Pure geometry so the draw loop AND the hit-test (which must match the drawn
+// rectangle, not a square) share one source of truth, and it unit-tests without
+// a 2D context.
+// ---------------------------------------------------------------------------
+
+/** The drawn width×height (px) of a node's thumbnail given its base SIDE (the
+ * `nodeBaseSizePx` value, already overlay-scaled by the caller) and the loaded
+ * image's natural pixel dimensions. The LONG edge is capped at `side` and the
+ * SHORT edge scales down by the aspect, so the long edge always reads at the
+ * intended size and the box FITS within `side`×`side` (a square photo recovers
+ * exactly `side`×`side`, the prior behavior).
+ *
+ * Until the image is decoded its natural dimensions are unknown (0); the caller
+ * passes a neutral square then (a non-positive dimension ⇒ `side`×`side`), so
+ * the placeholder box stays square until the aspect is known (no layout jump). */
+export function nodeDrawRect(
+  side: number,
+  naturalWidth: number,
+  naturalHeight: number,
+): { w: number; h: number } {
+  // Aspect unknown (not yet decoded / degenerate): a neutral square placeholder.
+  if (naturalWidth <= 0 || naturalHeight <= 0) return { w: side, h: side };
+  if (naturalWidth >= naturalHeight) {
+    // Landscape (or square): long edge = width = side, height scales down.
+    return { w: side, h: side * (naturalHeight / naturalWidth) };
+  }
+  // Portrait: long edge = height = side, width scales down.
+  return { w: side * (naturalWidth / naturalHeight), h: side };
 }
