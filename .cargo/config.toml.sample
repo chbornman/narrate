@@ -1,0 +1,22 @@
+# Shared cargo target dir - SAMPLE (committed). Copy to .cargo/config.toml and set
+# the absolute path to THIS checkout's `target/`:
+#
+#   cp .cargo/config.toml.sample .cargo/config.toml
+#   # then edit target-dir to: <absolute path to this repo>/target
+#
+# WHY: this project builds heavy native deps (ONNX Runtime via `ort`, sherpa-onnx,
+# `image`, `rawler` - hundreds of MB of compiled artifacts + bundled dylibs each).
+# The dev workflow spins up git WORKTREES under .claude/worktrees/<agent> for
+# isolated agent builds; by default each worktree builds its OWN 5-10GB target, so
+# a few concurrent worktrees blow up disk fast. Pointing every build (the main repo
+# AND the nested worktrees) at one shared target-dir makes the deps compile ONCE
+# and be reused. The worktrees sit inside the repo on disk, so cargo's
+# config-discovery walk reaches this file; an ABSOLUTE target-dir then resolves to
+# the same place from any of them (a relative path would resolve per-CWD and not
+# share). Set it to <repo>/target so the main layout is unchanged and
+# ./target/release/<bin> paths still work.
+#
+# The real .cargo/config.toml is gitignored because the absolute path is
+# machine-specific.
+[build]
+target-dir = "/ABSOLUTE/PATH/TO/photoproof/target"
