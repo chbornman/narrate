@@ -109,6 +109,18 @@ pub fn llama_server_args_mtp(
 /// floor at ~2.5 cores).
 pub const ASR_MIN_THREADS: u32 = 4;
 
+/// Default per-stream ASR language passed to the wrapper child
+/// (docs/PLAN-NEMOTRON-35-SIDECAR.md). WHY a constant and not an
+/// `Option`: the Nemotron 3.5 multilingual export expects a per-stream
+/// language string (`en` / `ja` / `auto`) and the SPIKE hit a
+/// `None-language` coin-flip class upstream, so the value must NEVER be
+/// empty. English is the product today (SPIKE forced en-US), so `en` is
+/// the floor. The CURRENT sherpa-onnx-crate child accepts-and-ignores
+/// `--lang` (same posture as `--chunk-ms`), so passing it is a no-op
+/// until a 3.5 engine that reads it ships - the live ASR path is
+/// unchanged.
+pub const ASR_DEFAULT_LANG: &str = "en";
+
 /// §3.2 — the owned ASR wrapper child (B67). The wrapper binary speaks
 /// the same wire contract as the reference server (raw f32 frames in,
 /// result JSON out, "Done" sentinel) but mints finals from the LAST
@@ -118,6 +130,11 @@ pub const ASR_MIN_THREADS: u32 = 4;
 /// as the manifest pins them — those entries are flat (path == basename),
 /// so these basenames match the path-preserving on-disk layout that
 /// download.rs writes under models_dir/<id>/<file.path>.
+///
+/// `--lang` carries the per-stream language for the staged Nemotron 3.5
+/// export (PLAN-NEMOTRON-35-SIDECAR §4); it defaults to [`ASR_DEFAULT_LANG`]
+/// and is inert for the current English model (the sherpa child ignores
+/// it), so it never changes today's behavior.
 pub fn asr_wrapper_args(model_dir: &Path, chunk_ms: u32, threads: u32) -> Vec<String> {
     // The endpoint rules are VOICE DIALS (DESIGN-TUNING-LOOP.md): they live in
     // `tuning().voice` so a committed `[voice]` config actually changes the
@@ -149,6 +166,11 @@ pub fn asr_wrapper_args(model_dir: &Path, chunk_ms: u32, threads: u32) -> Vec<St
         (voice.rule2 as f32).to_string(),
         "--rule3".into(),
         (voice.rule3 as f32).to_string(),
+        // Per-stream language for the staged Nemotron 3.5 export
+        // (PLAN-NEMOTRON-35-SIDECAR §4): never empty (the SPIKE's
+        // None-language class), inert for the current English child.
+        "--lang".into(),
+        ASR_DEFAULT_LANG.to_string(),
     ]
 }
 
@@ -262,5 +284,17 @@ mod tests {
             "rule2 from tuning: {joined}"
         );
         assert!(joined.contains("--rule3 20"), "rule3 from tuning: {joined}");
+    }
+
+    /// The per-stream language flag is ALWAYS passed and defaults to `en`
+    /// (PLAN-NEMOTRON-35-SIDECAR §4/§6): never empty (the SPIKE's
+    /// None-language class) and inert for the current English child, so
+    /// this is a no-op today but in place for the 3.5 engine swap.
+    #[test]
+    fn asr_args_pin_the_per_stream_language_default() {
+        let args = asr_wrapper_args(&PathBuf::from("/models/asr"), 560, 4);
+        let joined = args.join(" ");
+        assert!(joined.contains("--lang en"), "default lang: {joined}");
+        assert_eq!(ASR_DEFAULT_LANG, "en", "english is the product floor");
     }
 }
