@@ -27,7 +27,7 @@ will not load, a native crash) lands at Tier 0 quietly. So "robust fallbacks" me
 | **ASR** (voice -> text) | Nemotron-speech-streaming-en-0.6b (enc/dec/joiner) | int8 | sherpa-onnx | `pp-asr-server` child |
 | **VAD** (speech gating) | silero-vad v5 (~2 MB) | int8 | ONNX Runtime (`ort`) | in-process |
 | **Text embed** (search S1/S3) | EmbeddingGemma-300m (768-dim) | q8/int8 | `ort` | in-process |
-| **Image+text CLIP** (search S4) | DFN5B ViT-H-14-378 (1024-dim) | int8 today; **FP16 in progress** | `ort` | in-process |
+| **Image+text CLIP** (search S4) | DFN5B ViT-H-14-378 (1024-dim) | int8 (CPU fallback) + **FP16 (validated; CoreML 8.77x)** | `ort` | in-process |
 | Reranker | none (RRF fusion only) | - | - | - |
 
 Three runtimes, three different acceleration stories.
@@ -53,10 +53,10 @@ VAD is tiny -> CPU forever. CLIP + text-embed are the ones that want the GPU/ANE
 
 | platform | EP | runs on | status |
 |---|---|---|---|
-| macOS | **CoreML** | ANE / GPU | WIRED off-by-default (P2, `PHOTOPROOF_ORT_COREML`); BLOCKED on FP16 single-file models - int8 + the external-data split both fail on CoreML. **FP16 conversion in progress.** |
+| macOS | **CoreML** | ANE / GPU | **VALIDATED June 14: SHIP-WITH-FP16.** The inlined FP16 visual tower LOADS under CoreML (int8 + the external-data split both failed); measured **8.77x** over CPU (18 -> 162 img/min), near-lossless (cosine vs CPU min 0.9956). Caveat: a ~16.5 min FIRST-LOAD compile - production must set `.with_model_cache_dir(...)` to amortize it. Still wired off-by-default (`PHOTOPROOF_ORT_COREML`); production model-selection not yet wired. `docs/SPIKE-COREML.md`. |
 | Windows / Linux + NVIDIA | **CUDA** | GPU | PLANNED (the "Margo" desktop). The same FP16 ONNX serves it; wiring is the analog of the CoreML EP (an `ort` `cuda` feature + EP registration). |
 | Windows | **DirectML** | GPU | OPTION (any DX12 GPU, no CUDA needed). Not yet evaluated. |
-| any | CPU | CPU | **LIVE default.** CLIP ~3 s/image (~18 img/min) - the embedding bottleneck. |
+| any | CPU | CPU | **LIVE default.** CLIP ~3 s/image (~18 img/min) - the embedding bottleneck (CoreML-FP16 lifts it 8.77x; pending production wiring). |
 | (Vulkan) | n/a | - | NOT available via `ort`. Would need a different runtime (ggml / ncnn). Later / cross-platform-GPU item. |
 
 WHY FP16 (not int8) for the EPs: GPUs + the Neural Engine run FP16 fast and accept
@@ -101,8 +101,13 @@ CUDA/CoreML providers if ever wanted. Default: stay on CPU.
 
 ## Open / in-flight (the framework's remaining wiring)
 
-- **[in progress]** FP16 single-file CLIP + text-embed -> unblock CoreML on Mac (the
-  embedding bottleneck). `docs/SPIKE-COREML.md`.
+- **[DONE June 14]** FP16 single-file CLIP conversion -> CoreML VALIDATED at **8.77x**
+  over CPU, near-lossless (SHIP-WITH-FP16). Models staged locally; recipe + cosines +
+  measurements in `docs/SPIKE-COREML.md`. The int8 dir stays as the CPU fallback.
+- **[NEXT - production wiring]** select the FP16 model + register the CoreML EP by
+  platform in production (not just the env knob), set `.with_model_cache_dir(...)` to
+  amortize the ~16.5 min first-load compile, and re-export the text-embed tower to FP16
+  the same way. This is the embedding-bottleneck fix going live.
 - **[planned]** CUDA EP wiring for the `ort` embedders (Margo NVIDIA desktop) - same
   FP16 model, the CoreML analog.
 - **[planned]** DirectML EP option (Windows GPUs without CUDA).

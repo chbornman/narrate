@@ -233,14 +233,20 @@ each lands, exact API, effort/risk/win/validation) is **docs/PLAN-PERF.md**.
 Ordered by the plan below. Validate the spikes; do not act on unverified
 magnitudes.
 
-- [ ] **CoreML EP spike (the embedding bottleneck)** - HIGHEST. We run `ort`
-  CPU-only; CLIP embedding measured ~20 img/min. Enable ONNX Runtime's CoreML
-  execution provider (the **MLProgram** backend, NOT legacy NeuralNetwork which
-  casts FP16 and can flip predictions) to run on Apple Silicon GPU/ANE. Immich
-  shipped this in v2.2.0 (PR #17718). SPIKE: measure images/min AND embedding
-  accuracy for the DFN5B ViT-H int8 + EmbeddingGemma vs the CPU baseline; also
-  bake-off Apple MLX / Core ML / GGML. (CoreML-EP-applies-to-CLIP was refuted 1-2;
-  validate before committing.)
+- [~] **CoreML EP spike (the embedding bottleneck)** - SPIKE DONE June 14, verdict
+  **SHIP-WITH-FP16** (`docs/SPIKE-COREML.md` + `crates/photoproof-connectors/tests/
+  coreml_spike.rs`, merged `17255f5`). The int8 tower could not load under CoreML (the
+  397-file external-data split), but an INLINED FP16 visual tower (converted from the
+  Immich FP32, same lineage as our int8) LOADS and runs **8.77x** faster than CPU
+  (18 -> 162 img/min), near-lossless (cosine vs CPU min 0.9956; vs FP32 min 0.99998).
+  MLProgram + CPUAndNeuralEngine. ONE caveat: a ~16.5 min FIRST-LOAD compile, so
+  production must set `.with_model_cache_dir(...)`. REMAINING (the production-wiring
+  packet, see RUNTIME-MATRIX "NEXT"): select the FP16 model + register CoreML by
+  platform in production (not just the `PHOTOPROOF_ORT_COREML` env knob), wire the
+  cache dir, and re-export the text-embed tower to FP16 the same way. ORIGINAL: we run
+  `ort` CPU-only; enable ONNX Runtime's CoreML EP (MLProgram, NOT legacy
+  NeuralNetwork which casts FP16 and can flip predictions). Immich shipped this in
+  v2.2.0 (PR #17718).
 - [ ] **fast_image_resize + PPG demosaic** - cheapest certain win. Swap the
   `image`-crate CatmullRom resize for **`fast_image_resize`** (NEON SIMD, Lanczos3
   ~7x: 62ms vs 434ms, beats libvips) in the preview tiers; switch

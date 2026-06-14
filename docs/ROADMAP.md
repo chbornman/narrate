@@ -65,8 +65,8 @@ The ML brain lights up here. Grouped by theme.
 - **Retrieval eval harness** - built and unit-tested; awaiting the founder's real golden query set to gate weights
 
 ### Execution providers (the GPU wiring) - see `docs/RUNTIME-MATRIX.md`
-- FP16 single-file CLIP + text-embed export (unblocks CoreML) - **conversion in progress now**
-- CoreML EP activation on macOS (wired off-by-default; gated on the FP16 model)
+- FP16 single-file CLIP export + CoreML - **VALIDATED June 14: 8.77x over CPU, ship-with-FP16** (`docs/SPIKE-COREML.md`)
+- CoreML EP production wiring on macOS - select FP16 model by platform + `.with_model_cache_dir` (amortize the ~16.5 min first compile); re-export text-embed to FP16
 - CUDA EP for the `ort` embedders (the NVIDIA "Margo" desktop)
 - DirectML EP option (Windows GPUs without CUDA) - not yet evaluated
 - Supervisor auto-detect: extend llama.cpp's hardware-pick + graceful fallback to the embedders
