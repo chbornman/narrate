@@ -29,6 +29,14 @@ toml = "0.8"
 # exact rc this was written against is load-bearing.
 ort = { version = "2.0.0-rc.12", features = ["half", "coreml"] }
 half = "2"
+
+[features]
+# NVIDIA GPU path (the Ryzen 9900X + RTX 5080 "margo" desktop): pulls ort's
+# CUDA + TensorRT execution providers. OFF by default - the macOS/CoreML + the
+# CPU builds never link CUDA/TensorRT. Built + tested ONLY on the NVIDIA machine
+# (`cargo build -p photoproof-connectors --features nvidia`). The same single-
+# file FP16 model that CoreML validated serves the TensorRT/CUDA EPs.
+nvidia = ["ort/cuda", "ort/tensorrt"]
 # tokenizer.json loading for the in-process ort embedders (EmbeddingGemma /
 # Qwen3 / DFN5B textual). default-features off: we only deserialize a
 # pretrained tokenizer.json, never train, so the heavy training/http deps
