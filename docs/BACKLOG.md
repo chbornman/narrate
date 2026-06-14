@@ -447,6 +447,13 @@ magnitudes.
   nowhere - live ASR path untouched) + a guard test. GO = a crate release
   carrying 3.5 + the language binding; then flip tiers, bump the crate,
   wire `en`/`auto`, run validation. See the plan for the full delta.
+  UPDATE (June 14): 3.5 ALREADY LANDED via a DIFFERENT path - the
+  `parakeet-rs` engine behind `engine-parakeet` (`docs/PLAN-NEMOTRON-35-SIDECAR.md`),
+  whose §7.4 latency/RSS A/B PASSED on both machines (see LANDED). So 3.5 is
+  shipping-ready today without the crate. This B74 crate-watch now narrows to
+  a LATER CONSOLIDATION: if/when the k2-fsa sherpa-onnx Rust crate ships 3.5,
+  evaluate retiring the younger `parakeet-rs` engine for the mature crate
+  (int8, lighter RAM) - a bench-off, not a blocker.
 - [ ] **Audiobook WER stress harness** (founder idea, June 2026): run a
   LONG known-transcript recording through the full pipeline - a LibriVox
   public-domain audiobook chapter (librivox.org) with its Project

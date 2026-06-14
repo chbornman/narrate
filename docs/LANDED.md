@@ -6,6 +6,35 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 14 2026 - Nemotron 3.5 ASR via the parakeet-rs engine
+
+- [x] **Nemotron 3.5 ASR engine** (`engine-parakeet`) - merge `27d7a7f`, dead-code
+  gate fix `498e5a1`. The 3.5 streaming model serves our exact `pp-asr-server` WS
+  protocol via the published `parakeet-rs` crate (pure Rust over `ort`, CPU EP),
+  bypassing the lagging k2-fsa sherpa-onnx crate (still 1.13.2, pre-3.5). `main.rs`
+  split into a generic WS loop + an `Engine` trait; `engine_sherpa.rs` is the
+  byte-for-byte DEFAULT, `engine_parakeet.rs` the opt-in. Needs its OWN model
+  layout (a directory of `config.json` + `encoder.onnx`(+`.data`, FP32 ~2.45 GB) +
+  `decoder_joint.onnx` + `tokenizer.model`), so a second staged manifest entry
+  (`nemotron-3.5-asr-streaming-0.6b-parakeet`, real SHAs, `tiers: vec![]`). The
+  engine owns chunking (560 ms), endpointing (ported CAPTURE §6.3 trailing-silence,
+  since parakeet-rs has no rule1/2/3), and B67 (accumulates incremental text). All
+  reversible: feature flag + tier flip, default build pulls no parakeet-rs.
+  `docs/PLAN-NEMOTRON-35-SIDECAR.md` §10.
+- [x] **§7.4 latency/RSS A/B gate - PASSED** - harness `scripts/asr-ab.sh`
+  (`2762193`+`63f742e`+`ae6da08`), portable across M1 (macOS `ru_maxrss`) and margo
+  (Linux `/proc` `VmHWM`); peak RSS measured via the kernel high-water mark because
+  `ps rss` under-reports mmap'd FP32 weights >10x. One clean streamed Alice ch1 pass
+  per engine, both machines. RESULT: 3.5-via-parakeet is REAL-TIME everywhere (M1
+  4.50x / 9900X 7.75x RTF; sherpa int8 4.11x / 15.57x - so parakeet is SLOWER than
+  int8 on the strong x86 CPU but never near the real-time floor), at +1.3 GB peak
+  RAM (FP32 ~2.2 GB vs int8 ~0.9-1.1 GB, mic-armed only), buying WER 1.25%
+  LibriSpeech with native punctuation + caps + multilingual. Default stays int8
+  sherpa until the founder flips the tier. `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11.
+- [x] **Cross-machine CLIP CUDA re-measure** - RTX 5080 CUDA EP (sm_120 onnxruntime
+  via `cuda-dynamic`) re-validated at **62.69x** over CPU (0.73 -> 45.6 img/s, FP16
+  DFN5B, cosine 0.9998), refreshing the prior 54.47x. `docs/RUNTIME-MATRIX.md`.
+
 ## June 14 2026 - Performance plan (PLAN-PERF.md execution)
 
 - [x] **P1 preview-tier fast_image_resize** - `b1422a1`. Swapped the image-crate

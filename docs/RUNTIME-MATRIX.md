@@ -49,10 +49,10 @@ are over the CPU/int8 fallback for that seam.
 | seam | best result so far | status | source |
 |---|---|---|---|
 | **CLIP image embed** (the bottleneck) | M1 Pro CoreML FP16 = **8.77x** (18 -> 162 img/min), near-lossless | **SHIPPED**, flipped on the dev machine | `docs/SPIKE-COREML.md` |
-| **CLIP image embed** | RTX 5080 **TensorRT FP16 = 85.79x** (41 -> 3635 img/min), cosine 0.99994 (CUDA alone = 54.47x) | **VALIDATED** (both rungs) | `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
+| **CLIP image embed** | RTX 5080 **TensorRT FP16 = 85.79x** (41 -> 3635 img/min), cosine 0.99994; CUDA alone **62.69x** (re-measured 2026-06-14, 0.73 -> 45.6 img/s; was 54.47x) | **VALIDATED** (both rungs) | `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
 | **Text embed** (EmbeddingGemma) | int8/CPU is BEST everywhere measured; CoreML LOSES (0.48-0.64x) | CPU shipped; CUDA whole-graph re-measure TBD | `docs/SPIKE-COREML-TEXT.md`, `docs/SPIKE-MLX-COREML-TEXT.md` |
 | **LLM** (Gemma 4) | Metal (Mac) / CUDA (NVIDIA); Gemma 4 MTP = 1.4-2.98x but CUDA-ONLY | MTP staged for the 5080; laptop stays plain E2B | `docs/PLAN-GEMMA-MTP.md` |
-| **ASR** (Nemotron 0.6b) | CPU by design (real-time, frees the GPU) | shipped; 3.5 upgrade staged, NO-GO pending crate | `docs/PLAN-NEMOTRON-35.md` |
+| **ASR** (Nemotron 0.6b / 3.5) | CPU by design (real-time, frees the GPU). 3.5-via-`parakeet-rs` A/B'd real-time on BOTH machines (M1 4.50x / 9900X 7.75x), WER 1.25% + punctuation, +1.3 GB RAM | shipped (int8); **3.5 engine LANDED behind `engine-parakeet`, §7.4 gate PASSED**, tier flip pending founder | `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11 |
 | **VAD** (silero) | CPU always (~2ms/chunk, tiny) | shipped | - |
 | **Cross-platform GPU** (non-Apple/non-NVIDIA) | DirectML EP (Windows DX12) + WebGPU EP (strategic) | planned; NOT raw Vulkan (`ort` has no Vulkan EP) | `docs/PLAN-VULKAN.md` |
 
@@ -83,7 +83,7 @@ experience. Speedups are over that seam's CPU fallback.
 | **LLM** (Gemma 4, llama.cpp) | **CUDA** + MTP variant (1.4-2.98x; CUDA-only) | **Metal** - plain E2B (MTP REGRESSES 11-28% on Metal) | CPU | LLM features dark; notes + search intact |
 | **CLIP image** (DFN5B, `ort`) | **TensorRT FP16 = 85.79x** (3635 img/min, cosine 0.99994); CUDA alone = 54.47x | **CoreML FP16** - **8.77x** (162 img/min), near-lossless; SHIPPED | **CPU int8** (~18-41 img/min) | semantic image search -> keyword |
 | **Text embed** (EmbeddingGemma, `ort`) | **CUDA FP16** - TBD (whole-graph; worth re-measuring) | **CPU int8** - BEST (CoreML/MLX lose; ANE takes ~3% of graph) | **CPU int8** - BEST | semantic search -> keyword |
-| **ASR** (Nemotron 0.6b, sherpa) | **CPU** by design (frees the GPU) | **CPU** by design | **CPU** by design | voice dark; journal intact |
+| **ASR** (Nemotron 0.6b int8 / 3.5 parakeet) | **CPU** by design - int8 15.57x or 3.5-parakeet 7.75x RTF (both real-time) | **CPU** by design - int8 4.11x or 3.5-parakeet 4.50x RTF | **CPU** by design | voice dark; journal intact |
 | **VAD** (silero, `ort`) | **CPU** always | **CPU** always | **CPU** always | n/a (tiny) |
 | Windows DX12 GPU (any tier) | **DirectML FP16** (CLIP), CUDA if NVIDIA | n/a | DirectML if GPU present | same floor |
 
@@ -187,8 +187,18 @@ path) so a crash cannot lose an annotation.
 `spec/RUNTIME.md` S6.2: CPU EP by default on every tier; "CPU-resident ASR is a
 FEATURE, not a fallback" - a 0.6B streaming model is real-time on laptop CPUs at int8,
 and keeping ASR off the GPU removes the worst VRAM contention (live mic vs the LLM) by
-construction. The Nemotron 3.5 upgrade is STAGED but a NO-GO until the sherpa-onnx Rust
-crate ships it (`docs/PLAN-NEMOTRON-35.md`). GPU optional via config; default: CPU.
+construction. GPU optional via config; default: CPU.
+
+**Nemotron 3.5 upgrade - LANDED behind `engine-parakeet` (2026-06-14).** The 3.5
+streaming model now serves our exact WS protocol via the `parakeet-rs` engine inside
+`pp-asr-server` (CPU EP), bypassing the lagging sherpa-onnx crate. The §7.4 latency/RSS
+gate PASSED on both target machines (`scripts/asr-ab.sh`): real-time everywhere (M1
+4.50x / 9900X 7.75x RTF), WER **1.25%** LibriSpeech with native punctuation +
+capitalization + multilingual, at the cost of ~+1.3 GB peak RAM (FP32 weights, ~2.2 GB
+vs int8 ~0.9-1.1 GB) only while the mic is armed. The default ASR path stays the int8
+sherpa-onnx-crate child (byte-for-byte) until the founder flips the feature + manifest
+tier - both one-line reversible. The two engines co-exist behind one process boundary
+(a crash in either costs only the armed mic). `docs/PLAN-NEMOTRON-35-SIDECAR.md` §10-11.
 
 ## Precision strategy (why each format)
 
@@ -208,8 +218,10 @@ crate ships it (`docs/PLAN-NEMOTRON-35.md`). GPU optional via config; default: C
   degrades to keyword (still works).
 - **Text-embed:** **CPU-int8 IS the best path** (CoreML/MLX rejected; CUDA whole-graph
   TBD) -> if even CPU fails / model absent, semantic search degrades to keyword.
-- **ASR:** CPU-int8 (by design) -> ASR disabled (voice dark, journal unaffected). Model
-  order (`spec/RUNTIME.md`): multilingual 3.5 (staged) -> English 0.6b -> disabled.
+- **ASR:** CPU (by design) -> ASR disabled (voice dark, journal unaffected). Two engines
+  behind one process: 3.5-via-`parakeet-rs` FP32 (LANDED, `engine-parakeet`, default
+  OFF) and the English-0.6b int8 sherpa child (default). Model order
+  (`spec/RUNTIME.md`): multilingual 3.5 -> English 0.6b -> disabled.
 - **VAD:** CPU (always; tiny).
 
 ## The new perf frontier (the bottleneck moved)
@@ -242,8 +254,11 @@ These are the next perf items, not yet built.
 - **[TBD]** CUDA whole-graph text-embed re-measure on the 5080.
 - **[planned]** DirectML EP (Windows DX12 GPUs); **[watch]** WebGPU EP (cross-platform).
   `docs/PLAN-VULKAN.md`.
-- **[staged, NO-GO]** Nemotron 3.5 ASR upgrade - blocked on the sherpa-onnx Rust crate.
-  `docs/PLAN-NEMOTRON-35.md`.
+- **[LANDED, gate PASSED]** Nemotron 3.5 ASR via `parakeet-rs` (`engine-parakeet`, CPU).
+  §7.4 latency/RSS A/B clears on both machines (M1 4.50x / 9900X 7.75x RTF, WER 1.25%,
+  +1.3 GB RAM); default stays int8 sherpa until the founder flips the tier. Reversible.
+  `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11. (The crate-bump path - `docs/PLAN-NEMOTRON-35.md`
+  - stays the long-term option once the sherpa-onnx Rust crate ships 3.5.)
 - **[perf]** re-bench `min(cores, 8)` on the desktop + batch the GPU embed (above).
 - **[planned, founder]** per-model capture-pause: once embedders run on a GPU EP, RELAX
   the mic-armed pause for GPU embed passes (a GPU embed no longer contends with CPU

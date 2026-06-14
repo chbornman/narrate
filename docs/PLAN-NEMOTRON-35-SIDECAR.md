@@ -391,4 +391,44 @@ engine serving our exact WS protocol on CPU — is met and reversible.
 `cargo fmt` / `clippy -D warnings` / `test` are green for BOTH the default
 (`engine-sherpa`) and `--no-default-features --features engine-parakeet`
 builds.
+
+## 11. §7.4 GATE COMPLETE - cross-machine latency/RSS A/B (2026-06-14)
+
+The §7.4 latency + peak-RSS gate, run on BOTH target machines through the
+reproducible `scripts/asr-ab.sh` harness: ONE clean streamed pass of the
+Alice ch1 corpus (~1046 s audio), RTF = audio_s / wall_s, peak RSS = the
+kernel high-water mark (macOS `ru_maxrss` via `/usr/bin/time -l`; Linux
+`VmHWM` from `/proc/<pid>/status`) - which counts the mmap'd FP32
+external-data that `ps rss` under-reports by >10x.
+
+| machine | engine | RTF | per-chunk decode | peak RSS |
+|---|---|---|---|---|
+| M1 Pro (ARM, CPU) | sherpa int8 | **4.11x** | ~136 ms | **1.10 GB** |
+| M1 Pro (ARM, CPU) | parakeet 3.5 fp32 | **4.50x** | ~125 ms | **2.17 GB** |
+| Ryzen 9900X (x86, CPU) | sherpa int8 | **15.57x** | ~36 ms | **0.87 GB** |
+| Ryzen 9900X (x86, CPU) | parakeet 3.5 fp32 | **7.75x** | ~72 ms | **2.28 GB** |
+
+Read:
+
+- **Both engines clear real-time on both machines** (worst case M1 sherpa
+  4.11x; every cell >= 4x faster than the audio is long). The §3.2
+  CPU-by-design budget holds for 3.5 - no GPU needed.
+- **Latency: parakeet EDGES sherpa on the M1** (4.50x vs 4.11x) and stays
+  comfortably real-time on the desktop (7.75x); sherpa int8 SCREAMS on the
+  9900X (15.57x). So parakeet trades some headroom on a strong x86 CPU but
+  never approaches the real-time floor anywhere.
+- **Memory is the real trade**: parakeet's FP32 weights peak at ~2.2-2.3 GB
+  vs sherpa int8's ~0.9-1.1 GB - about +1.2-1.4 GB, and only while the mic
+  is armed (the ASR child is spawned per capture session, killed on disarm).
+- **Accuracy is the win (§10)**: parakeet 3.5 = WER **1.25%** LibriSpeech /
+  5.4% Alice with NATIVE punctuation + capitalization + multilingual, vs the
+  English-only int8 transducer with none.
+
+**Verdict: the §7.4 gate PASSES.** 3.5-via-parakeet is real-time on both
+targets and within a sane desktop memory budget; the accuracy + punctuation
++ multilingual upgrade is worth ~1.3 GB of mic-armed RAM. The swap stays
+behind the `engine-parakeet` feature + the unflipped manifest tier (one-line
+reversible) until the founder calls the flip - this A/B clears the technical
+bar for it. Harness: `scripts/asr-ab.sh` (portable; same script ran on both
+machines).
 </content>
