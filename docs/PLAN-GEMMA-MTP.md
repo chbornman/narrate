@@ -4,10 +4,12 @@ Goal: a lossless 1.4-2.98x decode speedup for the `LanguageModel` seam
 (query-parse, summaries, captions) by adding Gemma 4 **MTP** (multi-token
 prediction) speculative decoding to the vendored `llama-server`.
 
-Status: research + SAFE code-side draft landed (manifest entries, launch
-flags, config note, tests). The two founder-owned steps — **vendoring an
-updated `llama.cpp` binary** and the **shell-side Metal gate wiring** — are
-called out explicitly below. Nothing here changes the shipped default path.
+Status: research + code-side wiring landed AND the shell-side Metal gate is
+now implemented + tested (§5a). Activation is blocked on exactly ONE
+founder-owned step: **vendoring a post-#24282 `llama.cpp` binary** (the exact
+build/validate recipe is in §5a). Nothing here changes the shipped default
+path — the plain E2B argv is pinned byte-identical, and Apple Silicon always
+runs the plain target.
 
 ---
 
@@ -102,9 +104,9 @@ Mapping onto the tier system (RUNTIME §6.2): both MTP entries are
 precedent. The tier-1 floor (the laptop) is untouched; the MTP entries are
 *offered*, never auto-applied (§6.2: "Offered, never auto-applied").
 
-**The Metal gate (founder-owned shell wiring).** The pure argv builder
+**The Metal gate (NOW WIRED — see §5a).** The pure argv builder
 `runtime::launch::llama_server_args_mtp` takes `Option<&MtpDraft>`. The
-supervisor/shell resolves that option:
+supervisor resolves that option in `supervisors::mtp_draft_for`:
 - macOS / Apple Silicon (Metal) → **`None`** (strip MTP, run the plain
   target) regardless of the model id named, per #23752.
 - CUDA / Vulkan + the model entry ships an `mtp-` file → `Some(MtpDraft{
@@ -136,6 +138,95 @@ Landed:
 3. **`crates/photoproof-connectors/src/config.rs`** — doc note: the MTP ids
    are config-selectable; no model-pick logic changes (any manifest id flows
    through the existing plan; tier/install gating already enforced).
+
+## 5a. What is now CODE-WIRED vs what the founder must do (the binary)
+
+The Metal gate is no longer "founder-owned shell wiring TODO" — it is
+implemented and tested in the supervisor. Activation is now blocked on ONE
+thing: vendoring the post-#24282 `llama-server` binary (the recipe is below).
+
+**CODE-WIRED (done on this branch, `cargo fmt`/`clippy`/`test` green):**
+
+1. **The Metal gate** — `apps/desktop/src-tauri/src/supervisors.rs`,
+   `mtp_draft_for(entry, dir) -> Option<MtpDraft>`:
+   - `cfg!(target_os = "macos")` => `None`. Apple Silicon strips MTP
+     regardless of the model id named (the plain target runs; no failure, no
+     11-28% Metal slowdown, #23752). The macOS build never even checks for
+     the drafter file.
+   - non-Apple (CUDA / Vulkan) AND the chosen entry ships an `mtp-*.gguf`
+     drafter => `Some(MtpDraft{ draft_model, n_max: 4 })`.
+   - A model with NO `mtp-` file (the plain E2B default, E4B) => `None` on
+     every platform — byte-identical legacy argv.
+   `llama_spec` now calls `launch::llama_server_args_mtp(.., mtp.as_ref())`
+   and excludes the `mtp-` drafter from the TARGET-gguf predicate (the
+   `*-mtp` entries ship target + drafter + mmproj side by side).
+
+2. **The model-pick / manifest tier** — the two `*-mtp` entries are OFFERED
+   at `tiers: [2]`, `role: llm-alt` ("offered, never auto-applied", RUNTIME
+   §6.2). The discrete-GPU box (RTX 5080 = tier 2) is the only place they
+   appear in a consent sum; selecting one is a `config.llm.model` edit, which
+   the runtime plan already gates by tier+install. No per-tier auto-default
+   was added — that would violate the llm-alt precedent; the existing
+   mechanism (offer at the tier, user/config selects) is the intended pick.
+
+3. **Tests pinning the wiring** (all green on macOS, where the gate fires
+   `None`; the non-Apple branches are asserted under `cfg!(not(macos))`):
+   - `the_plain_e2b_default_argv_is_byte_identical_to_the_legacy_path` — the
+     shipped default's argv equals `llama_server_args(..)` exactly.
+   - `mtp_draft_for_resolves_the_pinned_drafter_when_offered` — drafter
+     resolution + the Metal short-circuit.
+   - `llama_spec_gates_mtp_flags_by_platform` — whole-path: target is the
+     Q4_K_XL (never the drafter), MTP flags present iff non-Apple.
+
+**FOUNDER MUST DO — the blocker to activation: vendor the binary.**
+
+Nothing lights MTP up until a post-#24282 `llama-server` sits where the
+supervisor finds it. The current pinned spike build (brew, b9590) predates
+#24282 and will FAIL to load the `gemma4-assistant` drafter arch (fails
+closed: the server refuses to start, the supervisor degrades the LLM
+feature, journaling is unaffected — RUNTIME §7). Exact recipe:
+
+```bash
+# On margo (Arch, Ryzen 9900X + RTX 5080, CUDA 13.3) — the CUDA build that
+# proves the drafter arch loads. Do this on each platform that runs MTP.
+ssh caleb@margo.local 'bash -lc "
+  set -e
+  cd ~/src
+  rm -rf llama.cpp && git clone https://github.com/ggml-org/llama.cpp
+  cd llama.cpp
+  # MUST be after 2026-06-08 (post-#24282 = the gemma4-assistant drafter
+  # arch + E2B/E4B support). Pin the exact commit you vendor.
+  git log --oneline -1   # record this SHA in the manifest/vendoring notes
+  cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --config Release -j --target llama-server
+  ./build/bin/llama-server --version   # sanity
+"'
+```
+
+Validate it actually loads the drafter (this is the go/no-go for the
+binary), then place/vendor it:
+
+```bash
+# Smoke test: the drafter arch must load and the MTP flags must be accepted.
+./build/bin/llama-server \
+  --model    <models>/gemma-4-e2b-it-qat-q4_k_xl-mtp/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf \
+  --model-draft <models>/gemma-4-e2b-it-qat-q4_k_xl-mtp/mtp-gemma-4-E2B-it.gguf \
+  --spec-type draft-mtp --spec-draft-n-max 4 \
+  --mmproj   <models>/gemma-4-e2b-it-qat-q4_k_xl-mtp/mmproj-F16.gguf \
+  -ngl 99 -fa on --reasoning-budget 0 --port 8080
+# Must reach /health Ready and log a draft acceptance rate (~0.45 E2B /
+# ~0.70 dense). Then the supervisor finds it via:
+#   1. beside the app executable (bundle: ship it as a resource sibling), or
+#   2. on PATH (dev): copy build/bin/llama-server somewhere on $PATH.
+```
+
+Per RUNTIME §3.1 the binary is vendored per-platform; this is a VERSION BUMP
+of that existing machinery, not new infrastructure. macOS does NOT need a new
+binary for MTP (the gate strips it there) — only the CUDA/Vulkan platforms
+that will actually run a `*-mtp` model. Once a validated post-#24282 binary
+is in place, MTP is live the next `apply_supervisor_plan` converge: select a
+`*-mtp` id in `config.llm.model` on the tier-2 box and the supervisor emits
+the `--spec-type draft-mtp` argv automatically.
 
 ## 6. Expected speedup
 
