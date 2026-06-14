@@ -1,5 +1,25 @@
 # PLAN-ORT-BLACKWELL — GPU inference on the RTX 5080 (Blackwell sm_120 + CUDA 13.3)
 
+> ## VALIDATED June 14 2026 - 54x on the 5080. Option #1 (the cuda13 tarball) WORKED.
+> The official `onnxruntime-linux-x64-gpu_cuda13-1.26.0.tgz` carries real sm_120 SASS
+> (`cuobjdump`: `sm_75 sm_80 sm_86 sm_89 sm_90 sm_100 sm_120`). cuDNN was already on the
+> system (`/usr/lib/libcudnn.so`). Pointing `ORT_DYLIB_PATH` at its `libonnxruntime.so.1.26.0`
+> + the `cuda-dynamic` feature, the FP16 CLIP visual tower ran on the 5080 at **37.65 img/s
+> (2259 img/min) vs 0.69 img/s (41 img/min) CPU = 54.47x**, near-lossless (cosine 0.9998
+> mean, 0.9973 min). That is **14x the M1's CoreML path** and ~125x the M1 CPU. CUDA ALONE -
+> TensorRT fell through (`fail_silently`, no libnvinfer on `LD_LIBRARY_PATH`), so a TensorRT
+> install (Fallback B) adds the last ~1.5x.
+>
+> Exact working invocation (margo):
+> ```bash
+> ORT_DIR=~/onnxruntime-linux-x64-gpu-1.26.0   # extracted from the cuda13 tgz
+> ORT_DYLIB_PATH=$ORT_DIR/lib/libonnxruntime.so.1.26.0 \
+> LD_LIBRARY_PATH=$ORT_DIR/lib:/opt/cuda/lib64:/usr/lib \
+>   cargo test -p photoproof-connectors --features cuda-dynamic --test cuda_spike -- --ignored --nocapture
+> ```
+> REMAINING: wire `ORT_DYLIB_PATH` + the `cuda-dynamic` build into the desktop app launch on
+> NVIDIA (the analog of the macOS CoreML flip) + optionally the TensorRT EP for ~1.5x more.
+
 Status: READY-TO-EXECUTE on margo (Arch Linux, Ryzen 9900X, RTX 5080, CUDA 13.3,
 driver 610, `paru`, sudo). No code change required — PhotoProof's `cuda-dynamic`
 feature already loads a system `libonnxruntime.so` via `ORT_DYLIB_PATH`

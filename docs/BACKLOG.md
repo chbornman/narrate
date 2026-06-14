@@ -225,16 +225,20 @@ of them posture changes the founder made deliberately.
   A per-model pause policy instead of "pause all background." Gated on the GPU EP
   landing. (Founder, June 14 2026.)
 
-- [ ] **CUDA execution provider for the `ort` embedders (Ryzen 9900X + RTX 5080
-  desktop)** (founder, June 14 2026: "backlog CUDA"): the analog of the macOS CoreML
-  path for the powerful NVIDIA desktop. The SAME single-file FP16 model serves it
-  (CLIP done; EmbeddingGemma fp16 pending the text-embed spike) - wiring is an `ort`
-  `cuda` feature + EP registration + extending the per-model gating in
-  `OrtEmbedder::clip` (today `cfg!(macos) && id.ends_with("-fp16")`) to also pick CUDA
-  on NVIDIA. The 5080 (Blackwell, 16 GB) can also run a HIGHER tier (bigger LLM, more
-  concurrency). MUST be built + measured ON the 5080 machine (cannot validate from the
-  M1 Pro). llama.cpp already does CUDA for the LLM; this brings the embedders up to
-  match. See `docs/RUNTIME-MATRIX.md` target-hardware. (Founder, June 14 2026.)
+- [~] **CUDA execution provider for the `ort` embedders (Ryzen 9900X + RTX 5080
+  desktop)** - VALIDATED June 14 2026: the FP16 CLIP runs on the 5080 at **54.47x**
+  over CPU (2259 vs 41 img/min, near-lossless cosine 0.9998). The per-model NVIDIA
+  gating (`OrtEmbedder::clip` -> `Accel::Nvidia` -> the TensorRT/CUDA ladder, behind
+  the `cuda`/`tensorrt`/`cuda-dynamic` features) + the `cuda_spike` harness are
+  committed. The Blackwell (sm_120) blocker (no prebuilt onnxruntime kernels) was
+  solved with the official **cuda13 onnxruntime tarball** (real sm_120 SASS) loaded
+  via `ort/load-dynamic` + `ORT_DYLIB_PATH` (recipe + result in
+  `docs/PLAN-ORT-BLACKWELL.md`). REMAINING: (a) wire `ORT_DYLIB_PATH` + the
+  `cuda-dynamic` build into the desktop app launch on NVIDIA (the analog of the macOS
+  CoreML flip); (b) the TensorRT EP for the last ~1.5x (install libnvinfer); (c)
+  re-measure EmbeddingGemma on CUDA (it takes the whole transformer graph, unlike
+  CoreML). The 5080 can also run a higher tier (bigger LLM + Gemma 4 MTP, see
+  PLAN-GEMMA-MTP). (Founder, June 14 2026.)
 
 - [ ] **Cross-platform GPU path for the `ort` embedders (non-Apple, non-NVIDIA)**
   (founder, June 14 2026: "and Vulkan too") - CORRECTED framing, see `docs/PLAN-VULKAN.md`:

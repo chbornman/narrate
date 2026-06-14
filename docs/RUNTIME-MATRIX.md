@@ -50,7 +50,7 @@ models). The two CURRENT target machines, both cutting-edge-GPU focused:
 | model | M1 Pro (best) | Ryzen 9900X + RTX 5080 (best) | CPU fallback |
 |---|---|---|---|
 | **LLM** (Gemma 4 E2B q4_0, llama.cpp) | **Metal** (GPU) | **CUDA** (GPU) | CPU -> LLM features dark |
-| **CLIP** (DFN5B, `ort`) | **CoreML FP16** (ANE/GPU) - DONE, **8.77x** over CPU, near-lossless (COCO nDCG 0.8212 vs int8 0.8225) | **CUDA FP16** - PLANNED (same single-file FP16 model, `ort` `cuda` EP) | CPU int8 -> keyword search |
+| **CLIP** (DFN5B, `ort`) | **CoreML FP16** (ANE/GPU) - DONE, **8.77x** over CPU, near-lossless (COCO nDCG 0.8212 vs int8 0.8225) | **CUDA FP16** - VALIDATED **54x** on the RTX 5080 (2259 vs 41 img/min, cosine 0.9998; same FP16 model via `cuda-dynamic` + the cuda13 onnxruntime, sm_120). TensorRT EP would add ~1.5x more | CPU int8 -> keyword search |
 | **Text-embed** (EmbeddingGemma, `ort`) | **CPU int8** - BEST here (CoreML measured 0.48-0.64x SLOWER: only ~3% of the graph partitions to the ANE, the transformer body runs CPU anyway; `docs/SPIKE-COREML-TEXT.md`) | **CUDA FP16** - TBD (CUDA takes the whole graph unlike CoreML; measure on the 5080) | CPU int8 -> keyword search |
 | **ASR** (Nemotron 0.6b, sherpa) | **CPU** by design | **CPU** by design | smaller model -> voice dark |
 | **VAD** (silero, `ort`) | **CPU** always (~2ms/chunk) | **CPU** always (~2ms/chunk) | n/a (tiny) |
