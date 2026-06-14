@@ -167,10 +167,13 @@ work lives here.
   in CI over .svelte template regions / string literals) so they don't
   creep back. (Founder, June 12 2026.)
 
-## Performance / SOTA (audit June 13 2026 - see docs/PERF-AUDIT.md)
+## Performance / SOTA (audit June 13 2026)
 
-Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). Ordered
-by impact. Validate the spikes; do not act on unverified magnitudes.
+Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). The
+findings live in **docs/PERF-AUDIT.md**; the dependency-ordered build plan (where
+each lands, exact API, effort/risk/win/validation) is **docs/PLAN-PERF.md**.
+Ordered by the plan below. Validate the spikes; do not act on unverified
+magnitudes.
 
 - [ ] **CoreML EP spike (the embedding bottleneck)** - HIGHEST. We run `ort`
   CPU-only; CLIP embedding measured ~20 img/min. Enable ONNX Runtime's CoreML
@@ -198,10 +201,11 @@ by impact. Validate the spikes; do not act on unverified magnitudes.
   Interim: move the existing sim into a Web Worker so it stops blocking. Full:
   WebGL render (Sigma.js) + GPU/Barnes-Hut O(N log N) layout (cosmos.gl scales to
   1M+). Pairs with the existing graph-perf work.
-- [ ] **Off-main-thread thumbnail decode + grid virtualization** (gated by WKWebView
-  check). Decode thumbs via `createImageBitmap` in a Web Worker (ImageBitmap is
-  transferable -> post back for drawImage) and virtualize the grid (render only
-  visible cells).
+- [ ] **Off-main-thread thumbnail decode** (small/optional, gated). CORRECTION from
+  the recon: the grid is ALREADY virtualized (`gridlayout.ts` visible-window + DOM
+  pool) and `Thumb.svelte` already uses `<img decoding="async">`, so this is a
+  control upgrade, not a fix. Optional: `createImageBitmap` in a Worker. Do only if
+  scroll-decode jank is actually measured. (See P7 in PLAN-PERF.md.)
 - [ ] **USearch HNSW at scale** - DEFERRED, scale-triggered. Brute-force int8
   MRL-512 is CORRECT now (negligible vs HNSW under ~100k per arXiv 2409.06464).
   Trigger: when a library crosses ~tens of thousands of images, benchmark the
