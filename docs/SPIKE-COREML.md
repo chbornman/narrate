@@ -328,6 +328,16 @@ production wiring should also ensure adequate scratch/cache disk.
 
 ### Production wiring - status (June 14, 2026)
 
+> FLIPPED on the M1 Pro dev machine (June 14). The eval HELD - COCO-1k retrieval
+> on the fp16/CoreML space is statistically identical to int8/CPU: **nDCG@10 0.8212
+> vs 0.8225, R@10 0.9572 vs 0.9568, MRR 0.7797 vs 0.7817** (deltas < 0.3%, R@10 up).
+> So the default was flipped on this machine: per-model CoreML gating + the fp16
+> manifest entry are committed; this machine's `installed.json` + `config.toml`
+> select fp16 (the desktop app now runs CLIP on CoreML, re-embedding the library
+> under the fp16 space on next launch). Revert = delete `config.toml`. Remaining for
+> ALL users: host the model (3), CUDA EP for the 5080 (`docs/RUNTIME-MATRIX.md`),
+> and the EmbeddingGemma fp16 re-export.
+
 The measurement justified graduating CoreML+fp16 on macOS. The CODE-side wiring
 that does not need infra or a vector-space decision is now LANDED; the remaining
 steps are founder/infra-gated (hosting + the re-embed eval). Status per step:
@@ -344,25 +354,28 @@ steps are founder/infra-gated (hosting + the re-embed eval). Status per step:
    (`coreml_cache_dir` + `build_session_with_coreml`). Active whenever CoreML is
    on (today the `PHOTOPROOF_ORT_COREML` env knob). Unit-tested; the CPU default
    is byte-identical (the cache is only touched on the CoreML branch).
-3. **[FOUNDER - infra] Host the fp16 model + add a manifest entry.** The fp16
-   model was converted LOCALLY; it is not hosted, so the downloader (SHA-pinned,
-   consent-gated) cannot fetch it yet. To distribute: host the three files and add
-   a `ModelEntry { id: "...__dfn5b-fp16", ... }` to `runtime/manifest.rs`. The
-   local SHA-256 + sizes (ready to pin once hosted):
+3. **[PARTIAL - manifest done, hosting pending] manifest entry + host.** The fp16
+   `ModelEntry` is now in `runtime/manifest.rs` (real local SHAs below, nominal
+   repo). So the planner runs it where the files are present + `installed.json`
+   lists it (dev machines stage locally). REMAINING for other users: HOST the three
+   files at a real URL + re-pin (the immich repo serves fp32, not this single file).
 
    | file | bytes | sha256 |
    |---|---|---|
    | `visual/model.onnx`     | 1265962399 | `e30e7613f2cdf1eda55fa685b467e1e04e261f20c5a15d22238682189e45ef99` |
    | `textual/model.onnx`    | 708726647  | `f2cc1e79707f394373083d26abd6a51a039e319cb1bd47c65a47f3786ba368d2` |
    | `textual/tokenizer.json`| 3642073    | `6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35` |
-4. **[FOUNDER - flip] Prefer fp16+CoreML on macOS + graduate the env knob to a
-   config field**, with int8+CPU as the fallback (the `RuntimePlan` selection in
-   `runtime/plan.rs`). This is the default-flip; gated on step 3 + step 5.
-5. **[FOUNDER - eval] Re-embed nDCG check.** A re-embed under the fp16 vectors is
-   NOT required for correctness (cosine vs the int8/CPU space ~0.999), but run the
-   COCO golden nDCG on the fp16 space before flipping the default, since the stored
-   vectors were embedded under int8/CPU. The eval rig can do this NOW against the
-   local fp16 model (step 1 makes the id buildable).
+4. **[DONE - per-model gating] CoreML chosen per model.** `OrtEmbedder::clip`
+   enables CoreML iff `cfg!(macos) && model_id.ends_with("-fp16")`; the int8 CLIP +
+   the EmbeddingGemma text embedder stay CPU STRUCTURALLY (no global env knob), so
+   int8 never hits the pathological CoreML compile. The env knob still force-enables
+   it for the spike harness. This machine is flipped via `config.toml` (model = the
+   fp16 id); a config FIELD to replace the env knob for other users is the remaining
+   graduation. CUDA on the 5080 is the analog (planned).
+5. **[DONE - eval HELD] Re-embed nDCG check.** Ran the COCO-1k golden nDCG on the
+   fp16/CoreML space vs the int8/CPU baseline: nDCG 0.8212 vs 0.8225, R@10 0.9572 vs
+   0.9568, MRR 0.7797 vs 0.7817 - identical within noise (R@10 up). Confirmed the
+   space-change is retrieval-safe; the flip proceeded.
 
 So: the speedup is wired and usable on this machine (env knob -> CoreML -> cached
 compile); shipping it to all users needs the founder to host the model (3) and run

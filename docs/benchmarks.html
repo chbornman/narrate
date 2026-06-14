@@ -76,6 +76,16 @@
 
 <div class="note"><b>Honest scope:</b> COCO photos carry no notes, so this measures PURE VISUAL retrieval (the CLIP S4 signal). The fusion knobs (how much to weight your written notes vs. the visual match) do not move a single-signal ranking, so they cannot be tuned here. Tuning that balance needs a library with REAL notes - and the current dogfood library's notes are test junk, so that benchmark is not yet meaningful. Visual retrieval is benchmarkable today; notes-fusion tuning waits on a real reviewed library.</div>
 
+<h3>FP16 / CoreML retrieval parity (June 14 2026)</h3>
+<p>This same COCO-1k harness was the gate for switching the CLIP embedder from int8/CPU to <b>FP16 on CoreML</b> (Apple Neural Engine / GPU), which runs <b>8.77x faster</b> (18 to 162 img/min). The question: does the faster path retrieve as well? The 1000 images were re-embedded under FP16/CoreML and the 5002 caption queries re-run:</p>
+<table>
+  <tr><th>signal</th><th class="n">int8 / CPU</th><th class="n">FP16 / CoreML</th><th class="n">delta</th></tr>
+  <tr><td>nDCG@10</td><td class="n">0.8225</td><td class="n">0.8212</td><td class="n">-0.16%</td></tr>
+  <tr><td>Recall@10</td><td class="n">0.9568</td><td class="n">0.9572</td><td class="n">+0.04%</td></tr>
+  <tr><td>MRR</td><td class="n">0.7817</td><td class="n">0.7797</td><td class="n">-0.26%</td></tr>
+</table>
+<p>Statistically identical - the deltas are pure noise (Recall@10 even ticked up). FP16 is near-lossless (cosine vs the fp32 source 0.99998; CoreML vs CPU 0.9987), so the 8.77x speedup costs nothing in retrieval quality. This cleared the gate to flip the default to FP16/CoreML on the M1 Pro. See <a href="SPIKE-COREML.md">SPIKE-COREML.md</a>.</p>
+
 <h2>Voice - transcription (LibriSpeech)</h2>
 <p class="lede">The standard ASR benchmark, built from public-domain audiobooks: 40+ readers, clean per-utterance reference transcripts, a dev split to tune on and a test split to report on. Utterances are joined with a 0.5s silence gap so the endpointer has real boundaries to find. The metric is gating-cost = gated WER minus raw WER, isolating pipeline truncation from the model's own error.</p>
 <h3>Result (LibriSpeech dev-clean, 3-chapter sweep subset)</h3>

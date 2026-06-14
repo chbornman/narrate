@@ -244,12 +244,17 @@ magnitudes.
   CoreML compiled-model cache (`.with_model_cache_dir`, beside each tower) + the
   `...__dfn5b-fp16` model spec (`ort_embedder.rs`/`model_specs.rs`, gate green, CPU
   default byte-identical) - so the env-knob CoreML path now compiles once not per
-  launch, and the fp16 id is buildable by the eval rig. REMAINING (founder/infra,
-  see SPIKE-COREML "Production wiring - status"): (a) HOST the fp16 model + add a
-  `runtime/manifest.rs` entry (SHAs recorded in the spike doc); (b) prefer
-  fp16+CoreML on macOS in `runtime/plan.rs` + graduate the env knob to a config
-  field; (c) the COCO golden-nDCG re-embed eval before flipping the default; (d)
-  re-export EmbeddingGemma to FP16 too. ORIGINAL: we run
+  launch, and the fp16 id is buildable by the eval rig. EVAL HELD + FLIPPED ON THE
+  M1 PRO June 14: COCO-1k nDCG 0.8212 (fp16/CoreML) vs 0.8225 (int8/CPU), R@10 up,
+  MRR within 0.3% - retrieval-safe. Per-model CoreML gating
+  (`OrtEmbedder::clip`, macOS + `-fp16` only; int8/text stay CPU) + the fp16
+  `manifest.rs` entry are committed; this machine's `installed.json` + `config.toml`
+  select fp16, so the desktop app runs CLIP on CoreML (re-embeds the library under
+  the fp16 space on next launch; revert = delete config.toml). REMAINING for ALL
+  users: (a) HOST the fp16 files at a real URL + re-pin (it is locally converted);
+  (b) graduate the env knob to a config FIELD; (c) CUDA EP for the Ryzen/5080
+  desktop (`docs/RUNTIME-MATRIX.md` target-hardware); (d) re-export EmbeddingGemma
+  to FP16. ORIGINAL: we run
   `ort` CPU-only; enable ONNX Runtime's CoreML EP (MLProgram, NOT legacy
   NeuralNetwork which casts FP16 and can flip predictions). Immich shipped this in
   v2.2.0 (PR #17718).
