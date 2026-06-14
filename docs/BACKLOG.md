@@ -236,14 +236,19 @@ of them posture changes the founder made deliberately.
   M1 Pro). llama.cpp already does CUDA for the LLM; this brings the embedders up to
   match. See `docs/RUNTIME-MATRIX.md` target-hardware. (Founder, June 14 2026.)
 
-- [ ] **Vulkan GPU path for the `ort` embedders (cross-platform fallback)** (founder,
-  June 14 2026: "and Vulkan too"): the GPU path for machines that are NEITHER Apple
-  (CoreML) NOR NVIDIA/CUDA - AMD/Intel GPUs on Linux/Windows, the broad "other GPU"
-  bucket. BIGGER lift: `ort`/ONNX Runtime has no Vulkan EP for these models, so it needs
-  a DIFFERENT runtime (ggml / ncnn / wonnx) or a DirectML bridge (Windows DX12) - not a
-  drop-in like CoreML/CUDA. llama.cpp already vendors a Vulkan backend for the LLM; the
-  embedders are the gap. Lower priority than CUDA (the named target desktop is NVIDIA).
-  Pairs with the lower-power-hardware backlog. (Founder, June 14 2026.)
+- [ ] **Cross-platform GPU path for the `ort` embedders (non-Apple, non-NVIDIA)**
+  (founder, June 14 2026: "and Vulkan too") - CORRECTED framing, see `docs/PLAN-VULKAN.md`:
+  ONNX Runtime has NO Vulkan EP and never shipped one, so "raw Vulkan" is the wrong
+  target. The real answers: (a) **DirectML EP** (Windows, any DX12 GPU - AMD/Intel/NVIDIA)
+  - cheapest near-term win, exists in `ort` behind the `directml` feature, runs FP16 (not
+  int8 - matches our split exactly), consumes the SAME single-file FP16 model, mirrors the
+  CoreML/CUDA gating; Windows-only. (b) **WebGPU EP** (Dawn -> Vulkan on Linux / DX12 on
+  Win / Metal on Mac) - the strategic ONE-EP-for-all-non-Apple/NVIDIA bet, exists in `ort`
+  (`webgpu` feature), op coverage looks right, but younger/needs a real-hardware spike
+  before shipping. (c) ncnn / Burn-wgpu / vendor EPs (OpenVINO-Intel, MIGraphX-AMD) only
+  as a last resort for Linux-AMD - each costs a conversion away from ONNX. Sequencing:
+  DirectML when the Windows bucket opens -> WebGPU-EP spike in parallel. Lower priority
+  than the M1 (done) + 5080/CUDA (in progress) targets. (Founder, June 14 2026.)
 
 ## Performance / SOTA (audit June 13 2026)
 
