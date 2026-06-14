@@ -6,6 +6,38 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 13 2026 - Tuning loop runs on REAL data
+
+- [x] **Close the no-models gap; first real search sweep** - merge `f64db81` (work
+  `18eb55c`) + fix `c7ddb79`. The eval rig (`pp-retrieval-eval`/`pp-sweep search`)
+  ran KEYWORD-ONLY - `retrieval_eval::evaluate` built a rig with the embedder slots
+  `None`, so the vector signals (S1 annotation, S4 CLIP) were dark and the sweep
+  tuned a different search than the app ships. Lifted the pinned model-id->layout +
+  `OrtEmbedder` construction into a shared `photoproof-connectors/src/model_specs.rs`
+  (app delegates, behavior unchanged); added `EvalRig` (text+clip embedders + the
+  `.ppvec` store, model ids resolved read-only off the live `vectors` table) and a
+  `--models-dir` flag. `evaluate` now embeds the query and runs the SAME `HybridRig`
+  the app builds when models are present; graceful keyword-only fallback keeps the
+  headless CI green. Rig built once, re-fused per config. REAL RUN against the live
+  library (414 images, 414 image_clip + 31 annotation vectors, 7 journal-anchored
+  golden queries): keyword-only nDCG@10 0.286 -> model-backed 0.815 (vectors nearly
+  TRIPLE ranking quality). Sweep moved the metric (s4/beta genuinely matter), winner
+  on this small set s4=0.5/beta=0.3 nDCG 0.894 - indicative only (tiny journal-
+  anchored set; the s4<1.0 preference is this text-heavy query mix, NOT a default
+  change). K14 propose-only honored.
+- [x] **Real audiobook WER corpus (LibriSpeech) + multi-reader voice sweep** -
+  merge `4d1995e` (work `04131c0`), `scripts/fetch-voice-corpus.sh`. Staged the
+  standard ASR benchmark (public-domain audiobooks) as the WER corpus: dev-clean (97
+  chapters, tune on) + test-clean (87 chapters, report on), 40+ readers, per-chapter
+  continuous wav + reference transcript + manifest. CRITICAL: utterances are joined
+  with a 0.5s silence gap so the VAD gate closes and the endpoint rules (rule2 etc.)
+  actually fire - without it a [voice] sweep over rule2/hysteresis would be a no-op
+  (caught + fixed during the merge; an earlier gap-less staging was wrong). Extended
+  `pp-sweep voice` with `--corpus-manifest`: scores token-weighted CORPUS WER (total
+  edits / total reference tokens across all chapters) so one short chapter cannot
+  swing the rank; ascending gating-cost; single-file form preserved. Gitignored
+  corpus; only the staging script + manifest format committed. (Founder, June 13 2026.)
+
 ## June 13 2026 - Automated testing/tuning loop
 
 See `docs/DESIGN-TUNING-LOOP.md` for the architecture (`sweep -> score -> rank ->
