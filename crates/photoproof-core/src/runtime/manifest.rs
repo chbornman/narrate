@@ -448,17 +448,17 @@ pub fn compiled_manifest() -> Manifest {
             // config.json declares left_context=56 + vocab 13087 — the
             // multilingual-3.5 markers the plan cites.
             //
-            // OFFERED ONLY when pp-asr-server is built `--features
-            // engine-parakeet` AND this tier flips to vec![1, 2]. STAGED
-            // (tiers: vec![]) until the WER/latency gate (§7) passes: the
-            // downloader never enqueues it, the consent card never sums it.
-            // Flipping the tier + building the parakeet feature is the live
-            // swap; both revert in one line each (fully reversible — the
-            // sherpa-onnx-crate child stays the default).
+            // LIVE (2026-06-14): the §7 WER/latency gate PASSED on both target
+            // machines (PLAN-NEMOTRON-35-SIDECAR §11), so this is now the tier-1
+            // default ASR. pp-asr-server is built `--features engine-parakeet`,
+            // which compiles BOTH engines and runtime-dispatches by model layout
+            // (config.json => parakeet, encoder.int8.onnx => sherpa), so the int8
+            // English transducer below stays a config-selectable lighter fallback.
+            // Revert = point `[asr] model` back at the int8 id + drop this tier.
             ModelEntry {
                 id: "nemotron-3.5-asr-streaming-0.6b-parakeet".into(),
                 role: "asr".into(),
-                tiers: vec![],
+                tiers: vec![1, 2],
                 license: License {
                     name: "NVIDIA Open Model License".into(),
                     url: "https://developer.download.nvidia.com/licenses/nvidia-open-model-license-agreement-june-2024.pdf".into(),
@@ -710,15 +710,16 @@ mod tests {
                 assert!(!f.revision.is_empty(), "immutable revision pin");
             }
         }
-        // Tier-1 bundle with the B73 embedder pins REAL: E2B (3.91 GB) + ASR
-        // (0.66 GB) + DFN5B int8 (3.95 GB, graph + ~400 external-data files) +
-        // EmbeddingGemma-300m q8 (0.33 GB, the text-embedder default) +
-        // DFN5B-fp16 (1.98 GB, the single-file CoreML CLIP, also offered at
-        // tiers 1-2) = 10_830_366_615 bytes. Qwen3-alt is tier-2-only, so it is
+        // Tier-1 bundle with the B73 embedder pins REAL: E2B (3.91 GB) + int8
+        // English ASR (0.66 GB, the fallback engine) + DFN5B int8 (3.95 GB, graph
+        // + ~400 external-data files) + EmbeddingGemma-300m q8 (0.33 GB, the
+        // text-embedder default) + DFN5B-fp16 (1.98 GB, the single-file CLIP) +
+        // Nemotron 3.5 parakeet (2.59 GB, the LIVE default ASR since 2026-06-14) =
+        // 13_424_936_294 bytes. Qwen3-alt + the MTP variants are tier-2-only, so
         // NOT counted here. Exact, not a range — every byte traces to a pinned
         // file. (The fp16 bundle byte is nominal: dev machines stage it locally;
         // a hosted download URL is a backlog item, see the entry comment.)
-        assert_eq!(m.total_bytes_at(1), 10_830_366_615, "tier-1 pinned sum");
+        assert_eq!(m.total_bytes_at(1), 13_424_936_294, "tier-1 pinned sum");
         assert_eq!(m.total_bytes_at(0), 0, "tier 0 offers NOTHING");
     }
 
@@ -848,8 +849,9 @@ mod tests {
             n35.files.iter().map(|f| f.bytes).sum::<u64>(),
             "total_bytes is the live file sum"
         );
-        // The live ASR path is the 560 ms-lineage entry and is the ONLY asr
-        // model offered at the tier-1 floor — the staged entry must not leak in.
+        // The tier-1 floor now offers TWO asr models: the parakeet 3.5 default
+        // and the int8 English transducer (the lighter runtime-dispatch fallback).
+        // The staged sherpa-layout 3.5 entry (this test's subject) must NOT leak in.
         let offered_asr: Vec<&str> = m
             .offered_at(1)
             .iter()
@@ -858,25 +860,28 @@ mod tests {
             .collect();
         assert_eq!(
             offered_asr,
-            vec!["nemotron-speech-streaming-en-0.6b-560ms-int8"],
-            "only the current ASR model is offered; 3.5 stays staged"
+            vec![
+                "nemotron-speech-streaming-en-0.6b-560ms-int8",
+                "nemotron-3.5-asr-streaming-0.6b-parakeet",
+            ],
+            "the int8 fallback + parakeet 3.5 default are offered; the staged sherpa-layout 3.5 is not"
         );
     }
 
-    /// PLAN-NEMOTRON-35-SIDECAR: the parakeet-layout 3.5 entry is a SECOND
-    /// staged pin (parakeet-rs loads a different model format than sherpa).
-    /// Fully resolvable (real SHAs/revision), but offered at NO tier until
-    /// the gate passes AND the engine-parakeet feature is built — so it
-    /// never ships by accident and the live sherpa path is untouched.
+    /// PLAN-NEMOTRON-35-SIDECAR §11: the parakeet-layout 3.5 entry is the LIVE
+    /// default ASR (the §7.4 gate passed on both target machines). Offered at
+    /// tiers 1-2, role asr, with the parakeet-rs directory layout the engine
+    /// runtime-dispatches to (config.json => parakeet vs encoder.int8.onnx =>
+    /// sherpa). The int8 English transducer stays a config-selectable fallback.
     #[test]
-    fn nemotron_35_parakeet_entry_is_pinned_but_staged() {
+    fn nemotron_35_parakeet_is_the_live_default_asr() {
         let m = compiled_manifest();
         let pk = m
             .model("nemotron-3.5-asr-streaming-0.6b-parakeet")
             .expect("parakeet-layout 3.5 entry present");
-        assert!(pk.is_pinned(), "real SHAs — resolvable when GO lands");
+        assert!(pk.is_pinned(), "real SHAs");
         assert_eq!(pk.role, "asr");
-        assert!(pk.tiers.is_empty(), "STAGED: offered at no tier");
+        assert_eq!(pk.tiers, vec![1, 2], "LIVE: offered at the tier-1 floor");
         // The parakeet-rs directory layout (NOT the four-file sherpa export):
         // config.json + encoder.onnx + .data + decoder_joint.onnx + tokenizer.
         assert_eq!(pk.files.len(), 5);
@@ -894,10 +899,10 @@ mod tests {
             pk.files.iter().map(|f| f.bytes).sum::<u64>(),
             "total_bytes is the file sum"
         );
-        // Never offered at the tier-1 floor (the staging guarantee).
+        // It IS offered at the tier-1 floor now (the live default).
         assert!(
-            !m.offered_at(1).iter().any(|e| e.id == pk.id),
-            "parakeet 3.5 must not leak into the offered set"
+            m.offered_at(1).iter().any(|e| e.id == pk.id),
+            "parakeet 3.5 is offered at tier 1"
         );
     }
 

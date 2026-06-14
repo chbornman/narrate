@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.photoproof.desktop",
   "build": {
-    "beforeDevCommand": "cargo build -p pp-asr-server && npm run dev",
+    "beforeDevCommand": "cargo build -p pp-asr-server --features engine-parakeet && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cargo build --release -p pp-asr-server && npm run build",
+    "beforeBuildCommand": "cargo build --release -p pp-asr-server --features engine-parakeet && npm run build",
     "frontendDist": "../dist"
   },
   "app": {

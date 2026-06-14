@@ -36,13 +36,13 @@ model = "claude-sonnet-latest"                  # structured output.
 
 [asr]
 backend = "local-sherpa"     # "local-sherpa" | "disabled"
-model = "nemotron-speech-streaming-en-0.6b-560ms-int8"
+model = "nemotron-3.5-asr-streaming-0.6b-parakeet"   # int8 English fallback: nemotron-speech-streaming-en-0.6b-560ms-int8
 chunk_ms = 560               # 80 | 160 | 560 | 1120 (model-supported)
 device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]
 backend = "local-ort"        # "local-ort" | "openai-compatible"
-model = "ViT-H-14-378-quickgelu__dfn5b"   # or ViT-H-14-quickgelu__dfn5b (224px)
+model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file; CPU-only fallback: ViT-H-14-378-quickgelu__dfn5b (int8)
 device = "auto"              # "auto" | "cpu" | "gpu"
 
 [embedder.text]              # the text-embedding model (§3.3): annotation
@@ -77,12 +77,12 @@ fn spec_literal_block_parses_with_no_warnings() {
     assert_eq!(c.llm.anthropic.model, "claude-sonnet-latest");
 
     assert_eq!(c.asr.backend, AsrBackend::LocalSherpa);
-    assert_eq!(c.asr.model, "nemotron-speech-streaming-en-0.6b-560ms-int8");
+    assert_eq!(c.asr.model, "nemotron-3.5-asr-streaming-0.6b-parakeet");
     assert_eq!(c.asr.chunk_ms, 560);
     assert_eq!(c.asr.device, AsrDevice::Cpu);
 
     assert_eq!(c.embedder.backend, EmbedderBackend::LocalOrt);
-    assert_eq!(c.embedder.model, "ViT-H-14-378-quickgelu__dfn5b");
+    assert_eq!(c.embedder.model, "ViT-H-14-378-quickgelu__dfn5b-fp16");
     assert_eq!(c.embedder.device, EmbedDevice::Auto);
     assert_eq!(c.embedder.text.backend, TextEmbedderBackend::LocalOrt);
     assert_eq!(c.embedder.text.model, "embeddinggemma-300m-q8");

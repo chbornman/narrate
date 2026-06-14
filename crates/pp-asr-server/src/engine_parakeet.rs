@@ -53,15 +53,37 @@ const SILENCE_PEAK: f32 = 0.01;
 /// passes `--model-dir`; if absent (an older launcher that only knows the
 /// four-file flags), fall back to `--encoder`'s parent — the manifest lays
 /// each ASR export under its own `models_dir/<id>/` root, so the encoder's
-/// directory IS the model dir.
+/// directory IS the model dir. The export's files are nested one level down
+/// (the HF repo subdir is preserved on download), so descend to wherever
+/// `config.json` actually lives — `from_pretrained` needs that exact dir.
 fn model_dir(a: &Args) -> PathBuf {
-    if !a.model_dir.is_empty() {
-        return PathBuf::from(&a.model_dir);
+    let base = if !a.model_dir.is_empty() {
+        PathBuf::from(&a.model_dir)
+    } else {
+        Path::new(&a.encoder)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    resolve_to_config(base)
+}
+
+/// Descend `base` to the directory holding `config.json`: `base` itself if it
+/// has one, else the first immediate subdir that does (the nested HF layout),
+/// else `base` unchanged (let `from_pretrained` surface the real error).
+fn resolve_to_config(base: PathBuf) -> PathBuf {
+    if base.join("config.json").is_file() {
+        return base;
     }
-    Path::new(&a.encoder)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join("config.json").is_file() {
+                return p;
+            }
+        }
+    }
+    base
 }
 
 /// Load the Nemotron model on the CPU EP and set the per-stream language.

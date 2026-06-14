@@ -336,7 +336,14 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             backend: AsrBackend::LocalSherpa,
-            model: "nemotron-speech-streaming-en-0.6b-560ms-int8".into(),
+            // Best validated default: Nemotron 3.5 via the parakeet-rs engine
+            // (WER 1.25%, native punctuation + caps + multilingual; real-time on
+            // M1 4.50x / 9900X 7.75x, PLAN-NEMOTRON-35-SIDECAR §11). The
+            // pp-asr-server binary built with `engine-parakeet` runtime-dispatches
+            // to the right engine by model layout, so the int8 English transducer
+            // (`nemotron-speech-streaming-en-0.6b-560ms-int8`) stays a config-
+            // selectable lighter fallback.
+            model: "nemotron-3.5-asr-streaming-0.6b-parakeet".into(),
             chunk_ms: 560,
             device: AsrDevice::Cpu,
         }
@@ -380,7 +387,13 @@ impl Default for EmbedderConfig {
     fn default() -> Self {
         Self {
             backend: EmbedderBackend::LocalOrt,
-            model: "ViT-H-14-378-quickgelu__dfn5b".into(),
+            // Default to the single-file FP16 CLIP: it graduates to the platform
+            // GPU automatically (CoreML on macOS = 8.77x; CUDA/TensorRT on a
+            // `cuda` build = 62-112x, both validated) and still runs on a plain
+            // CPU build (`select_clip_accel` returns Cpu for it). The int8
+            // external-data export stays in the manifest as the lighter
+            // CPU-optimal alternative a no-GPU machine can name in `[embedder]`.
+            model: "ViT-H-14-378-quickgelu__dfn5b-fp16".into(),
             device: EmbedDevice::Auto,
             text: TextEmbedderConfig::default(),
         }

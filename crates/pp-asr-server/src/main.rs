@@ -42,10 +42,9 @@ use tungstenite::Message;
 
 #[cfg(feature = "engine-parakeet")]
 mod engine_parakeet;
-// parakeet overrides sherpa when both are on (matches `make_engine`'s cfg),
-// so only compile the sherpa module when it is the actually-selected engine.
-// Otherwise its whole session type is dead code under `-D warnings`.
-#[cfg(all(feature = "engine-sherpa", not(feature = "engine-parakeet")))]
+// Both modules compile whenever their feature is on; `make_engine` dispatches
+// between them at runtime by model layout (see below), so neither is dead code.
+#[cfg(feature = "engine-sherpa")]
 mod engine_sherpa;
 
 /// Sample rate declared to the engine for every inbound binary frame. WHY:
@@ -322,12 +321,28 @@ fn serve_connection(mut engine: Box<dyn Engine>, conn: std::net::TcpStream, grac
     }
 }
 
-/// Build the per-connection engine session for the active Cargo feature.
-/// The shared `Engine` factory: returns a fresh session bound to the
-/// model the supervisor pinned. `engine-parakeet` wins if both features
-/// are on (a deliberate explicit-opt-in build); the default binary has
-/// only `engine-sherpa` and so takes the sherpa path.
-#[cfg(feature = "engine-parakeet")]
+/// Build the per-connection engine session. The shared `Engine` factory returns
+/// a fresh session bound to the model the supervisor pinned.
+///
+/// When BOTH engines are compiled in (the shipped app build, `engine-parakeet`
+/// added on top of the default `engine-sherpa`), the engine is chosen at RUNTIME
+/// by the pinned model's on-disk layout: the sherpa int8 transducer ships
+/// `encoder.int8.onnx` in the model dir, the parakeet FP32 export does not. The
+/// launcher passes `--encoder <dir>/encoder.int8.onnx` for both, so that file's
+/// existence is the unambiguous sherpa signature. This keeps the int8 English
+/// engine a live, config-selectable fallback beside the parakeet 3.5 default,
+/// with no second binary.
+#[cfg(all(feature = "engine-parakeet", feature = "engine-sherpa"))]
+fn make_engine(args: &Args) -> Box<dyn Engine> {
+    let is_sherpa = !args.encoder.is_empty() && std::path::Path::new(&args.encoder).is_file();
+    if is_sherpa {
+        engine_sherpa::new_session(args)
+    } else {
+        engine_parakeet::new_session(args)
+    }
+}
+
+#[cfg(all(feature = "engine-parakeet", not(feature = "engine-sherpa")))]
 fn make_engine(args: &Args) -> Box<dyn Engine> {
     engine_parakeet::new_session(args)
 }

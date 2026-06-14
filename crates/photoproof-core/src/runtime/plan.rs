@@ -220,7 +220,9 @@ mod tests {
             &compiled_manifest(),
             &installed(&[
                 "gemma-4-e2b-it-qat-q4_0",
-                "nemotron-speech-streaming-en-0.6b-560ms-int8",
+                // the default ASR is now Nemotron 3.5 via parakeet (the int8
+                // English transducer stays a config-selectable fallback)
+                "nemotron-3.5-asr-streaming-0.6b-parakeet",
             ]),
         );
         assert_eq!(
@@ -232,7 +234,7 @@ mod tests {
         assert_eq!(
             p.asr,
             ProcessPlan::Run {
-                model_id: "nemotron-speech-streaming-en-0.6b-560ms-int8".into()
+                model_id: "nemotron-3.5-asr-streaming-0.6b-parakeet".into()
             }
         );
 
@@ -256,16 +258,18 @@ mod tests {
     #[test]
     fn installed_embedders_run_in_process_without_spawning_a_child() {
         let cfg = from_toml_str("").unwrap().config;
+        // The default CLIP id is the fp16 single-file export (CoreML/CUDA-ready).
+        let clip_id = "ViT-H-14-378-quickgelu__dfn5b-fp16";
         let p = plan(
             &cfg,
             1,
             &compiled_manifest(),
-            &installed(&["ViT-H-14-378-quickgelu__dfn5b", "embeddinggemma-300m-q8"]),
+            &installed(&[clip_id, "embeddinggemma-300m-q8"]),
         );
         assert_eq!(
             p.clip_embedder,
             ProcessPlan::Run {
-                model_id: "ViT-H-14-378-quickgelu__dfn5b".into()
+                model_id: clip_id.into()
             }
         );
         assert_eq!(

@@ -288,13 +288,13 @@ model = "claude-sonnet-latest"                  # structured output.
 
 [asr]
 backend = "local-sherpa"     # "local-sherpa" | "disabled"
-model = "nemotron-speech-streaming-en-0.6b-560ms-int8"
+model = "nemotron-3.5-asr-streaming-0.6b-parakeet"   # 3.5 (punctuation+multilingual); int8 English fallback: nemotron-speech-streaming-en-0.6b-560ms-int8
 chunk_ms = 560               # 80 | 160 | 560 | 1120 (model-supported)
 device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]
 backend = "local-ort"        # "local-ort" | "openai-compatible"
-model = "ViT-H-14-378-quickgelu__dfn5b"   # or ViT-H-14-quickgelu__dfn5b (224px)
+model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file (CoreML/CUDA); CPU-only fallback: ViT-H-14-378-quickgelu__dfn5b (int8)
 device = "auto"              # "auto" | "cpu" | "gpu"
 
 [embedder.text]              # the text-embedding model (§3.3): annotation
