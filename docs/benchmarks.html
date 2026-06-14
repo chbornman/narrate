@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photoproof - Benchmarks</title>
+<style>
+  :root {
+    --bg: #141414;
+    --panel: #1d1d1d;
+    --panel2: #242424;
+    --line: #3a3a3a;
+    --text: #e8e6e1;
+    --dim: #9a968e;
+    --faint: #6b675f;
+    --red: #c0392b;
+    --green: #4f9d69;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); line-height: 1.55; font-size: 15px; }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 4px; }
+  h1 .pencil { color: var(--red); }
+  .subtitle { color: var(--dim); margin: 0 0 6px; max-width: 72ch; }
+  .stamp { color: var(--faint); font-family: var(--mono); font-size: 12px; margin-bottom: 40px; }
+  .back { color: var(--faint); font-family: var(--mono); font-size: 12px; }
+  .back a { border-bottom: 1px solid var(--line); }
+  h2 { font-size: 19px; font-weight: 600; margin: 56px 0 6px; padding-top: 18px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15px; font-weight: 600; margin: 26px 0 4px; }
+  .lede { color: var(--dim); margin: 0 0 22px; max-width: 72ch; }
+  p { max-width: 72ch; }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; color: var(--dim); }
+
+  /* headline metric cards */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0; }
+  .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .metric .v { font-size: 30px; font-weight: 600; font-family: var(--mono); color: var(--green); line-height: 1.1; }
+  .metric .k { color: var(--dim); font-size: 12.5px; margin-top: 6px; }
+  .metric .sub { color: var(--faint); font-size: 11.5px; margin-top: 2px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+  th, td { padding: 7px 12px 7px 0; border-bottom: 1px solid #262626; vertical-align: top; text-align: left; }
+  th { color: var(--faint); font-weight: 500; font-size: 12px; }
+  td.n, th.n { font-family: var(--mono); text-align: right; padding-right: 18px; }
+
+  .note { background: var(--panel); border-left: 2px solid var(--red); border-radius: 0 8px 8px 0; padding: 12px 16px; margin: 18px 0; color: var(--dim); font-size: 13.5px; }
+  .note b { color: var(--text); }
+  .pending { color: var(--faint); font-style: italic; }
+  footer { color: var(--faint); font-size: 12.5px; margin-top: 64px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+
+<p class="back"><a href="index.html">&larr; docs</a></p>
+<h1>Photoproof <span class="pencil">/</span> benchmarks</h1>
+<p class="subtitle">The tuning loop's measuring sticks, run against REAL data: standard public benchmarks, not synthetic or self-authored. Each measures one subsystem the loop tunes. Saved JSON lives beside this page in <code>docs/benchmarks/</code>.</p>
+<p class="stamp">first run June 13 2026 - see docs/DESIGN-TUNING-LOOP.md for the loop these feed</p>
+
+<h2>Search - visual retrieval (MS-COCO)</h2>
+<p class="lede">The standard image-text retrieval benchmark: real photos, five human-written captions each. Each caption is a query; the right answer is the photo it describes. This honestly tests the CLIP visual + semantic retrieval the app does - exactly what a self-authored note cannot, since a planted note only tests search finding its own injected text.</p>
+
+<h3>Result (100 photos, 500 caption-queries)</h3>
+<div class="metrics">
+  <div class="metric"><div class="v">0.996</div><div class="k">Recall@10</div><div class="sub">right photo in the top 10</div></div>
+  <div class="metric"><div class="v">0.954</div><div class="k">nDCG@10</div><div class="sub">ranking quality</div></div>
+  <div class="metric"><div class="v">0.939</div><div class="k">MRR</div><div class="sub">mean reciprocal rank</div></div>
+</div>
+<p>For 500 real caption queries, CLIP visual search puts the correct photo in the top 10 about <b>99.6%</b> of the time - near the model's ceiling, as expected from the DFN5B ViT-H encoder. This is the genuine measurement the 7-query journal sketch could not provide.</p>
+
+<h3 class="pending">Full run (1000 photos, ~5000 caption-queries) - completing</h3>
+<p class="pending">The full COCO-1K sweep is embedding on CPU (~20 img/min); this page updates with the larger-sample numbers when it lands. They are expected to track the 100-photo result closely (CLIP is consistent).</p>
+
+<div class="note"><b>Honest scope:</b> COCO photos carry no notes, so this measures PURE VISUAL retrieval (the CLIP S4 signal). The fusion knobs (how much to weight your written notes vs. the visual match) do not move a single-signal ranking, so they cannot be tuned here. Tuning that balance needs a library with REAL notes - and the current dogfood library's notes are test junk, so that benchmark is not yet meaningful. Visual retrieval is benchmarkable today; notes-fusion tuning waits on a real reviewed library.</div>
+
+<h2>Voice - transcription (LibriSpeech)</h2>
+<p class="lede">The standard ASR benchmark, built from public-domain audiobooks: 40+ readers, clean per-utterance reference transcripts, a dev split to tune on and a test split to report on. Utterances are joined with a 0.5s silence gap so the endpointer has real boundaries to find. The metric is gating-cost = gated WER minus raw WER, isolating pipeline truncation from the model's own error.</p>
+<h3 class="pending">Result - completing</h3>
+<p class="pending">The voice sweep runs after the COCO embed finishes (to avoid model contention on this machine); this section fills with the dev-split gating-cost leaderboard when it lands.</p>
+
+<h2>How these are produced</h2>
+<p>All reusable, committed scripts + binaries (the corpora themselves are gitignored - they hold real data and stay local):</p>
+<pre>  # search: stage a real photo+caption benchmark, ingest into a throwaway eval
+  # library, CLIP-embed, build the golden set, sweep
+  scripts/fetch-image-benchmark.sh 1000
+  pp-eval-ingest --images .../coco5k/images --lib /tmp/coco-eval-lib \
+    --captions .../captions.json --out-golden .../coco-golden.json
+  pp-sweep search --db /tmp/coco-eval-lib/photoproof.db \
+    --queries .../coco-golden.json --models-dir &lt;models&gt; --json
+
+  # voice: stage a real audiobook benchmark, sweep the endpoint dials
+  scripts/fetch-voice-corpus.sh dev-clean
+  pp-sweep voice --corpus-manifest .../dev-clean-sweep-subset.tsv \
+    --grid "rule2=0.8,1.0,1.2" --model-dir &lt;asr&gt; --server &lt;pp-asr-server&gt; --json</pre>
+
+<h2>The loop these feed</h2>
+<p><code>pp-sweep</code> PROPOSES a better config (you commit it - the machine never auto-changes a setting). <code>make tune-check</code> guards against regressions: it re-runs the cheap synthetic benches and fails if a deterministic quality metric drops (perf is warn-only, since it is machine-variable). Contracts (the &lt;100ms search budget, the timing invariants) stay fixed; only the dials are tuned. See <a href="DESIGN-TUNING-LOOP.md">DESIGN-TUNING-LOOP.md</a>.</p>
+
+<footer>
+Photoproof benchmarks - real public data, run on the founder machine. Numbers are
+measured, not modeled. The saved JSON in docs/benchmarks/ is the reviewable record.
+</footer>
+
+</main>
+</body>
+</html>
