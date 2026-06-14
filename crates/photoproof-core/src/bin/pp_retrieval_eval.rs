@@ -62,19 +62,22 @@
 //! four fusion WEIGHTS on top of that baseline; the weight sweep already answers
 //! the B69 "how much should S4 vote" question the gate exists for.
 //!
-//! NOTE on signals. This runner uses the keyword-only rig (no embedders/LLM):
-//! the heavy real-model wiring (loading CLIP/text embedders + the parse LLM,
-//! pointing at the on-disk vector store) is the desktop app's job and well
-//! beyond a metrics runner's scope. With keyword-only the FusionWeights still
-//! shape any query that reaches fusion through S2 + the SQL-only S3
-//! summaries_fts sub-list; the full four-signal sweep is a desktop-driven run
-//! that feeds the same query set to the same scorer. The metrics + query-set
-//! format this binary ships are the instrument either path uses.
+//! NOTE on signals. Pass `--models-dir <app-data/models>` to run the FULL
+//! model-backed rig: the runner loads the SAME text + CLIP embedders the
+//! desktop app loads (via `photoproof_connectors::model_specs`) and opens the
+//! on-disk `.ppvec` store, so the QUERY is embedded into the annotation space
+//! (S1) and the CLIP space (S4, B69 always-votes) and ranked against the stored
+//! vectors — the four-signal fusion the app ships. WITHOUT `--models-dir` (no
+//! models present) the runner falls back to the keyword-only rig: every vector
+//! signal is dark and the FusionWeights shape only S2 + the SQL-only S3
+//! summaries_fts sub-list. The graceful fallback keeps the no-models CI path
+//! (the synthetic fixture, `retrieval_eval_sample`) green headlessly. The parse
+//! LLM seam stays `None` either way (NL parse is out of this runner's scope).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use photoproof_core::retrieval_eval::{EvalConfig, EvalReport, QuerySet, evaluate};
+use photoproof_core::retrieval_eval::{EvalConfig, EvalReport, EvalRig, QuerySet, evaluate};
 use photoproof_core::search::{FusionWeights, Searcher};
 
 /// Built-in @k default when neither the CLI nor the query set pins one.
@@ -91,6 +94,13 @@ struct Args {
     k: Option<usize>,
     json: bool,
     weights: WeightOverrides,
+    /// `--models-dir <path>`: the app-data `models/` directory. When present
+    /// AND the library has stored vectors, the run uses the FULL model-backed
+    /// rig (the query is embedded into the annotation + CLIP spaces, S1/S4
+    /// vote). Absent/unset, the run is the keyword-only rig (no models) — the
+    /// graceful fallback the CI/no-models path needs. Defaults to the DB's
+    /// sibling `models/` if that directory exists, else stays keyword-only.
+    models_dir: Option<PathBuf>,
 }
 
 /// Per-signal fusion-weight overrides; `None` keeps the spec default for that
@@ -119,9 +129,10 @@ impl WeightOverrides {
 
 fn usage() -> &'static str {
     "usage: pp-retrieval-eval --db <photoproof.db> --queries <queryset.json> \
-     [--k N] [--json] [--s1 W] [--s2 W] [--s3 W] [--s4 W]\n\
+     [--models-dir <dir>] [--k N] [--json] [--s1 W] [--s2 W] [--s3 W] [--s4 W]\n\
      or:    pp-retrieval-eval --synthetic [--k N] [--json] [--s1 W] ...\n\
-     (paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET; args win)"
+     (paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET / PP_RETRIEVAL_MODELS_DIR; args win)\n\
+     --models-dir lights up the FULL model-backed rig (S1/S4 vote); absent it is keyword-only"
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -133,6 +144,8 @@ fn parse_args() -> Result<Args, String> {
     let mut k: Option<usize> = None;
     let mut json = false;
     let mut weights = WeightOverrides::default();
+    // Env default for the models dir (args win), mirroring --db/--queries.
+    let mut models_dir = std::env::var_os("PP_RETRIEVAL_MODELS_DIR").map(PathBuf::from);
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut it = argv.iter();
@@ -152,6 +165,7 @@ fn parse_args() -> Result<Args, String> {
             "--synthetic" => synthetic = true,
             "--db" => db = Some(PathBuf::from(val("--db")?)),
             "--queries" => queries = Some(PathBuf::from(val("--queries")?)),
+            "--models-dir" => models_dir = Some(PathBuf::from(val("--models-dir")?)),
             "--k" => {
                 k = Some(
                     val("--k")?
@@ -189,6 +203,7 @@ fn parse_args() -> Result<Args, String> {
         k,
         json,
         weights,
+        models_dir,
     })
 }
 
@@ -233,15 +248,59 @@ fn run(args: &Args) -> Result<(), String> {
     let searcher =
         Searcher::open(db).map_err(|e| format!("opening library DB {}: {e}", db.display()))?;
 
+    // Resolve the model-backed rig: explicit --models-dir, else the DB's
+    // sibling `models/` if it exists, else keyword-only. When a dir is present
+    // the rig embeds the query and exercises S1/S4 (the full app fusion); when
+    // absent we fall back to keyword-only, so a no-models machine still runs.
+    let rig = build_eval_rig(args.models_dir.as_deref(), db)?;
+    if rig.is_some() {
+        eprintln!("pp-retrieval-eval: model-backed rig active (S1/S4 vote)");
+    } else {
+        eprintln!("pp-retrieval-eval: keyword-only rig (no models dir; S1/S4 dark)");
+    }
+
     // Shared run->score loop (`retrieval_eval::evaluate`): the SAME entry point
     // pp-sweep drives, so the gate and the sweep can never diverge.
-    let report = evaluate(&searcher, &query_set, config, k)?;
+    let report = evaluate(&searcher, &query_set, config, k, rig.as_ref())?;
     if args.json {
         print_json(&report, &weights, db, queries);
     } else {
         print_table(&report, &weights);
     }
     Ok(())
+}
+
+/// Resolve the optional model-backed eval rig from the CLI/env models dir.
+///
+/// Precedence: an explicit `--models-dir` is REQUIRED to exist (a typo must
+/// error, not silently degrade to keyword-only and report misleading numbers);
+/// absent the flag, the DB's sibling `models/` is used IF it exists (the
+/// app-data layout), else the run stays keyword-only. A present dir with no
+/// stored vectors in the DB also errors (the rig has nothing to rank against),
+/// surfacing the misconfiguration instead of a silent empty-signal run.
+fn build_eval_rig(
+    models_dir: Option<&std::path::Path>,
+    db: &std::path::Path,
+) -> Result<Option<EvalRig>, String> {
+    let dir = match models_dir {
+        Some(explicit) => {
+            if !explicit.is_dir() {
+                return Err(format!(
+                    "--models-dir {} is not a directory",
+                    explicit.display()
+                ));
+            }
+            explicit.to_path_buf()
+        }
+        None => match db.parent().map(|p| p.join("models")) {
+            Some(sibling) if sibling.is_dir() => sibling,
+            // No models dir anywhere -> the graceful keyword-only fallback.
+            _ => return Ok(None),
+        },
+    };
+    // `from_db` resolves the text/clip model ids off the live `vectors` table
+    // (read-only) and defaults the `vectors/` flat-file dir to the DB's sibling.
+    Ok(Some(EvalRig::from_db(&dir, db)?))
 }
 
 /// `--synthetic`: build a deterministic in-process corpus + golden set, run the
@@ -270,7 +329,9 @@ fn run_synthetic(args: &Args) -> Result<(), String> {
         ..EvalConfig::default()
     };
 
-    let report = evaluate(&searcher, &query_set, config, k)?;
+    // Synthetic mode is keyword-only by definition (no models, no vectors): the
+    // rig is always `None` here, the headless fallback path.
+    let report = evaluate(&searcher, &query_set, config, k, None)?;
     let synth_path = std::path::Path::new("<synthetic>");
     if args.json {
         print_json(&report, &weights, synth_path, synth_path);

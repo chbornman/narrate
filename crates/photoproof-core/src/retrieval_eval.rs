@@ -294,7 +294,159 @@ impl EvalReport {
 // that depends on `crate::search`; the metrics themselves never do.
 // ---------------------------------------------------------------------------
 
-use crate::search::{FusionWeights, HybridOptions, Searcher, keyword_only_rig};
+use std::path::Path;
+use std::sync::Arc;
+
+use photoproof_connectors::OrtEmbedder;
+use photoproof_connectors::vector_store::VectorStore;
+
+use crate::retrieval::PpvecStore;
+use crate::search::{FusionWeights, HybridOptions, HybridRig, NoModel, Searcher, keyword_only_rig};
+
+// ---------------------------------------------------------------------------
+// The model-backed eval rig (the app-vs-eval gap closer)
+//
+// `evaluate` used to run the KEYWORD-ONLY rig unconditionally: every vector
+// signal (S1 annotation, S3 image-summary, S4 CLIP) was dark, so a sweep could
+// only move S2 + the SQL-only S3 sub-list. That tuned a DIFFERENT search than
+// the one the app ships (which embeds the QUERY with the real text + CLIP
+// towers and ranks it against the stored `annotation_chunk` / `image_clip`
+// vectors). `EvalRig` is the optional second arm: when models + the vector
+// store are present it builds the SAME `HybridRig<NoModel, OrtEmbedder,
+// OrtEmbedder>` the desktop's `run_search` builds (text + clip + vectors), so
+// the eval embeds the query and exercises the FULL fusion. Absent models it is
+// `None` and `evaluate` falls back to the keyword-only rig EXACTLY as before —
+// the no-models CI path (the synthetic fixture, every unit test) is unchanged.
+//
+// WHY built once and reused across configs: embedding the query set is
+// config-INDEPENDENT (the same towers, the same stored vectors); only the
+// fusion WEIGHTS (`EvalConfig`) change per sweep config. The sweep builds the
+// rig once and hands `&EvalRig` to `evaluate` per config, so the heavy ort
+// load happens ONCE, not once per grid cell.
+// ---------------------------------------------------------------------------
+
+/// The real query-side embedders + the on-disk vector store, mirroring the
+/// desktop search stack. Built once (the ort load is seconds) and shared by
+/// every config in a sweep. `text` embeds the query into the annotation space
+/// (S1) and the image-summary half of S3; `clip` embeds it into the CLIP space
+/// (S4, B69 always-votes); `vectors` is the `.ppvec` store the app reads.
+pub struct EvalRig {
+    text: Arc<OrtEmbedder>,
+    clip: Arc<OrtEmbedder>,
+    vectors: PpvecStore,
+}
+
+impl EvalRig {
+    /// Build the rig from a models dir + the live library DB.
+    ///
+    /// `models_dir` is the app-data `models/` directory (`<id>/...` layout);
+    /// `db_path` is the library SQLite and `vectors_dir` its sibling `vectors/`
+    /// flat-file store. The text/clip model ids MUST match the ids the stored
+    /// vectors were written under (the desktop pins `embeddinggemma-300m-q8` for
+    /// text and `ViT-H-14-378-quickgelu__dfn5b` for clip): the search joins a
+    /// query embedding to a stored space by `(vec_kind, model_id)`, so a
+    /// mismatched id silently finds nothing. The caller resolves the ids off the
+    /// `vectors` table (the model that produced the rows) so the rig can never
+    /// embed into a space the library does not have.
+    ///
+    /// `Err` on a native load failure (missing/corrupt weights, an unknown id,
+    /// a vector-store open failure) — the bin decides whether to surface it or
+    /// degrade to keyword-only. The build reuses the SHARED connectors seam
+    /// (`build_text_embedder` / `build_clip_embedder`), so the eval loads the
+    /// exact same ort sessions the desktop host does.
+    pub fn build(
+        models_dir: &Path,
+        text_model_id: &str,
+        clip_model_id: &str,
+        db_path: &Path,
+        vectors_dir: &Path,
+    ) -> Result<Self, String> {
+        let text = photoproof_connectors::build_text_embedder(text_model_id, models_dir)
+            .map_err(|e| format!("loading text embedder {text_model_id}: {e}"))?;
+        let clip = photoproof_connectors::build_clip_embedder(clip_model_id, models_dir)
+            .map_err(|e| format!("loading clip embedder {clip_model_id}: {e}"))?;
+        let vectors = PpvecStore::open(db_path, vectors_dir)
+            .map_err(|e| format!("opening vector store {}: {e}", vectors_dir.display()))?;
+        Ok(Self {
+            text: Arc::new(text),
+            clip: Arc::new(clip),
+            vectors,
+        })
+    }
+
+    /// Build the rig, resolving the text + clip model ids off the live DB's
+    /// `vectors` table (the model that actually produced the stored rows), and
+    /// defaulting `vectors_dir` to the DB's sibling `vectors/`.
+    ///
+    /// WHY resolve from the DB and not hardcode the pinned ids: the search joins
+    /// a query embedding to a stored space by `(vec_kind, model_id)`, so the rig
+    /// MUST embed with the same model the library's vectors were written under.
+    /// Reading the id off the table makes that impossible to get wrong (and makes
+    /// the eval follow a library re-embedded under a different model for free).
+    ///
+    /// `Err` if the DB has no `annotation_chunk`/`image_clip` rows to read an id
+    /// from (nothing to rank against), or any build step fails.
+    pub fn from_db(models_dir: &Path, db_path: &Path) -> Result<Self, String> {
+        let text_model_id = resolve_vector_model_id(db_path, "annotation_chunk")?;
+        let clip_model_id = resolve_vector_model_id(db_path, "image_clip")?;
+        let vectors_dir = crate::retrieval::default_vectors_dir(db_path)
+            .ok_or_else(|| format!("cannot derive vectors dir from {}", db_path.display()))?;
+        Self::build(
+            models_dir,
+            &text_model_id,
+            &clip_model_id,
+            db_path,
+            &vectors_dir,
+        )
+    }
+
+    /// The model-backed `HybridRig` for one search — byte-identical in shape to
+    /// the desktop `run_search` semantic rig (`llm: None`, text + clip + the
+    /// vector store). Cheap to build per query (it only borrows the shared
+    /// embedders + store), so `evaluate` can call it inside its per-query loop
+    /// without re-loading anything.
+    fn rig(&self) -> HybridRig<'_, NoModel, OrtEmbedder, OrtEmbedder> {
+        HybridRig {
+            llm: None,
+            text: Some(self.text.as_ref()),
+            clip: Some(self.clip.as_ref()),
+            vectors: Some(&self.vectors as &dyn VectorStore),
+        }
+    }
+}
+
+/// The `model_id` the live DB stored its `vec_kind` vectors under (the model
+/// that produced the rows). Read READ-ONLY — this is a pure lookup, it must
+/// never migrate or write the live library. `Err` if the space is empty (no id
+/// to read; nothing to rank against) or several ids coexist (an ambiguous
+/// re-embed mid-flight — refuse rather than guess which space to query).
+fn resolve_vector_model_id(db_path: &Path, vec_kind: &str) -> Result<String, String> {
+    // Read-only open: no migration, no WAL checkpoint write — the live DB is
+    // untouched (the K-constraint that the eval never mutates the library).
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| format!("opening {} read-only: {e}", db_path.display()))?;
+    let ids: Vec<String> = conn
+        .prepare("SELECT DISTINCT model_id FROM vectors WHERE vec_kind = ?1 AND deleted = 0")
+        .and_then(|mut stmt| {
+            stmt.query_map([vec_kind], |row| row.get::<_, String>(0))?
+                .collect()
+        })
+        .map_err(|e| format!("reading {vec_kind} model id: {e}"))?;
+    match ids.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(format!(
+            "no {vec_kind} vectors in {} — nothing to rank against (re-embed the library first)",
+            db_path.display()
+        )),
+        many => Err(format!(
+            "ambiguous {vec_kind} model ids in {}: {many:?} — refusing to guess which space to query",
+            db_path.display()
+        )),
+    }
+}
 
 /// The per-config knobs a single eval run varies: the four fusion weights plus
 /// the two scalar dials (`rrf_k`, `beta`). One value object so the runner and
@@ -322,25 +474,38 @@ impl Default for EvalConfig {
     }
 }
 
-/// Run every query in `query_set` through the keyword-only hybrid rig under
-/// `config`, score each ranked result against its relevant set at cutoff `k`,
-/// and return the mean-over-queries [`EvalReport`].
+/// Run every query in `query_set` through the hybrid rig under `config`, score
+/// each ranked result against its relevant set at cutoff `k`, and return the
+/// mean-over-queries [`EvalReport`].
 ///
 /// This is the shared entry point the `pp-retrieval-eval` runner and the
 /// `pp-sweep` orchestrator both call: ONE definition of the run->score loop,
-/// so a sweep can never silently diverge from the gate it tunes. Keyword-only
-/// (no models) by construction, matching the runner's documented rig — the
-/// `FusionWeights`/`β`/`rrf_k` still shape any query that reaches fusion
-/// through S2 + the SQL-only S3 sub-list.
+/// so a sweep can never silently diverge from the gate it tunes.
+///
+/// `rig` selects the search arm WITHOUT changing the loop:
+/// - `None` -> the keyword-only rig (the no-models CI path, unchanged): every
+///   vector signal is dark, so `FusionWeights`/`β`/`rrf_k` shape only S2 + the
+///   SQL-only S3 sub-list. This is what the synthetic fixture and every headless
+///   test exercise; it requires no models.
+/// - `Some(rig)` -> the model-backed rig the desktop app ships (text + clip +
+///   the vector store): the query is EMBEDDED into the annotation space (S1) and
+///   the CLIP space (S4, B69) and ranked against the stored vectors. This is the
+///   founder-machine run that exercises the FULL fusion. Same per-query scoring,
+///   same metrics — only the candidate generation differs.
+///
+/// `rig` is built ONCE and passed per config, so a sweep reuses the same loaded
+/// ort sessions + vectors across every grid cell (the embedding is
+/// config-independent; only the fusion weights move).
 pub fn evaluate(
     searcher: &Searcher,
     query_set: &QuerySet,
     config: EvalConfig,
     k: usize,
+    rig: Option<&EvalRig>,
 ) -> Result<EvalReport, String> {
     // One options value per run; weights/β/rrf_k are the swept knobs, the rest
-    // are the keyword-only defaults (no `now` override -> wall-clock for any
-    // relative-date filter, exactly as the runner did inline).
+    // are the defaults (no `now` override -> wall-clock for any relative-date
+    // filter, exactly as the runner did inline).
     let opts = HybridOptions {
         weights: config.weights,
         beta: config.beta,
@@ -352,9 +517,16 @@ pub fn evaluate(
         query, relevant, ..
     } in &query_set.queries
     {
-        let out = searcher
-            .hybrid_search(query, &[], &keyword_only_rig(), &opts)
-            .map_err(|e| format!("search failed for {query:?}: {e}"))?;
+        // Branch on the arm per query. The two rigs are DISTINCT generic types
+        // (`HybridRig<NoModel,NoModel,NoModel>` vs `<NoModel,OrtEmbedder,
+        // OrtEmbedder>`), so the match arms each call the monomorphized
+        // `hybrid_search`; the `None` arm is byte-identical to the prior
+        // keyword-only behavior the CI tests pin.
+        let out = match rig {
+            Some(eval_rig) => searcher.hybrid_search(query, &[], &eval_rig.rig(), &opts),
+            None => searcher.hybrid_search(query, &[], &keyword_only_rig(), &opts),
+        }
+        .map_err(|e| format!("search failed for {query:?}: {e}"))?;
         let ranked: Vec<String> = out
             .images
             .iter()

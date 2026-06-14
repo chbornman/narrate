@@ -32,6 +32,7 @@ pub mod http;
 pub mod keychain;
 pub mod llm;
 pub mod mock;
+pub mod model_specs;
 pub mod openai;
 pub mod ort_embedder;
 pub mod reranker;
@@ -46,6 +47,9 @@ pub use error::{ConnectorError, ConnectorResult};
 pub use feed::AudioFeed;
 pub use keychain::{KeyResolver, MockKeyResolver};
 pub use llm::{ChatMessage, ChatRequest, ChatResponse, Lane, LanguageModel, Role};
+pub use model_specs::{
+    build_clip_embedder, build_text_embedder, is_known_clip_model, is_known_text_model,
+};
 pub use openai::{EndpointCell, HealthStatus, InFlightGauge, LostReports, OpenAiCompatClient};
 pub use ort_embedder::{OrtEmbedder, TextRecipe};
 pub use reranker::{CandidateText, Reranker};
