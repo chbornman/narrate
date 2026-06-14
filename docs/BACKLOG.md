@@ -273,8 +273,10 @@ magnitudes.
   the fp16 space on next launch; revert = delete config.toml). REMAINING for ALL
   users: (a) HOST the fp16 files at a real URL + re-pin (it is locally converted);
   (b) graduate the env knob to a config FIELD; (c) CUDA EP for the Ryzen/5080
-  desktop (`docs/RUNTIME-MATRIX.md` target-hardware); (d) re-export EmbeddingGemma
-  to FP16. ORIGINAL: we run
+  desktop (`docs/RUNTIME-MATRIX.md` target-hardware). NOTE (d) text-embed on
+  CoreML was SPIKED + REJECTED June 14 (0.48-0.64x slower; the EmbeddingGemma
+  transformer graph does not partition to the ANE) - it STAYS int8/CPU, its best
+  path (`docs/SPIKE-COREML-TEXT.md`, `coreml_spike_text.rs`). ORIGINAL: we run
   `ort` CPU-only; enable ONNX Runtime's CoreML EP (MLProgram, NOT legacy
   NeuralNetwork which casts FP16 and can flip predictions). Immich shipped this in
   v2.2.0 (PR #17718).

@@ -67,7 +67,9 @@ The ML brain lights up here. Grouped by theme.
 ### Execution providers (the GPU wiring) - see `docs/RUNTIME-MATRIX.md`
 - FP16 single-file CLIP export + CoreML - **VALIDATED June 14: 8.77x over CPU, ship-with-FP16** (`docs/SPIKE-COREML.md`)
 - CoreML code wiring (cache dir + fp16 model spec) - **LANDED June 14** (`ort_embedder.rs`/`model_specs.rs`); env-knob path now compiles once, fp16 id buildable
-- CoreML ship-to-users (founder/infra) - host the fp16 model + manifest entry (SHAs in spike doc); prefer fp16+CoreML on macOS in `plan.rs` + config field; COCO nDCG re-embed eval before flipping the default; re-export EmbeddingGemma to FP16
+- CoreML CLIP - FLIPPED on the M1 Pro dev machine (eval held). Ship-to-users (founder/infra): host the fp16 model + manifest entry (SHAs in spike doc); graduate the env knob to a config field
+- Text-embed on CoreML - REJECTED (spiked, measured 0.48-0.64x slower; the transformer graph does not partition to the ANE). Stays int8/CPU - its best path. `docs/SPIKE-COREML-TEXT.md`
+- CUDA EP for the `ort` embedders (Ryzen/5080) - CLIP + maybe text-embed (CUDA takes the whole graph, unlike CoreML); measure on the 5080
 - CUDA EP for the `ort` embedders (the NVIDIA "Margo" desktop)
 - DirectML EP option (Windows GPUs without CUDA) - not yet evaluated
 - Supervisor auto-detect: extend llama.cpp's hardware-pick + graceful fallback to the embedders

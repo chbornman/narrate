@@ -51,7 +51,7 @@ models). The two CURRENT target machines, both cutting-edge-GPU focused:
 |---|---|---|---|
 | **LLM** (Gemma 4 E2B q4_0, llama.cpp) | **Metal** (GPU) | **CUDA** (GPU) | CPU -> LLM features dark |
 | **CLIP** (DFN5B, `ort`) | **CoreML FP16** (ANE/GPU) - DONE, **8.77x** over CPU, near-lossless (COCO nDCG 0.8212 vs int8 0.8225) | **CUDA FP16** - PLANNED (same single-file FP16 model, `ort` `cuda` EP) | CPU int8 -> keyword search |
-| **Text-embed** (EmbeddingGemma, `ort`) | **CoreML FP16** - PLANNED (needs the FP16 re-export; only CLIP is converted so far) | **CUDA FP16** - PLANNED | CPU int8 -> keyword search |
+| **Text-embed** (EmbeddingGemma, `ort`) | **CPU int8** - BEST here (CoreML measured 0.48-0.64x SLOWER: only ~3% of the graph partitions to the ANE, the transformer body runs CPU anyway; `docs/SPIKE-COREML-TEXT.md`) | **CUDA FP16** - TBD (CUDA takes the whole graph unlike CoreML; measure on the 5080) | CPU int8 -> keyword search |
 | **ASR** (Nemotron 0.6b, sherpa) | **CPU** by design | **CPU** by design | smaller model -> voice dark |
 | **VAD** (silero, `ort`) | **CPU** always (~2ms/chunk) | **CPU** always (~2ms/chunk) | n/a (tiny) |
 
@@ -111,7 +111,10 @@ This is the gold standard the others should match (`spec/RUNTIME.md` S3).
 
 `ort` accelerates via per-platform EXECUTION PROVIDERS. Spec default: CPU EP, GPU
 "a tier-promoted opt-in once the spike validates stability" (`spec/RUNTIME.md`).
-VAD is tiny -> CPU forever. CLIP + text-embed are the ones that want the GPU/ANE.
+VAD is tiny -> CPU forever. CLIP is the one that wants the GPU/ANE (it is the
+bottleneck, a conv/matmul stack CoreML takes whole); text-embed measured BEST on
+int8/CPU - its transformer graph barely partitions to the ANE, so CoreML LOSES
+(`docs/SPIKE-COREML-TEXT.md`). So on `ort`, only CLIP graduates to the GPU.
 
 | platform | EP | runs on | status |
 |---|---|---|---|
@@ -145,17 +148,22 @@ CUDA/CoreML providers if ever wanted. Default: stay on CPU.
 - **q4_0** (LLM): the K-quant size/quality sweet spot for llama.cpp; GPU-friendly.
 - **int8** (ASR, VAD, and the current CLIP/text-embed CPU path): smallest, real-time
   on CPU.
-- **FP16** (CLIP/text-embed accelerator path, in progress): the format GPUs and the
+- **FP16** (the CLIP accelerator path - LANDED on macOS): the format GPUs and the
   ANE run fast, near-lossless. Built by ROUNDING DOWN from the FP32 source (you
   cannot recover precision by upscaling int8). One FP16 ONNX serves CoreML + CUDA.
+  (Text-embed FP16 was measured and REJECTED on CoreML - it stays int8/CPU; see
+  the fallback chain below.)
 
 ## Fallback chains (per model)
 
 - **LLM:** Metal | CUDA | Vulkan (by detected hardware) -> CPU -> LLM features dark
   (Tier 0).
-- **CLIP / text-embed:** CoreML-FP16 (Mac) | CUDA-FP16 (NVIDIA) | DirectML (Win) ->
-  CPU-int8 -> embed pass deferred / semantic search degrades to keyword (still
-  works).
+- **CLIP:** CoreML-FP16 (Mac, LANDED) | CUDA-FP16 (NVIDIA, planned) | DirectML (Win) ->
+  CPU-int8 -> embed pass deferred / semantic search degrades to keyword (still works).
+- **Text-embed:** **CPU-int8 IS the best path** (CoreML measured slower, rejected;
+  CUDA on the 5080 still TBD) -> if even CPU fails / model absent, semantic search
+  degrades to keyword. No Mac GPU path: the transformer graph does not partition to
+  the ANE (`docs/SPIKE-COREML-TEXT.md`).
 - **ASR:** CPU-int8 (by design) -> ASR disabled (voice dark, journal unaffected).
   Model fallback order (`spec/RUNTIME.md`): multilingual 3.5 -> English 0.6b ->
   disabled.
@@ -175,7 +183,11 @@ CUDA/CoreML providers if ever wanted. Default: stay on CPU.
   + add a `runtime/manifest.rs` entry (SHAs recorded in `docs/SPIKE-COREML.md`);
   (b) prefer fp16+CoreML on macOS in `runtime/plan.rs` + graduate the env knob to a
   config field; (c) run the COCO golden-nDCG re-embed eval before flipping the default.
-  Also re-export the EmbeddingGemma text tower to FP16 the same way.
+  (The CLIP eval HELD and the M1 Pro dev machine is already flipped via per-model
+  gating + `config.toml`; this `[NEXT]` is for OTHER users / distribution.)
+- **[DONE June 14 - REJECTED]** EmbeddingGemma text-embed on CoreML/FP16 was spiked and
+  measured SLOWER than int8/CPU (0.48-0.64x; the transformer body does not partition to
+  the ANE) - text-embed STAYS int8/CPU, its best path. `docs/SPIKE-COREML-TEXT.md`.
 - **[planned]** CUDA EP wiring for the `ort` embedders (Margo NVIDIA desktop) - same
   FP16 model, the CoreML analog.
 - **[planned]** DirectML EP option (Windows GPUs without CUDA).
