@@ -128,6 +128,18 @@ fn parse_args() -> Args {
             "--chunk-ms" => {
                 let _ = val();
             }
+            // Accepted for launcher symmetry: the launcher ALWAYS passes
+            // --lang (default "en") for the staged Nemotron 3.5 export
+            // (docs/PLAN-NEMOTRON-35-SIDECAR.md §4). The current English
+            // transducer has a single fixed language, so the sherpa-onnx
+            // crate has no per-stream language knob - this is an
+            // accept-and-ignore until a 3.5 engine reads it. WHY accept it
+            // (not reject): an unknown flag exits 2, and the launcher now
+            // always sends --lang, so ignoring it keeps the live child
+            // spawning unchanged.
+            "--lang" => {
+                let _ = val();
+            }
             "--num-threads" => a.num_threads = val().parse().expect("--num-threads"),
             "--rule1" => a.rule1 = val().parse().expect("--rule1"),
             "--rule2" => a.rule2 = val().parse().expect("--rule2"),
