@@ -6,6 +6,27 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 13 2026 - Real image benchmark for search (COCO)
+
+- [x] **`pp-eval-ingest` + COCO benchmark; first benchmark sweep** - merges
+  `6263ff8` + fix `316ad2f`; `scripts/fetch-image-benchmark.sh`. Fixes "the golden
+  set is too small" the RIGHT way (a real benchmark, NOT fake notes - a planted
+  note just tests search finding its own injected text and skips the visual
+  signal). `pp-eval-ingest` headlessly creates a THROWAWAY eval library at any
+  path, ingests an image folder, CLIP-embeds it (reusing `Library::open` ->
+  `scan_root` -> `process_queue` -> `build_clip_embedder` + `process_embedding_queue`),
+  and emits a golden set from a normalized captions file (each caption a query, its
+  photo the answer) - the real library is never touched. The fetch script stages
+  the standard MS-COCO 5K image-text retrieval benchmark (real photos + 5
+  human captions each) from a HuggingFace mirror. `EvalRig` made the annotation/
+  text space OPTIONAL so an image-only library (no notes) runs CLIP-visual (S4)
+  retrieval. REAL RUN: 100 COCO photos embedded -> 500 caption queries -> nDCG@10
+  0.954, Recall@10 0.996 (CLIP puts the right photo in the top 10 ~99.6% of the
+  time - near-ceiling, as expected from DFN5B). Scales to the full 1000/5000 with
+  the same command. NOTE: COCO has no notes, so it measures PURE visual retrieval
+  (the fusion s4/beta knobs do not move a single-signal ranking); the journal-
+  anchored set is what exercises the notes-vs-visual fusion. (Founder, June 13 2026.)
+
 ## June 13 2026 - Tuning loop runs on REAL data
 
 - [x] **Close the no-models gap; first real search sweep** - merge `f64db81` (work
