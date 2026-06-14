@@ -96,8 +96,51 @@ fn model_dir(models_dir: &Path, id: &str) -> PathBuf {
     models_dir.join(id)
 }
 
+/// `--spec-draft-n-max`: the Unsloth MTP card default and the ceiling of
+/// the 1-4 range mainline tests (docs/PLAN-GEMMA-MTP.md §3). Good for the
+/// high-acceptance CUDA runs this path is gated to.
+const MTP_DRAFT_N_MAX: u32 = 4;
+
+/// The Metal gate (docs/PLAN-GEMMA-MTP.md §4). MTP is LOSSLESS but it is a
+/// CUDA/Vulkan win and an Apple-Silicon (Metal) LOSS — 11-28% SLOWER, the
+/// draft-eval overhead exceeds the speculative gain (ggml-org/llama.cpp
+/// #23752, closed, no fix). So:
+///
+/// - **macOS / Apple Silicon (Metal)** -> `None`. Even if the config names
+///   an MTP model id, the supervisor strips the drafter and runs the plain
+///   target — no failure, no slowdown. This is the WHOLE reason the gate
+///   lives here in the shell and not in the pure argv builder.
+/// - **non-Apple (CUDA / Vulkan)** AND the chosen model entry ships an
+///   `mtp-` drafter file beside the target -> `Some(MtpDraft{..})`, so the
+///   `--spec-type draft-mtp` flags ride along.
+///
+/// A model with no `mtp-` file (the plain E2B default, E4B, ...) yields
+/// `None` on every platform, so the legacy argv is byte-identical there too.
+fn mtp_draft_for(entry: &ModelEntry, dir: &Path) -> Option<launch::MtpDraft> {
+    // The Apple-Silicon gate: strip MTP regardless of the model id named.
+    // `cfg!` (not `#[cfg]`) keeps this a plain runtime const the compiler
+    // folds away per target — non-macOS builds never even check the file.
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    // Non-Apple: activate MTP only when the entry actually ships the tiny
+    // `mtp-*.gguf` drafter (the manifest pins it beside the Q4_K_XL target
+    // for the *-mtp entries). Resolve against the FULL path, same layout
+    // rule as the target/mmproj below.
+    entry
+        .files
+        .iter()
+        .find(|f| f.file_name().starts_with("mtp-") && f.path.ends_with(".gguf"))
+        .map(|f| launch::MtpDraft {
+            draft_model: dir.join(&f.path),
+            n_max: MTP_DRAFT_N_MAX,
+        })
+}
+
 /// The P1 spec from a manifest entry: model = the entry's first .gguf
-/// that is not an mmproj; projector rides when present.
+/// that is not an mmproj or an `mtp-` drafter; projector rides when present;
+/// the MTP drafter rides when the entry ships one AND the platform is
+/// non-Apple (the Metal gate, [`mtp_draft_for`]).
 fn llama_spec(
     binary: &Path,
     entry: &ModelEntry,
@@ -112,10 +155,18 @@ fn llama_spec(
     // keeps the launcher correct if a future entry ever ships nested. The
     // mmproj predicate still keys off the basename, which is what names the
     // projector regardless of any directory prefix.
+    //
+    // The target is the gguf that is NEITHER the mmproj NOR the `mtp-`
+    // drafter — the *-mtp entries ship both beside the target, so without
+    // the `mtp-` exclusion the drafter could be mistaken for the target.
     let model = entry
         .files
         .iter()
-        .find(|f| f.path.ends_with(".gguf") && !f.file_name().starts_with("mmproj"))
+        .find(|f| {
+            f.path.ends_with(".gguf")
+                && !f.file_name().starts_with("mmproj")
+                && !f.file_name().starts_with("mtp-")
+        })
         .map(|f| dir.join(&f.path))
         .unwrap_or_else(|| dir.join("model.gguf"));
     let mmproj = entry
@@ -123,9 +174,19 @@ fn llama_spec(
         .iter()
         .find(|f| f.file_name().starts_with("mmproj"))
         .map(|f| dir.join(&f.path));
+    // The Metal gate resolves the Option<MtpDraft> (None on Apple Silicon,
+    // and None for any model that ships no `mtp-` drafter — the legacy path).
+    let mtp = mtp_draft_for(entry, &dir);
     SpawnSpec {
         program: binary.to_path_buf(),
-        args: launch::llama_server_args(&model, mmproj.as_deref(), ctx_size, parallel_slots, None),
+        args: launch::llama_server_args_mtp(
+            &model,
+            mmproj.as_deref(),
+            ctx_size,
+            parallel_slots,
+            None,
+            mtp.as_ref(),
+        ),
         log: None,
     }
 }
@@ -416,5 +477,98 @@ mod tests {
         };
         host.apply(&dark, &manifest, Path::new("/nonexistent"), 4096, 1, 560);
         assert!(host.asr_blocked().is_none());
+    }
+
+    /// The shipped E2B default ships NO `mtp-` drafter, so its argv must be
+    /// EXACTLY the legacy `llama_server_args` (the back-compat wrapper) on
+    /// EVERY platform — the Metal gate never even reaches the file check.
+    /// This pins the laptop/default path byte-for-byte across the new wiring.
+    #[test]
+    fn the_plain_e2b_default_argv_is_byte_identical_to_the_legacy_path() {
+        let m = compiled_manifest();
+        let entry = m.model("gemma-4-e2b-it-qat-q4_0").unwrap();
+        let models = Path::new("/models");
+        let spec = llama_spec(Path::new("/bin/llama-server"), entry, models, 16384, 2);
+
+        // The legacy builder over the same resolved target + projector.
+        let dir = models.join(&entry.id);
+        let target = dir.join("gemma-4-E2B_q4_0-it.gguf");
+        let mmproj = dir.join("mmproj-gemma-4-E2B-it-Q8_0.gguf");
+        let legacy = launch::llama_server_args(&target, Some(mmproj.as_path()), 16384, 2, None);
+        assert_eq!(spec.args, legacy, "default LLM argv must not drift");
+        assert!(
+            !spec.args.join(" ").contains("draft-mtp"),
+            "the plain default never carries MTP flags"
+        );
+    }
+
+    /// The drafter-resolution half of the Metal gate, independent of the
+    /// running platform: `mtp_draft_for` finds the `mtp-*.gguf` the manifest
+    /// pins beside the MTP target and joins it under the model dir.
+    /// (On macOS the gate short-circuits to None BEFORE this — covered by the
+    /// platform-conditional test below.)
+    #[test]
+    fn mtp_draft_for_resolves_the_pinned_drafter_when_offered() {
+        let m = compiled_manifest();
+        let entry = m.model("gemma-4-e2b-it-qat-q4_k_xl-mtp").unwrap();
+        let dir = Path::new("/models").join(&entry.id);
+        let draft = mtp_draft_for(entry, &dir);
+        if cfg!(target_os = "macos") {
+            // Metal LOSS (#23752): the gate strips MTP regardless of the id.
+            assert!(draft.is_none(), "Apple Silicon strips MTP");
+        } else {
+            // CUDA/Vulkan: the drafter rides, pointing at the pinned mtp- file.
+            let draft = draft.expect("non-Apple activates MTP for an mtp- entry");
+            assert_eq!(
+                draft.draft_model,
+                dir.join("mtp-gemma-4-E2B-it.gguf"),
+                "drafter joined under the model dir"
+            );
+            assert_eq!(draft.n_max, MTP_DRAFT_N_MAX);
+        }
+    }
+
+    /// The whole-path Metal gate over `llama_spec` for an MTP entry: on
+    /// Apple Silicon the argv is the plain target (no MTP flags); on
+    /// CUDA/Vulkan the `--spec-type draft-mtp` flags land, the target is the
+    /// Q4_K_XL gguf (NOT the `mtp-` drafter), and the projector still rides.
+    #[test]
+    fn llama_spec_gates_mtp_flags_by_platform() {
+        let m = compiled_manifest();
+        let entry = m.model("gemma-4-e2b-it-qat-q4_k_xl-mtp").unwrap();
+        let spec = llama_spec(
+            Path::new("/bin/llama-server"),
+            entry,
+            Path::new("/models"),
+            16384,
+            2,
+        );
+        let joined = spec.args.join(" ");
+        // The target is the real Q4_K_XL, never the drafter — on every
+        // platform (the `mtp-` exclusion in the target predicate).
+        assert!(
+            joined.contains(
+                "--model /models/gemma-4-e2b-it-qat-q4_k_xl-mtp/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf"
+            ),
+            "{joined}"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(!joined.contains("draft-mtp"), "Metal strips MTP: {joined}");
+            assert!(
+                !joined.contains("--model-draft"),
+                "no drafter on Apple Silicon: {joined}"
+            );
+        } else {
+            assert!(joined.contains("--spec-type draft-mtp"), "{joined}");
+            assert!(
+                joined.contains(
+                    "--model-draft /models/gemma-4-e2b-it-qat-q4_k_xl-mtp/mtp-gemma-4-E2B-it.gguf"
+                ),
+                "{joined}"
+            );
+            assert!(joined.contains("--spec-draft-n-max 4"), "{joined}");
+        }
+        // The projector rides on every platform.
+        assert!(joined.contains("--mmproj"), "{joined}");
     }
 }
