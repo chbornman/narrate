@@ -54,56 +54,73 @@ cp target/release/pp-asr-server target/release/pp-asr-server-parakeet
 echo "built."
 echo
 
+# Authoritative peak RSS via the kernel high-water mark (ru_maxrss), NOT `ps`
+# sampling: `ps rss` does not count mmap'd external-data pages (the parakeet
+# FP32 encoder.onnx.data is mmap'd), so it under-reports by >10x. `/usr/bin/time`
+# reports ru_maxrss even when the child is signalled. Portable across macOS
+# (`time -l`, bytes) and GNU/Linux (`time -v`, kbytes). Loads the model then
+# TERMs it; model residency dominates peak (streaming adds only small buffers).
+peak_rss_mb() { # server args...  -> echoes MB
+  local bin="$1"; shift
+  local tlog; tlog=$(mktemp)
+  local slog; slog=$(mktemp)
+  if [[ "$(uname)" == "Darwin" ]]; then
+    /usr/bin/time -l "$bin" "$@" >"$slog" 2>"$tlog" &
+  else
+    /usr/bin/time -v "$bin" "$@" >"$slog" 2>"$tlog" &
+  fi
+  local tpid=$!
+  local i; for i in $(seq 1 80); do grep -q READY "$slog" 2>/dev/null && break; sleep 0.5; done
+  sleep 2  # settle past load
+  local spid; spid=$(pgrep -P "$tpid" | head -1 || true)
+  [[ -n "$spid" ]] && kill -TERM "$spid" 2>/dev/null || true
+  wait "$tpid" 2>/dev/null || true
+  if [[ "$(uname)" == "Darwin" ]]; then
+    grep 'maximum resident set size' "$tlog" | awk '{printf "%.0f", $1/1048576}'
+  else
+    grep 'Maximum resident set size' "$tlog" | awk '{printf "%.0f", $NF/1024}'
+  fi
+  rm -f "$tlog" "$slog"
+}
+
 run_engine() {
   local name="$1" server="$2" model_dir="$3"
   if [[ ! -d "$model_dir" ]]; then
     echo "## $name: SKIP (model dir absent: $model_dir)"; echo; return
   fi
+  # Engine-specific server args: sherpa reads the four int8 paths; parakeet
+  # reads --model-dir (the other flags are inert for it). One spawner, two shapes.
+  local srv_args
+  if [[ "$name" == "parakeet" ]]; then
+    srv_args=(--port 0 --encoder x --decoder x --joiner x --tokens x --model-dir "$model_dir" --lang en)
+  else
+    srv_args=(--port 0 --encoder "$model_dir/encoder.int8.onnx" --decoder "$model_dir/decoder.int8.onnx" \
+              --joiner "$model_dir/joiner.int8.onnx" --tokens "$model_dir/tokens.txt" --model-dir "$model_dir")
+  fi
+
   pkill -f pp-asr-server >/dev/null 2>&1 || true
   sleep 1
-  # Background peak-RSS sampler: find the child server PID, record max RSS(KB).
-  # WHY 200ms: cheap enough not to steal CPU from a multi-minute decode run.
-  local peakfile; peakfile=$(mktemp)
-  echo 0 > "$peakfile"
-  (
-    while true; do
-      pid=$(pgrep -f "pp-asr-server-${name}" | head -1 || true)
-      if [[ -n "${pid:-}" ]]; then
-        rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)
-        if [[ -n "${rss:-}" ]]; then
-          cur=$(cat "$peakfile")
-          [[ "$rss" -gt "$cur" ]] && echo "$rss" > "$peakfile"
-        fi
-      fi
-      sleep 0.1
-    done
-  ) &
-  local sampler=$!
-
-  # SINGLE clean pass: no --expect (which triple-streams via score_run's
-  # gated+raw passes) so wall-clock is one honest decode of the audio. WER is
-  # validated separately (PLAN-NEMOTRON-35-SIDECAR §10); this pass is the
-  # §7.4 latency + peak-RSS gate.
-  local t0 t1 wall segs
+  # 1) RTF: ONE clean streamed pass (no --expect; score_run would triple-stream).
+  #    WER is validated separately (PLAN-NEMOTRON-35-SIDECAR §10).
+  local t0 t1 wall
   t0=$(date +%s.%N)
-  segs=$("$BENCH" --wav "$WAV" --model-dir "$model_dir" --server "$server" \
-        2>/dev/null | grep -c 'entry\|onset' || true)
+  "$BENCH" --wav "$WAV" --model-dir "$model_dir" --server "$server" >/dev/null 2>&1 || true
   t1=$(date +%s.%N)
-  kill "$sampler" >/dev/null 2>&1 || true
   pkill -f pp-asr-server >/dev/null 2>&1 || true
-
-  wall=$(awk "BEGIN{printf \"%.1f\", $t1-$t0}")
-  local peak_kb; peak_kb=$(cat "$peakfile"); rm -f "$peakfile"
-  local peak_mb; peak_mb=$(awk "BEGIN{printf \"%.0f\", $peak_kb/1024}")
+  local wall; wall=$(awk "BEGIN{printf \"%.1f\", $t1-$t0}")
   local rtf; rtf=$(awk "BEGIN{printf \"%.2f\", $AUDIO_S/$wall}")
   local chunk_ms; chunk_ms=$(awk "BEGIN{printf \"%.0f\", 560/($AUDIO_S/$wall)}")
+
+  # 2) peak RSS: authoritative ru_maxrss (ps cannot see mmap'd weights).
+  sleep 1
+  local peak_mb; peak_mb=$(peak_rss_mb "$server" "${srv_args[@]}")
+  pkill -f pp-asr-server >/dev/null 2>&1 || true
 
   echo "## $name"
   echo "  wall:        ${wall}s   (audio ${AUDIO_S}s, single pass)"
   echo "  RTF:         ${rtf}x    (>1 = faster than real-time)"
   echo "  decode/chunk:~${chunk_ms}ms per 560ms chunk  (per-final tail proxy)"
-  echo "  peak RSS:    ${peak_mb} MB"
-  echo "  entries:     ${segs}"
+  echo "  peak RSS:    ${peak_mb} MB   (ru_maxrss, counts mmap'd weights)"
   echo
 }
 
