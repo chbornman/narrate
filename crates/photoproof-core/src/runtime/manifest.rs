@@ -436,6 +436,73 @@ pub fn compiled_manifest() -> Manifest {
                     ),
                 ],
             },
+            // PLAN-NEMOTRON-35-SIDECAR — the Nemotron 3.5 export in the
+            // PARAKEET-RS LAYOUT (the second staged entry the plan §6
+            // calls for). parakeet-rs does NOT load the four-file sherpa
+            // transducer export above; it loads a directory of
+            // encoder.onnx + encoder.onnx.data + decoder_joint.onnx +
+            // config.json + tokenizer.model (an FP32 ONNX, ~2.5 GB of
+            // external data — NOT the int8 sherpa export). Served from the
+            // crate author's HF repo (altunenes/parakeet-rs), subdir
+            // nemotron-3.5-asr-streaming-0.6b-onnx, at the pinned commit.
+            // config.json declares left_context=56 + vocab 13087 — the
+            // multilingual-3.5 markers the plan cites.
+            //
+            // OFFERED ONLY when pp-asr-server is built `--features
+            // engine-parakeet` AND this tier flips to vec![1, 2]. STAGED
+            // (tiers: vec![]) until the WER/latency gate (§7) passes: the
+            // downloader never enqueues it, the consent card never sums it.
+            // Flipping the tier + building the parakeet feature is the live
+            // swap; both revert in one line each (fully reversible — the
+            // sherpa-onnx-crate child stays the default).
+            ModelEntry {
+                id: "nemotron-3.5-asr-streaming-0.6b-parakeet".into(),
+                role: "asr".into(),
+                tiers: vec![],
+                license: License {
+                    name: "NVIDIA Open Model License".into(),
+                    url: "https://developer.download.nvidia.com/licenses/nvidia-open-model-license-agreement-june-2024.pdf".into(),
+                    acceptance_required: true,
+                },
+                total_bytes: 2979 + 97_590_054 + 42_164_972 + 2_454_405_120 + 406_554,
+                files: vec![
+                    pinned(
+                        "hf:altunenes/parakeet-rs",
+                        "a95331a1f347c66d68bc7e34d3eb05963bbb2f4c",
+                        "nemotron-3.5-asr-streaming-0.6b-onnx/config.json",
+                        "b0289e196d11a17e3c661bbadfe455c87de4baffc1a5e652a5779f5d687c5db0",
+                        2_979,
+                    ),
+                    pinned(
+                        "hf:altunenes/parakeet-rs",
+                        "a95331a1f347c66d68bc7e34d3eb05963bbb2f4c",
+                        "nemotron-3.5-asr-streaming-0.6b-onnx/decoder_joint.onnx",
+                        "634dfadf24cb4f73c2fae170b36611d68db48186426882cbc8f7e02ed9f2bb29",
+                        97_590_054,
+                    ),
+                    pinned(
+                        "hf:altunenes/parakeet-rs",
+                        "a95331a1f347c66d68bc7e34d3eb05963bbb2f4c",
+                        "nemotron-3.5-asr-streaming-0.6b-onnx/encoder.onnx",
+                        "d569fbe78b48fbb04e169d324f5d25463838ceed7b5fc3bfe209872441979bd9",
+                        42_164_972,
+                    ),
+                    pinned(
+                        "hf:altunenes/parakeet-rs",
+                        "a95331a1f347c66d68bc7e34d3eb05963bbb2f4c",
+                        "nemotron-3.5-asr-streaming-0.6b-onnx/encoder.onnx.data",
+                        "7584f85df76bc9ae6fbdfa53aa8d97b07a842525d1c501d536d77fd9e4f57ac7",
+                        2_454_405_120,
+                    ),
+                    pinned(
+                        "hf:altunenes/parakeet-rs",
+                        "a95331a1f347c66d68bc7e34d3eb05963bbb2f4c",
+                        "nemotron-3.5-asr-streaming-0.6b-onnx/tokenizer.model",
+                        "ce3895e40806f02a26c3a225161b96ef682d6c0054bae32a245dec4258d7d291",
+                        406_554,
+                    ),
+                ],
+            },
             // B73: DFN5B (ViT-H-14-378-quickgelu, Immich's ONNX export) is the
             // CLIP embedder — founder-confirmed feasible on M-series. Pinned in
             // full: the visual tower's graph onnx PLUS ~400 external-data weight
@@ -793,6 +860,44 @@ mod tests {
             offered_asr,
             vec!["nemotron-speech-streaming-en-0.6b-560ms-int8"],
             "only the current ASR model is offered; 3.5 stays staged"
+        );
+    }
+
+    /// PLAN-NEMOTRON-35-SIDECAR: the parakeet-layout 3.5 entry is a SECOND
+    /// staged pin (parakeet-rs loads a different model format than sherpa).
+    /// Fully resolvable (real SHAs/revision), but offered at NO tier until
+    /// the gate passes AND the engine-parakeet feature is built — so it
+    /// never ships by accident and the live sherpa path is untouched.
+    #[test]
+    fn nemotron_35_parakeet_entry_is_pinned_but_staged() {
+        let m = compiled_manifest();
+        let pk = m
+            .model("nemotron-3.5-asr-streaming-0.6b-parakeet")
+            .expect("parakeet-layout 3.5 entry present");
+        assert!(pk.is_pinned(), "real SHAs — resolvable when GO lands");
+        assert_eq!(pk.role, "asr");
+        assert!(pk.tiers.is_empty(), "STAGED: offered at no tier");
+        // The parakeet-rs directory layout (NOT the four-file sherpa export):
+        // config.json + encoder.onnx + .data + decoder_joint.onnx + tokenizer.
+        assert_eq!(pk.files.len(), 5);
+        for name in [
+            "nemotron-3.5-asr-streaming-0.6b-onnx/config.json",
+            "nemotron-3.5-asr-streaming-0.6b-onnx/encoder.onnx",
+            "nemotron-3.5-asr-streaming-0.6b-onnx/encoder.onnx.data",
+            "nemotron-3.5-asr-streaming-0.6b-onnx/decoder_joint.onnx",
+            "nemotron-3.5-asr-streaming-0.6b-onnx/tokenizer.model",
+        ] {
+            assert!(pk.files.iter().any(|f| f.path == name), "{name} pinned");
+        }
+        assert_eq!(
+            pk.total_bytes,
+            pk.files.iter().map(|f| f.bytes).sum::<u64>(),
+            "total_bytes is the file sum"
+        );
+        // Never offered at the tier-1 floor (the staging guarantee).
+        assert!(
+            !m.offered_at(1).iter().any(|e| e.id == pk.id),
+            "parakeet 3.5 must not leak into the offered set"
         );
     }
 

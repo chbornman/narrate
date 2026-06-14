@@ -87,6 +87,17 @@ realization keeps the sidecar in Rust and swaps only its engine.
   feature flags — matching our accelerator plan.
   - https://crates.io/crates/parakeet-rs · https://docs.rs/parakeet-rs
   - https://github.com/altunenes/parakeet-rs
+- **CPU EP only — CoreML/Metal is OFF the table for ASR, and that COSTS
+  us nothing.** The parakeet-rs README states plainly: "CoreML is unstable
+  with this model ... use CPU; even CPU is faster than Whisper-metal" (on
+  e.g. an M3/16 GB). This lines up exactly with our ASR-CPU-by-design
+  posture: the accelerator budget (CoreML on Mac, CUDA on margo, Vulkan
+  later) is spent on the embedders + LLM, never the streaming transducer
+  (RUNTIME §3.2 keeps ASR on CPU regardless). So the `engine-parakeet`
+  Cargo dep pulls NO `coreml`/`cuda` feature, and the engine pins
+  `ExecutionProvider::Cpu` explicitly. The M1 validation (§10) confirms it:
+  CPU streamed at **RTF ~4.66x** (decode is 4.66x faster than the audio is
+  long), comfortably real-time, with no Metal in sight.
 - It exposes a `Nemotron` streaming type + `NemotronEncoderCache` whose
   docs explicitly cover BOTH `English 0.6B (left_context=70)` and
   `multilingual 3.5 (left_context=56)` — so 3.5 streaming is in the
@@ -94,17 +105,26 @@ realization keeps the sidecar in Rust and swaps only its engine.
   it in 560 ms chunks with silence-flush, exactly our serving shape, and
   sets language via `set_target_lang(lang)` (default `"auto"`).
   - https://github.com/altunenes/parakeet-rs/blob/master/examples/streaming.rs
-- Model artifacts: the staged manifest entry's export
-  (`csukuangfj2/...-560ms-int8-2026-06-11`) is the standard four-file
-  transducer layout `encoder.int8.onnx` / `decoder.int8.onnx` /
-  `joiner.int8.onnx` / `tokens.txt` — the same basenames
-  `asr_wrapper_args` already passes. `parakeet-rs` may want a slightly
-  different file handle (it splits "encoder" + "decoder_joint" sessions);
-  the spike (§7) confirms whether the sherpa-layout export loads directly
-  or wants `parakeet-rs`'s own export script
-  (`scripts/export_nemotron_streaming_multilingual.py`). If it needs the
-  parakeet-layout export, that is a SECOND staged manifest entry (new id,
-  new SHAs), not a change to the protocol or launcher.
+- Model artifacts — **ANSWERED (the GO spike, §10): `parakeet-rs` does
+  NOT load the sherpa four-file int8 export. It needs its OWN layout**, so
+  a SECOND staged manifest entry was added (`tiers: vec![]`, real SHAs).
+  The sherpa staged entry (`csukuangfj2/...-560ms-int8-2026-06-11`) is the
+  four-file int8 transducer `encoder.int8.onnx` / `decoder.int8.onnx` /
+  `joiner.int8.onnx` / `tokens.txt`. `parakeet-rs` instead loads a model
+  DIRECTORY of `config.json` + `encoder.onnx` + `encoder.onnx.data`
+  (an **FP32** ONNX, ~2.45 GB of external weights, NOT int8) +
+  `decoder_joint.onnx` (one fused decoder+joiner session, not the split
+  decoder/joiner) + `tokenizer.model`. We pin the crate author's prebuilt
+  export (`hf:altunenes/parakeet-rs`, subdir
+  `nemotron-3.5-asr-streaming-0.6b-onnx`, commit
+  `a95331a1…`), whose `config.json` declares `left_context=56` + `vocab
+  13087` — the multilingual-3.5 markers. (The author also ships
+  `scripts/export_nemotron_streaming_multilingual.py` to re-export from
+  `nvidia/nemotron-3.5-asr-streaming-0.6b`; we pin the prebuilt rather than
+  re-export, same discipline as every other entry.) Manifest id:
+  `nemotron-3.5-asr-streaming-0.6b-parakeet`. The launcher gained one
+  additive flag — `--model-dir {dir}` — so the parakeet engine gets the
+  directory; the sherpa engine ignores it. No protocol change.
 
 **Why this over Python:** Python-free (keeps RUNTIME §1.2), a *pinned
 published crate* (keeps manifest/dependency discipline), reuses the `ort`
@@ -276,4 +296,99 @@ staged manifest entry serves all three paths unchanged.
   flipped; no model downloads change. The `engine-parakeet` Cargo feature
   + the `parakeet-rs` engine impl are left for the GO branch (they need
   the real model on the founder machine to validate, §7).
+
+## 10. GO landed — the `parakeet-rs` engine, behind `engine-parakeet`
+
+The founder-approved GO. Implemented behind the `engine-parakeet` Cargo
+feature; the sherpa-onnx path stays the **default** and untouched (fully
+reversible). All on the CPU EP (§3 Metal note).
+
+### What shipped
+
+- **`pp-asr-server` split into a generic WS loop + two engine modules.**
+  `main.rs` owns arg parsing, the WS server, and ONE generic
+  per-connection loop (the B67 finals-from-last-state + grace + endpoint
+  machinery, verbatim) driving an `Engine` trait. `engine_sherpa.rs` is
+  the DEFAULT — byte-for-byte today's decode behavior (recognizer +
+  `is_endpoint` rule1/2/3 + B67), just lifted behind the trait.
+  `engine_parakeet.rs` is the new engine.
+- **`Cargo.toml` features:** `engine-sherpa` (default) and
+  `engine-parakeet`. Both `sherpa-onnx` and `parakeet-rs` are
+  `optional`; the default build does not pull `parakeet-rs`. The parakeet
+  feature also pulls a direct `ort` dep ONLY to turn on `download-binaries`
+  (parakeet-rs depends on `ort` with default-features off, so without this
+  the binary cannot link onnxruntime). It is the SAME `ort` rc.12 the
+  connectors crate already vendors — Cargo unifies it, so there is no
+  second ONNX Runtime. NO `coreml`/`cuda` feature: CPU only.
+- **The parakeet engine owns three things sherpa got for free:**
+  1. **Chunking** — re-chunks the arbitrary ~50 ms wire frames into the
+     fixed 560 ms (8960-sample) chunks `transcribe_chunk` wants.
+  2. **Endpointing** — `parakeet-rs` has no rule1/2/3 endpointer, so we
+     PORTED CAPTURE §6.3 as a trailing-silence sample counter (rule2 after
+     decoded speech, rule1 for pre-speech dead air, rule3 max-utterance),
+     feeding the generic loop the same `is_endpoint` signal sherpa does.
+  3. **B67** — `transcribe_chunk` returns INCREMENTAL text; the session
+     accumulates it per utterance so `result()` is the running text-so-far
+     and a minted final can never carry less than its partials did.
+- **`set_target_lang("en")`** is called on the multilingual 3.5 model at
+  stream create (guarded on `NemotronMode::Multilingual`).
+- **Launch:** `asr_wrapper_args` gained `--model-dir {dir}` (additive,
+  inert for the sherpa child).
+- **Manifest:** added `nemotron-3.5-asr-streaming-0.6b-parakeet`
+  (`tiers: vec![]`, real SHAs/sizes, revision `a95331a1…`) — the parakeet
+  directory layout. STAGED: offered nowhere until the tier flips AND the
+  binary is built with `engine-parakeet`.
+
+### API gotchas (cite)
+
+- **Model format is parakeet's own, not sherpa's** (the headline answer):
+  see §3 — a directory of `config.json` + `encoder.onnx`(+`.data`) +
+  `decoder_joint.onnx` + `tokenizer.model`, FP32 ~2.5 GB, NOT the int8
+  four-file export. Required the second manifest entry.
+  - https://huggingface.co/altunenes/parakeet-rs/tree/main/nemotron-3.5-asr-streaming-0.6b-onnx
+- `Nemotron::from_pretrained(dir, Option<ExecutionConfig>) -> Result<Self>`;
+  `set_target_lang(&mut self, &str)`; `transcribe_chunk(&mut self, &[f32])
+  -> Result<String>` (INCREMENTAL text, not cumulative); `get_transcript()`
+  (cumulative); `reset(&mut self)`. The type is `&mut`/stateful, so it is
+  ONE `Nemotron` per connection (unlike sherpa's shared recognizer +
+  per-stream `create_stream`).
+  - https://docs.rs/parakeet-rs/0.3.6/parakeet_rs/struct.Nemotron.html
+- `ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cpu)
+  .with_intra_threads(n)`; `ExecutionProvider::Cpu` is the Default.
+  - https://github.com/altunenes/parakeet-rs/blob/master/examples/streaming.rs
+- No per-token timestamps on the streaming Nemotron path; both `tokens`
+  and `timestamps` are emitted EMPTY (the wire contract makes them
+  Optional, and CAPTURE binds onsets to VAD not token times, §4).
+
+### Validation on the M1 (CPU, real model, gitignored corpora)
+
+Model downloaded to `models/nemotron-3.5-asr-streaming-0.6b-parakeet/…`;
+all five files' SHA-256 verified against the manifest pins.
+
+- **LibriSpeech** (test-clean `1089-134686`, 295 s read speech):
+  **WER 1.25%**, RTF **4.66x**, load 2.2 s. Native punctuation + caps
+  present ("He hoped there would be stew for dinner, turnips and carrots
+  …").
+- **Alice ch1** (`alice-ch1-16k.wav`, ~17.4 min): **WER 5.4%** RTF
+  **4.66x** — and that 5.4% is inflated by the LibriVox boilerplate intro
+  ("this is a Librivox recording … please visit librivox dot org") the
+  engine transcribes but the reference omits; content WER is materially
+  lower. Punctuation + caps native throughout.
+- **End-to-end through the REAL server binary** (not just the engine):
+  spawned `pp-asr-server --features engine-parakeet --model-dir … --lang
+  en`, it printed `READY port=…` on stdout, then a WS client streamed a
+  12 s clip as f32 frames + "Done" and received a well-formed FINAL JSON
+  (`is_final`, `segment`, cased+punctuated `text`) and the "Done" ack. The
+  ported endpointer minted exactly one final for the single-utterance clip.
+
+**Verdict: the engine WORKS, transcribes correctly with native
+punctuation/caps, and produces excellent WER well within the §7 "must
+work + sane WER" bar.** It is not yet A/B'd against the live 560 ms int8
+model for the full §7 latency/RSS gate (next step before flipping the tier
++ defaulting the feature), but the GO objective — a published-crate 3.5
+engine serving our exact WS protocol on CPU — is met and reversible.
+
+`cargo fmt` / `clippy -D warnings` / `test` are green for BOTH the default
+(`engine-sherpa`) and `--no-default-features --features engine-parakeet`
+builds.
 </content>

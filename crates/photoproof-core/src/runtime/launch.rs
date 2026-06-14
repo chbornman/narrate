@@ -155,6 +155,13 @@ pub fn asr_wrapper_args(model_dir: &Path, chunk_ms: u32, threads: u32) -> Vec<St
         model_dir.join("joiner.int8.onnx").display().to_string(),
         "--tokens".into(),
         model_dir.join("tokens.txt").display().to_string(),
+        // The model DIRECTORY itself, for the parakeet-rs engine, which
+        // loads a dir (encoder.onnx + .data + decoder_joint.onnx +
+        // tokenizer.model) rather than the four sherpa transducer files
+        // (PLAN-NEMOTRON-35-SIDECAR §6). The sherpa engine ignores it; the
+        // parakeet engine reads it. Inert for the live sherpa child.
+        "--model-dir".into(),
+        model_dir.display().to_string(),
         "--chunk-ms".into(),
         chunk_ms.to_string(),
         "--num-threads".into(),
@@ -263,6 +270,12 @@ mod tests {
         assert!(joined.contains("--chunk-ms 160"));
         assert!(joined.contains("/models/asr/encoder.int8.onnx"));
         assert!(joined.contains("/models/asr/tokens.txt"));
+        // The parakeet engine loads the model DIRECTORY; the launcher always
+        // passes it (inert for the sherpa child). PLAN-NEMOTRON-35-SIDECAR §6.
+        assert!(
+            joined.contains("--model-dir /models/asr"),
+            "model dir for parakeet: {joined}"
+        );
     }
 
     /// The endpoint rules are now READ from `tuning().voice` and passed to the
