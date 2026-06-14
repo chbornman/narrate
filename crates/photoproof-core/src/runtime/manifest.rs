@@ -193,6 +193,107 @@ pub fn compiled_manifest() -> Manifest {
                     ),
                 ],
             },
+            // MTP (multi-token prediction) E2B — the lossless-speculative
+            // variant. Same Gemma 4 E2B target, plus a TINY MTP drafter
+            // (~59 MB) that shares the target KV cache; the target verifies
+            // every drafted token, so output is byte-identical to the plain
+            // E2B path (Unsloth MTP card; mainline llama.cpp #23398 + #24282).
+            //
+            // GATED BY HARDWARE, NOT DEFAULT: MTP is a CUDA win (RTX 5080) and
+            // a Metal LOSS — the draft-eval overhead exceeds the speculative
+            // gain on Apple Silicon at every config (ggml-org/llama.cpp #23752,
+            // closed: 11-28% SLOWER on Metal). So this entry is OFFERED at
+            // tier 2 (the discrete-GPU tier) and the supervisor only passes the
+            // `--spec-type draft-mtp` flags when the drafter file is present
+            // AND the platform is non-Metal (launch.rs). The laptop keeps the
+            // plain `gemma-4-e2b-it-qat-q4_0` entry above, unchanged.
+            //
+            // Repo: Unsloth's QAT GGUF (Q4_K_XL UD target + the root `mtp-`
+            // drafter + Q8 mmproj). The drafter and target SHAs are REAL (HF
+            // LFS pointers at the pinned revision); the mmproj SHA is the
+            // Unsloth F16 projector. Requires a vendored llama.cpp built AFTER
+            // 2026-06-08 (#24282 added the `gemma4-assistant` drafter arch +
+            // E2B/E4B support) — the binary update is a separate, founder-owned
+            // step (docs/PLAN-GEMMA-MTP.md).
+            ModelEntry {
+                id: "gemma-4-e2b-it-qat-q4_k_xl-mtp".into(),
+                role: "llm-alt".into(),
+                tiers: vec![2],
+                license: License {
+                    name: "Gemma Terms of Use".into(),
+                    url: "https://ai.google.dev/gemma/terms".into(),
+                    acceptance_required: true,
+                },
+                total_bytes: 2_620_368_960 + 59_234_176 + 985_654_080,
+                files: vec![
+                    pinned(
+                        "hf:unsloth/gemma-4-E2B-it-qat-GGUF",
+                        "db01ae3ceeca98487bf3569814f832f5023cd48c",
+                        "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf",
+                        "cd4526493dccbfd6791bee8822e37e30340074d1d4d9aada52ce09afefd6a33a",
+                        2_620_368_960,
+                    ),
+                    // The MTP drafter (root `mtp-` file: a recent llama.cpp
+                    // auto-detects it next to the target, but the supervisor
+                    // passes it explicitly via --model-draft because our
+                    // vendored binary loads from a pinned path, not `-hf`).
+                    pinned(
+                        "hf:unsloth/gemma-4-E2B-it-qat-GGUF",
+                        "db01ae3ceeca98487bf3569814f832f5023cd48c",
+                        "mtp-gemma-4-E2B-it.gguf",
+                        "8702bf70ab5604dcc818f26ea144fd4237c9908c15992d5b34746c65039dc65d",
+                        59_234_176,
+                    ),
+                    pinned(
+                        "hf:unsloth/gemma-4-E2B-it-qat-GGUF",
+                        "db01ae3ceeca98487bf3569814f832f5023cd48c",
+                        "mmproj-F16.gguf",
+                        "13c8966d1635d02e6727f27402880614906fa291850c07feda18dbcddf2291b6",
+                        985_654_080,
+                    ),
+                ],
+            },
+            // MTP 26B-A4B — the Tier-2 quality upgrade for the discrete-GPU
+            // box (RTX 5080, 16 GB VRAM). MoE with ~4B active params tolerates
+            // partial CPU offload (RUNTIME §6.2), the Q4_K_XL target is 14.25 GB
+            // (fits 16 GB with KV + the ~252 MB drafter), and MTP gives the big
+            // dense-style speedup on CUDA. Same lossless-verify guarantee as the
+            // E2B-MTP entry; same non-Metal launch gating. The 31B target
+            // (17.3 GB) does NOT fit 16 GB VRAM, so 26B-A4B is the pick.
+            ModelEntry {
+                id: "gemma-4-26b-a4b-it-qat-q4_k_xl-mtp".into(),
+                role: "llm-alt".into(),
+                tiers: vec![2],
+                license: License {
+                    name: "Gemma Terms of Use".into(),
+                    url: "https://ai.google.dev/gemma/terms".into(),
+                    acceptance_required: true,
+                },
+                total_bytes: 14_249_045_120 + 251_937_728 + 985_654_080,
+                files: vec![
+                    pinned(
+                        "hf:unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+                        "02749a7b272109255a4c559a80894d3d9777574c",
+                        "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+                        "dcf179a91153e3a7ece792e48ef872180d9d6ef9b7677f0a0bd3e83cfe624d5e",
+                        14_249_045_120,
+                    ),
+                    pinned(
+                        "hf:unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+                        "02749a7b272109255a4c559a80894d3d9777574c",
+                        "mtp-gemma-4-26B-A4B-it.gguf",
+                        "62bd3af7f66c9308de9a5454233852f8c7324c93767e8dfb824ed45b9179864a",
+                        251_937_728,
+                    ),
+                    pinned(
+                        "hf:unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+                        "02749a7b272109255a4c559a80894d3d9777574c",
+                        "mmproj-F16.gguf",
+                        "13c8966d1635d02e6727f27402880614906fa291850c07feda18dbcddf2291b6",
+                        985_654_080,
+                    ),
+                ],
+            },
             // E4B stays the config-selectable bigger option (Tier 2+):
             // measurably better prose for captions, 2.9 s parses, 6.7 GB.
             ModelEntry {
@@ -552,6 +653,41 @@ mod tests {
         // a hosted download URL is a backlog item, see the entry comment.)
         assert_eq!(m.total_bytes_at(1), 10_830_366_615, "tier-1 pinned sum");
         assert_eq!(m.total_bytes_at(0), 0, "tier 0 offers NOTHING");
+    }
+
+    /// The MTP (multi-token-prediction) LLM variants are pinned, tier-2-only
+    /// (the discrete-GPU tier — MTP is a CUDA win, a Metal loss, #23752), and
+    /// each ships its `mtp-` drafter file beside the target. They are
+    /// llm-alt: the shipped default LLM (`gemma-4-e2b-it-qat-q4_0`) is
+    /// untouched, so this never changes the tier-1 floor or the laptop path.
+    #[test]
+    fn mtp_llm_variants_are_pinned_tier2_and_ship_a_drafter() {
+        let m = compiled_manifest();
+        for id in [
+            "gemma-4-e2b-it-qat-q4_k_xl-mtp",
+            "gemma-4-26b-a4b-it-qat-q4_k_xl-mtp",
+        ] {
+            let model = m.model(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(model.is_pinned(), "{id} fully pinned (real SHAs)");
+            assert_eq!(model.role, "llm-alt", "{id} is a selectable alternative");
+            assert_eq!(model.tiers, vec![2], "{id} offered at the GPU tier only");
+            assert!(
+                model.files.iter().any(|f| f.path.starts_with("mtp-")),
+                "{id} ships the mtp- drafter beside the target"
+            );
+            assert_eq!(
+                model.total_bytes,
+                model.files.iter().map(|f| f.bytes).sum::<u64>(),
+                "{id} total_bytes is the live file sum"
+            );
+        }
+        // The default LLM is NOT the MTP entry — the laptop path is unchanged.
+        assert!(
+            m.model("gemma-4-e2b-it-qat-q4_0").is_some(),
+            "the plain E2B default still exists"
+        );
+        // MTP entries are tier-2-only, so the tier-1 floor sum is unchanged
+        // (guarded above in the pinned-sum test).
     }
 
     #[test]

@@ -191,6 +191,17 @@ impl Default for LlmConfig {
             // footprint, 2× the speed, schema probe 50/50, and the
             // interactive parse fits §9's 2 s budget on the Tier-1 floor.
             // E4B (gemma-4-e4b-it-q4_k_m) remains config-selectable.
+            //
+            // MTP (multi-token-prediction) variants are also selectable on
+            // discrete-GPU (tier-2) machines — set `model` to
+            // `gemma-4-e2b-it-qat-q4_k_xl-mtp` (laptop-class E2B + drafter)
+            // or `gemma-4-26b-a4b-it-qat-q4_k_xl-mtp` (the RTX-5080 quality
+            // pick). These are CUDA-only wins: the supervisor strips the MTP
+            // flags on Apple Silicon, where MTP is a NET LOSS (#23752), so
+            // naming one on a Mac just runs the plain target. No model-pick
+            // logic changes here — any manifest id flows through unchanged,
+            // and tier/install gating is enforced in the runtime plan.
+            // See docs/PLAN-GEMMA-MTP.md.
             model: "gemma-4-e2b-it-qat-q4_0".into(),
             local_llamacpp: LlamacppConfig::default(),
             openai_compatible: OpenAiCompatibleConfig::default(),
