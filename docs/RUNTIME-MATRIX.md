@@ -112,6 +112,43 @@ CUDA/CoreML providers if ever wanted. Default: stay on CPU.
   tier is already designed for llama.cpp; extend the same auto-detect + graceful
   fallback to the `ort` embedders (CoreML/CUDA/DirectML/CPU) once FP16 lands.
 
+## Model concurrency - which models co-run, by user flow
+
+WHERE (the accelerator/EP tables above) is only half the story. WHEN models run is
+governed by a SCHEDULER (`crates/photoproof-core/src/runtime/scheduler.rs`,
+`spec/RUNTIME.md` S9) that enforces a strict priority ladder:
+
+> **live voice  >  interactive search  >  background fuel**
+
+The mechanics: mic-armed pauses ALL background model work (resumes 5s after disarm,
+`MIC_UNPAUSE_DELAY_MS`); an interactive LLM query parse PREEMPTS a background LLM
+job if it would wait >250ms; the LLM is one `llama-server` with two slots
+(interactive + background, never more); GPU/embedding passes run at concurrency 1.
+
+### Per user flow (which models fire)
+| user action | models | live/bg | who pauses/yields |
+|---|---|---|---|
+| **Dictate a note** (Space) | VAD + ASR | LIVE (CPU) | background embed + LLM PAUSE while mic armed |
+| **Search** (type a query) | LLM parse + text-embed (query) + CLIP-text (if visual / few results) | LIVE | interactive parse PREEMPTS background LLM |
+| **Import / ingest a shoot** | CLIP image-embed + text-embed (notes) + LLM caption (M3+) | BACKGROUND | all yield to voice + interactive; serialized concurrency 1 |
+| **Stop reviewing** (30-min idle / session close) | LLM session + per-image summaries | BACKGROUND | yields to voice + interactive |
+| **Open Visualizer / Station digest** | (precomputed CLIP + text vectors) + LLM digest | mostly precomputed | digest is background LLM |
+
+### Real overlap scenarios (the contention cases)
+| co-running | resolution | governed by |
+|---|---|---|
+| Dictate **+** background embedding | embedding PAUSES (voice protected); resumes +5s | scheduler `set_mic_armed` |
+| Search **+** background embedding | CO-RUN (both small ort sessions; no serialization) | ort concurrent sessions |
+| Search **+** background LLM summary | interactive PREEMPTS (cancels background lane) | scheduler 250ms rule |
+| Image-embed **+** note-embed (both bg) | SERIALIZED (concurrency 1, queue order) | LIBRARY.md S10.3 |
+| VAD **+** ASR | sequential by design (VAD gates, ASR transcribes) | CAPTURE.md S6.2 |
+| LLM **+** LLM | serialized (one server, 2 slots, 1 active/lane) | RUNTIME.md S3.1 |
+
+So contention is managed by TWO complementary layers: this scheduler decides WHEN
+(priority ladder + mic-pause + preemption), and the EP/accelerator tables above
+decide WHERE (which chip). That is why ASR-on-CPU + background-pause-during-capture
+means the live mic never fights the GPU/LLM.
+
 ## Where the normative truth lives
 
 `spec/RUNTIME.md` (S3 serving + the CPU-default / GPU-opt-in EP plan + llama.cpp
