@@ -154,7 +154,10 @@ impl OrtEmbedder {
         tokenizer_path: &Path,
         dims: usize,
     ) -> ConnectorResult<Self> {
-        let session = build_session(model_path)?;
+        // The text embedder (EmbeddingGemma / Qwen3) stays on CPU: it is int8,
+        // and int8 under CoreML hits a pathological compile (docs/SPIKE-COREML).
+        // CoreML/CUDA acceleration is the CLIP path, gated per-model in `clip`.
+        let session = build_session(model_path, false)?;
         let tokenizer = load_tokenizer(tokenizer_path)?;
         let kv_feeds = zero_length_kv_feeds(&session);
         let has_position_ids = session.inputs().iter().any(|i| i.name() == "position_ids");
@@ -181,11 +184,20 @@ impl OrtEmbedder {
         tokenizer_path: &Path,
         dims: usize,
     ) -> ConnectorResult<Self> {
-        let image_session = build_session(image_model_path)?;
-        let text_session = build_session(text_model_path)?;
+        let model_id = model_id.into();
+        // Per-model accelerator selection: CoreML (ANE/GPU) for the single-file
+        // FP16 CLIP on macOS - measured 8.77x over CPU, near-lossless
+        // (docs/SPIKE-COREML.md). The int8 external-data CLIP + the text embedder
+        // stay CPU (int8 under CoreML pathologically compiles). The `-fp16`
+        // model-id suffix marks the CoreML-ready single-file export. CUDA for
+        // NVIDIA is the analogous EP (planned, not yet wired). The env knob still
+        // force-enables CoreML for the spike harness (see `build_session`).
+        let coreml = cfg!(target_os = "macos") && model_id.ends_with("-fp16");
+        let image_session = build_session(image_model_path, coreml)?;
+        let text_session = build_session(text_model_path, coreml)?;
         let tokenizer = load_tokenizer(tokenizer_path)?;
         Ok(Self {
-            model_id: model_id.into(),
+            model_id,
             dims,
             inner: Inner::Clip {
                 text_session: Mutex::new(text_session),
@@ -342,7 +354,7 @@ fn coreml_requested() -> bool {
     }
 }
 
-fn build_session(model_path: &Path) -> ConnectorResult<Session> {
+fn build_session(model_path: &Path, coreml: bool) -> ConnectorResult<Session> {
     // CPU EP is ort's default; 4 intra-op threads is the spike posture.
     // GraphOptimizationLevel::Level3 matches onnxruntime python's default
     // (ORT_ENABLE_ALL) the spike measured against. The builder option
@@ -363,7 +375,10 @@ fn build_session(model_path: &Path) -> ConnectorResult<Session> {
     // CPU fallback; a spike that "succeeds" by quietly running on CPU would be
     // a false positive. Per-op CPU<->ANE partition is CoreML's own internal
     // decision and is read from `with_profile_compute_plan` logs, not here.
-    if coreml_requested() {
+    // CoreML when the caller selected it for THIS model (the FP16 CLIP on macOS,
+    // chosen in `clip`) OR the env knob forces it (the spike harness). int8
+    // models + the text embedder pass `coreml=false` and stay on the CPU EP.
+    if coreml || coreml_requested() {
         // Cache the compiled CoreML MLProgram beside the model so the multi-
         // minute first-load compile is paid ONCE, not on every launch (the FP16
         // production caveat: ~16.5 min first compile, docs/SPIKE-COREML.md).

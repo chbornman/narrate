@@ -285,6 +285,53 @@ pub fn compiled_manifest() -> Manifest {
                 total_bytes: dfn5b_total,
                 files: dfn5b_files,
             },
+            // FP16 single-file CLIP (docs/SPIKE-COREML.md). The SAME DFN5B graph
+            // as the int8 entry above, but weights INLINED into one model.onnx per
+            // tower - the form CoreML can load (the int8 external-data split cannot).
+            // Measured 8.77x over CPU on Apple Silicon (CoreML/ANE), near-lossless
+            // (COCO nDCG 0.8212 vs int8 0.8225). Selected on macOS when config names
+            // this id; the int8 entry stays the CPU fallback.
+            //
+            // NOT YET HOSTED: this artifact is LOCALLY converted (the immich repo
+            // serves fp32, not this single-file fp16), so the repo/revision below is
+            // a NOMINAL pointer and a real download URL is a backlog item (host the
+            // file + re-pin). Dev machines stage the files under models/<id>/ and
+            // mark installed.json, so the downloader is never invoked. The sha256 +
+            // bytes ARE the real local artifact (a future hosted copy must match).
+            ModelEntry {
+                id: "ViT-H-14-378-quickgelu__dfn5b-fp16".into(),
+                role: "embedder".into(),
+                tiers: vec![1, 2],
+                license: License {
+                    name: "Apple Sample Code License (ASCL)".into(),
+                    url: "https://huggingface.co/immich-app/ViT-H-14-378-quickgelu__dfn5b".into(),
+                    acceptance_required: true,
+                },
+                total_bytes: 1_265_962_399 + 708_726_647 + 3_642_073,
+                files: vec![
+                    pinned(
+                        DFN5B_REPO,
+                        "local-fp16-convert",
+                        "visual/model.onnx",
+                        "e30e7613f2cdf1eda55fa685b467e1e04e261f20c5a15d22238682189e45ef99",
+                        1_265_962_399,
+                    ),
+                    pinned(
+                        DFN5B_REPO,
+                        "local-fp16-convert",
+                        "textual/model.onnx",
+                        "f2cc1e79707f394373083d26abd6a51a039e319cb1bd47c65a47f3786ba368d2",
+                        708_726_647,
+                    ),
+                    pinned(
+                        DFN5B_REPO,
+                        "local-fp16-convert",
+                        "textual/tokenizer.json",
+                        "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35",
+                        3_642_073,
+                    ),
+                ],
+            },
             // B73: EmbeddingGemma-300m q8 is the text-embedder DEFAULT — better
             // paraphrase separation than Qwen3, 768 dims (half the PPVEC bytes),
             // 316 MB. onnx-community export: graph + external .onnx_data weights
@@ -429,11 +476,14 @@ mod tests {
             }
         }
         // Tier-1 bundle with the B73 embedder pins REAL: E2B (3.91 GB) + ASR
-        // (0.66 GB) + DFN5B (3.95 GB, graph + ~400 external-data files) +
-        // EmbeddingGemma-300m q8 (0.33 GB, the text-embedder default) =
-        // 8_852_035_496 bytes. Qwen3-alt is tier-2-only, so it is NOT counted
-        // here. Exact, not a range — every byte traces to a pinned file.
-        assert_eq!(m.total_bytes_at(1), 8_852_035_496, "tier-1 pinned sum");
+        // (0.66 GB) + DFN5B int8 (3.95 GB, graph + ~400 external-data files) +
+        // EmbeddingGemma-300m q8 (0.33 GB, the text-embedder default) +
+        // DFN5B-fp16 (1.98 GB, the single-file CoreML CLIP, also offered at
+        // tiers 1-2) = 10_830_366_615 bytes. Qwen3-alt is tier-2-only, so it is
+        // NOT counted here. Exact, not a range — every byte traces to a pinned
+        // file. (The fp16 bundle byte is nominal: dev machines stage it locally;
+        // a hosted download URL is a backlog item, see the entry comment.)
+        assert_eq!(m.total_bytes_at(1), 10_830_366_615, "tier-1 pinned sum");
         assert_eq!(m.total_bytes_at(0), 0, "tier 0 offers NOTHING");
     }
 

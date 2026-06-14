@@ -53,7 +53,16 @@ use photoproof_core::retrieval_eval::{GoldenQuery, QuerySet};
 /// (`model_specs::clip_spec`). The eval library is fresh, so there is no
 /// stored-vector id to resolve from; we embed under the same pinned id the
 /// app ships so the offline tune ranks against the search that ships.
-const CLIP_MODEL_ID: &str = "ViT-H-14-378-quickgelu__dfn5b";
+///
+/// Override with `PP_EVAL_CLIP_MODEL` to embed under an alternate pinned id -
+/// e.g. `ViT-H-14-378-quickgelu__dfn5b-fp16` to A/B the FP16 CoreML space
+/// against the int8 CPU baseline (docs/SPIKE-COREML.md eval). Must be a known
+/// `clip_spec` id with weights staged under `models_dir/<id>/`.
+const DEFAULT_CLIP_MODEL_ID: &str = "ViT-H-14-378-quickgelu__dfn5b";
+
+fn clip_model_id() -> String {
+    std::env::var("PP_EVAL_CLIP_MODEL").unwrap_or_else(|_| DEFAULT_CLIP_MODEL_ID.to_string())
+}
 
 /// The default @k the emitted golden set pins (the runner's built-in default
 /// too). Single-answer text->image queries: 10 is the standard cutoff.
@@ -250,19 +259,21 @@ fn embed_images(
     lib_dir: &Path,
     models_dir: &Path,
 ) -> Result<(), String> {
-    let embedder = match photoproof_connectors::build_clip_embedder(CLIP_MODEL_ID, models_dir) {
+    let model_id = clip_model_id();
+    let embedder = match photoproof_connectors::build_clip_embedder(&model_id, models_dir) {
         Ok(e) => e,
         Err(e) => {
             // No usable CLIP towers: skip embedding rather than abort, so the
             // headless map/golden path still completes.
             eprintln!(
-                "warning: could not load CLIP embedder {CLIP_MODEL_ID} from {}: {e}. \
+                "warning: could not load CLIP embedder {model_id} from {}: {e}. \
                  SKIPPING image embedding.",
                 models_dir.display()
             );
             return Ok(());
         }
     };
+    eprintln!("[pp-eval-ingest] embedding under CLIP model id: {model_id}");
     // The vector store lives beside the eval db (its sibling vectors/), kept
     // under --lib so the throwaway library is one directory.
     let vectors_dir = default_vectors_dir(db_path).unwrap_or_else(|| lib_dir.join("vectors"));

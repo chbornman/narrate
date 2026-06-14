@@ -32,6 +32,68 @@ will not load, a native crash) lands at Tier 0 quietly. So "robust fallbacks" me
 
 Three runtimes, three different acceleration stories.
 
+## Target hardware (best-first, by machine)
+
+WHERE each model runs is not fixed - it is CHOSEN at startup from detected hardware
+(OS + GPU vendor + VRAM/RAM), best-first, then falls back. Two layers stack: (1) the
+best accelerator PER MODEL for that machine, and (2) the Tier-0 floor under everything
+(typed notes + grease pencil + ratings + FTS5 - a complete product even with zero
+models). The two CURRENT target machines, both cutting-edge-GPU focused:
+
+- **M1 Pro MacBook Pro 16"** - Apple Silicon (ANE + ~16-core GPU, unified memory).
+  Primary dev machine and the VALIDATED-TODAY target (CoreML CLIP shipped, below).
+- **Ryzen 9900X + RTX 5080** desktop - AMD Zen5 12c/24t + NVIDIA Blackwell, 16 GB
+  GDDR7. The powerful CUDA target; can run a HIGHER tier (more VRAM, see below).
+
+### Per model x per machine (the 5 seams)
+
+| model | M1 Pro (best) | Ryzen 9900X + RTX 5080 (best) | CPU fallback |
+|---|---|---|---|
+| **LLM** (Gemma 4 E2B q4_0, llama.cpp) | **Metal** (GPU) | **CUDA** (GPU) | CPU -> LLM features dark |
+| **CLIP** (DFN5B, `ort`) | **CoreML FP16** (ANE/GPU) - DONE, **8.77x** over CPU, near-lossless (COCO nDCG 0.8212 vs int8 0.8225) | **CUDA FP16** - PLANNED (same single-file FP16 model, `ort` `cuda` EP) | CPU int8 -> keyword search |
+| **Text-embed** (EmbeddingGemma, `ort`) | **CoreML FP16** - PLANNED (needs the FP16 re-export; only CLIP is converted so far) | **CUDA FP16** - PLANNED | CPU int8 -> keyword search |
+| **ASR** (Nemotron 0.6b, sherpa) | **CPU** by design | **CPU** by design | smaller model -> voice dark |
+| **VAD** (silero, `ort`) | **CPU** always (~2ms/chunk) | **CPU** always (~2ms/chunk) | n/a (tiny) |
+
+ASR is CPU on BOTH machines on purpose: a 0.6B streaming model is real-time on CPU,
+and keeping it off the GPU removes the worst contention (live mic vs the LLM for VRAM)
+by construction. On the 5080 there IS GPU headroom, so ASR-on-GPU is reconsiderable -
+but the contention-free design still favors CPU. VAD is tiny -> CPU forever, everywhere.
+
+### The fallback ladder (when/how we fall back)
+
+Applied PER MODEL, independently (CLIP can be on CoreML while text-embed is still on
+CPU, while the LLM is on Metal - each seam descends its own ladder):
+
+1. **Detect hardware** (OS + GPU vendor + VRAM/RAM) at startup.
+2. **Best EP per model** for that machine (the table above).
+3. On any **load/validate failure**, fall back to the **CPU** path for that model.
+4. If **CPU also fails** (or the model is absent), THAT FEATURE goes dark - voice off,
+   semantic search degrades to keyword - and the journal is unaffected.
+5. The **Tier-0 floor** (typed notes + grease pencil + ratings + FTS5) is always a
+   complete product underneath, no matter how many seams fell to dark.
+
+### Tier headroom and validation status
+
+The 5080 desktop can run a **higher tier**: 16 GB GDDR7 means bigger LLM weights
+(Tier-2 quality upgrade), FP16 accelerator paths, and more concurrency than a Tier-1
+machine - the cutting-edge target. The M1 Pro is the **validated-today** machine:
+CoreML FP16 CLIP is the one accelerator path measured end-to-end and shipped-ready
+(8.77x, near-lossless; `docs/SPIKE-COREML.md`), wired behind an env knob with the
+compiled-model cache landed. CUDA on the 5080 is the next analog wiring, not yet measured.
+
+### Future / backlog (lower-power + other hardware)
+
+Explicitly DEFERRED, not detailed here: Intel Macs (no ANE), integrated / older GPUs
+(Vulkan / DirectML), low-RAM machines (smaller models, Tier 0/1), Linux/Windows
+WITHOUT NVIDIA (Vulkan), ARM Windows. Vulkan in particular needs a NON-`ort` runtime
+for the embedders (noted again under the `ort` section below). These are tracked in
+`docs/BACKLOG.md`; the focus now is the two cutting-edge GPU targets above.
+
+> Supervisor logic: the detect -> tier -> select -> fallback path already EXISTS for
+> llama.cpp (the gold standard below) and is being extended to the `ort` embedders -
+> CoreML done, CUDA next.
+
 ## llama.cpp (the LLM) - already cross-platform accelerated
 
 The model that already has the full fallback framework. Vendored per-platform
