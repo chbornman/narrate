@@ -64,16 +64,15 @@
 <h2>Search - visual retrieval (MS-COCO)</h2>
 <p class="lede">The standard image-text retrieval benchmark: real photos, five human-written captions each. Each caption is a query; the right answer is the photo it describes. This honestly tests the CLIP visual + semantic retrieval the app does - exactly what a self-authored note cannot, since a planted note only tests search finding its own injected text.</p>
 
-<h3>Result (100 photos, 500 caption-queries)</h3>
+<h3>Result (1000 photos, 5002 caption-queries)</h3>
 <div class="metrics">
-  <div class="metric"><div class="v">0.996</div><div class="k">Recall@10</div><div class="sub">right photo in the top 10</div></div>
-  <div class="metric"><div class="v">0.954</div><div class="k">nDCG@10</div><div class="sub">ranking quality</div></div>
-  <div class="metric"><div class="v">0.939</div><div class="k">MRR</div><div class="sub">mean reciprocal rank</div></div>
+  <div class="metric"><div class="v">0.957</div><div class="k">Recall@10</div><div class="sub">right photo in the top 10</div></div>
+  <div class="metric"><div class="v">0.823</div><div class="k">nDCG@10</div><div class="sub">ranking quality</div></div>
+  <div class="metric"><div class="v">0.782</div><div class="k">MRR</div><div class="sub">mean reciprocal rank</div></div>
 </div>
-<p>For 500 real caption queries, CLIP visual search puts the correct photo in the top 10 about <b>99.6%</b> of the time - near the model's ceiling, as expected from the DFN5B ViT-H encoder. This is the genuine measurement the 7-query journal sketch could not provide.</p>
+<p>For <b>5002 real caption queries</b> against 1000 photos, CLIP visual search puts the correct photo in the top 10 about <b>95.7%</b> of the time. This is the full COCO-1K benchmark - a genuine, vetted measurement at scale, a world apart from the 7-query journal sketch.</p>
 
-<h3 class="pending">Full run (1000 photos, ~5000 caption-queries) - completing</h3>
-<p class="pending">The full COCO-1K sweep is embedding on CPU (~20 img/min); this page updates with the larger-sample numbers when it lands. They are expected to track the 100-photo result closely (CLIP is consistent).</p>
+<div class="note"><b>Why lower than a smaller run:</b> a 100-photo / 500-query slice scored higher (nDCG 0.954, Recall@10 0.996) simply because there are fewer distractor photos to rank against. The 1000-photo number is the more honest one: 10x more photos competing for each query's top-10, and CLIP still lands the right one 95.7% of the time. (All sweep configs scored identically - with only the visual signal present, the fusion knobs do not move a single-signal ranking, as expected.)</div>
 
 <div class="note"><b>Honest scope:</b> COCO photos carry no notes, so this measures PURE VISUAL retrieval (the CLIP S4 signal). The fusion knobs (how much to weight your written notes vs. the visual match) do not move a single-signal ranking, so they cannot be tuned here. Tuning that balance needs a library with REAL notes - and the current dogfood library's notes are test junk, so that benchmark is not yet meaningful. Visual retrieval is benchmarkable today; notes-fusion tuning waits on a real reviewed library.</div>
 
