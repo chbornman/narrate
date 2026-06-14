@@ -53,3 +53,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 cuda = ["ort/cuda"]
 tensorrt = ["ort/tensorrt", "cuda"]
 nvidia = ["tensorrt"]
+# Load a SYSTEM onnxruntime at runtime (via ORT_DYLIB_PATH) instead of ort's
+# prebuilt binary. Needed for bleeding-edge GPUs: the RTX 5080 (Blackwell sm_120)
+# is newer than ort's prebuilt onnxruntime kernels (they top out at sm_90 Hopper),
+# so we point ORT_DYLIB_PATH at an official onnxruntime-gpu (1.21+) that ships
+# sm_120. The CUDA/TensorRT EP *types* come from the cuda/tensorrt features; the
+# actual binary + provider .so's come from the dylib.
+cuda-dynamic = ["tensorrt", "ort/load-dynamic"]
