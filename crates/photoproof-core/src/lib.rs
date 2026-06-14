@@ -13,6 +13,8 @@
 //! - `retrieval`: PPVEC vector storage + chunking (RETRIEVAL, P7.1)
 //! - `collections`: named collections + portability file (RETRIEVAL §10, P7.3)
 //! - `voice_wer`: word-error-rate scoring for the voice stress harness (BACKLOG)
+//! - `voice_bench`: the shared headless voice-pipeline harness (VAD+ASR+engine
+//!   wiring + gated-vs-raw scoring) driven by `pp-voice-bench` and `pp-sweep voice`
 //! - `retrieval_eval`: pure IR metrics + golden-query-set format for the M3
 //!   retrieval-quality gate (RETRIEVAL §12; the `pp-retrieval-eval` runner)
 //! - `tuning`: centralized, file-overridable tuning config — ONE home for the
@@ -38,6 +40,7 @@ pub mod store;
 pub mod topic;
 pub mod topics;
 pub mod tuning;
+pub mod voice_bench;
 pub mod voice_wer;
 
 pub use canonical::{CanonicalParseError, canonical_json, parse_canonical};

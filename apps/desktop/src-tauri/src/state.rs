@@ -239,31 +239,44 @@ impl App {
                 runtime.asr_model_id(),
                 runtime.supervisors.asr_endpoint.clone(),
             )));
-        let capture = Arc::new(Mutex::new(match SileroVad::new() {
-            Ok(vad) => Some(
-                CaptureEngine::new(
-                    SystemClock::new(),
-                    transcriber,
-                    Box::new(vad),
-                    session.id().clone(),
-                )
-                // DESIGN-VOICE-SUBJECTS.md: wire the subject-note seam so a
-                // voice final bound to a collection/topic appends to its note
-                // log (the same Collections/Topics handles the typed composer
-                // commands use), instead of minting an image event.
-                .with_note_sink(Box::new(SubjectNotes {
-                    collections: Arc::clone(&collections),
-                    topics: Arc::clone(&topics),
-                })),
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "in-process VAD failed to build; voice capture disabled"
-                );
-                None
-            }
-        }));
+        // The silero hysteresis (enter/exit thresholds + hang) are VOICE DIALS
+        // (DESIGN-TUNING-LOOP.md): build the VAD from `tuning().voice` so a
+        // committed `[voice]` config actually changes the live gate, and a
+        // pp-sweep voice winner is a file the app reads. Absent a `[voice]`
+        // override these equal silero's own const defaults (the cast f64 -> f32
+        // is exact for the shipped 0.5 / 0.35), so behavior is unchanged.
+        let voice = photoproof_core::tuning::tuning().voice;
+        let capture = Arc::new(Mutex::new(
+            match SileroVad::with_params(
+                voice.vad_enter as f32,
+                voice.vad_exit as f32,
+                voice.vad_hang,
+            ) {
+                Ok(vad) => Some(
+                    CaptureEngine::new(
+                        SystemClock::new(),
+                        transcriber,
+                        Box::new(vad),
+                        session.id().clone(),
+                    )
+                    // DESIGN-VOICE-SUBJECTS.md: wire the subject-note seam so a
+                    // voice final bound to a collection/topic appends to its note
+                    // log (the same Collections/Topics handles the typed composer
+                    // commands use), instead of minting an image event.
+                    .with_note_sink(Box::new(SubjectNotes {
+                        collections: Arc::clone(&collections),
+                        topics: Arc::clone(&topics),
+                    })),
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "in-process VAD failed to build; voice capture disabled"
+                    );
+                    None
+                }
+            },
+        ));
         // The §2.5/§2.2 seam: rotations and closes drain + re-point the
         // engine through the session manager, no caller burden.
         session.attach_capture(Box::new(SharedDrain(Arc::clone(&capture))));
