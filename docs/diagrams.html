@@ -357,9 +357,14 @@ self-contained HTML plus one CDN script tag (Mermaid v11); edit and reload.
 </main>
 
 <script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
+  // ESM entry point (.mjs). The UMD `dist/mermaid.min.js` is NOT an ES module
+  // (no default export), so importing it here renders nothing and the diagrams
+  // show as raw text. With the ESM build we initialize, then run() explicitly:
+  // module scripts are deferred, so the DOM is parsed and every .mermaid node
+  // exists by the time this executes (more robust than relying on startOnLoad).
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
   mermaid.initialize({
-    startOnLoad: true,
+    startOnLoad: false,
     theme: "dark",
     securityLevel: "loose",
     themeVariables: {
@@ -396,6 +401,7 @@ self-contained HTML plus one CDN script tag (Mermaid v11); edit and reload.
       noteBorderColor: "#8a8455"
     }
   });
+  await mermaid.run();
 </script>
 </body>
 </html>
