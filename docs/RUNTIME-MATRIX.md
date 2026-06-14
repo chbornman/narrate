@@ -130,9 +130,18 @@ job if it would wait >250ms; the LLM is one `llama-server` with two slots
 |---|---|---|---|
 | **Dictate a note** (Space) | VAD + ASR | LIVE (CPU) | background embed + LLM PAUSE while mic armed |
 | **Search** (type a query) | LLM parse + text-embed (query) + CLIP-text (if visual / few results) | LIVE | interactive parse PREEMPTS background LLM |
-| **Import / ingest a shoot** | CLIP image-embed + text-embed (notes) + LLM caption (M3+) | BACKGROUND | all yield to voice + interactive; serialized concurrency 1 |
-| **Stop reviewing** (30-min idle / session close) | LLM session + per-image summaries | BACKGROUND | yields to voice + interactive |
-| **Open Visualizer / Station digest** | (precomputed CLIP + text vectors) + LLM digest | mostly precomputed | digest is background LLM |
+| **Import / ingest a shoot** | CLIP image-embed + text-embed (notes); LLM caption is SPEC-ONLY (M3, not wired) | BACKGROUND | all yield to voice + interactive; serialized concurrency 1 |
+| **Stop reviewing** (30-min idle / session close) | LLM session + per-image summaries - SPEC-ONLY (storage + search consume them; generation not wired yet, M3) | BACKGROUND | yields to voice + interactive |
+| **Open Visualizer** | precomputed CLIP + text vectors only (no live model) | precomputed | no "digest" feature exists; see note below |
+
+> Build-status caveat (verified): of the BACKGROUND LLM jobs above, only query-parse
+> is actually wired today. Captions (`PassName::Caption`) are a registered pass with
+> no runner (M3). Summary GENERATION is unwired (the `derived_summaries` table, FTS,
+> `image_summary` vectors, and S3 search all exist and would consume them - nothing
+> produces them yet). "Digest" is not a feature - it is UI shorthand for ingest
+> progress counters ("hashing 12 / previews 480"), unrelated to summaries. The
+> embedders are CPU-only in production (no GPU EP wired); the priority ladder is real
+> and wired.
 
 ### Real overlap scenarios (the contention cases)
 | co-running | resolution | governed by |
