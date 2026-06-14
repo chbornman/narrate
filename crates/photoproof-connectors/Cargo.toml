@@ -45,9 +45,11 @@ pollster = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [features]
-# NVIDIA GPU path (the Ryzen 9900X + RTX 5080 "margo" desktop): pulls ort's
-# CUDA + TensorRT execution providers. OFF by default - the macOS/CoreML + the
-# CPU builds never link CUDA/TensorRT. Built + tested ONLY on the NVIDIA machine
-# (`cargo build -p photoproof-connectors --features nvidia`). The same single-
-# file FP16 model that CoreML validated serves the TensorRT/CUDA EPs.
-nvidia = ["ort/cuda", "ort/tensorrt"]
+# NVIDIA GPU path (the Ryzen 9900X + RTX 5080 "margo" desktop). Split so the
+# floor (CUDA, which only needs the CUDA toolkit) can be built + tested BEFORE
+# TensorRT (which also needs the TensorRT libs installed). OFF by default - the
+# macOS/CoreML + CPU builds never link CUDA/TensorRT. Built ONLY on the NVIDIA
+# machine. The same single-file FP16 model that CoreML validated serves both EPs.
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt", "cuda"]
+nvidia = ["tensorrt"]

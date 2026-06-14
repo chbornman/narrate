@@ -9,9 +9,9 @@
 //!   cargo test -p photoproof-connectors --features nvidia --test nvidia_probe \
 //!       -- --ignored --nocapture
 //!
-//! The whole file is gated behind the `nvidia` feature, so the default macOS /
-//! CPU builds never compile it (and never pull CUDA/TensorRT).
-#![cfg(feature = "nvidia")]
+//! Gated behind the `cuda` feature (the NVIDIA floor); the TensorRT check adds
+//! itself only under `tensorrt`. The default macOS / CPU builds never compile it.
+#![cfg(feature = "cuda")]
 
 fn report(name: &str, r: ort::Result<bool>) {
     match r {
@@ -20,19 +20,22 @@ fn report(name: &str, r: ort::Result<bool>) {
     }
 }
 
-/// Does the linked onnxruntime carry the CUDA + TensorRT EPs? Prints both;
+/// Does the linked onnxruntime carry the CUDA (+ TensorRT) EPs? Prints them;
 /// asserts CUDA is present (the floor - TensorRT is the optimization on top).
 #[test]
-#[ignore = "nvidia probe; run on the RTX 5080 machine with --features nvidia -- --ignored --nocapture"]
+#[ignore = "nvidia probe; run on the RTX 5080 machine with --features cuda (or tensorrt) -- --ignored --nocapture"]
 fn nvidia_provider_available() {
+    use ort::ep::CUDA;
     use ort::ep::ExecutionProvider;
-    use ort::ep::{CUDA, TensorRT};
 
     println!("[nvidia-probe] target_os = {}", std::env::consts::OS);
-    let cuda = CUDA::default().is_available();
-    let trt = TensorRT::default().is_available();
-    report("CUDA", cuda);
-    report("TensorRT", trt);
+    report("CUDA", CUDA::default().is_available());
+
+    #[cfg(feature = "tensorrt")]
+    {
+        use ort::ep::TensorRT;
+        report("TensorRT", TensorRT::default().is_available());
+    }
 
     // CUDA is the floor; if even it is absent the linked onnxruntime lacks GPU
     // support and we need a load-dynamic + vendored CUDA-enabled libonnxruntime.
