@@ -6,6 +6,28 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 14 2026 - Best-per-platform defaults + NVIDIA/MTP app staging
+
+- [x] **Best validated ML as the committed default per platform** - `fe7c8e4`. CLIP
+  default -> `...-fp16` (auto-picks CoreML on macOS 8.77x / CUDA-TensorRT on a cuda build
+  62-117x / CPU); ASR default -> Nemotron 3.5 parakeet (WER 1.25% + punctuation +
+  multilingual). pp-asr-server now builds `--features engine-parakeet` (tauri.conf.json),
+  compiling BOTH engines and RUNTIME-DISPATCHING by model layout (`encoder.int8.onnx` =>
+  sherpa, else parakeet) - the int8 English engine stays a one-line config fallback, no
+  second binary. engine_parakeet descends the nested HF export to `config.json`. Manifest
+  parakeet -> tier [1,2]; tier-1 sum + spec RUNTIME §4.4 + tests synced. Verified both
+  engines READY via the supervisor arg shape; gate green (connectors, core 255, x2 asr).
+- [x] **#53 NVIDIA app launch - staged + verified on margo**. The desktop app compiles
+  `--features cuda-dynamic` (50s, clean); `ort_runtime::resolve()` stages `ORT_DYLIB_PATH`
+  from `{app-data}/runtime/onnxruntime-cuda/lib` (+ `tensorrt/lib`), both symlinked on
+  margo. Proven via that exact staged path: TensorRT ladder loads -> **117.43x** CLIP
+  (82.3 vs 0.70 img/s, cosine 0.9999). Live GUI run on margo awaits a display (headless ssh).
+- [x] **#55 MTP vendoring - staged + verified on margo**. llama-server (v9636, RUNPATH to
+  its libs) symlinked onto PATH; the MTP model symlinked at `{models}/gemma-4-e2b-it-qat-q4_k_xl-mtp/`
+  with the pinned basenames; `config.toml` selects it. Supervisor MTP wiring tests pass on
+  Linux (`mtp_draft_for` resolves the drafter, `llama_spec` gates `--spec-type draft-mtp`);
+  the binary+flags measured 1.32x earlier. Live spawn awaits the GUI run.
+
 ## June 14 2026 - Nemotron 3.5 ASR via the parakeet-rs engine
 
 - [x] **Nemotron 3.5 ASR engine** (`engine-parakeet`) - merge `27d7a7f`, dead-code

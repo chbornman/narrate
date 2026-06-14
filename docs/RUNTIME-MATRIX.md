@@ -48,11 +48,11 @@ are over the CPU/int8 fallback for that seam.
 
 | seam | best result so far | status | source |
 |---|---|---|---|
-| **CLIP image embed** (the bottleneck) | M1 Pro CoreML FP16 = **8.77x** (18 -> 162 img/min), near-lossless | **SHIPPED**, flipped on the dev machine | `docs/SPIKE-COREML.md` |
+| **CLIP image embed** (the bottleneck) | M1 Pro CoreML FP16 = **8.77x** (18 -> 162 img/min), near-lossless | **SHIPPED + DEFAULT on all platforms** (fp16 is the committed default; auto-picks CoreML/CUDA/CPU) | `docs/SPIKE-COREML.md` |
 | **CLIP image embed** | RTX 5080 **TensorRT FP16 = 112.35x** (81.7 img/s, 4900 img/min), cosine 0.999936 (re-measured 2026-06-14; prior 85.79x); CUDA alone **62.69x** (45.6 img/s; prior 54.47x) | **VALIDATED** (both rungs) | `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
 | **Text embed** (EmbeddingGemma) | int8/CPU is BEST everywhere measured; CoreML LOSES (0.48-0.64x) | CPU shipped; CUDA whole-graph re-measure TBD | `docs/SPIKE-COREML-TEXT.md`, `docs/SPIKE-MLX-COREML-TEXT.md` |
 | **LLM** (Gemma 4) | Metal (Mac) / CUDA (NVIDIA); Gemma 4 MTP = 1.3-2.98x (prompt-dependent), CUDA-ONLY. Re-confirmed on 5080: 1.32x (300 -> 395 tok/s, 35.6% draft accept) on a hard prompt | MTP staged for the 5080; laptop stays plain E2B | `docs/PLAN-GEMMA-MTP.md` |
-| **ASR** (Nemotron 0.6b / 3.5) | CPU by design (real-time, frees the GPU). 3.5-via-`parakeet-rs` A/B'd real-time on BOTH machines (M1 4.50x / 9900X 7.75x), WER 1.25% + punctuation, +1.3 GB RAM | shipped (int8); **3.5 engine LANDED behind `engine-parakeet`, §7.4 gate PASSED**, tier flip pending founder | `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11 |
+| **ASR** (Nemotron 3.5 / 0.6b) | CPU by design (real-time, frees the GPU). 3.5-via-`parakeet-rs` real-time on BOTH machines (M1 4.50x / 9900X 7.75x), WER 1.25% + punctuation, +1.3 GB RAM | **DEFAULT on all platforms** (parakeet 3.5, tier-1); pp-asr-server builds both engines + runtime-dispatches; int8 English = config fallback | `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11 |
 | **VAD** (silero) | CPU always (~2ms/chunk, tiny) | shipped | - |
 | **Cross-platform GPU** (non-Apple/non-NVIDIA) | DirectML EP (Windows DX12) + WebGPU EP (strategic) | planned; NOT raw Vulkan (`ort` has no Vulkan EP) | `docs/PLAN-VULKAN.md` |
 
@@ -195,10 +195,12 @@ streaming model now serves our exact WS protocol via the `parakeet-rs` engine in
 gate PASSED on both target machines (`scripts/asr-ab.sh`): real-time everywhere (M1
 4.50x / 9900X 7.75x RTF), WER **1.25%** LibriSpeech with native punctuation +
 capitalization + multilingual, at the cost of ~+1.3 GB peak RAM (FP32 weights, ~2.2 GB
-vs int8 ~0.9-1.1 GB) only while the mic is armed. The default ASR path stays the int8
-sherpa-onnx-crate child (byte-for-byte) until the founder flips the feature + manifest
-tier - both one-line reversible. The two engines co-exist behind one process boundary
-(a crash in either costs only the armed mic). `docs/PLAN-NEMOTRON-35-SIDECAR.md` §10-11.
+vs int8 ~0.9-1.1 GB) only while the mic is armed. Parakeet 3.5 is now the COMMITTED
+DEFAULT on every platform (the feature + manifest tier flipped 2026-06-14): pp-asr-server
+builds BOTH engines and runtime-dispatches by model layout (encoder.int8.onnx => sherpa,
+else parakeet), so the int8 English transducer stays a one-line config fallback. The two
+engines co-exist behind one process boundary (a crash in either costs only the armed
+mic). `docs/PLAN-NEMOTRON-35-SIDECAR.md` §10-11.
 
 ## Precision strategy (why each format)
 
@@ -240,25 +242,32 @@ These are the next perf items, not yet built.
 
 ## Open / in-flight (remaining wiring)
 
-- **[SHIPPED]** FP16 single-file CLIP -> CoreML at **8.77x**, near-lossless; cache +
-  `...__dfn5b-fp16` model spec landed; flipped on the dev machine. `docs/SPIKE-COREML.md`.
+- **[DEFAULT]** FP16 single-file CLIP is the committed default on every platform
+  (`config.rs`): auto-picks CoreML (macOS 8.77x) / CUDA-TensorRT (cuda build 62-112x) /
+  CPU. The int8 export stays the no-GPU alternative. `docs/SPIKE-COREML.md`.
 - **[VALIDATED]** CUDA FP16 on the 5080 at **62.69x** (re-measured; prior 54.47x) via `cuda-dynamic` + cuda13
   onnxruntime (sm_120). `docs/PLAN-ORT-BLACKWELL.md`.
 - **[VALIDATED]** TensorRT EP = **112.35x** (4900 img/min, ~1.8x over CUDA, re-measured; prior 85.79x, cosine
   0.99994; TensorRT 10.16 sm120 via `pip 'tensorrt-cu12<11'`). `docs/PLAN-TENSORRT.md`.
-- **[NEXT - distribution]** ship the CoreML 8.77x to ALL Mac users: host the fp16 model
-  + `runtime/manifest.rs` entry; prefer fp16+CoreML in `runtime/plan.rs`; run the COCO
-  golden-nDCG re-embed eval before flipping the default for others.
+- **[DONE - distribution]** fp16+CoreML is now the committed default for all Macs
+  (`config.rs` embedder default = `...-fp16`; manifest offers it at tier 1). Remaining:
+  host a download URL for the fp16 model (the manifest byte is staged-local today).
 - **[REJECTED]** EmbeddingGemma text-embed on CoreML/FP16 and MLX - both lose to
   int8/CPU; text-embed stays int8/CPU. `docs/SPIKE-COREML-TEXT.md`, `docs/SPIKE-MLX-COREML-TEXT.md`.
 - **[TBD]** CUDA whole-graph text-embed re-measure on the 5080.
 - **[planned]** DirectML EP (Windows DX12 GPUs); **[watch]** WebGPU EP (cross-platform).
   `docs/PLAN-VULKAN.md`.
-- **[LANDED, gate PASSED]** Nemotron 3.5 ASR via `parakeet-rs` (`engine-parakeet`, CPU).
-  §7.4 latency/RSS A/B clears on both machines (M1 4.50x / 9900X 7.75x RTF, WER 1.25%,
-  +1.3 GB RAM); default stays int8 sherpa until the founder flips the tier. Reversible.
+- **[DEFAULT]** Nemotron 3.5 ASR via `parakeet-rs` is the committed default on every
+  platform (`config.rs` + manifest tier-1). pp-asr-server builds both engines and
+  runtime-dispatches; int8 English is a one-line config fallback. §7.4 A/B cleared both
+  machines (M1 4.50x / 9900X 7.75x RTF, WER 1.25%, +1.3 GB RAM). Reversible.
   `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11. (The crate-bump path - `docs/PLAN-NEMOTRON-35.md`
   - stays the long-term option once the sherpa-onnx Rust crate ships 3.5.)
+- **[STAGED on margo]** NVIDIA app launch (#53): the desktop app compiles `--features
+  cuda-dynamic`; `ort_runtime::resolve()` stages `ORT_DYLIB_PATH` from
+  `{app-data}/runtime/onnxruntime-cuda/lib` (+ tensorrt/lib), both symlinked on margo.
+  MTP (#55): llama-server on PATH, the MTP model staged at the app-data id, `config.toml`
+  selects it. Both await an interactive GUI run on margo (headless ssh has no display).
 - **[perf]** re-bench `min(cores, 8)` on the desktop + batch the GPU embed (above).
 - **[planned, founder]** per-model capture-pause: once embedders run on a GPU EP, RELAX
   the mic-armed pause for GPU embed passes (a GPU embed no longer contends with CPU
