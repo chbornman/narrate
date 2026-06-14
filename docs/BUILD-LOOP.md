@@ -227,4 +227,8 @@ Retired tracking docs (content absorbed; full text in git history):
 - M1 verified live; its open decisions live in FOUNDER-CHECKLIST),
 `docs/BEST-PRACTICES-REVIEW.md` (pre-build research executive summary;
 its ~30 amendments were dispositioned into the specs at the time; the
-full cited reports remain in `docs/research/`).
+full cited reports remain in `docs/research/`),
+`docs/HANDOFF.md` + `docs/MORNING-BRIEF.md` + `docs/NIGHT-PLAN.md`
+(point-in-time session handoff/scratch from the June 12-13 autonomous
+rounds; everything shipped is in `docs/LANDED.md`, open work in BACKLOG,
+retired June 14 after the acceleration packet closed).
