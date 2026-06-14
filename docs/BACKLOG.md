@@ -225,6 +225,26 @@ of them posture changes the founder made deliberately.
   A per-model pause policy instead of "pause all background." Gated on the GPU EP
   landing. (Founder, June 14 2026.)
 
+- [ ] **CUDA execution provider for the `ort` embedders (Ryzen 9900X + RTX 5080
+  desktop)** (founder, June 14 2026: "backlog CUDA"): the analog of the macOS CoreML
+  path for the powerful NVIDIA desktop. The SAME single-file FP16 model serves it
+  (CLIP done; EmbeddingGemma fp16 pending the text-embed spike) - wiring is an `ort`
+  `cuda` feature + EP registration + extending the per-model gating in
+  `OrtEmbedder::clip` (today `cfg!(macos) && id.ends_with("-fp16")`) to also pick CUDA
+  on NVIDIA. The 5080 (Blackwell, 16 GB) can also run a HIGHER tier (bigger LLM, more
+  concurrency). MUST be built + measured ON the 5080 machine (cannot validate from the
+  M1 Pro). llama.cpp already does CUDA for the LLM; this brings the embedders up to
+  match. See `docs/RUNTIME-MATRIX.md` target-hardware. (Founder, June 14 2026.)
+
+- [ ] **Vulkan GPU path for the `ort` embedders (cross-platform fallback)** (founder,
+  June 14 2026: "and Vulkan too"): the GPU path for machines that are NEITHER Apple
+  (CoreML) NOR NVIDIA/CUDA - AMD/Intel GPUs on Linux/Windows, the broad "other GPU"
+  bucket. BIGGER lift: `ort`/ONNX Runtime has no Vulkan EP for these models, so it needs
+  a DIFFERENT runtime (ggml / ncnn / wonnx) or a DirectML bridge (Windows DX12) - not a
+  drop-in like CoreML/CUDA. llama.cpp already vendors a Vulkan backend for the LLM; the
+  embedders are the gap. Lower priority than CUDA (the named target desktop is NVIDIA).
+  Pairs with the lower-power-hardware backlog. (Founder, June 14 2026.)
+
 ## Performance / SOTA (audit June 13 2026)
 
 Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). The
