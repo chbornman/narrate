@@ -387,6 +387,14 @@ magnitudes.
   the 560 ms int8 export, wire the per-stream language option, rerun
   the voice corpus + Alice WER STREAMED, spike-style latency/RSS
   numbers. Brings native punctuation/capitalization + 40 locales.
+  PLAN WRITTEN `docs/PLAN-NEMOTRON-35.md` (June 14): go/no-go = NO-GO
+  today, STAGED. Trigger UNMET - newest published `sherpa-onnx` Rust
+  crate is 1.13.2 (May 14), predating 3.5 (C++ master only, ~June 12,
+  PR 3671); pp-asr-server still pins 1.13.2. The 560 ms int8 export entry
+  is staged in `manifest.rs` with REAL SHAs at `tiers: vec![]` (offered
+  nowhere - live ASR path untouched) + a guard test. GO = a crate release
+  carrying 3.5 + the language binding; then flip tiers, bump the crate,
+  wire `en`/`auto`, run validation. See the plan for the full delta.
 - [ ] **Audiobook WER stress harness** (founder idea, June 2026): run a
   LONG known-transcript recording through the full pipeline - a LibriVox
   public-domain audiobook chapter (librivox.org) with its Project
