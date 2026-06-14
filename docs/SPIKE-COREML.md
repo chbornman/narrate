@@ -18,7 +18,14 @@ and EmbeddingGemma-300m (768-dim, int8), at the app-data `models/` dir.
 > figure, not a clean-room best case. The CPU-vs-CoreML *conclusion* does not
 > depend on the exact CPU number.
 
-## VERDICT: DON'T-SHIP (as-is) — NEEDS an inlined-weights re-export first
+## VERDICT (int8): DON'T-SHIP (as-is) -- NEEDS an inlined-weights re-export first
+
+> UPDATE (June 14, 2026): the inlined-weights FP16 re-export was done and
+> re-tested. It WORKS: CoreML loads the FP16 visual tower and runs it **8.77x**
+> faster than CPU (0.31 -> 2.70 img/s) with near-lossless embeddings (mean cosine
+> 0.9987 vs CPU). New verdict for fp16: **SHIP-WITH-FP16** with a model-cache
+> caveat. See the "FP16 follow-up" section below for the recipe, validation
+> cosines, measurement, and production-wiring notes.
 
 CoreML cannot even **load** the DFN5B visual tower (the actual bottleneck) in
 this onnxruntime build, and the int8 quantization means CoreML would fall back
@@ -171,12 +178,169 @@ cargo test --release -p photoproof-connectors --test coreml_spike \
     coreml_spike_visual_from_cwd          -- --ignored --nocapture
 cargo test --release -p photoproof-connectors --test coreml_spike \
     coreml_spike_singlefile_session_builds -- --ignored --nocapture
+
+# FP16 follow-up: CPU vs CoreML on the inlined single-file FP16 visual tower
+# (needs the staged models/...-fp16/ dir; ~16.5 min first-load CoreML compile):
+cargo test --release -p photoproof-connectors --test coreml_spike \
+    coreml_spike_fp16_clip_image_cpu_vs_coreml -- --ignored --nocapture
 ```
 
 The harness lives at `crates/photoproof-connectors/tests/coreml_spike.rs`
 (all `#[ignore]`, measurements not gates; they skip cleanly without the local
 DFN5B snapshot + COCO images). It drives CPU-vs-CoreML by toggling the same
 `PHOTOPROOF_ORT_COREML` knob the shipped code reads.
+
+## FP16 follow-up (June 14, 2026) -- VERDICT: SHIP-WITH-FP16 (one caveat)
+
+The int8 spike above predicted an FP16 single-file re-export would clear BOTH
+blockers. It does. CoreML now loads the visual tower and runs it ~8.8x faster
+than CPU with near-lossless embeddings. The one caveat is a long first-launch
+CoreML compile that production must cache.
+
+### The two int8 blockers, re-tested on FP16
+
+1. **External-data load failure -> CLEARED.** The FP16 re-export inlines all
+   weights into ONE self-contained `visual/model.onnx` (no ~397 sibling files),
+   so the path-misresolution that killed the int8 visual load cannot occur.
+   CoreML accepted the single file and proceeded to compile it.
+2. **int8 CPU-fallback + pathological compile -> CLEARED (was the int8 issue).**
+   FP16 conv/matmul are ANE/GPU-eligible, so CoreML actually accelerates the
+   graph instead of partitioning it to CPU. The visual tower went from 0.31 to
+   2.70 img/s.
+
+### The FP16 conversion recipe (this machine)
+
+Source: `immich-app/ViT-H-14-378-quickgelu__dfn5b` FP32 (the SAME export lineage
+our int8 ships -- so the graph I/O the connector is built against is preserved).
+NOT RuteNL's repo (different lineage, different I/O). Env: a Python 3.12 venv
+(system 3.14 had wheels, but 3.12 was used for stability) with `onnx==1.21`,
+`onnxconverter_common`, `onnxruntime==1.26`, `huggingface_hub`, `tokenizers`,
+`numpy`, `pillow`.
+
+The naive `convert_float_to_float16(m, keep_io_types=True)` FAILED to load in ORT
+with `Type Error: Concat bound to different types (float / float16) at
+/visual/Concat`. Root cause: the graph carries 131 explicit `Cast(to=FLOAT)`
+nodes (visual) / 98 (textual) that the converter leaves untouched; once their
+neighbours go fp16 the Cast outputs a stray float32 into a Concat. `keep_io_types`
+also could not run in-converter shape inference (the >2GB protobuf limit). The
+recipe that worked:
+
+```python
+import onnx
+from onnxconverter_common import float16
+from onnx import helper, TensorProto
+
+m = onnx.load(src)                       # resolves external data, any file count
+g_in_name  = m.graph.input[0].name       # visual: 'image' (f32) / textual: 'text' (int32)
+g_out_name = m.graph.output[0].name      # 'embedding' (f32)
+in_is_float = m.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
+
+# Convert EVERYTHING to fp16 (keep_io_types=False) to avoid the buggy boundary casts.
+m16 = float16.convert_float_to_float16(m, keep_io_types=False, disable_shape_infer=True)
+g = m16.graph
+
+# Retarget the surviving explicit Cast(to=FLOAT) -> FLOAT16 (the Concat fix).
+for n in g.node:
+    if n.op_type == "Cast":
+        for a in n.attribute:
+            if a.name == "to" and a.i == TensorProto.FLOAT:
+                a.i = TensorProto.FLOAT16
+
+# Re-wrap f32 I/O BY HAND so the connector's f32 'image' feed + f32 'embedding'
+# read (try_extract_tensor::<f32>) still match: Cast(f32->f16) after input,
+# Cast(f16->f32) before output. (textual 'text' is int32 and stays int32.)
+fp16_out = g_out_name + "_fp16"
+for n in g.node:
+    for i, o in enumerate(n.output):
+        if o == g_out_name: n.output[i] = fp16_out
+g.node.append(helper.make_node("Cast", [fp16_out], [g_out_name], to=TensorProto.FLOAT))
+g.output[0].type.tensor_type.elem_type = TensorProto.FLOAT
+if in_is_float:
+    fp16_in = g_in_name + "_fp16"
+    for n in g.node:
+        for i, x in enumerate(n.input):
+            if x == g_in_name: n.input[i] = fp16_in
+    g.node.insert(0, helper.make_node("Cast", [g_in_name], [fp16_in], to=TensorProto.FLOAT16))
+    g.input[0].type.tensor_type.elem_type = TensorProto.FLOAT
+
+onnx.save_model(m16, dst, save_as_external_data=False)   # INLINE -> single file
+```
+
+Outputs (single-file, weights inlined): `visual/model.onnx` ~1.27 GB,
+`textual/model.onnx` ~0.71 GB. I/O preserved exactly: visual `image`
+f32 `[1,3,378,378]` -> `embedding` f32 `[1,1024]`; textual `text` int32 `[1,77]`
+-> `embedding` f32 `[1,1024]` (matches `ort_embedder::run_clip_image` /
+`run_clip_text`). Staged at
+`models/ViT-H-14-378-quickgelu__dfn5b-fp16/{visual,textual}/model.onnx` (+ the
+textual tokenizer/configs); the int8 dir is untouched as the CPU fallback.
+
+### Validation (lossless? YES)
+
+FP16 vs FP32 reference, both ORT CPU EP, real inputs (COCO images preprocessed
+exactly like the connector: resize-shortest-side + center-crop 378, /255,
+mean/std, CHW; CLIP-tokenized captions):
+
+| tower   | mean cosine fp16-vs-fp32 | min cosine | n  |
+|---------|--------------------------|------------|----|
+| visual  | **0.999994**             | 0.999976   | 10 |
+| textual | **1.000000**             | 1.000000   | 6  |
+
+Comfortably past the >= 0.9995 lossless bar. (Conversion warnings -- a handful of
+sub-1e-7 constants truncated to fp16 min, and the attention `-inf` mask fill
+clamped to -10000 -- are the converter's standard, safe behavior.)
+
+### CoreML measurement on the FP16 visual tower (the payoff)
+
+`coreml_spike_fp16_clip_image_cpu_vs_coreml` (in
+`crates/photoproof-connectors/tests/coreml_spike.rs`, `#[ignore]`), 60 timed
+COCO images, 3 warmup, edge 378, CoreML `ComputeUnits::CPUAndNeuralEngine` +
+`ModelFormat::MLProgram`:
+
+| EP | CLIP visual (image) embedding | accuracy vs CPU |
+|----|-------------------------------|-----------------|
+| **CPU (int8 today / fp16)** | 0.31 img/s ~= 18.4 img/min | reference |
+| **CoreML (fp16, MLProgram)** | **2.70 img/s ~= 161.7 img/min** | mean cosine **0.998656**, min 0.995628 |
+
+- **Does the FP16 visual tower LOAD on CoreML?** YES -- the inlined single-file
+  form loads where the int8 external-data form could not.
+- **img/sec CPU vs CoreML?** 0.31 -> 2.70 = **8.77x** on the bottleneck tower.
+  This directly addresses the ~18 img/min CPU ceiling: ~18 img/min -> ~162
+  img/min.
+- **ANE/GPU or CPU fallback?** The 8.8x speedup is only explicable by ANE/GPU
+  execution (a CPU-partitioned graph would match the CPU row); CoreML accelerated
+  the fp16 conv/matmul as predicted. (A per-op `ProfileComputePlan` partition
+  dump was not separately captured; the throughput is the signal.)
+- **Accuracy CoreML vs CPU?** mean cosine 0.998656, min 0.995628 -- retrieval
+  -safe (35/60 sat just below 0.999, none below 0.995; this is normal fp16
+  ANE-vs-CPU rounding, not a different embedding space).
+
+**The one caveat -- first-launch compile cost.** CoreML spent **992 s (~16.5
+min) compiling the fp16 visual MLProgram on the first load**, recompiled every
+session. Production MUST set `.with_model_cache_dir(...)` so that compile is paid
+once and cached across launches; without caching the 16.5 min tax would dwarf
+the inference win on short runs.
+
+**Disk note (environment, not the model).** The CoreML MLProgram compiler writes
+the full ~1.3 GB of weights plus intermediates to `$TMPDIR`; on a near-full disk
+(this machine sat at 95-99% used) the compile aborts with `NSCocoaErrorDomain
+640 ... out of space`. It only succeeded after freeing headroom to ~17 GB. So
+production wiring should also ensure adequate scratch/cache disk.
+
+### What production wiring would take (NOT done in this spike)
+
+The measurement justifies graduating CoreML+fp16 on macOS, but per the brief
+this packet stays a measurement spike. The concrete production steps:
+
+1. A `model_specs` fp16 CLIP entry (e.g. id `...__dfn5b-fp16`, the
+   `visual/textual/model.onnx` single-file paths) selected on macOS.
+2. Runtime: prefer fp16 + CoreML on macOS (graduate `PHOTOPROOF_ORT_COREML` from
+   an env knob to a real config field), with int8 + CPU as the fallback.
+3. Set `.with_model_cache_dir(...)` on the CoreML session so the ~16.5 min
+   compile is paid once, not per launch.
+4. A one-time re-embed of the PPVEC space under the fp16 vectors is NOT required
+   for correctness (cosine vs the int8/CPU space is ~0.999), but should be
+   evaluated against the COCO golden nDCG before flipping the default, since the
+   stored vectors were embedded under the int8 CPU path.
 
 ## Constraint check
 

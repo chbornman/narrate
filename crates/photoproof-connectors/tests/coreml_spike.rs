@@ -44,6 +44,17 @@ fn models_dir() -> PathBuf {
         .join(CLIP_MODEL_ID)
 }
 
+/// The FP16 single-file re-export staged alongside the int8 (the FP16 follow-up,
+/// docs/SPIKE-COREML.md). Weights are INLINED into one `model.onnx` per tower
+/// (no external-data fan-out), which is the form that clears the CoreML load
+/// blocker. int8 stays the CPU default; this dir is the CoreML candidate.
+fn models_dir_fp16() -> PathBuf {
+    let home = std::env::var("HOME").expect("HOME");
+    PathBuf::from(home)
+        .join("Library/Application Support/com.photoproof.desktop/models")
+        .join(format!("{CLIP_MODEL_ID}-fp16"))
+}
+
 /// COCO source images. The eval library's `paths` table points here; the
 /// images live in the MAIN checkout (not this worktree), so use an absolute
 /// path. Override with COCO_IMAGES_DIR if they move.
@@ -371,5 +382,149 @@ fn coreml_spike_clip_image_cpu_vs_coreml() {
     assert!(
         mean > 0.9,
         "CoreML embeddings diverged from CPU (mean cosine {mean:.4}); see docs/SPIKE-COREML.md"
+    );
+}
+
+// --------------------------------------------------------------------------
+// FP16 follow-up (docs/SPIKE-COREML.md "FP16 follow-up"). The int8 spike found
+// CoreML cannot load the external-data visual tower and falls back to CPU on
+// int8 ops. This measures the hypothesized fix: a single-file FP16 re-export of
+// the SAME DFN5B graph (same I/O names/shapes the connector feeds). It loads the
+// FP16 visual tower CPU-vs-CoreML and reports img/s + the CoreML-vs-CPU cosine.
+// --------------------------------------------------------------------------
+
+/// FP16 tower paths (the `-fp16` staged dir). Same filenames as int8.
+fn clip_paths_fp16() -> (PathBuf, PathBuf, PathBuf) {
+    let dir = models_dir_fp16();
+    // The FP16 dir's tokenizer is copied from the int8 textual dir; either works.
+    (
+        dir.join("visual/model.onnx"),
+        dir.join("textual/model.onnx"),
+        dir.join("textual/tokenizer.json"),
+    )
+}
+
+/// Build the FP16 CLIP embedder with CoreML on/off via the shipped env knob.
+fn build_clip_fp16_fallible(
+    coreml: bool,
+) -> Result<OrtEmbedder, photoproof_connectors::ConnectorError> {
+    if coreml {
+        // SAFETY: single-threaded test setup; no other thread reads env here.
+        unsafe { std::env::set_var("PHOTOPROOF_ORT_COREML", "1") };
+    } else {
+        unsafe { std::env::remove_var("PHOTOPROOF_ORT_COREML") };
+    }
+    let (vis, txt, tok) = clip_paths_fp16();
+    let r = OrtEmbedder::clip(CLIP_MODEL_ID, &vis, &txt, &tok, 1024);
+    unsafe { std::env::remove_var("PHOTOPROOF_ORT_COREML") };
+    r
+}
+
+/// THE PAYOFF: does the single-file FP16 visual tower LOAD on CoreML (the int8
+/// external-data one did not), and is CoreML faster/accurate? Loads the FP16
+/// visual tower CPU vs CoreML, times image embedding over N COCO images, and
+/// reports CoreML-vs-CPU cosine. Prints the table; the ship/no-ship verdict is
+/// written from these numbers in docs/SPIKE-COREML.md, not asserted here. Only a
+/// soft accuracy gate is enforced (CoreML must not corrupt the embedding space).
+#[test]
+#[ignore = "spike measurement; needs the staged -fp16 dir + COCO images; run with --ignored --nocapture on macOS"]
+fn coreml_spike_fp16_clip_image_cpu_vs_coreml() {
+    let (vis, _, _) = clip_paths_fp16();
+    if !vis.exists() {
+        eprintln!(
+            "skipping: FP16 visual tower absent at {} (run the FP16 conversion first, see docs/SPIKE-COREML.md)",
+            vis.display()
+        );
+        return;
+    }
+    let imgs = load_sample(SAMPLE_N + WARMUP);
+    if imgs.len() < WARMUP + 5 {
+        eprintln!(
+            "skipping: only {} COCO images decoded from {} (need >= {})",
+            imgs.len(),
+            coco_images_dir().display(),
+            WARMUP + 5
+        );
+        return;
+    }
+    let (warm, timed) = imgs.split_at(WARMUP);
+    println!(
+        "[coreml-spike fp16] timing {} images/EP ({} warmup), edge {}x{}",
+        timed.len(),
+        warm.len(),
+        CLIP_EDGE,
+        CLIP_EDGE
+    );
+
+    // --- CPU EP on the FP16 tower ---
+    let cpu = build_clip_fp16_fallible(false).expect("load FP16 visual (CPU)");
+    let _ = embed_all(&cpu, warm);
+    let t0 = Instant::now();
+    let cpu_vecs = embed_all(&cpu, timed);
+    let cpu_secs = t0.elapsed().as_secs_f64();
+    let cpu_ips = timed.len() as f64 / cpu_secs;
+    println!(
+        "[coreml-spike fp16] CPU    : {:.2} img/s  ({:.1} img/min, {:.3}s for {})",
+        cpu_ips,
+        cpu_ips * 60.0,
+        cpu_secs,
+        timed.len()
+    );
+
+    // --- CoreML EP on the FP16 tower (the int8 one could not even load) ---
+    let t_load = Instant::now();
+    let ml = match build_clip_fp16_fallible(true) {
+        Ok(e) => {
+            println!(
+                "[coreml-spike fp16] CoreML LOADED the FP16 visual tower in {:.1}s (int8 external-data tower could NOT)",
+                t_load.elapsed().as_secs_f64()
+            );
+            e
+        }
+        Err(e) => {
+            println!("[coreml-spike fp16] CoreML still FAILS to load the FP16 tower: {e}");
+            println!(
+                "[coreml-spike fp16] => FP16 did not unblock CoreML; CPU stands at {cpu_ips:.2} img/s"
+            );
+            return;
+        }
+    };
+    let _ = embed_all(&ml, warm);
+    let t1 = Instant::now();
+    let ml_vecs = embed_all(&ml, timed);
+    let ml_secs = t1.elapsed().as_secs_f64();
+    let ml_ips = timed.len() as f64 / ml_secs;
+    println!(
+        "[coreml-spike fp16] CoreML : {:.2} img/s  ({:.1} img/min, {:.3}s for {})",
+        ml_ips,
+        ml_ips * 60.0,
+        ml_secs,
+        timed.len()
+    );
+    println!(
+        "[coreml-spike fp16] speedup (CoreML / CPU): {:.2}x",
+        ml_ips / cpu_ips
+    );
+
+    // --- Accuracy: cosine(CPU vec, CoreML vec) per image ---
+    let cosines: Vec<f32> = cpu_vecs
+        .iter()
+        .zip(&ml_vecs)
+        .map(|(a, b)| cos(a, b))
+        .collect();
+    let mean = cosines.iter().sum::<f32>() / cosines.len() as f32;
+    let min = cosines.iter().cloned().fold(f32::INFINITY, f32::min);
+    let below_999 = cosines.iter().filter(|&&c| c < 0.999).count();
+    println!(
+        "[coreml-spike fp16] embedding cosine CPU-vs-CoreML: mean {:.6}, min {:.6}, {} of {} below 0.999",
+        mean,
+        min,
+        below_999,
+        cosines.len()
+    );
+
+    assert!(
+        mean > 0.9,
+        "CoreML FP16 embeddings diverged from CPU (mean cosine {mean:.4}); see docs/SPIKE-COREML.md"
     );
 }
