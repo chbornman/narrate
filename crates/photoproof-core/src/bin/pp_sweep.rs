@@ -2265,6 +2265,7 @@ chB\t/c/b.wav\t/c/b.txt\t7
             expect: expect.map(PathBuf::from),
             corpus_manifest: manifest.map(PathBuf::from),
             model_dir: None,
+            models_dir: None,
             server: None,
             grid: "rule2=0.8".into(),
             metric: "gating_cost".into(),
