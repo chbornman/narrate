@@ -268,6 +268,73 @@ pub fn compiled_manifest() -> Manifest {
                     ),
                 ],
             },
+            // B74 / docs/PLAN-NEMOTRON-35.md — the Nemotron 3.5 ASR Streaming
+            // 0.6B target (560 ms int8, csukuangfj2 export 2026-06-11). NATIVE
+            // punctuation + capitalization + ~40 language-locales; the SPIKE
+            // (docs/SPIKE-ASR35.md) confirmed the 560 ms export clears the
+            // tail-truncation class baked into the 160 ms lookahead. Four-file
+            // transducer layout, SAME basenames as the current ASR entry
+            // (encoder/decoder/joiner.int8.onnx + tokens.txt) so
+            // `runtime::launch::asr_wrapper_args` needs no path changes.
+            //
+            // NOT OFFERED YET (tiers: vec![] — appears in no tier sum, no
+            // consent card): this is a STAGED pin, not a live swap. GO is
+            // BLOCKED on the sherpa-onnx RUST crate shipping 3.5 streaming
+            // support — as of 2026-06-14 the crate is pinned at 1.13.2 (May 14),
+            // which predates 3.5 landing in their C++ master (~June 12,
+            // PR 3671). The per-stream language option ('en'/'auto', README of
+            // the export) is also a NEW binding not in any tagged crate. When a
+            // crate release lands the support: (1) bump pp-asr-server's
+            // sherpa-onnx pin, (2) flip these tiers to vec![1, 2] and demote the
+            // 160 ms-lineage entry, (3) wire the language option, (4) rerun the
+            // voice corpus + Alice WER STREAMED. SHAs/sizes/revision below are
+            // REAL (HF API, revision = the repo's main sha at pin time); only
+            // the runtime support is missing.
+            ModelEntry {
+                id: "nemotron-3.5-asr-streaming-0.6b-560ms-int8".into(),
+                role: "asr".into(),
+                // Empty = offered at no tier. The downloader never enqueues it,
+                // the consent card never sums it, `total_bytes_at` ignores it.
+                // Flipping to vec![1, 2] is the single line that makes it live,
+                // gated by the PLAN-NEMOTRON-35.md go/no-go.
+                tiers: vec![],
+                license: License {
+                    name: "NVIDIA Open Model License".into(),
+                    url: "https://developer.download.nvidia.com/licenses/nvidia-open-model-license-agreement-june-2024.pdf".into(),
+                    acceptance_required: true,
+                },
+                total_bytes: 657_395_114 + 14_978_075 + 9_504_438 + 131_440,
+                files: vec![
+                    pinned(
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11",
+                        "f4111f5f930348aa484ccf1779c5fb6f71e20dea",
+                        "encoder.int8.onnx",
+                        "4ff9fedb8f2324ad9736cad6c4a89063d8a428fe21364504ec613a3d60f749b4",
+                        657_395_114,
+                    ),
+                    pinned(
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11",
+                        "f4111f5f930348aa484ccf1779c5fb6f71e20dea",
+                        "decoder.int8.onnx",
+                        "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
+                        14_978_075,
+                    ),
+                    pinned(
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11",
+                        "f4111f5f930348aa484ccf1779c5fb6f71e20dea",
+                        "joiner.int8.onnx",
+                        "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
+                        9_504_438,
+                    ),
+                    pinned(
+                        "hf:csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11",
+                        "f4111f5f930348aa484ccf1779c5fb6f71e20dea",
+                        "tokens.txt",
+                        "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a",
+                        131_440,
+                    ),
+                ],
+            },
             // B73: DFN5B (ViT-H-14-378-quickgelu, Immich's ONNX export) is the
             // CLIP embedder — founder-confirmed feasible on M-series. Pinned in
             // full: the visual tower's graph onnx PLUS ~400 external-data weight
@@ -540,6 +607,56 @@ mod tests {
             dfn.total_bytes,
             dfn.files.iter().map(|f| f.bytes).sum::<u64>(),
             "total_bytes is the live file sum, never an estimate"
+        );
+    }
+
+    /// B74: the Nemotron 3.5 entry is a STAGED pin — fully resolvable
+    /// (real SHAs) so a future swap is a one-line tier flip, but offered at
+    /// NO tier so it never enters a consent sum, the downloader never
+    /// enqueues it, and the live ASR path (the 560 ms-lineage entry) is
+    /// untouched. GO is blocked on the sherpa-onnx Rust crate (see
+    /// docs/PLAN-NEMOTRON-35.md); this test guards the "doesn't ship by
+    /// accident" property until then.
+    #[test]
+    fn nemotron_35_is_pinned_but_offered_at_no_tier() {
+        let m = compiled_manifest();
+        let n35 = m
+            .model("nemotron-3.5-asr-streaming-0.6b-560ms-int8")
+            .expect("3.5 staged entry present");
+        assert!(n35.is_pinned(), "real SHAs — resolvable when GO lands");
+        assert_eq!(n35.role, "asr");
+        assert!(
+            n35.tiers.is_empty(),
+            "STAGED: offered at no tier until the crate supports 3.5"
+        );
+        // The four-file transducer layout sherpa loads, same basenames as the
+        // live entry so asr_wrapper_args needs no path change on swap.
+        assert_eq!(n35.files.len(), 4);
+        for name in [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ] {
+            assert!(n35.files.iter().any(|f| f.path == name), "{name} pinned");
+        }
+        assert_eq!(
+            n35.total_bytes,
+            n35.files.iter().map(|f| f.bytes).sum::<u64>(),
+            "total_bytes is the live file sum"
+        );
+        // The live ASR path is the 560 ms-lineage entry and is the ONLY asr
+        // model offered at the tier-1 floor — the staged entry must not leak in.
+        let offered_asr: Vec<&str> = m
+            .offered_at(1)
+            .iter()
+            .filter(|e| e.role == "asr")
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(
+            offered_asr,
+            vec!["nemotron-speech-streaming-en-0.6b-560ms-int8"],
+            "only the current ASR model is offered; 3.5 stays staged"
         );
     }
 
