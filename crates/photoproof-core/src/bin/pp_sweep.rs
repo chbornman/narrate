@@ -92,10 +92,17 @@ struct Args {
     db: Option<PathBuf>,
     queries: Option<PathBuf>,
     // --- voice arm paths (required for `voice`) ---
-    /// `--corpus <wav>`: the recording to score every config over.
+    /// `--corpus <wav>`: the single recording to score every config over.
+    /// Mutually exclusive with `--corpus-manifest` (the n=1 form).
     corpus: Option<PathBuf>,
-    /// `--expect <ref>`: the reference transcript WER is scored against.
+    /// `--expect <ref>`: the reference transcript WER is scored against
+    /// (pairs with `--corpus`).
     expect: Option<PathBuf>,
+    /// `--corpus-manifest <tsv>`: a many-recording corpus (a LibriSpeech split
+    /// staged by scripts/fetch-voice-corpus.sh). The ALTERNATIVE to
+    /// `--corpus`/`--expect`; the config is scored over EVERY (wav, transcript)
+    /// pair and aggregated corpus-level. Exactly one of the two forms is given.
+    corpus_manifest: Option<PathBuf>,
     /// `--model-dir`/`--server`: ASR model dir + `pp-asr-server` binary
     /// (default: founder-machine layout / sibling bin).
     model_dir: Option<PathBuf>,
@@ -118,10 +125,12 @@ fn usage() -> &'static str {
      (search paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET; args win)\n\
      search knobs: s1 s2 s3 s4 rrf_k beta ; metrics: ndcg_at_k precision_at_k recall_at_k mrr\n\
      \n\
-     pp-sweep voice --corpus <recording.wav> --expect <reference.txt> \
+     pp-sweep voice (--corpus <recording.wav> --expect <reference.txt> \
+     | --corpus-manifest <manifest.tsv>) \
      --grid \"rule2=0.8,1.0,1.2;vad_hang=10,15,20\" \
      [--metric gating_cost] [--model-dir DIR] [--server PATH] [--json] [--propose <file>]\n\
-     (voice paths also from env PP_VOICE_CORPUS / PP_VOICE_EXPECT; args win)\n\
+     (voice paths also from env PP_VOICE_CORPUS / PP_VOICE_EXPECT / PP_VOICE_MANIFEST; args win)\n\
+     exactly one corpus form: single wav (--corpus/--expect) OR a manifest (--corpus-manifest)\n\
      voice knobs: rule1 rule2 rule3 vad_enter vad_exit vad_hang pre_roll_ms ; \
      metrics: gating_cost gated_wer raw_wer"
 }
@@ -147,6 +156,7 @@ fn parse_args() -> Result<Args, String> {
     let mut queries = std::env::var_os("PP_RETRIEVAL_QUERYSET").map(PathBuf::from);
     let mut corpus = std::env::var_os("PP_VOICE_CORPUS").map(PathBuf::from);
     let mut expect = std::env::var_os("PP_VOICE_EXPECT").map(PathBuf::from);
+    let mut corpus_manifest = std::env::var_os("PP_VOICE_MANIFEST").map(PathBuf::from);
     let mut model_dir: Option<PathBuf> = None;
     let mut server: Option<PathBuf> = None;
     let mut grid = String::new();
@@ -169,6 +179,7 @@ fn parse_args() -> Result<Args, String> {
             "--queries" => queries = Some(PathBuf::from(val("--queries")?)),
             "--corpus" => corpus = Some(PathBuf::from(val("--corpus")?)),
             "--expect" => expect = Some(PathBuf::from(val("--expect")?)),
+            "--corpus-manifest" => corpus_manifest = Some(PathBuf::from(val("--corpus-manifest")?)),
             "--model-dir" => model_dir = Some(PathBuf::from(val("--model-dir")?)),
             "--server" => server = Some(PathBuf::from(val("--server")?)),
             "--grid" => grid = val("--grid")?,
@@ -210,6 +221,7 @@ fn parse_args() -> Result<Args, String> {
         queries,
         corpus,
         expect,
+        corpus_manifest,
         model_dir,
         server,
         grid,
@@ -872,25 +884,122 @@ fn knobs_of(c: VoiceTuning) -> VoiceKnobs {
     }
 }
 
+/// One file's contribution to a corpus aggregate: which manifest row produced
+/// it (id) plus the per-file gated/raw score. The per-file breakdown the
+/// `--json` output carries so a regression can be traced to one reader/chapter.
+struct FileScore {
+    /// The manifest `id` (or the corpus path stem for the single-file form).
+    id: String,
+    score: ScoreResult,
+}
+
+/// A config's CORPUS-LEVEL score: the token-WEIGHTED aggregate over every file
+/// plus the per-file breakdown and the rolled-up totals.
+///
+/// WHY token-weighted (true corpus WER = total edits / total reference tokens),
+/// not a naive mean of per-file WERs: a naive mean lets a 3-word chapter swing
+/// the score as hard as a 300-word chapter, so one short reader can dominate the
+/// ranking. Weighting each file's error by its reference-token count makes the
+/// aggregate the WER you would get by concatenating the whole split and scoring
+/// it once, which is what "how good is this config across many readers" means.
+/// For a single-file corpus (n=1) the weighted aggregate is exactly that file's
+/// WER, so `--corpus`/`--expect` keeps behaving as before.
+struct CorpusScore {
+    /// Token-weighted gated WER = total gated edits / total reference tokens.
+    gated_wer: f64,
+    /// Token-weighted raw WER = total raw edits / total reference tokens.
+    raw_wer: f64,
+    /// Total minted (gated) segments across the corpus.
+    total_segs: usize,
+    /// Total abandoned captures across the corpus.
+    total_abandoned: u64,
+    /// Sum of the manifest's per-file utterance counts (0 for the single-file
+    /// form, which has no manifest count).
+    total_utterances: u64,
+    /// The per-file breakdown (manifest order), surfaced in `--json`.
+    per_file: Vec<FileScore>,
+}
+
+impl CorpusScore {
+    /// Corpus-level gating cost = weighted gated WER - weighted raw WER (the
+    /// founder's headline at corpus scale; lower is better).
+    fn gating_cost(&self) -> f64 {
+        self.gated_wer - self.raw_wer
+    }
+
+    /// The number of files that fed the aggregate.
+    fn file_count(&self) -> usize {
+        self.per_file.len()
+    }
+}
+
+/// Aggregate a config's per-file `ScoreResult`s into a token-weighted
+/// `CorpusScore`. PURE (no IO/models) so the weighting is unit-testable with
+/// stub scores. `ids` labels each file in manifest order; `utterances` is the
+/// manifest's per-file utterance count (one entry per file, 0 when unknown).
+///
+/// The weighting recovers the edit/token counts from each `WerScore`
+/// (`sub + del + ins` edits over `ref_words` tokens) and sums them across the
+/// corpus, so the result is `total_edits / total_ref_tokens` - a true
+/// corpus-level WER, not an average of ratios.
+fn aggregate_corpus(scores: Vec<(String, u64, ScoreResult)>) -> CorpusScore {
+    let mut gated_edits = 0usize;
+    let mut gated_tokens = 0usize;
+    let mut raw_edits = 0usize;
+    let mut raw_tokens = 0usize;
+    let mut total_segs = 0usize;
+    let mut total_abandoned = 0u64;
+    let mut total_utterances = 0u64;
+    let mut per_file = Vec::with_capacity(scores.len());
+    for (id, utterances, score) in scores {
+        gated_edits += score.gated.sub + score.gated.del + score.gated.ins;
+        gated_tokens += score.gated.ref_words;
+        raw_edits += score.raw.sub + score.raw.del + score.raw.ins;
+        raw_tokens += score.raw.ref_words;
+        total_segs += score.gated_segs.len();
+        total_abandoned += score.abandoned;
+        total_utterances += utterances;
+        per_file.push(FileScore { id, score });
+    }
+    // Guard the empty-reference degenerate (no tokens): a 0/0 corpus WER is 0.0,
+    // matching voice_wer's empty-reference convention rather than emitting NaN.
+    let wer = |edits: usize, tokens: usize| {
+        if tokens == 0 {
+            0.0
+        } else {
+            edits as f64 / tokens as f64
+        }
+    };
+    CorpusScore {
+        gated_wer: wer(gated_edits, gated_tokens),
+        raw_wer: wer(raw_edits, raw_tokens),
+        total_segs,
+        total_abandoned,
+        total_utterances,
+        per_file,
+    }
+}
+
 /// One scored voice config: its label, the knobs differing from baseline, the
-/// concrete config, the gated/raw score, and the wall-time. `is_baseline` marks
-/// the always-present baseline row.
+/// concrete config, the corpus-level score, and the wall-time. `is_baseline`
+/// marks the always-present baseline row.
 struct VoiceRow {
     label: String,
     diff: Vec<(String, f64)>,
     config: VoiceTuning,
-    score: ScoreResult,
+    score: CorpusScore,
     wall_ms: u128,
     is_baseline: bool,
 }
 
-/// The named voice metric off a score (the ranking key). gating_cost is the
-/// default (lower better); gated_wer/raw_wer let a caller rank by either WER.
-fn voice_metric_value(s: &ScoreResult, metric: &str) -> f64 {
+/// The named voice metric off a corpus score (the ranking key). gating_cost is
+/// the default (lower better); gated_wer/raw_wer let a caller rank by either
+/// token-weighted WER.
+fn voice_metric_value(s: &CorpusScore, metric: &str) -> f64 {
     match metric {
         "gating_cost" => s.gating_cost(),
-        "gated_wer" => s.gated.wer,
-        "raw_wer" => s.raw.wer,
+        "gated_wer" => s.gated_wer,
+        "raw_wer" => s.raw_wer,
         _ => s.gating_cost(),
     }
 }
@@ -923,15 +1032,26 @@ fn voice_baseline_knob(b: VoiceTuning, knob: &str) -> f64 {
     }
 }
 
-/// Score the baseline plus every grid config over the corpus (UNSORTED — the
-/// caller ranks). Each config spawns its OWN `pp-asr-server` (rule1/2/3 are
-/// server-side flags) and runs the gated + raw WER passes. SEQUENTIAL by design:
-/// one server at a time keeps it deterministic and avoids N concurrent model
-/// loads. A config byte-identical to baseline is skipped (it would duplicate the
-/// baseline row).
+/// One corpus recording, already loaded: the manifest id, the decoded samples,
+/// the reference transcript, and the manifest's utterance count (0 for the
+/// single-file form). The unit a config is scored over - the manifest is a list
+/// of these (n=1 for `--corpus`/`--expect`).
+struct CorpusFile {
+    id: String,
+    samples: Vec<f32>,
+    reference: String,
+    utterances: u64,
+}
+
+/// Score the baseline plus every grid config over the WHOLE corpus (UNSORTED —
+/// the caller ranks). Each config spawns its OWN `pp-asr-server` (rule1/2/3 are
+/// server-side flags) ONCE and reuses it across every file in the corpus, then
+/// aggregates the per-file scores into a token-weighted `CorpusScore`.
+/// SEQUENTIAL by design: one server at a time keeps it deterministic and avoids
+/// N concurrent model loads. A config byte-identical to baseline is skipped (it
+/// would duplicate the baseline row).
 fn score_all_voice(
-    samples: &[f32],
-    reference: &str,
+    corpus: &[CorpusFile],
     server: &Path,
     model_dir: &Path,
     baseline: VoiceTuning,
@@ -939,8 +1059,7 @@ fn score_all_voice(
 ) -> Result<Vec<VoiceRow>, String> {
     let mut rows = Vec::with_capacity(overrides.len() + 1);
     rows.push(score_one_voice(
-        samples,
-        reference,
+        corpus,
         server,
         model_dir,
         baseline,
@@ -956,17 +1075,19 @@ fn score_all_voice(
         }
         let label = format!("cfg{i}");
         rows.push(score_one_voice(
-            samples, reference, server, model_dir, baseline, ov, config, &label, false,
+            corpus, server, model_dir, baseline, ov, config, &label, false,
         )?);
     }
     Ok(rows)
 }
 
-/// Score one voice config over the corpus and time it.
+/// Score one voice config over EVERY file in the corpus and time the whole pass.
+/// One server spawn per config, reused across files (the model load dominates;
+/// re-spawning per file would multiply it by the corpus size for no gain - the
+/// VAD params are client-side and the endpoint rules are fixed for the config).
 #[allow(clippy::too_many_arguments)]
 fn score_one_voice(
-    samples: &[f32],
-    reference: &str,
+    corpus: &[CorpusFile],
     server: &Path,
     model_dir: &Path,
     baseline: VoiceTuning,
@@ -988,7 +1109,13 @@ fn score_one_voice(
         }
     }
     let _reap = Reap(child);
-    let score = voice_bench::score_run(samples, addr, &knobs, reference);
+    // Score every file against the same server, then aggregate token-weighted.
+    let mut scores = Vec::with_capacity(corpus.len());
+    for file in corpus {
+        let score = voice_bench::score_run(&file.samples, addr, &knobs, &file.reference);
+        scores.push((file.id.clone(), file.utterances, score));
+    }
+    let score = aggregate_corpus(scores);
     let wall_ms = started.elapsed().as_millis();
     Ok(VoiceRow {
         label: label.to_owned(),
@@ -1030,28 +1157,31 @@ fn voice_config_label(r: &VoiceRow) -> String {
 }
 
 /// Human voice leaderboard. ASCII only (no em-dashes). gating-cost is the
-/// headline; gated/raw WER and the minted-segment count are shown alongside.
-fn print_voice_table(rows: &[VoiceRow], metric: &str) {
+/// headline; the WERs are the corpus-level TOKEN-WEIGHTED means, and the
+/// segment / abandoned counts are corpus totals. `files` is the corpus size
+/// (1 for the single-file form) so the header states what the means cover.
+fn print_voice_table(rows: &[VoiceRow], metric: &str, files: usize) {
     println!(
-        "voice sweep: {} configs ranked by {metric} (ascending; lower is better)",
+        "voice sweep: {} configs over {files} file(s) ranked by {metric} \
+         (ascending; lower is better; WERs are token-weighted corpus means)",
         rows.len()
     );
     println!(
-        "{:>4} {:<28} {:>9} {:>9} {:>9} {:>5} {:>4} {:>8}",
+        "{:>4} {:<28} {:>9} {:>9} {:>9} {:>6} {:>5} {:>8}",
         "rank", "config", "gate_cost", "gatedWER", "rawWER", "segs", "abnd", "ms"
     );
     for (i, r) in rows.iter().enumerate() {
         let cfg = voice_config_label(r);
         let s = &r.score;
         println!(
-            "{:>4} {:<28} {:>+9.4} {:>9.4} {:>9.4} {:>5} {:>4} {:>8}",
+            "{:>4} {:<28} {:>+9.4} {:>9.4} {:>9.4} {:>6} {:>5} {:>8}",
             i + 1,
             truncate(&cfg, 28),
             s.gating_cost(),
-            s.gated.wer,
-            s.raw.wer,
-            s.gated_segs.len(),
-            s.abandoned,
+            s.gated_wer,
+            s.raw_wer,
+            s.total_segs,
+            s.total_abandoned,
             r.wall_ms,
         );
     }
@@ -1070,17 +1200,38 @@ fn print_voice_json(rows: &[VoiceRow], args: &Args) {
                 .iter()
                 .map(|(knob, v)| (knob.clone(), serde_json::json!(v)))
                 .collect();
+            // Per-file breakdown (manifest order): so a corpus-level regression
+            // can be traced to one reader/chapter without a re-run.
+            let per_file: Vec<serde_json::Value> = s
+                .per_file
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "id": f.id,
+                        "gating_cost": f.score.gating_cost(),
+                        "gated_wer": f.score.gated.wer,
+                        "raw_wer": f.score.raw.wer,
+                        "ref_words": f.score.gated.ref_words,
+                        "segments": f.score.gated_segs.len(),
+                        "abandoned": f.score.abandoned,
+                    })
+                })
+                .collect();
             serde_json::json!({
                 "rank": i + 1,
                 "label": r.label,
                 "baseline": r.is_baseline,
                 "config_diff": diff,
                 "config": voice_config_json(r.config),
+                // The corpus-level (token-weighted) aggregate is the ranking key.
                 "gating_cost": s.gating_cost(),
-                "gated_wer": s.gated.wer,
-                "raw_wer": s.raw.wer,
-                "segments": s.gated_segs.len(),
-                "abandoned": s.abandoned,
+                "gated_wer": s.gated_wer,
+                "raw_wer": s.raw_wer,
+                "files": s.file_count(),
+                "total_segments": s.total_segs,
+                "total_abandoned": s.total_abandoned,
+                "total_utterances": s.total_utterances,
+                "per_file": per_file,
                 "wall_ms": r.wall_ms,
             })
         })
@@ -1090,6 +1241,7 @@ fn print_voice_json(rows: &[VoiceRow], args: &Args) {
         "metric": args.metric,
         "corpus": args.corpus.as_ref().map(|p| p.display().to_string()),
         "expect": args.expect.as_ref().map(|p| p.display().to_string()),
+        "corpus_manifest": args.corpus_manifest.as_ref().map(|p| p.display().to_string()),
         "host": {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -1113,18 +1265,24 @@ fn voice_config_json(c: VoiceTuning) -> serde_json::Value {
 /// baseline->winner delta (gating-cost + both WERs) as comments. PURE (no IO) so
 /// it is unit-testable; the caller writes the file. Mirrors the search arm's
 /// `render_proposal`.
+///
+/// `source` is the corpus the sweep ran (the single wav, or the manifest TSV);
+/// the proposal headers it so a reviewer knows the winner is corpus-level, not a
+/// single chapter. The deltas are the TOKEN-WEIGHTED corpus aggregates.
 fn render_voice_proposal(
     winner: &VoiceRow,
     baseline: &VoiceRow,
-    corpus: &Path,
+    source: &Path,
     metric: &str,
 ) -> String {
     let w = winner.config;
     let mut out = String::new();
     out.push_str(&format!(
-        "# PROPOSED by pp-sweep voice on {}; review and copy into tuning.toml to \
-         apply. The machine proposes; you commit (K14).\n",
-        corpus.display()
+        "# PROPOSED by pp-sweep voice over {} ({} file(s), token-weighted corpus \
+         WER); review and copy into tuning.toml to apply. The machine proposes; \
+         you commit (K14).\n",
+        source.display(),
+        winner.score.file_count(),
     ));
     if winner.is_baseline {
         out.push_str("# baseline already optimal in this grid: no knob change is proposed.\n");
@@ -1146,8 +1304,8 @@ fn render_voice_proposal(
     out.push_str(&format!(
         "# winner: gating_cost={:+.4} gated_wer={:.4} raw_wer={:.4}\n",
         ws.gating_cost(),
-        ws.gated.wer,
-        ws.raw.wer,
+        ws.gated_wer,
+        ws.raw_wer,
     ));
     out.push('\n');
     // The `[voice]` block, in the same shape as tuning.default.toml so a copy
@@ -1163,30 +1321,215 @@ fn render_voice_proposal(
     out
 }
 
+// ---------------------------------------------------------------------------
+// Corpus manifest (scripts/fetch-voice-corpus.sh): a TSV of many recordings, so
+// a config is scored over a whole LibriSpeech split (many readers) instead of
+// one chapter. WHY many readers: a single chapter's WER is one voice, one mic,
+// one reading speed; ranking on it overfits the dial to that reader. A
+// token-weighted aggregate over a split is far more robust. The script also
+// stages a `<split>-sweep-subset.tsv` (the 3 shortest chapters) so iteration on
+// the dials stays fast before a full-split confirmation run.
+// ---------------------------------------------------------------------------
+
+/// One parsed manifest row (paths NOT yet validated to exist).
+#[derive(Debug)]
+struct ManifestEntry {
+    id: String,
+    wav: PathBuf,
+    transcript: PathBuf,
+    /// The manifest's utterance count (column 4). `0` when the column is absent
+    /// (it is optional in the format and only ever a reporting total).
+    utterances: u64,
+}
+
+/// Parse the corpus-manifest TSV (the format `scripts/fetch-voice-corpus.sh`
+/// writes):
+///
+/// ```text
+/// # id\twav\ttranscript\tutterances
+/// <id>\t<abs-wav>\t<abs-transcript>\t<utterance-count>
+/// ```
+///
+/// Lines starting with `#` and blank lines are skipped (comments/header). Each
+/// data row splits on TAB into (id, wav, transcript[, utterances]); a 4th
+/// column, if present, is the utterance count. ROBUST: never panics on a
+/// malformed line; returns a descriptive `Err` naming the manifest line number
+/// and what was wrong. Paths are NOT existence-checked here (that is a separate,
+/// equally-descriptive pass in `load_corpus`) so the parser stays pure and
+/// unit-testable without the staged audio.
+fn parse_manifest(text: &str) -> Result<Vec<ManifestEntry>, String> {
+    let mut entries = Vec::new();
+    // 1-based line numbers so an error points at the file the way an editor does.
+    for (i, raw) in text.lines().enumerate() {
+        let line_no = i + 1;
+        let line = raw.trim_end_matches(['\r', '\n']);
+        let trimmed = line.trim();
+        // Skip comments (incl. the header) and blank lines.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Split on TAB only (the transcript text can contain spaces; the manifest
+        // is tab-delimited so paths with spaces survive).
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            return Err(format!(
+                "manifest line {line_no}: expected at least 3 tab-separated columns \
+                 (id, wav, transcript), found {} in {line:?}",
+                cols.len()
+            ));
+        }
+        let id = cols[0].trim();
+        let wav = cols[1].trim();
+        let transcript = cols[2].trim();
+        if id.is_empty() || wav.is_empty() || transcript.is_empty() {
+            return Err(format!(
+                "manifest line {line_no}: id, wav, and transcript must all be \
+                 non-empty (got id={id:?} wav={wav:?} transcript={transcript:?})"
+            ));
+        }
+        // The utterance column is optional; a present-but-unparsable value is a
+        // typo worth reporting (not silently zeroed).
+        let utterances = match cols.get(3).map(|c| c.trim()) {
+            None | Some("") => 0,
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|e| format!("manifest line {line_no}: utterance count {v:?}: {e}"))?,
+        };
+        entries.push(ManifestEntry {
+            id: id.to_owned(),
+            wav: PathBuf::from(wav),
+            transcript: PathBuf::from(transcript),
+            utterances,
+        });
+    }
+    if entries.is_empty() {
+        return Err("manifest has no recordings (only comments/blank lines?)".into());
+    }
+    Ok(entries)
+}
+
+/// Resolve a parsed manifest into loaded `CorpusFile`s: validate each wav +
+/// transcript path EXISTS (clear error naming the missing file and its manifest
+/// line), then decode the wav and read the transcript. Separated from
+/// `parse_manifest` so the pure parse is testable without the staged audio.
+fn load_corpus(entries: &[ManifestEntry]) -> Result<Vec<CorpusFile>, String> {
+    let mut corpus = Vec::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        let line_no = i + 1; // entries are in manifest data-row order
+        if !e.wav.exists() {
+            return Err(format!(
+                "manifest entry {:?} (data row {line_no}): wav not found: {}",
+                e.id,
+                e.wav.display()
+            ));
+        }
+        if !e.transcript.exists() {
+            return Err(format!(
+                "manifest entry {:?} (data row {line_no}): transcript not found: {}",
+                e.id,
+                e.transcript.display()
+            ));
+        }
+        let samples = voice_bench::read_wav(&e.wav)
+            .map_err(|err| format!("reading wav {} (entry {:?}): {err}", e.wav.display(), e.id))?;
+        let reference = std::fs::read_to_string(&e.transcript).map_err(|err| {
+            format!(
+                "reading transcript {} (entry {:?}): {err}",
+                e.transcript.display(),
+                e.id
+            )
+        })?;
+        corpus.push(CorpusFile {
+            id: e.id.clone(),
+            samples,
+            reference,
+            utterances: e.utterances,
+        });
+    }
+    Ok(corpus)
+}
+
+/// Resolve the voice arm's corpus from the args: EXACTLY ONE of the single-file
+/// form (`--corpus`/`--expect`) or the manifest form (`--corpus-manifest`). Both
+/// or neither is a clear error. Returns the loaded corpus plus the "source" path
+/// to header the proposal with (the wav, or the manifest TSV).
+///
+/// The single-file form is just the n=1 case of the manifest aggregation, so the
+/// rest of the arm never special-cases it.
+fn resolve_corpus(args: &Args) -> Result<(Vec<CorpusFile>, PathBuf), String> {
+    let single = args.corpus.is_some() || args.expect.is_some();
+    let manifest = args.corpus_manifest.is_some();
+    match (single, manifest) {
+        (true, true) => Err(format!(
+            "voice: give EITHER --corpus/--expect OR --corpus-manifest, not both\n{}",
+            usage()
+        )),
+        (false, false) => Err(format!(
+            "voice: missing corpus: give --corpus <wav> --expect <ref> \
+             (or PP_VOICE_CORPUS/PP_VOICE_EXPECT) OR --corpus-manifest <tsv> \
+             (or PP_VOICE_MANIFEST)\n{}",
+            usage()
+        )),
+        (true, false) => {
+            // Single-file form: both --corpus and --expect must be present.
+            let corpus = args.corpus.as_ref().ok_or_else(|| {
+                format!(
+                    "voice: --expect given without --corpus (or PP_VOICE_CORPUS)\n{}",
+                    usage()
+                )
+            })?;
+            let expect = args.expect.as_ref().ok_or_else(|| {
+                format!(
+                    "voice: --corpus given without --expect (or PP_VOICE_EXPECT)\n{}",
+                    usage()
+                )
+            })?;
+            let samples = voice_bench::read_wav(corpus)
+                .map_err(|e| format!("reading corpus {}: {e}", corpus.display()))?;
+            let reference = std::fs::read_to_string(expect)
+                .map_err(|e| format!("reading --expect {}: {e}", expect.display()))?;
+            // The id is the wav file stem (a stable, human label in the n=1 case).
+            let id = corpus
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("corpus")
+                .to_owned();
+            Ok((
+                vec![CorpusFile {
+                    id,
+                    samples,
+                    reference,
+                    utterances: 0,
+                }],
+                corpus.clone(),
+            ))
+        }
+        (false, true) => {
+            let path = args.corpus_manifest.as_ref().expect("manifest present");
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("reading corpus manifest {}: {e}", path.display()))?;
+            let entries = parse_manifest(&text)
+                .map_err(|e| format!("parsing corpus manifest {}: {e}", path.display()))?;
+            let corpus = load_corpus(&entries)?;
+            Ok((corpus, path.clone()))
+        }
+    }
+}
+
 fn run_voice(args: &Args) -> Result<(), String> {
-    let corpus = args
-        .corpus
-        .as_ref()
-        .ok_or_else(|| format!("voice: missing --corpus (or PP_VOICE_CORPUS)\n{}", usage()))?;
-    let expect = args
-        .expect
-        .as_ref()
-        .ok_or_else(|| format!("voice: missing --expect (or PP_VOICE_EXPECT)\n{}", usage()))?;
+    // Exactly one corpus form (single wav xor manifest); load it up front so a
+    // bad manifest/path errors before any model spawn.
+    let (corpus, source) = resolve_corpus(args)?;
 
     // The baseline IS the committed `[voice]` config. Source it from the same
-    // `tuning.toml` the app reads when one sits beside the corpus; absent a file
-    // this is the shipped voice defaults. `tuning().voice` reads that global.
-    if let Some(app_data) = corpus.parent() {
+    // `tuning.toml` the app reads when one sits beside the corpus source; absent
+    // a file this is the shipped voice defaults. `tuning().voice` reads the global.
+    if let Some(app_data) = source.parent() {
         photoproof_core::tuning::init_from(app_data);
     }
     let baseline = photoproof_core::tuning::tuning().voice;
 
     let overrides = parse_voice_grid(&args.grid)?;
-
-    let samples = voice_bench::read_wav(corpus)
-        .map_err(|e| format!("reading corpus {}: {e}", corpus.display()))?;
-    let reference = std::fs::read_to_string(expect)
-        .map_err(|e| format!("reading --expect {}: {e}", expect.display()))?;
 
     let server = args
         .server
@@ -1197,9 +1540,8 @@ fn run_voice(args: &Args) -> Result<(), String> {
         .clone()
         .unwrap_or_else(voice_bench::default_model_dir);
 
-    let rows = score_all_voice(
-        &samples, &reference, &server, &model_dir, baseline, &overrides,
-    )?;
+    let files = corpus.len();
+    let rows = score_all_voice(&corpus, &server, &model_dir, baseline, &overrides)?;
     let ranked = rank_voice(rows, &args.metric);
     if ranked.is_empty() {
         return Err("voice sweep produced no rows (empty grid?)".into());
@@ -1208,7 +1550,7 @@ fn run_voice(args: &Args) -> Result<(), String> {
     if args.json {
         print_voice_json(&ranked, args);
     } else {
-        print_voice_table(&ranked, &args.metric);
+        print_voice_table(&ranked, &args.metric, files);
     }
 
     if let Some(path) = &args.propose {
@@ -1217,7 +1559,7 @@ fn run_voice(args: &Args) -> Result<(), String> {
             .iter()
             .find(|r| r.is_baseline)
             .ok_or("internal: baseline row missing from ranked set")?;
-        let text = render_voice_proposal(winner, baseline_row, corpus, &args.metric);
+        let text = render_voice_proposal(winner, baseline_row, &source, &args.metric);
         guard_propose_target(path)?;
         std::fs::write(path, text)
             .map_err(|e| format!("writing proposal {}: {e}", path.display()))?;
@@ -1484,16 +1826,22 @@ mod tests {
         VoiceTuning::default()
     }
 
-    /// A `ScoreResult` with chosen gated/raw WER (the rest filled trivially).
-    fn vscore(gated: f64, raw: f64) -> ScoreResult {
-        let mk = |wer: f64| WerScore {
-            wer,
-            sub: 0,
-            del: 0,
-            ins: 0,
-            ref_words: 10,
-            hyp_words: 10,
-            hits: 10,
+    /// A per-file `ScoreResult` with chosen gated/raw WER over a chosen reference
+    /// token count (so the token-weighting can be exercised). The edit counts are
+    /// derived from `wer * ref_words` (rounded) and parked in `sub`, which is all
+    /// `aggregate_corpus` reads (it recovers edits = sub+del+ins).
+    fn fscore(gated: f64, raw: f64, ref_words: usize) -> ScoreResult {
+        let mk = |wer: f64| {
+            let edits = (wer * ref_words as f64).round() as usize;
+            WerScore {
+                wer,
+                sub: edits,
+                del: 0,
+                ins: 0,
+                ref_words,
+                hyp_words: ref_words,
+                hits: ref_words.saturating_sub(edits),
+            }
         };
         ScoreResult {
             raw: mk(raw),
@@ -1504,6 +1852,24 @@ mod tests {
                 text: "x".into(),
             }],
             abandoned: 0,
+        }
+    }
+
+    /// A single-file `CorpusScore` with EXACT chosen gated/raw WER (built directly,
+    /// not via integer-edit aggregation, so the ranking/proposal tests can use
+    /// arbitrary fractional WERs; the token-weighted aggregation path has its own
+    /// dedicated tests with representable edit/token counts).
+    fn vscore(gated: f64, raw: f64) -> CorpusScore {
+        CorpusScore {
+            gated_wer: gated,
+            raw_wer: raw,
+            total_segs: 1,
+            total_abandoned: 0,
+            total_utterances: 0,
+            per_file: vec![FileScore {
+                id: "f0".to_owned(),
+                score: fscore(gated, raw, 10),
+            }],
         }
     }
 
@@ -1678,5 +2044,205 @@ mod tests {
         assert!(validate_metric("voice", "ndcg_at_k").is_err());
         assert!(validate_metric("search", "gating_cost").is_err());
         assert!(validate_metric("search", "ndcg_at_k").is_ok());
+    }
+
+    // =======================================================================
+    // Corpus manifest: parse + token-weighted aggregation (deterministic, no
+    // models). The model-dependent multi-file run is the env-guarded #[ignore]
+    // integration test, like the single-file synth.
+    // =======================================================================
+
+    // --- manifest parse: valid rows, skipping, errors -----------------------
+    #[test]
+    fn manifest_parses_valid_rows_and_skips_comments_and_blanks() {
+        let tsv = "\
+# id\twav\ttranscript\tutterances
+chA\t/c/a.wav\t/c/a.txt\t12
+
+# a stray comment mid-file
+chB\t/c/b.wav\t/c/b.txt\t7
+";
+        let entries = parse_manifest(tsv).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "chA");
+        assert_eq!(entries[0].wav, PathBuf::from("/c/a.wav"));
+        assert_eq!(entries[0].transcript, PathBuf::from("/c/a.txt"));
+        assert_eq!(entries[0].utterances, 12);
+        assert_eq!(entries[1].id, "chB");
+        assert_eq!(entries[1].utterances, 7);
+    }
+
+    #[test]
+    fn manifest_utterance_column_is_optional() {
+        // A row with only the 3 required columns parses (utterances default 0).
+        let entries = parse_manifest("chA\t/c/a.wav\t/c/a.txt\n").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].utterances, 0);
+    }
+
+    #[test]
+    fn manifest_malformed_line_errors_not_panics() {
+        // Too few columns: a descriptive error naming the line, never a panic.
+        let err = parse_manifest("chA\t/c/a.wav\n").unwrap_err();
+        assert!(err.contains("line 1"), "{err}");
+        assert!(err.contains("at least 3"), "{err}");
+    }
+
+    #[test]
+    fn manifest_empty_required_field_errors() {
+        // An empty wav column is malformed (id present, wav blank).
+        let err = parse_manifest("chA\t\t/c/a.txt\n").unwrap_err();
+        assert!(err.contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn manifest_bad_utterance_count_errors() {
+        let err = parse_manifest("chA\t/c/a.wav\t/c/a.txt\tnotanum\n").unwrap_err();
+        assert!(err.contains("utterance count"), "{err}");
+    }
+
+    #[test]
+    fn manifest_all_comments_errors_with_no_recordings() {
+        let err = parse_manifest("# header\n\n# only comments\n").unwrap_err();
+        assert!(err.contains("no recordings"), "{err}");
+    }
+
+    #[test]
+    fn load_corpus_missing_wav_errors_clearly() {
+        // The wav path does not exist -> a clear error naming the file + entry.
+        let entries = parse_manifest("chA\t/nope/missing.wav\t/nope/missing.txt\n").unwrap();
+        let err = match load_corpus(&entries) {
+            Ok(_) => panic!("expected an error for a missing wav"),
+            Err(e) => e,
+        };
+        assert!(err.contains("wav not found"), "{err}");
+        assert!(err.contains("missing.wav"), "{err}");
+        assert!(err.contains("chA"), "{err}");
+    }
+
+    // --- aggregation: token-weighted corpus WER -----------------------------
+    #[test]
+    fn aggregate_is_token_weighted_not_naive_mean() {
+        // File A: gated 0.50 over 2 ref tokens (1 edit), raw 0.0 (0 edits).
+        // File B: gated 0.10 over 100 ref tokens (10 edits), raw 0.05 (5 edits).
+        // Token-weighted gated WER = (1 + 10) / (2 + 100) = 11/102 ~= 0.10784.
+        // A naive mean would be (0.50 + 0.10)/2 = 0.30 - the short file would
+        // dominate, which is exactly what the weighting avoids.
+        let agg = aggregate_corpus(vec![
+            ("A".to_owned(), 3, fscore(0.50, 0.0, 2)),
+            ("B".to_owned(), 9, fscore(0.10, 0.05, 100)),
+        ]);
+        assert!(
+            (agg.gated_wer - 11.0 / 102.0).abs() < 1e-9,
+            "{}",
+            agg.gated_wer
+        );
+        // Raw: (0 + 5) / 102 = 5/102.
+        assert!((agg.raw_wer - 5.0 / 102.0).abs() < 1e-9, "{}", agg.raw_wer);
+        // gating_cost = weighted gated - weighted raw.
+        assert!((agg.gating_cost() - (11.0 - 5.0) / 102.0).abs() < 1e-9);
+        // Totals roll up.
+        assert_eq!(agg.total_utterances, 12);
+        assert_eq!(agg.file_count(), 2);
+        // Per-file breakdown is preserved in manifest order.
+        assert_eq!(agg.per_file[0].id, "A");
+        assert_eq!(agg.per_file[1].id, "B");
+    }
+
+    #[test]
+    fn single_file_aggregate_equals_the_file_wer() {
+        // The n=1 case (the --corpus/--expect form) must equal the file's own WER.
+        let agg = aggregate_corpus(vec![("only".to_owned(), 0, fscore(0.18, 0.10, 50))]);
+        assert!((agg.gated_wer - 0.18).abs() < 1e-9, "{}", agg.gated_wer);
+        assert!((agg.raw_wer - 0.10).abs() < 1e-9, "{}", agg.raw_wer);
+        assert!((agg.gating_cost() - 0.08).abs() < 1e-9);
+        assert_eq!(agg.file_count(), 1);
+    }
+
+    #[test]
+    fn aggregate_empty_reference_corpus_is_zero_not_nan() {
+        // A corpus whose references are all empty (0 tokens) must report 0.0, not
+        // NaN (matches voice_wer's empty-reference convention).
+        let agg = aggregate_corpus(vec![("e".to_owned(), 0, fscore(0.0, 0.0, 0))]);
+        assert_eq!(agg.gated_wer, 0.0);
+        assert_eq!(agg.raw_wer, 0.0);
+        assert!(agg.gating_cost().is_finite());
+    }
+
+    #[test]
+    fn corpus_ranking_is_ascending_by_aggregate_gating_cost() {
+        // Build three rows whose CORPUS-LEVEL gating cost differs; the rank must
+        // be ascending (lowest aggregate gating-cost first), stable on ties.
+        let mk_row = |label: &str, files: Vec<ScoreResult>| VoiceRow {
+            label: label.to_owned(),
+            diff: Vec::new(),
+            config: voice_baseline(),
+            score: aggregate_corpus(
+                files
+                    .into_iter()
+                    .map(|s| (label.to_owned(), 0, s))
+                    .collect(),
+            ),
+            wall_ms: 5,
+            is_baseline: label == "baseline",
+        };
+        // baseline corpus gating-cost: edits gated (5+1)/(50+10) - raw 0 = 0.10.
+        let baseline = mk_row(
+            "baseline",
+            vec![fscore(0.10, 0.0, 50), fscore(0.10, 0.0, 10)],
+        );
+        // cfg0: gated (1+1)/(50+10) - raw 0 ~= 0.0333 (best).
+        let cfg0 = mk_row("cfg0", vec![fscore(0.02, 0.0, 50), fscore(0.10, 0.0, 10)]);
+        // cfg1: gated (4+1)/(50+10) - raw 0 ~= 0.0833 (middle).
+        let cfg1 = mk_row("cfg1", vec![fscore(0.08, 0.0, 50), fscore(0.10, 0.0, 10)]);
+        let ranked = rank_voice(vec![baseline, cfg0, cfg1], "gating_cost");
+        let labels: Vec<&str> = ranked.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["cfg0", "cfg1", "baseline"]);
+    }
+
+    // --- the --corpus xor --corpus-manifest arg validation ------------------
+    fn voice_args(corpus: Option<&str>, expect: Option<&str>, manifest: Option<&str>) -> Args {
+        Args {
+            subsystem: "voice".into(),
+            db: None,
+            queries: None,
+            corpus: corpus.map(PathBuf::from),
+            expect: expect.map(PathBuf::from),
+            corpus_manifest: manifest.map(PathBuf::from),
+            model_dir: None,
+            server: None,
+            grid: "rule2=0.8".into(),
+            metric: "gating_cost".into(),
+            k: None,
+            max_latency_ms: None,
+            json: false,
+            propose: None,
+        }
+    }
+
+    /// `resolve_corpus`'s `Ok` arm is not `Debug` (it carries decoded samples),
+    /// so assert on the error via `match` rather than `unwrap_err`.
+    fn resolve_err(args: &Args) -> String {
+        match resolve_corpus(args) {
+            Ok(_) => panic!("expected an error from resolve_corpus"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn corpus_xor_manifest_both_forms_errors() {
+        // Both the single-file form and the manifest form -> error.
+        let err = resolve_err(&voice_args(
+            Some("/c/a.wav"),
+            Some("/c/a.txt"),
+            Some("/c/m.tsv"),
+        ));
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn corpus_xor_manifest_neither_form_errors() {
+        let err = resolve_err(&voice_args(None, None, None));
+        assert!(err.contains("missing corpus"), "{err}");
     }
 }
