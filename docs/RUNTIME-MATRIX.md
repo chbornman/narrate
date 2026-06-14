@@ -49,14 +49,14 @@ are over the CPU/int8 fallback for that seam.
 | seam | best result so far | status | source |
 |---|---|---|---|
 | **CLIP image embed** (the bottleneck) | M1 Pro CoreML FP16 = **8.77x** (18 -> 162 img/min), near-lossless | **SHIPPED**, flipped on the dev machine | `docs/SPIKE-COREML.md` |
-| **CLIP image embed** | RTX 5080 **TensorRT FP16 = 85.79x** (41 -> 3635 img/min), cosine 0.99994; CUDA alone **62.69x** (re-measured 2026-06-14, 0.73 -> 45.6 img/s; was 54.47x) | **VALIDATED** (both rungs) | `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
+| **CLIP image embed** | RTX 5080 **TensorRT FP16 = 112.35x** (81.7 img/s, 4900 img/min), cosine 0.999936 (re-measured 2026-06-14; prior 85.79x); CUDA alone **62.69x** (45.6 img/s; prior 54.47x) | **VALIDATED** (both rungs) | `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
 | **Text embed** (EmbeddingGemma) | int8/CPU is BEST everywhere measured; CoreML LOSES (0.48-0.64x) | CPU shipped; CUDA whole-graph re-measure TBD | `docs/SPIKE-COREML-TEXT.md`, `docs/SPIKE-MLX-COREML-TEXT.md` |
-| **LLM** (Gemma 4) | Metal (Mac) / CUDA (NVIDIA); Gemma 4 MTP = 1.4-2.98x but CUDA-ONLY | MTP staged for the 5080; laptop stays plain E2B | `docs/PLAN-GEMMA-MTP.md` |
+| **LLM** (Gemma 4) | Metal (Mac) / CUDA (NVIDIA); Gemma 4 MTP = 1.3-2.98x (prompt-dependent), CUDA-ONLY. Re-confirmed on 5080: 1.32x (300 -> 395 tok/s, 35.6% draft accept) on a hard prompt | MTP staged for the 5080; laptop stays plain E2B | `docs/PLAN-GEMMA-MTP.md` |
 | **ASR** (Nemotron 0.6b / 3.5) | CPU by design (real-time, frees the GPU). 3.5-via-`parakeet-rs` A/B'd real-time on BOTH machines (M1 4.50x / 9900X 7.75x), WER 1.25% + punctuation, +1.3 GB RAM | shipped (int8); **3.5 engine LANDED behind `engine-parakeet`, §7.4 gate PASSED**, tier flip pending founder | `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11 |
 | **VAD** (silero) | CPU always (~2ms/chunk, tiny) | shipped | - |
 | **Cross-platform GPU** (non-Apple/non-NVIDIA) | DirectML EP (Windows DX12) + WebGPU EP (strategic) | planned; NOT raw Vulkan (`ort` has no Vulkan EP) | `docs/PLAN-VULKAN.md` |
 
-Headline: with the GPU embed at 54x, the BOTTLENECK MOVED off CLIP onto decode/resize
+Headline: with the GPU embed at 62-112x, the BOTTLENECK MOVED off CLIP onto decode/resize
 (see "The new perf frontier" below).
 
 ## The models (5 live seams)
@@ -81,7 +81,7 @@ experience. Speedups are over that seam's CPU fallback.
 | model | RTX 5080 (top) | M1 Pro (validated) | no-GPU laptop | Tier-0 floor |
 |---|---|---|---|---|
 | **LLM** (Gemma 4, llama.cpp) | **CUDA** + MTP variant (1.4-2.98x; CUDA-only) | **Metal** - plain E2B (MTP REGRESSES 11-28% on Metal) | CPU | LLM features dark; notes + search intact |
-| **CLIP image** (DFN5B, `ort`) | **TensorRT FP16 = 85.79x** (3635 img/min, cosine 0.99994); CUDA alone = 54.47x | **CoreML FP16** - **8.77x** (162 img/min), near-lossless; SHIPPED | **CPU int8** (~18-41 img/min) | semantic image search -> keyword |
+| **CLIP image** (DFN5B, `ort`) | **TensorRT FP16 = 112.35x** (4900 img/min, cosine 0.99994); CUDA alone = 62.69x | **CoreML FP16** - **8.77x** (162 img/min), near-lossless; SHIPPED | **CPU int8** (~18-41 img/min) | semantic image search -> keyword |
 | **Text embed** (EmbeddingGemma, `ort`) | **CUDA FP16** - TBD (whole-graph; worth re-measuring) | **CPU int8** - BEST (CoreML/MLX lose; ANE takes ~3% of graph) | **CPU int8** - BEST | semantic search -> keyword |
 | **ASR** (Nemotron 0.6b int8 / 3.5 parakeet) | **CPU** by design - int8 15.57x or 3.5-parakeet 7.75x RTF (both real-time) | **CPU** by design - int8 4.11x or 3.5-parakeet 4.50x RTF | **CPU** by design | voice dark; journal intact |
 | **VAD** (silero, `ort`) | **CPU** always | **CPU** always | **CPU** always | n/a (tiny) |
@@ -165,7 +165,7 @@ graph barely partitions, so CoreML LOSES. So on `ort`, only CLIP graduates to th
 | platform | EP | runs on | status |
 |---|---|---|---|
 | macOS | **CoreML** | ANE / GPU | **SHIPPED.** Inlined FP16 visual tower; **8.77x** over CPU (18 -> 162 img/min), near-lossless (cosine vs CPU min 0.9956, COCO-1k nDCG 0.8212 vs int8 0.8225). Caveat: a ~16.5 min FIRST-LOAD compile, amortized by `.with_model_cache_dir(...)` (landed). Flipped on the dev machine. `docs/SPIKE-COREML.md` |
-| Windows / Linux + NVIDIA | **TensorRT / CUDA** | GPU | **VALIDATED on the 5080: TensorRT FP16 = 85.79x** (3635 img/min, cosine 0.99994; CUDA alone 54.47x). Same FP16 ONNX; via `cuda-dynamic` + the cuda13 onnxruntime (sm_120) + TensorRT 10.16. `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
+| Windows / Linux + NVIDIA | **TensorRT / CUDA** | GPU | **VALIDATED on the 5080: TensorRT FP16 = 112.35x** (4900 img/min, cosine 0.999936; CUDA alone 62.69x; re-measured 2026-06-14, priors 85.79x / 54.47x). Same FP16 ONNX; via `cuda-dynamic` + the cuda13 onnxruntime (sm_120) + TensorRT 10.16. `docs/PLAN-ORT-BLACKWELL.md`, `docs/PLAN-TENSORRT.md` |
 | Windows | **DirectML** | GPU | PLANNED. Any DX12 GPU (AMD/Intel/NVIDIA), no CUDA needed; accepts our FP16 ONNX. The cheapest cross-platform win - an `ort` feature + EP registration, analogous to CoreML/CUDA. `docs/PLAN-VULKAN.md` |
 | Win/Linux, other GPU | **WebGPU** | GPU | WATCH. `ort` 2.0 `WebGPUExecutionProvider` (Dawn-backed: DX12/Vulkan/Metal) is the strategic one-EP cross-platform bet; younger than DirectML for our models. `docs/PLAN-VULKAN.md` |
 | any | CPU | CPU | **LIVE default.** CLIP int8 ~18-41 img/min - the floor under every accelerator. |
@@ -226,12 +226,12 @@ tier - both one-line reversible. The two engines co-exist behind one process bou
 
 ## The new perf frontier (the bottleneck moved)
 
-With the GPU embed at 54x, decode/resize is the new ceiling - CLIP is no longer the
+With the GPU embed at 62-112x, decode/resize is the new ceiling - CLIP is no longer the
 slow seam on a fast GPU. Decode IS already parallelized (rayon pool `min(cores, 8)`,
 `library/mod.rs:2986`; BLAKE3 hashing `min(cores, 8)`). Two levers now matter:
 
 1. **Re-bench the `min(cores, 8)` cap on the desktop.** That cap was tuned on the M1
-   Pro; the Ryzen 9900X (12c/24t) feeding a 54x GPU may want a higher cap to keep the
+   Pro; the Ryzen 9900X (12c/24t) feeding a 62-112x GPU may want a higher cap to keep the
    GPU fed. (`docs/PLAN-PERF.md`.)
 2. **Batch the GPU embed.** Today the embed is single-image / unbatched. Batching
    16-32 images per forward could beat even TensorRT by amortizing launch overhead.
@@ -242,9 +242,9 @@ These are the next perf items, not yet built.
 
 - **[SHIPPED]** FP16 single-file CLIP -> CoreML at **8.77x**, near-lossless; cache +
   `...__dfn5b-fp16` model spec landed; flipped on the dev machine. `docs/SPIKE-COREML.md`.
-- **[VALIDATED]** CUDA FP16 on the 5080 at **54.47x** via `cuda-dynamic` + cuda13
+- **[VALIDATED]** CUDA FP16 on the 5080 at **62.69x** (re-measured; prior 54.47x) via `cuda-dynamic` + cuda13
   onnxruntime (sm_120). `docs/PLAN-ORT-BLACKWELL.md`.
-- **[VALIDATED]** TensorRT EP = **85.79x** (3635 img/min, +1.58x over CUDA, cosine
+- **[VALIDATED]** TensorRT EP = **112.35x** (4900 img/min, ~1.8x over CUDA, re-measured; prior 85.79x, cosine
   0.99994; TensorRT 10.16 sm120 via `pip 'tensorrt-cu12<11'`). `docs/PLAN-TENSORRT.md`.
 - **[NEXT - distribution]** ship the CoreML 8.77x to ALL Mac users: host the fp16 model
   + `runtime/manifest.rs` entry; prefer fp16+CoreML in `runtime/plan.rs`; run the COCO

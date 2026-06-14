@@ -31,9 +31,19 @@ their original wording.
   RAM (FP32 ~2.2 GB vs int8 ~0.9-1.1 GB, mic-armed only), buying WER 1.25%
   LibriSpeech with native punctuation + caps + multilingual. Default stays int8
   sherpa until the founder flips the tier. `docs/PLAN-NEMOTRON-35-SIDECAR.md` §11.
-- [x] **Cross-machine CLIP CUDA re-measure** - RTX 5080 CUDA EP (sm_120 onnxruntime
-  via `cuda-dynamic`) re-validated at **62.69x** over CPU (0.73 -> 45.6 img/s, FP16
-  DFN5B, cosine 0.9998), refreshing the prior 54.47x. `docs/RUNTIME-MATRIX.md`.
+- [x] **Cross-machine CLIP GPU re-measure (5080)** - both rungs re-validated on the
+  sm_120 onnxruntime (`cuda-dynamic`): CUDA EP **62.69x** (45.6 img/s; prior 54.47x)
+  and TensorRT EP **112.35x** (81.7 img/s, 4900 img/min, cosine 0.999936, 0/60 below
+  0.999; prior 85.79x - higher now with a warm GPU + cached TRT engine, 4.3 s load).
+  TRT libs from `~/trt-venv` (`tensorrt-cu12<11`, 10.16.1, sm120 builder resource).
+  `docs/RUNTIME-MATRIX.md`, `docs/PLAN-TENSORRT.md`.
+- [x] **Gemma 4 MTP re-confirm (5080)** - llama.cpp v9636 (`8edaca903`), CUDA build,
+  `--spec-type draft-mtp --model-draft mtp-gemma-4-E2B-it.gguf --spec-draft-n-max 4`.
+  vs a no-speculation baseline on the same prompt/seed: **1.32x** (299.9 -> 395.0
+  tok/s) at **35.6% draft acceptance** (149/419) on a hard, low-predictability prompt
+  - acceptance (and thus speedup) is prompt-dependent, consistent with the cited
+  1.3-2.98x range (the prior 51.5% was an easier prompt). MTP path works end-to-end:
+  base + drafter + CUDA. `docs/PLAN-GEMMA-MTP.md`.
 
 ## June 14 2026 - Performance plan (PLAN-PERF.md execution)
 
