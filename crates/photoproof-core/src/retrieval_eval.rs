@@ -331,7 +331,11 @@ use crate::search::{FusionWeights, HybridOptions, HybridRig, NoModel, Searcher, 
 /// (S1) and the image-summary half of S3; `clip` embeds it into the CLIP space
 /// (S4, B69 always-votes); `vectors` is the `.ppvec` store the app reads.
 pub struct EvalRig {
-    text: Arc<OrtEmbedder>,
+    /// `None` for an image-only library (e.g. a COCO/Flickr benchmark with no
+    /// notes): there are no `annotation_chunk` vectors, so the query is ranked by
+    /// the CLIP visual signal (S4) alone - pure text->image retrieval, which is
+    /// exactly what such a benchmark measures.
+    text: Option<Arc<OrtEmbedder>>,
     clip: Arc<OrtEmbedder>,
     vectors: PpvecStore,
 }
@@ -356,19 +360,26 @@ impl EvalRig {
     /// exact same ort sessions the desktop host does.
     pub fn build(
         models_dir: &Path,
-        text_model_id: &str,
+        text_model_id: Option<&str>,
         clip_model_id: &str,
         db_path: &Path,
         vectors_dir: &Path,
     ) -> Result<Self, String> {
-        let text = photoproof_connectors::build_text_embedder(text_model_id, models_dir)
-            .map_err(|e| format!("loading text embedder {text_model_id}: {e}"))?;
+        // The text embedder is only built when the library HAS annotation vectors
+        // to rank against; an image-only benchmark skips it (S4-only retrieval).
+        let text = match text_model_id {
+            Some(id) => Some(Arc::new(
+                photoproof_connectors::build_text_embedder(id, models_dir)
+                    .map_err(|e| format!("loading text embedder {id}: {e}"))?,
+            )),
+            None => None,
+        };
         let clip = photoproof_connectors::build_clip_embedder(clip_model_id, models_dir)
             .map_err(|e| format!("loading clip embedder {clip_model_id}: {e}"))?;
         let vectors = PpvecStore::open(db_path, vectors_dir)
             .map_err(|e| format!("opening vector store {}: {e}", vectors_dir.display()))?;
         Ok(Self {
-            text: Arc::new(text),
+            text,
             clip: Arc::new(clip),
             vectors,
         })
@@ -384,16 +395,21 @@ impl EvalRig {
     /// Reading the id off the table makes that impossible to get wrong (and makes
     /// the eval follow a library re-embedded under a different model for free).
     ///
-    /// `Err` if the DB has no `annotation_chunk`/`image_clip` rows to read an id
-    /// from (nothing to rank against), or any build step fails.
+    /// The text/annotation space is OPTIONAL: a library with no notes (a
+    /// COCO/Flickr image benchmark) has no `annotation_chunk` vectors, and is
+    /// ranked by the CLIP visual signal (S4) alone. `image_clip` is required -
+    /// with neither space there is nothing to rank against.
+    ///
+    /// `Err` if the DB has no `image_clip` rows (nothing to rank against), or any
+    /// build step fails.
     pub fn from_db(models_dir: &Path, db_path: &Path) -> Result<Self, String> {
-        let text_model_id = resolve_vector_model_id(db_path, "annotation_chunk")?;
+        let text_model_id = resolve_vector_model_id_opt(db_path, "annotation_chunk")?;
         let clip_model_id = resolve_vector_model_id(db_path, "image_clip")?;
         let vectors_dir = crate::retrieval::default_vectors_dir(db_path)
             .ok_or_else(|| format!("cannot derive vectors dir from {}", db_path.display()))?;
         Self::build(
             models_dir,
-            &text_model_id,
+            text_model_id.as_deref(),
             &clip_model_id,
             db_path,
             &vectors_dir,
@@ -408,7 +424,9 @@ impl EvalRig {
     fn rig(&self) -> HybridRig<'_, NoModel, OrtEmbedder, OrtEmbedder> {
         HybridRig {
             llm: None,
-            text: Some(self.text.as_ref()),
+            // None for an image-only library -> the annotation/S1 signals stay
+            // dark and ranking is CLIP-visual (S4) only.
+            text: self.text.as_deref(),
             clip: Some(self.clip.as_ref()),
             vectors: Some(&self.vectors as &dyn VectorStore),
         }
@@ -420,6 +438,19 @@ impl EvalRig {
 /// never migrate or write the live library. `Err` if the space is empty (no id
 /// to read; nothing to rank against) or several ids coexist (an ambiguous
 /// re-embed mid-flight — refuse rather than guess which space to query).
+/// Like [`resolve_vector_model_id`] but an EMPTY space is `Ok(None)` rather than
+/// an error - used for the OPTIONAL annotation space (an image-only benchmark
+/// legitimately has none). An ambiguous space (several ids) is still an error.
+fn resolve_vector_model_id_opt(db_path: &Path, vec_kind: &str) -> Result<Option<String>, String> {
+    match resolve_vector_model_id(db_path, vec_kind) {
+        Ok(id) => Ok(Some(id)),
+        // The empty-space message is the one case we soften to None; a genuine
+        // open/ambiguity error still propagates.
+        Err(e) if e.contains("nothing to rank against") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 fn resolve_vector_model_id(db_path: &Path, vec_kind: &str) -> Result<String, String> {
     // Read-only open: no migration, no WAL checkpoint write — the live DB is
     // untouched (the K-constraint that the eval never mutates the library).
