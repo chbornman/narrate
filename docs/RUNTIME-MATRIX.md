@@ -104,10 +104,16 @@ CUDA/CoreML providers if ever wanted. Default: stay on CPU.
 - **[DONE June 14]** FP16 single-file CLIP conversion -> CoreML VALIDATED at **8.77x**
   over CPU, near-lossless (SHIP-WITH-FP16). Models staged locally; recipe + cosines +
   measurements in `docs/SPIKE-COREML.md`. The int8 dir stays as the CPU fallback.
-- **[NEXT - production wiring]** select the FP16 model + register the CoreML EP by
-  platform in production (not just the env knob), set `.with_model_cache_dir(...)` to
-  amortize the ~16.5 min first-load compile, and re-export the text-embed tower to FP16
-  the same way. This is the embedding-bottleneck fix going live.
+- **[DONE June 14 - code wiring]** the CoreML compiled-model CACHE
+  (`.with_model_cache_dir`, beside each tower) + the `...__dfn5b-fp16` model spec
+  are landed (`ort_embedder.rs` `coreml_cache_dir`, `model_specs.rs`). So the env-knob
+  CoreML path is now practical (compile once, not per launch) and the fp16 id is
+  buildable by the eval rig. CPU default stays byte-identical.
+- **[NEXT - founder/infra]** to ship the 8.77x to all users: (a) HOST the fp16 model
+  + add a `runtime/manifest.rs` entry (SHAs recorded in `docs/SPIKE-COREML.md`);
+  (b) prefer fp16+CoreML on macOS in `runtime/plan.rs` + graduate the env knob to a
+  config field; (c) run the COCO golden-nDCG re-embed eval before flipping the default.
+  Also re-export the EmbeddingGemma text tower to FP16 the same way.
 - **[planned]** CUDA EP wiring for the `ort` embedders (Margo NVIDIA desktop) - same
   FP16 model, the CoreML analog.
 - **[planned]** DirectML EP option (Windows GPUs without CUDA).

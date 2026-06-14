@@ -15,16 +15,18 @@
 //!   - The DFN5B textual export is batch=1 fixed ([1, 77]). Queries run
 //!     SINGLY; that also matches the app's one-embedding-per-search usage.
 //!
-//! Posture (spike): CPU EP only, 4 intra-op threads (`INTRA_OP_THREADS`).
-//! A device knob for the GPU EP stays UNBUILT pending spike session 2
-//! (RUNTIME ~§3 GPU line). All outputs are L2-normalized (PPVEC's cosine
-//! assumption; the spike scripts normalized).
+//! Posture: CPU EP by default, 4 intra-op threads (`INTRA_OP_THREADS`). The
+//! CoreML EP (Apple Silicon ANE/GPU) is wired behind the `PHOTOPROOF_ORT_COREML`
+//! env knob WITH a compiled-model cache (the FP16 production path that measured
+//! 8.77x, docs/SPIKE-COREML.md); it stays OFF by default until the FP16 model +
+//! the re-embed eval graduate it to a config field. All outputs are
+//! L2-normalized (PPVEC's cosine assumption; the spike scripts normalized).
 //!
 //! `Session::run` needs `&mut self`, but [`Embedder`] is `&self`; each
 //! session sits behind a `Mutex` so concurrent callers serialize on the
 //! native session (which is not internally reentrant anyway).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ort::session::Session;
@@ -362,13 +364,23 @@ fn build_session(model_path: &Path) -> ConnectorResult<Session> {
     // a false positive. Per-op CPU<->ANE partition is CoreML's own internal
     // decision and is read from `with_profile_compute_plan` logs, not here.
     if coreml_requested() {
-        builder = build_session_with_coreml(builder).map_err(err)?;
+        // Cache the compiled CoreML MLProgram beside the model so the multi-
+        // minute first-load compile is paid ONCE, not on every launch (the FP16
+        // production caveat: ~16.5 min first compile, docs/SPIKE-COREML.md).
+        // Best-effort: if the cache dir cannot be created we proceed without it
+        // (correct, just slower). CoreML re-keys on graph structure, so a stale
+        // cache from a model swap simply recompiles.
+        let cache = coreml_cache_dir(model_path);
+        builder = build_session_with_coreml(builder, cache.as_deref()).map_err(err)?;
         // Stderr (not tracing): this crate installs no subscriber, and the
-        // spike wants the "CoreML path taken" signal visible in the harness
-        // output regardless of host logging.
+        // "CoreML path taken" signal must be visible regardless of host logging.
         eprintln!(
-            "[ort coreml spike] registered CoreML EP for {} (compute units: CPUAndNeuralEngine, MLProgram)",
-            model_path.display()
+            "[ort coreml] registered CoreML EP for {} (CPUAndNeuralEngine, MLProgram{})",
+            model_path.display(),
+            match &cache {
+                Some(c) => format!(", cache {}", c.display()),
+                None => " - NO cache (recompiles each load)".to_string(),
+            }
         );
     }
     builder
@@ -376,13 +388,27 @@ fn build_session(model_path: &Path) -> ConnectorResult<Session> {
         .map_err(|e| err(e.to_string()))
 }
 
-/// Register the CoreML EP on `builder` (P2 SPIKE). Split out so `build_session`
-/// stays linear and the exact ort rc.12 builder chain lives in one documented
-/// place. The chain mirrors the research note, adjusted to the rc.12 API:
-/// `ep::CoreML` (not `CoreMLExecutionProvider`), `with_compute_units` (was
-/// `with_ane_only`), `with_subgraphs(true)` (now takes a bool), MLProgram
-/// format (Core ML 5+, supports more ops than NeuralNetwork), and
-/// `.error_on_failure()` so a runtime without the EP is loud, not silent.
+/// The CoreML compiled-model cache directory for `model_path`: a `.coreml-cache`
+/// subdir beside the model file, created best-effort. `None` if it has no parent
+/// or cannot be created (CoreML then recompiles each load - slower but correct).
+/// Co-located with the model so it follows a `models_dir` override and is keyed
+/// per tower; the dotdir matches no manifest file, so the downloader ignores it.
+fn coreml_cache_dir(model_path: &Path) -> Option<PathBuf> {
+    let dir = model_path.parent()?.join(".coreml-cache");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Register the CoreML EP on `builder`. Split out so `build_session` stays
+/// linear and the exact ort rc.12 builder chain lives in one documented place.
+/// The chain (rc.12 API): `ep::CoreML` (not `CoreMLExecutionProvider`),
+/// `with_compute_units` (was `with_ane_only`), `with_subgraphs(true)` (now takes
+/// a bool), MLProgram format (Core ML 5+, supports more ops than NeuralNetwork),
+/// and `.error_on_failure()` so a runtime without the EP is loud, not silent.
+///
+/// `cache_dir`, when `Some`, sets `ModelCacheDirectory` (`with_model_cache_dir`)
+/// so the compiled MLProgram is reused across session loads - without it CoreML
+/// recompiles every load (the ~16.5 min FP16 first-compile tax, docs/SPIKE-COREML).
 ///
 /// Returns `Err(String)` (not ort's `BuilderResult`) deliberately: that result
 /// carries the recoverable `SessionBuilder` in its error variant (~144 bytes),
@@ -390,16 +416,21 @@ fn build_session(model_path: &Path) -> ConnectorResult<Session> {
 /// message at the boundary keeps the large error from propagating.
 fn build_session_with_coreml(
     builder: ort::session::builder::SessionBuilder,
+    cache_dir: Option<&Path>,
 ) -> Result<ort::session::builder::SessionBuilder, String> {
     use ort::ep::CoreML;
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
+    let mut ep = CoreML::default()
+        .with_compute_units(ComputeUnits::CPUAndNeuralEngine)
+        .with_model_format(ModelFormat::MLProgram)
+        .with_subgraphs(true);
+    if let Some(dir) = cache_dir {
+        // ort takes the path as `impl ToString`; reuse the compiled model across
+        // launches so the first-compile cost is amortized.
+        ep = ep.with_model_cache_dir(dir.to_string_lossy().to_string());
+    }
     builder
-        .with_execution_providers([CoreML::default()
-            .with_compute_units(ComputeUnits::CPUAndNeuralEngine)
-            .with_model_format(ModelFormat::MLProgram)
-            .with_subgraphs(true)
-            .build()
-            .error_on_failure()])
+        .with_execution_providers([ep.build().error_on_failure()])
         .map_err(|e| e.to_string())
 }
 
@@ -866,6 +897,26 @@ mod tests {
             rgb8: vec![0; 100 * 100 * 3],
         };
         assert!(clip_image_tensor(&img).is_err());
+    }
+
+    // ---- CoreML cache dir resolution (the production amortization, no model) ----
+
+    #[test]
+    fn coreml_cache_dir_is_beside_the_model_and_created() {
+        // Lay out a fake models tree: <tmp>/<id>/visual/model.onnx, then assert
+        // the cache resolves to .../visual/.coreml-cache and is created. This is
+        // the per-tower, model-co-located cache the production CoreML path uses.
+        // (tempfile is not a dep here; a pid-scoped temp subdir is enough and is
+        // cleaned up at the end.)
+        let base = std::env::temp_dir().join(format!("pp-coreml-cache-{}", std::process::id()));
+        let model = base.join("dfn5b-fp16/visual/model.onnx");
+        std::fs::create_dir_all(model.parent().unwrap()).expect("layout");
+        let cache = coreml_cache_dir(&model).expect("cache dir");
+        assert_eq!(cache, model.parent().unwrap().join(".coreml-cache"));
+        assert!(cache.is_dir(), "cache dir must be created");
+        // Idempotent: a second call on an existing dir still returns it.
+        assert_eq!(coreml_cache_dir(&model).as_deref(), Some(cache.as_path()));
+        let _ = std::fs::remove_dir_all(&base); // best-effort cleanup
     }
 }
 

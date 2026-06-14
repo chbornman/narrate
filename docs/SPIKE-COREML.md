@@ -326,21 +326,47 @@ the full ~1.3 GB of weights plus intermediates to `$TMPDIR`; on a near-full disk
 640 ... out of space`. It only succeeded after freeing headroom to ~17 GB. So
 production wiring should also ensure adequate scratch/cache disk.
 
-### What production wiring would take (NOT done in this spike)
+### Production wiring - status (June 14, 2026)
 
-The measurement justifies graduating CoreML+fp16 on macOS, but per the brief
-this packet stays a measurement spike. The concrete production steps:
+The measurement justified graduating CoreML+fp16 on macOS. The CODE-side wiring
+that does not need infra or a vector-space decision is now LANDED; the remaining
+steps are founder/infra-gated (hosting + the re-embed eval). Status per step:
 
-1. A `model_specs` fp16 CLIP entry (e.g. id `...__dfn5b-fp16`, the
-   `visual/textual/model.onnx` single-file paths) selected on macOS.
-2. Runtime: prefer fp16 + CoreML on macOS (graduate `PHOTOPROOF_ORT_COREML` from
-   an env knob to a real config field), with int8 + CPU as the fallback.
-3. Set `.with_model_cache_dir(...)` on the CoreML session so the ~16.5 min
-   compile is paid once, not per launch.
-4. A one-time re-embed of the PPVEC space under the fp16 vectors is NOT required
-   for correctness (cosine vs the int8/CPU space is ~0.999), but should be
-   evaluated against the COCO golden nDCG before flipping the default, since the
-   stored vectors were embedded under the int8 CPU path.
+1. **[DONE] `model_specs` fp16 CLIP entry.** `clip_spec("ViT-H-14-378-quickgelu__dfn5b-fp16")`
+   resolves to the single-file `visual/textual/model.onnx` layout (1024-dim) -
+   `crates/photoproof-connectors/src/model_specs.rs`. Own model_id = own PPVEC
+   space, so selecting it triggers a clean re-embed (the int8 entry stays the
+   CPU fallback). Buildable now by the offline eval rig and a config that names it.
+2. **[DONE] CoreML compiled-model cache.** `build_session` now derives a
+   `.coreml-cache` dir beside each tower and passes it to
+   `with_model_cache_dir(...)`, so the ~16.5 min first compile is paid ONCE, not
+   per launch - `crates/photoproof-connectors/src/ort_embedder.rs`
+   (`coreml_cache_dir` + `build_session_with_coreml`). Active whenever CoreML is
+   on (today the `PHOTOPROOF_ORT_COREML` env knob). Unit-tested; the CPU default
+   is byte-identical (the cache is only touched on the CoreML branch).
+3. **[FOUNDER - infra] Host the fp16 model + add a manifest entry.** The fp16
+   model was converted LOCALLY; it is not hosted, so the downloader (SHA-pinned,
+   consent-gated) cannot fetch it yet. To distribute: host the three files and add
+   a `ModelEntry { id: "...__dfn5b-fp16", ... }` to `runtime/manifest.rs`. The
+   local SHA-256 + sizes (ready to pin once hosted):
+
+   | file | bytes | sha256 |
+   |---|---|---|
+   | `visual/model.onnx`     | 1265962399 | `e30e7613f2cdf1eda55fa685b467e1e04e261f20c5a15d22238682189e45ef99` |
+   | `textual/model.onnx`    | 708726647  | `f2cc1e79707f394373083d26abd6a51a039e319cb1bd47c65a47f3786ba368d2` |
+   | `textual/tokenizer.json`| 3642073    | `6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35` |
+4. **[FOUNDER - flip] Prefer fp16+CoreML on macOS + graduate the env knob to a
+   config field**, with int8+CPU as the fallback (the `RuntimePlan` selection in
+   `runtime/plan.rs`). This is the default-flip; gated on step 3 + step 5.
+5. **[FOUNDER - eval] Re-embed nDCG check.** A re-embed under the fp16 vectors is
+   NOT required for correctness (cosine vs the int8/CPU space ~0.999), but run the
+   COCO golden nDCG on the fp16 space before flipping the default, since the stored
+   vectors were embedded under int8/CPU. The eval rig can do this NOW against the
+   local fp16 model (step 1 makes the id buildable).
+
+So: the speedup is wired and usable on this machine (env knob -> CoreML -> cached
+compile); shipping it to all users needs the founder to host the model (3) and run
+the eval + flip (4, 5).
 
 ## Constraint check
 

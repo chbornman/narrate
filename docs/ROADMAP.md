@@ -66,7 +66,8 @@ The ML brain lights up here. Grouped by theme.
 
 ### Execution providers (the GPU wiring) - see `docs/RUNTIME-MATRIX.md`
 - FP16 single-file CLIP export + CoreML - **VALIDATED June 14: 8.77x over CPU, ship-with-FP16** (`docs/SPIKE-COREML.md`)
-- CoreML EP production wiring on macOS - select FP16 model by platform + `.with_model_cache_dir` (amortize the ~16.5 min first compile); re-export text-embed to FP16
+- CoreML code wiring (cache dir + fp16 model spec) - **LANDED June 14** (`ort_embedder.rs`/`model_specs.rs`); env-knob path now compiles once, fp16 id buildable
+- CoreML ship-to-users (founder/infra) - host the fp16 model + manifest entry (SHAs in spike doc); prefer fp16+CoreML on macOS in `plan.rs` + config field; COCO nDCG re-embed eval before flipping the default; re-export EmbeddingGemma to FP16
 - CUDA EP for the `ort` embedders (the NVIDIA "Margo" desktop)
 - DirectML EP option (Windows GPUs without CUDA) - not yet evaluated
 - Supervisor auto-detect: extend llama.cpp's hardware-pick + graceful fallback to the embedders

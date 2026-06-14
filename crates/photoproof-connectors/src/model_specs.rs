@@ -68,6 +68,22 @@ struct ClipSpec {
 fn clip_spec(model_id: &str) -> Option<ClipSpec> {
     match model_id {
         "ViT-H-14-378-quickgelu__dfn5b" => Some(ClipSpec {
+            // The int8 CPU default: the visual tower is ~397 external-data files
+            // referenced relative to visual/model.onnx (loads on CPU, not CoreML).
+            visual: "visual/model.onnx",
+            textual: "textual/model.onnx",
+            tokenizer: "textual/tokenizer.json",
+            dims: 1024,
+        }),
+        "ViT-H-14-378-quickgelu__dfn5b-fp16" => Some(ClipSpec {
+            // The FP16 CoreML candidate (docs/SPIKE-COREML.md FP16 follow-up):
+            // SAME graph + I/O as the int8 above, but weights INLINED into one
+            // self-contained model.onnx per tower (the single-file form that
+            // clears the CoreML external-data load blocker). Same relative
+            // layout, so it is a drop-in for the int8 dir. Measured 8.77x over
+            // CPU on CoreML, near-lossless. Selected only when the runtime
+            // prefers CoreML+FP16 (macOS, gated) - the int8 entry stays the
+            // CPU fallback; nothing selects this by default yet.
             visual: "visual/model.onnx",
             textual: "textual/model.onnx",
             tokenizer: "textual/tokenizer.json",
@@ -148,6 +164,13 @@ mod tests {
             clip_spec("ViT-H-14-378-quickgelu__dfn5b").unwrap().dims,
             1024
         );
+        // The FP16 CoreML candidate resolves to the SAME single-file layout +
+        // dims as the int8 (drop-in), under its own id (own vector space).
+        let fp16 = clip_spec("ViT-H-14-378-quickgelu__dfn5b-fp16").unwrap();
+        assert_eq!(fp16.dims, 1024);
+        assert_eq!(fp16.visual, "visual/model.onnx");
+        assert_eq!(fp16.textual, "textual/model.onnx");
+        assert!(is_known_clip_model("ViT-H-14-378-quickgelu__dfn5b-fp16"));
         assert!(text_spec("nope").is_none());
         assert!(clip_spec("nope").is_none());
     }

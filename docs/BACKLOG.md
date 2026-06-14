@@ -240,10 +240,16 @@ magnitudes.
   Immich FP32, same lineage as our int8) LOADS and runs **8.77x** faster than CPU
   (18 -> 162 img/min), near-lossless (cosine vs CPU min 0.9956; vs FP32 min 0.99998).
   MLProgram + CPUAndNeuralEngine. ONE caveat: a ~16.5 min FIRST-LOAD compile, so
-  production must set `.with_model_cache_dir(...)`. REMAINING (the production-wiring
-  packet, see RUNTIME-MATRIX "NEXT"): select the FP16 model + register CoreML by
-  platform in production (not just the `PHOTOPROOF_ORT_COREML` env knob), wire the
-  cache dir, and re-export the text-embed tower to FP16 the same way. ORIGINAL: we run
+  production must set `.with_model_cache_dir(...)`. CODE WIRING LANDED June 14: the
+  CoreML compiled-model cache (`.with_model_cache_dir`, beside each tower) + the
+  `...__dfn5b-fp16` model spec (`ort_embedder.rs`/`model_specs.rs`, gate green, CPU
+  default byte-identical) - so the env-knob CoreML path now compiles once not per
+  launch, and the fp16 id is buildable by the eval rig. REMAINING (founder/infra,
+  see SPIKE-COREML "Production wiring - status"): (a) HOST the fp16 model + add a
+  `runtime/manifest.rs` entry (SHAs recorded in the spike doc); (b) prefer
+  fp16+CoreML on macOS in `runtime/plan.rs` + graduate the env knob to a config
+  field; (c) the COCO golden-nDCG re-embed eval before flipping the default; (d)
+  re-export EmbeddingGemma to FP16 too. ORIGINAL: we run
   `ort` CPU-only; enable ONNX Runtime's CoreML EP (MLProgram, NOT legacy
   NeuralNetwork which casts FP16 and can flip predictions). Immich shipped this in
   v2.2.0 (PR #17718).
