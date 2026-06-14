@@ -6,6 +6,34 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 14 2026 - Performance plan (PLAN-PERF.md execution)
+
+- [x] **P1 preview-tier fast_image_resize** - `b1422a1`. Swapped the image-crate
+  CatmullRom resize for `fast_image_resize` (NEON SIMD) in the preview tiers, same
+  CatmullRom kernel (byte-identical geometry, +-1 LSB only), aspect math + pixel
+  type preserved, scalar fallback on error. MEASURED 3.66x on the resize step on
+  M-series (pp-bench, 81.59 -> 22.27 ms/resize) - the real Apple-Silicon figure
+  (the plan's ~7x was a Neoverse-N1 number).
+- [x] **P3 graph sim in a Web Worker** - `f2e1409`. The Visualizer force loop
+  (O(N^2), `step()` is pure) runs off the UI main thread in a Worker, with a
+  transferable SoA buffer (positions ping-pong, static inputs sent on-change),
+  pipelined draw(N-1) while computing N, and a full inline fallback for older
+  webviews. A bit-identical parity test pins the worker against the inline path;
+  all graph features preserved (drag, idle-when-stable, persist/restore, LOD,
+  selection, bake). WHY a Worker not a Rust IPC: the render target is in the
+  webview and transferable buffers are near-zero-copy, vs per-frame Tauri IPC.
+- [x] **P2 CoreML EP spike (verdict: DON'T-SHIP / needs-FP16)** - `a88e91f`; see
+  docs/SPIKE-COREML.md. Wired ONNX Runtime's CoreML EP via the `ort` `coreml`
+  feature (`ep::CoreML::default().with_compute_units(CPUAndNeuralEngine)
+  .with_model_format(MLProgram)`), OFF by default behind the `PHOTOPROOF_ORT_COREML`
+  env knob (CPU path byte-identical). FINDINGS: the CoreML EP IS available (no
+  custom onnxruntime needed), but our INT8 models do not work on it - the DFN5B
+  visual tower's ~397 external-data files mis-load under CoreML, and the int8
+  MLProgram compile is pathological (10+ min, killed). CPU baseline confirmed ~18
+  img/min. A real win needs an FP16 single-file re-export (path documented; needs
+  the original fp32 source not in our int8 snapshot). Kept the wired-off code + the
+  reproducible #[ignore] spike harness for when FP16 models exist.
+
 ## June 13 2026 - Real image benchmark for search (COCO)
 
 - [x] **`pp-eval-ingest` + COCO benchmark; first benchmark sweep** - merges

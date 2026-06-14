@@ -71,6 +71,10 @@ Fixes the embedding bottleneck we hit live (~20 img/min CLIP on CPU).
 - Decision gate: ship CoreML ONLY if the measured speedup is real AND retrieval
   accuracy holds; otherwise keep CPU. MLX/Core ML rewrite is NOT justified (the
   only Rust MLX bindings, mlx-rs, are unofficial/pre-1.0 with no CLIP examples).
+- STATUS: SPIKED + landed wired-OFF `a88e91f` (docs/SPIKE-COREML.md). VERDICT:
+  DON'T-SHIP with our int8 models (visual tower's ~397 external-data files fail to
+  load on CoreML; int8 MLProgram compile pathological). NEEDS an FP16 single-file
+  re-export to retry. CPU stays default; env knob PHOTOPROOF_ORT_COREML kept.
 
 ## P3. Graph sim -> Web Worker  [Visualizer smoothness - not version-gated]
 
@@ -86,6 +90,8 @@ Fixes the embedding bottleneck we hit live (~20 img/min CLIP on CPU).
   headroom toward the ~5k-node Canvas-2D ceiling.
 - Validate: the existing `forcegraph` unit tests still cover the pure `step()`; a
   frame-time check while a topic is added.
+- STATUS: LANDED `f2e1409` (worker + transferable SoA + inline fallback + a
+  bit-identical parity test; all graph features preserved).
 
 ## P4. Demosaic -> PPG
 
