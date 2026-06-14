@@ -10,10 +10,19 @@ their original wording.
 
 - [x] **P1 preview-tier fast_image_resize** - `b1422a1`. Swapped the image-crate
   CatmullRom resize for `fast_image_resize` (NEON SIMD) in the preview tiers, same
-  CatmullRom kernel (byte-identical geometry, +-1 LSB only), aspect math + pixel
-  type preserved, scalar fallback on error. MEASURED 3.66x on the resize step on
-  M-series (pp-bench, 81.59 -> 22.27 ms/resize) - the real Apple-Silicon figure
-  (the plan's ~7x was a Neoverse-N1 number).
+  CatmullRom kernel (identical geometry; pixels a valid alternate resampling),
+  aspect math + pixel type preserved, scalar fallback on error. MEASURED 3.66x on
+  the resize step on M-series (pp-bench, 81.59 -> 22.27 ms/resize) - the real
+  Apple-Silicon figure (the plan's ~7x was a Neoverse-N1 number). NOTE (corrected
+  by P5): the two CatmullRom libs diverge up to ~17/255 on edges, not +-1 LSB -
+  fine for display previews, but it is why the same swap was REJECTED for the
+  correctness-locked CLIP preprocess (P5).
+- [~] **P5 CLIP-preprocess resize - REJECTED (parity)** - not pursued. The
+  parity-gated swap of the CLIP 378x378 resize failed: on 80 real images the
+  embeddings shifted (mean cosine 0.99935, min 0.99689, 10/80 below 0.999) because
+  the convolutions diverge up to 17/255 on edges. The 378x378 square is
+  OpenCLIP-validated, and the win is a sliver of the inference, so it was reverted
+  (no commit). clip_preprocess.rs stays on image-rs CatmullRom. See PLAN-PERF P5.
 - [x] **P3 graph sim in a Web Worker** - `f2e1409`. The Visualizer force loop
   (O(N^2), `step()` is pure) runs off the UI main thread in a Worker, with a
   transferable SoA buffer (positions ping-pong, static inputs sent on-change),

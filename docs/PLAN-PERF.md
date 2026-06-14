@@ -34,7 +34,11 @@ spikes measure the real numbers on our hardware.
 - Win: **MEASURED 3.66x** on the resize step on M-series (pp-bench, 240 resizes:
   81.59 -> 22.27 ms/resize). The plan's ~7x was the Neoverse-N1 bench, flagged
   directional; 3.66x is the real Apple-Silicon figure (resolves open question #3).
-  CatmullRom kernel kept -> byte-identical geometry, +-1 LSB convolution only.
+  CatmullRom kernel kept -> identical geometry; pixels are a valid alternate
+  CatmullRom resampling. (CORRECTION via P5: the two libs' convolutions diverge up
+  to ~17/255 on edges, NOT the assumed +-1 LSB - cosmetically negligible for
+  DISPLAY previews, but that is why the SAME swap was REJECTED for the
+  correctness-locked CLIP preprocess in P5.)
 - Validate: the preview-artifact reproducibility tests; A/B CatmullRom (parity)
   vs Lanczos3 (sharper) through `pp-bench` for size + speed.
 - Gating: none.
@@ -117,6 +121,14 @@ Fixes the embedding bottleneck we hit live (~20 img/min CLIP on CPU).
 - Win: speeds the embed preprocess (helps P2's throughput too).
 - Validate: re-run the OpenCLIP parity tests + the retrieval sanity; ship only on a
   pass.
+- STATUS: REJECTED - not pursued. The parity gate FAILED: on 80 real images the two
+  CatmullRom implementations (image-rs vs fast_image_resize) diverge by up to
+  17/255 per channel on edge/texture content (NOT the assumed +-1 LSB), shifting
+  the CLIP embedding measurably (mean cosine 0.99935, min 0.99689, 10/80 below
+  0.999 - thresholds were mean >= 0.9999 AND min >= 0.999). Since the 378x378
+  square is correctness-locked (OpenCLIP-validated) and the win is tiny (the resize
+  is a sliver of the ~3.3s/image inference), it is not worth a measurable embedding
+  shift. clip_preprocess.rs left on image-rs CatmullRom.
 
 ## P6. WebGL graph render  [gated: WebGL2 / Safari 17 / Sonoma]
 
