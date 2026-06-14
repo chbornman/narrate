@@ -76,3 +76,18 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 debug-panel = []
 # Tauri convention: enabled by `cargo tauri build` for bundled apps.
 custom-protocol = ["tauri/custom-protocol"]
+
+# NVIDIA GPU build (the Ryzen 9900X + RTX 5080 "margo" desktop). These forward
+# to the connectors crate's GPU features so the SAME app binary that ships
+# CoreML/CPU elsewhere links the CUDA/TensorRT execution-provider types here.
+# OFF by default: macOS and the CPU build never enable them and are unaffected.
+#   cuda          - the CUDA-EP floor (needs only the CUDA toolkit to build).
+#   tensorrt      - adds the TensorRT EP rung (needs the TensorRT libs to build).
+#   cuda-dynamic  - load a SYSTEM/staged onnxruntime via ORT_DYLIB_PATH (the
+#                   Blackwell sm_120 cuda13 tarball) instead of ort's bundled
+#                   sm_90 binary. This is the feature `ort_runtime::resolve`
+#                   gates on: it locates + stages the libonnxruntime.so and the
+#                   TensorRT/CUDA libs at launch (docs/PLAN-NVIDIA-LAUNCH.md).
+cuda = ["photoproof-connectors/cuda"]
+tensorrt = ["photoproof-connectors/tensorrt"]
+cuda-dynamic = ["photoproof-connectors/cuda-dynamic"]

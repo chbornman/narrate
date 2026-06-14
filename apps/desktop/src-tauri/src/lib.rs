@@ -23,6 +23,11 @@ mod hardware;
 mod menu;
 mod mic;
 mod note;
+// onnxruntime runtime-resolution (NVIDIA `cuda-dynamic` build): `pub` so
+// `main()` can call `ort_runtime::resolve()` as its first statement, BEFORE any
+// thread spawns and before the first ort session is built. A no-op on the
+// macOS/CPU builds where the feature is off.
+pub mod ort_runtime;
 mod protocol;
 mod pump;
 mod runtime;
