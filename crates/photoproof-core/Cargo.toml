@@ -106,6 +106,19 @@ path = "src/bin/pp_sweep.rs"
 name = "pp-tune-check"
 path = "src/bin/pp_tune_check.rs"
 
+[[bin]]
+# The retrieval-benchmark ingest tool (founder, June 2026). Builds a FRESH,
+# throwaway eval library at an arbitrary path, ingests a folder of captioned
+# images (COCO/Flickr), CLIP-embeds them via the SAME pinned towers the app
+# ships, and emits a golden-query set in the `retrieval_eval::QuerySet` shape
+# so search ranking can be tuned against a REAL image-caption benchmark
+# WITHOUT polluting the user's real library or needing the desktop app. The
+# headless path (map only, embedding skipped) needs no models or benchmark
+# data, so the gate stays cheap. Explicit [[bin]] only to spell the name with
+# hyphens (pp-eval-ingest).
+name = "pp-eval-ingest"
+path = "src/bin/pp_eval_ingest.rs"
+
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }
