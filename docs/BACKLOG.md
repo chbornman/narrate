@@ -167,6 +167,48 @@ work lives here.
   in CI over .svelte template regions / string literals) so they don't
   creep back. (Founder, June 12 2026.)
 
+## Performance / SOTA (audit June 13 2026 - see docs/PERF-AUDIT.md)
+
+Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). Ordered
+by impact. Validate the spikes; do not act on unverified magnitudes.
+
+- [ ] **CoreML EP spike (the embedding bottleneck)** - HIGHEST. We run `ort`
+  CPU-only; CLIP embedding measured ~20 img/min. Enable ONNX Runtime's CoreML
+  execution provider (the **MLProgram** backend, NOT legacy NeuralNetwork which
+  casts FP16 and can flip predictions) to run on Apple Silicon GPU/ANE. Immich
+  shipped this in v2.2.0 (PR #17718). SPIKE: measure images/min AND embedding
+  accuracy for the DFN5B ViT-H int8 + EmbeddingGemma vs the CPU baseline; also
+  bake-off Apple MLX / Core ML / GGML. (CoreML-EP-applies-to-CLIP was refuted 1-2;
+  validate before committing.)
+- [ ] **fast_image_resize + PPG demosaic** - cheapest certain win. Swap the
+  `image`-crate CatmullRom resize for **`fast_image_resize`** (NEON SIMD, Lanczos3
+  ~7x: 62ms vs 434ms, beats libvips) in the preview tiers; switch
+  `raw_develop.rs::demosaic_bilinear_rggb` to rawler 0.7.2's PPG demosaic. Verified
+  3-0 (benchmark is Neoverse-N1; direction holds on Apple Silicon).
+- [ ] **WKWebView capability check** - GATES the two below. Verify our Tauri macOS
+  webview supports OffscreenCanvas, Web Workers + createImageBitmap, WebGL/WebGPU
+  before building on them (WebGL broad; OffscreenCanvas Safari 16.4+; WebGPU
+  newer/partial).
+- [ ] **Ingest pass pipelining** - backend, no webview dep. Passes run sequentially
+  between stages (hash->exif->preview->embed); overlap them with bounded channels
+  (crossbeam/flume) for backpressure so preview/embed run while later items scan.
+  BLAKE3 hashing is already SOTA - the win is overlap.
+- [ ] **Visualizer off main thread, then WebGL** (gated by WKWebView check). The
+  graph sim is all-pairs O(N^2) Canvas-2D on the MAIN THREAD (sustains ~5k nodes).
+  Interim: move the existing sim into a Web Worker so it stops blocking. Full:
+  WebGL render (Sigma.js) + GPU/Barnes-Hut O(N log N) layout (cosmos.gl scales to
+  1M+). Pairs with the existing graph-perf work.
+- [ ] **Off-main-thread thumbnail decode + grid virtualization** (gated by WKWebView
+  check). Decode thumbs via `createImageBitmap` in a Web Worker (ImageBitmap is
+  transferable -> post back for drawImage) and virtualize the grid (render only
+  visible cells).
+- [ ] **USearch HNSW at scale** - DEFERRED, scale-triggered. Brute-force int8
+  MRL-512 is CORRECT now (negligible vs HNSW under ~100k per arXiv 2409.06464).
+  Trigger: when a library crosses ~tens of thousands of images, benchmark the
+  M-series brute-force scan against the <100ms contract and adopt USearch HNSW
+  (int8 274k QPS vs 171k f32 @ 98.9% recall@1) if needed. (The "~10x past 1M"
+  justification was refuted 1-2.)
+
 ## Next polish round (small, founder-requested)
 
 - [ ] **Voice chunking tuning** — first live run (June 2026) works end to
