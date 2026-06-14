@@ -1,0 +1,120 @@
+{
+  "corpus": null,
+  "corpus_manifest": "/Users/bornman/projects/photoproof/test-corpora/voice-long/librispeech/dev-clean-sweep-subset.tsv",
+  "expect": null,
+  "host": {
+    "arch": "aarch64",
+    "cores": 10,
+    "os": "macos"
+  },
+  "metric": "gating_cost",
+  "results": [
+    {
+      "baseline": false,
+      "config": {
+        "pre_roll_ms": 1000,
+        "rule1": 2.4,
+        "rule2": 1.0,
+        "rule3": 20.0,
+        "vad_enter": 0.5,
+        "vad_exit": 0.35,
+        "vad_hang": 15
+      },
+      "config_diff": {
+        "rule2": 1.0
+      },
+      "files": 3,
+      "gated_wer": 0.11764705882352941,
+      "gating_cost": 0.0,
+      "label": "cfg0",
+      "per_file": [
+        {
+          "abandoned": 0,
+          "gated_wer": 0.07751937984496124,
+          "gating_cost": 0.0,
+          "id": "1993-147966",
+          "raw_wer": 0.07751937984496124,
+          "ref_words": 129,
+          "segments": 6
+        },
+        {
+          "abandoned": 0,
+          "gated_wer": 0.11875,
+          "gating_cost": 0.0,
+          "id": "1993-147965",
+          "raw_wer": 0.11875,
+          "ref_words": 160,
+          "segments": 12
+        },
+        {
+          "abandoned": 0,
+          "gated_wer": 0.14705882352941177,
+          "gating_cost": 0.0,
+          "id": "652-130737",
+          "raw_wer": 0.14705882352941177,
+          "ref_words": 170,
+          "segments": 14
+        }
+      ],
+      "rank": 1,
+      "raw_wer": 0.11764705882352941,
+      "total_abandoned": 0,
+      "total_segments": 32,
+      "total_utterances": 30,
+      "wall_ms": 96008
+    },
+    {
+      "baseline": true,
+      "config": {
+        "pre_roll_ms": 1000,
+        "rule1": 2.4,
+        "rule2": 1.2,
+        "rule3": 20.0,
+        "vad_enter": 0.5,
+        "vad_exit": 0.35,
+        "vad_hang": 15
+      },
+      "config_diff": {},
+      "files": 3,
+      "gated_wer": 0.10457516339869281,
+      "gating_cost": 0.0,
+      "label": "baseline",
+      "per_file": [
+        {
+          "abandoned": 0,
+          "gated_wer": 0.08527131782945736,
+          "gating_cost": 0.0,
+          "id": "1993-147966",
+          "raw_wer": 0.08527131782945736,
+          "ref_words": 129,
+          "segments": 5
+        },
+        {
+          "abandoned": 0,
+          "gated_wer": 0.08125,
+          "gating_cost": 0.0,
+          "id": "1993-147965",
+          "raw_wer": 0.08125,
+          "ref_words": 160,
+          "segments": 9
+        },
+        {
+          "abandoned": 0,
+          "gated_wer": 0.1411764705882353,
+          "gating_cost": 0.0,
+          "id": "652-130737",
+          "raw_wer": 0.1411764705882353,
+          "ref_words": 170,
+          "segments": 14
+        }
+      ],
+      "rank": 2,
+      "raw_wer": 0.10457516339869281,
+      "total_abandoned": 0,
+      "total_segments": 28,
+      "total_utterances": 30,
+      "wall_ms": 96396
+    }
+  ],
+  "schema": 1
+}

@@ -78,8 +78,14 @@
 
 <h2>Voice - transcription (LibriSpeech)</h2>
 <p class="lede">The standard ASR benchmark, built from public-domain audiobooks: 40+ readers, clean per-utterance reference transcripts, a dev split to tune on and a test split to report on. Utterances are joined with a 0.5s silence gap so the endpointer has real boundaries to find. The metric is gating-cost = gated WER minus raw WER, isolating pipeline truncation from the model's own error.</p>
-<h3 class="pending">Result - completing</h3>
-<p class="pending">The voice sweep runs after the COCO embed finishes (to avoid model contention on this machine); this section fills with the dev-split gating-cost leaderboard when it lands.</p>
+<h3>Result (LibriSpeech dev-clean, 3-chapter sweep subset)</h3>
+<div class="metrics">
+  <div class="metric"><div class="v">0.000</div><div class="k">gating-cost</div><div class="sub">gated WER minus raw WER</div></div>
+  <div class="metric"><div class="v">10.5%</div><div class="k">WER (default)</div><div class="sub">Nemotron 0.6B int8</div></div>
+</div>
+<p>Two findings. First, <b>gating-cost is 0.0</b> - the gated (production) transcript matches the raw (gate-forced-open) transcript exactly, so the VAD + endpointer truncate <b>nothing</b> on this clean, gap-segmented audio; the pipeline costs nothing over the model's own error. Second, the sweep shows the snappiness dial matters: dropping <code>rule2</code> from the default 1.2s to 1.0s <b>worsens</b> WER (10.5% -> 11.8%), so the more aggressive endpoint is not free - the default is the better setting on this corpus. The ~10.5% WER is the streaming 0.6B int8 model's own accuracy on LibriSpeech dev-clean.</p>
+
+<div class="note"><b>Scope:</b> this is the fast 3-chapter sweep subset (30 utterances) for dial iteration; a full-split run + the test-clean confirmation are one command each (<code>scripts/fetch-voice-corpus.sh</code> already staged both splits). Gating-cost is 0 because LibriSpeech is clean, well-segmented read speech with inserted inter-utterance silence - real messy dictation may show non-zero truncation, which is exactly what this metric is built to catch.</div>
 
 <h2>How these are produced</h2>
 <p>All reusable, committed scripts + binaries (the corpora themselves are gitignored - they hold real data and stay local):</p>
