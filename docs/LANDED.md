@@ -6,6 +6,43 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 13 2026 - Automated testing/tuning loop
+
+See `docs/DESIGN-TUNING-LOOP.md` for the architecture (`sweep -> score -> rank ->
+propose -> commit -> guard`; contracts stay fixed, dials are tuned, K14 proposes).
+
+- [x] **pp-sweep search** - merge `2f8a7cf`. The research/offense half for search:
+  `pp-sweep search --grid "s4=0.5,0.75,1,1.25;beta=0.3,0.5" --propose <file>` runs the
+  existing retrieval eval per config (refactored a shared `evaluate(db, queryset,
+  weights, k)` reused by `pp-retrieval-eval`), ranks by nDCG@10, writes a PROPOSED
+  `tuning.toml` `[search]` block + delta (founder commits). Threaded `rrf_k` through
+  `HybridOptions` so it varies per-config in one process.
+- [x] **Regression guard (make tune-check)** - merge (worktree) + fix `981e011`. The
+  testing/defense half: `pp-tune-check` runs the cheap synthetic benches
+  (retrieval_eval_sample IR metrics + pp-bench synthetic ingest), compares to a
+  committed `tuning-baselines.json` within tolerance, `--update-baseline` regen, JSON
+  out. KEY POLICY (fixed post-merge): only the DETERMINISTIC search-quality metrics
+  GATE; ingest throughput is WARN-only (machine/load-variable - the parallel build
+  fan-out proved it false-fails otherwise). `make tune-check` / `make tune-baseline`.
+- [x] **pp-sweep voice + `[voice]` config lift** - merge `f1d2062`. Closed the voice
+  loop: lifted the endpoint rules (`rule1/2/3`), VAD hysteresis (`vad_enter/exit/hang`),
+  and `pre_roll_ms` from code consts/pp-asr-server flags into a `[voice]` `tuning.toml`
+  section (DIALS; the onset-budget/skew/drain CONTRACTS stay fixed consts), now READ by
+  the launcher (`asr_wrapper_args`), the VAD build (`state.rs`), and the engine pre-roll.
+  Defaults byte-identical to before. New `voice_bench.rs` shared module (VAD+ASR+engine
+  wiring moved out of the bin); `pp-sweep voice --corpus --expect --grid ...` ranks
+  ASCENDING by gating-cost (gated WER - raw WER), proposes a `[voice]` block.
+- [x] **Property + fuzz tests** - merge `059a842`. proptest (256/64 cases, fixed seed):
+  the search firewall (non-vocab token never a chip; parse never panics on arbitrary
+  unicode), sidecar write->read identity + graceful reject of garbage, the RAW develop
+  matrix invariant (arbitrary/zero/NaN/Inf matrices never panic, never NaN/black pixels -
+  the black-fix proven), and tuning bounds (every dial accepts iff in-range else
+  rejects-to-default). No real bugs surfaced.
+- [x] **Frontend cross-flow coverage** - merge `895629e`. 29 vitest tests over the
+  cross-cutting flows: viewMode transition chains preserving scope+photo, scope-subject
+  voice routing precedence, clear-previews global cache-bust + grid-wide rebuild, graph
+  node selection scoping. 1041 tests total, no bugs surfaced.
+
 ## June 13 2026 — Dogfood round 4: Visualizer polish + RAW cache versioning
 
 Founder dogfood asks against the live Visualizer (the semantic topic-graph lens)
