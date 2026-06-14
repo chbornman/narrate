@@ -70,6 +70,14 @@ pub const ASR_MIN_THREADS: u32 = 4;
 /// so these basenames match the path-preserving on-disk layout that
 /// download.rs writes under models_dir/<id>/<file.path>.
 pub fn asr_wrapper_args(model_dir: &Path, chunk_ms: u32, threads: u32) -> Vec<String> {
+    // The endpoint rules are VOICE DIALS (DESIGN-TUNING-LOOP.md): they live in
+    // `tuning().voice` so a committed `[voice]` config actually changes the
+    // child's endpointing at launch, and pp-sweep voice can propose a winner.
+    // The server keeps its own const defaults as a fallback (when no flags are
+    // passed); we ALWAYS pass them so the live config is what runs. `tuning()`
+    // returns the shipped defaults pre-init (tests, no tuning.toml), which equal
+    // the server's own consts — so passing them is a no-op until overridden.
+    let voice = crate::tuning::tuning().voice;
     vec![
         "--port".into(),
         "{port}".into(),
@@ -85,6 +93,13 @@ pub fn asr_wrapper_args(model_dir: &Path, chunk_ms: u32, threads: u32) -> Vec<St
         chunk_ms.to_string(),
         "--num-threads".into(),
         threads.max(ASR_MIN_THREADS).to_string(),
+        // CAPTURE §6.3 endpoint rules, as f32 seconds (the server parses f32).
+        "--rule1".into(),
+        (voice.rule1 as f32).to_string(),
+        "--rule2".into(),
+        (voice.rule2 as f32).to_string(),
+        "--rule3".into(),
+        (voice.rule3 as f32).to_string(),
     ]
 }
 
@@ -135,5 +150,26 @@ mod tests {
         assert!(joined.contains("--chunk-ms 160"));
         assert!(joined.contains("/models/asr/encoder.int8.onnx"));
         assert!(joined.contains("/models/asr/tokens.txt"));
+    }
+
+    /// The endpoint rules are now READ from `tuning().voice` and passed to the
+    /// child, so a committed `[voice]` config changes the live endpointing.
+    /// Absent a `tuning.toml` (the test case), `tuning()` yields the shipped
+    /// defaults, which equal `pp-asr-server`'s own const fallbacks — so the
+    /// args carry rule1=2.4 / rule2=1.2 / rule3=20 and nothing changes by
+    /// construction (the behavior-unchanged contract).
+    #[test]
+    fn asr_args_carry_the_voice_endpoint_rules_from_tuning() {
+        let args = asr_wrapper_args(&PathBuf::from("/models/asr"), 160, 4);
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("--rule1 2.4"),
+            "rule1 from tuning: {joined}"
+        );
+        assert!(
+            joined.contains("--rule2 1.2"),
+            "rule2 from tuning: {joined}"
+        );
+        assert!(joined.contains("--rule3 20"), "rule3 from tuning: {joined}");
     }
 }

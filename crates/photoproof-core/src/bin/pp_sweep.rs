@@ -40,13 +40,21 @@ use std::time::Instant;
 
 use photoproof_core::retrieval_eval::{EvalConfig, EvalReport, QuerySet, evaluate};
 use photoproof_core::search::Searcher;
+use photoproof_core::tuning::VoiceTuning;
+use photoproof_core::voice_bench::{self, ScoreResult, VoiceKnobs};
 
 /// Built-in @k default when neither the CLI nor the query set pins one (matches
 /// `pp-retrieval-eval`).
 const DEFAULT_K: usize = 10;
 
-/// The default ranking metric: nDCG@k (DESIGN: search maximizes `ndcg_at_k`).
+/// The default search ranking metric: nDCG@k (DESIGN: search maximizes it).
 const DEFAULT_METRIC: &str = "ndcg_at_k";
+
+/// The default VOICE ranking metric: gating-cost = gated WER - raw WER (DESIGN:
+/// voice MINIMIZES it — the WER the pipeline's gating adds over the model's own
+/// error, the founder's headline). Lower is better, so the voice arm ranks
+/// ASCENDING (unlike search's descending).
+const DEFAULT_VOICE_METRIC: &str = "gating_cost";
 
 // Tuning validation bounds — the DOCUMENTED public ranges from
 // `crate::tuning` (see `tuning.default.toml` / tuning.html). A grid value
@@ -60,15 +68,39 @@ const RRF_K_MAX: f64 = 10_000.0;
 const BETA_MIN: f64 = 0.0;
 const BETA_MAX: f64 = 1.0;
 
+// Voice tuning bounds — mirror the documented `[voice]` ranges in
+// `crate::tuning` (tuning.default.toml). A grid value outside these errors,
+// exactly like the search bounds, so the sweep never ranks a config the
+// validator would have snapped back at runtime.
+const VOICE_RULE_MIN_S: f64 = 0.1;
+const VOICE_RULE_MAX_S: f64 = 60.0;
+const VOICE_VAD_PROB_MIN: f64 = 0.0;
+const VOICE_VAD_PROB_MAX: f64 = 1.0;
+const VOICE_VAD_HANG_MIN: f64 = 1.0;
+const VOICE_VAD_HANG_MAX: f64 = 300.0;
+const VOICE_PRE_ROLL_MIN_MS: f64 = 0.0;
+const VOICE_PRE_ROLL_MAX_MS: f64 = 5_000.0;
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
 struct Args {
-    /// The subsystem to sweep (only `search` is implemented).
+    /// The subsystem to sweep (`search` or `voice`).
     subsystem: String,
-    db: PathBuf,
-    queries: PathBuf,
+    // --- search arm paths (required for `search`) ---
+    db: Option<PathBuf>,
+    queries: Option<PathBuf>,
+    // --- voice arm paths (required for `voice`) ---
+    /// `--corpus <wav>`: the recording to score every config over.
+    corpus: Option<PathBuf>,
+    /// `--expect <ref>`: the reference transcript WER is scored against.
+    expect: Option<PathBuf>,
+    /// `--model-dir`/`--server`: ASR model dir + `pp-asr-server` binary
+    /// (default: founder-machine layout / sibling bin).
+    model_dir: Option<PathBuf>,
+    server: Option<PathBuf>,
+    // --- shared ---
     grid: String,
     metric: String,
     k: Option<usize>,
@@ -79,11 +111,19 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "usage: pp-sweep search --db <photoproof.db> --queries <queryset.json> \
+    "usage:\n\
+     pp-sweep search --db <photoproof.db> --queries <queryset.json> \
      --grid \"s4=0.5,1.0;beta=0.3,0.5\" \
      [--metric ndcg_at_k] [--k N] [--max-latency-ms N] [--json] [--propose <file>]\n\
-     (paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET; args win)\n\
-     knobs: s1 s2 s3 s4 rrf_k beta ; metrics: ndcg_at_k precision_at_k recall_at_k mrr"
+     (search paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET; args win)\n\
+     search knobs: s1 s2 s3 s4 rrf_k beta ; metrics: ndcg_at_k precision_at_k recall_at_k mrr\n\
+     \n\
+     pp-sweep voice --corpus <recording.wav> --expect <reference.txt> \
+     --grid \"rule2=0.8,1.0,1.2;vad_hang=10,15,20\" \
+     [--metric gating_cost] [--model-dir DIR] [--server PATH] [--json] [--propose <file>]\n\
+     (voice paths also from env PP_VOICE_CORPUS / PP_VOICE_EXPECT; args win)\n\
+     voice knobs: rule1 rule2 rule3 vad_enter vad_exit vad_hang pre_roll_ms ; \
+     metrics: gating_cost gated_wer raw_wer"
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -96,7 +136,7 @@ fn parse_args() -> Result<Args, String> {
         Some(s) if s == "-h" || s == "--help" => return Err(usage().to_owned()),
         _ => {
             return Err(format!(
-                "missing subsystem (expected `search`)\n{}",
+                "missing subsystem (expected `search` or `voice`)\n{}",
                 usage()
             ));
         }
@@ -105,8 +145,14 @@ fn parse_args() -> Result<Args, String> {
     // env supplies path defaults; explicit flags override (args win).
     let mut db = std::env::var_os("PP_RETRIEVAL_DB").map(PathBuf::from);
     let mut queries = std::env::var_os("PP_RETRIEVAL_QUERYSET").map(PathBuf::from);
+    let mut corpus = std::env::var_os("PP_VOICE_CORPUS").map(PathBuf::from);
+    let mut expect = std::env::var_os("PP_VOICE_EXPECT").map(PathBuf::from);
+    let mut model_dir: Option<PathBuf> = None;
+    let mut server: Option<PathBuf> = None;
     let mut grid = String::new();
-    let mut metric = DEFAULT_METRIC.to_owned();
+    // The default metric is per-subsystem: search ranks by nDCG, voice by
+    // gating-cost (the founder's headline). A `--metric` flag overrides.
+    let mut metric: Option<String> = None;
     let mut k: Option<usize> = None;
     let mut max_latency_ms: Option<u64> = None;
     let mut json = false;
@@ -121,8 +167,12 @@ fn parse_args() -> Result<Args, String> {
         match flag.as_str() {
             "--db" => db = Some(PathBuf::from(val("--db")?)),
             "--queries" => queries = Some(PathBuf::from(val("--queries")?)),
+            "--corpus" => corpus = Some(PathBuf::from(val("--corpus")?)),
+            "--expect" => expect = Some(PathBuf::from(val("--expect")?)),
+            "--model-dir" => model_dir = Some(PathBuf::from(val("--model-dir")?)),
+            "--server" => server = Some(PathBuf::from(val("--server")?)),
             "--grid" => grid = val("--grid")?,
-            "--metric" => metric = val("--metric")?,
+            "--metric" => metric = Some(val("--metric")?),
             "--k" => {
                 k = Some(
                     val("--k")?
@@ -144,17 +194,24 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
-    let db = db.ok_or_else(|| format!("missing --db (or PP_RETRIEVAL_DB)\n{}", usage()))?;
-    let queries = queries
-        .ok_or_else(|| format!("missing --queries (or PP_RETRIEVAL_QUERYSET)\n{}", usage()))?;
     if grid.trim().is_empty() {
         return Err(format!("missing --grid\n{}", usage()));
     }
-    validate_metric(&metric)?;
+    // Per-subsystem default metric, then validate the (resolved) metric against
+    // the subsystem's allowed set.
+    let metric = metric.unwrap_or_else(|| match subsystem.as_str() {
+        "voice" => DEFAULT_VOICE_METRIC.to_owned(),
+        _ => DEFAULT_METRIC.to_owned(),
+    });
+    validate_metric(&subsystem, &metric)?;
     Ok(Args {
         subsystem,
         db,
         queries,
+        corpus,
+        expect,
+        model_dir,
+        server,
         grid,
         metric,
         k,
@@ -164,13 +221,19 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// The four primary-metric selectors the leaderboard can rank by. Reject an
-/// unknown metric at parse time so a typo never silently ranks by nDCG.
-fn validate_metric(metric: &str) -> Result<(), String> {
-    match metric {
-        "ndcg_at_k" | "precision_at_k" | "recall_at_k" | "mrr" => Ok(()),
-        other => Err(format!(
-            "unknown --metric {other:?} (want ndcg_at_k|precision_at_k|recall_at_k|mrr)"
+/// The primary-metric selectors a leaderboard can rank by, per subsystem.
+/// Reject an unknown metric at parse time so a typo never silently ranks by the
+/// default. Search maximizes its metric; voice minimizes gating-cost/WER (the
+/// rank direction is the arm's, not the metric name's).
+fn validate_metric(subsystem: &str, metric: &str) -> Result<(), String> {
+    match (subsystem, metric) {
+        ("voice", "gating_cost" | "gated_wer" | "raw_wer") => Ok(()),
+        ("voice", other) => Err(format!(
+            "unknown voice --metric {other:?} (want gating_cost|gated_wer|raw_wer)"
+        )),
+        (_, "ndcg_at_k" | "precision_at_k" | "recall_at_k" | "mrr") => Ok(()),
+        (_, other) => Err(format!(
+            "unknown search --metric {other:?} (want ndcg_at_k|precision_at_k|recall_at_k|mrr)"
         )),
     }
 }
@@ -200,18 +263,26 @@ const KNOBS: [&str; 6] = ["s1", "s2", "s3", "s4", "rrf_k", "beta"];
 /// names are present; the rest stay at baseline.
 type ConfigOverride = BTreeMap<String, f64>;
 
-/// Parse `--grid "knob=v,v,...;knob=v,..."` into the per-knob value lists, then
-/// expand to the CARTESIAN PRODUCT of configs. Each value is an `f64`,
-/// range-validated against the knob's tuning bounds (out-of-range is an error,
-/// not a clamp). A repeated knob, an unknown knob, or an unparsable value all
-/// error with a clear message.
-///
-/// Ordering is deterministic: knobs iterate in `KNOBS` order, values in the
-/// order written, and the product enumerates last-knob-fastest. That makes the
-/// resulting leaderboard reproducible (the tiebreak below leans on it).
+/// The search arm's grid parse — `parse_grid_with` over the search `KNOBS` and
+/// the search-knob validator.
 fn parse_grid(grid: &str) -> Result<Vec<ConfigOverride>, String> {
-    // knob -> its value list, kept in KNOBS column order via a BTreeMap keyed
-    // by the column index so the cartesian product is deterministic.
+    parse_grid_with(grid, &KNOBS, validate_knob)
+}
+
+/// Parse `--grid "knob=v,v,...;knob=v,..."` into the per-knob value lists, then
+/// expand to the CARTESIAN PRODUCT of configs over the given `knobs` column
+/// order. Each value is an `f64`, range-validated by `validate` (out-of-range is
+/// an error, not a clamp). A repeated knob, an unknown knob, or an unparsable
+/// value all error with a clear message. Shared by the search and voice arms so
+/// they parse and ENUMERATE identically (deterministic, last-knob-fastest), the
+/// only difference being which knob set + bounds apply.
+fn parse_grid_with(
+    grid: &str,
+    knobs: &[&str],
+    validate: fn(&str, f64) -> Result<(), String>,
+) -> Result<Vec<ConfigOverride>, String> {
+    // knob -> its value list, kept in column order via a BTreeMap keyed by the
+    // column index so the cartesian product is deterministic.
     let mut by_col: BTreeMap<usize, (String, Vec<f64>)> = BTreeMap::new();
     for clause in grid.split(';') {
         let clause = clause.trim();
@@ -222,10 +293,10 @@ fn parse_grid(grid: &str) -> Result<Vec<ConfigOverride>, String> {
             .split_once('=')
             .ok_or_else(|| format!("grid clause {clause:?} is not `knob=v,v,...`"))?;
         let knob = knob.trim();
-        let col = KNOBS
+        let col = knobs
             .iter()
             .position(|k| *k == knob)
-            .ok_or_else(|| format!("unknown grid knob {knob:?} (want one of {KNOBS:?})"))?;
+            .ok_or_else(|| format!("unknown grid knob {knob:?} (want one of {knobs:?})"))?;
         if by_col.contains_key(&col) {
             return Err(format!("grid knob {knob:?} appears more than once"));
         }
@@ -238,7 +309,7 @@ fn parse_grid(grid: &str) -> Result<Vec<ConfigOverride>, String> {
             let v: f64 = raw
                 .parse()
                 .map_err(|e| format!("grid knob {knob:?} value {raw:?}: {e}"))?;
-            validate_knob(knob, v)?;
+            validate(knob, v)?;
             parsed.push(v);
         }
         if parsed.is_empty() {
@@ -267,7 +338,7 @@ fn parse_grid(grid: &str) -> Result<Vec<ConfigOverride>, String> {
     Ok(configs)
 }
 
-/// Range-validate one knob value against its documented tuning bound.
+/// Range-validate one search knob value against its documented tuning bound.
 fn validate_knob(knob: &str, v: f64) -> Result<(), String> {
     let (min, max) = match knob {
         "s1" | "s2" | "s3" | "s4" => (WEIGHT_MIN, WEIGHT_MAX),
@@ -531,8 +602,8 @@ fn print_json(rows: &[Row], args: &Args, k: usize) {
         "schema": 1,
         "k": k,
         "metric": args.metric,
-        "db": args.db.display().to_string(),
-        "queries": args.queries.display().to_string(),
+        "db": args.db.as_ref().map(|p| p.display().to_string()),
+        "queries": args.queries.as_ref().map(|p| p.display().to_string()),
         "host": {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -620,24 +691,38 @@ fn render_proposal(winner: &Row, baseline: &Row, queries: &Path, metric: &str) -
 // ---------------------------------------------------------------------------
 
 fn run(args: &Args) -> Result<(), String> {
-    // Only `search` is implemented; an unknown subsystem errors cleanly (the
-    // DESIGN build sequence adds voice/ingest later).
-    if args.subsystem != "search" {
-        return Err(format!(
-            "subsystem {:?} not implemented (only `search` for now)",
-            args.subsystem
-        ));
+    // Dispatch by subsystem; the DESIGN build sequence adds `ingest` later, and
+    // an unknown subsystem errors cleanly.
+    match args.subsystem.as_str() {
+        "search" => run_search(args),
+        "voice" => run_voice(args),
+        other => Err(format!(
+            "subsystem {other:?} not implemented (want `search` or `voice`)"
+        )),
     }
+}
 
-    let raw = std::fs::read_to_string(&args.queries)
-        .map_err(|e| format!("reading query set {}: {e}", args.queries.display()))?;
+fn run_search(args: &Args) -> Result<(), String> {
+    let db = args
+        .db
+        .as_ref()
+        .ok_or_else(|| format!("search: missing --db (or PP_RETRIEVAL_DB)\n{}", usage()))?;
+    let queries = args.queries.as_ref().ok_or_else(|| {
+        format!(
+            "search: missing --queries (or PP_RETRIEVAL_QUERYSET)\n{}",
+            usage()
+        )
+    })?;
+
+    let raw = std::fs::read_to_string(queries)
+        .map_err(|e| format!("reading query set {}: {e}", queries.display()))?;
     let query_set: QuerySet = serde_json::from_str(&raw)
-        .map_err(|e| format!("parsing query set {}: {e}", args.queries.display()))?;
+        .map_err(|e| format!("parsing query set {}: {e}", queries.display()))?;
 
     // Source the baseline from the SAME `tuning.toml` the app reads (beside the
     // DB), so the baseline row IS the live committed config. Absent a file this
     // is the spec defaults. `EvalConfig::default()` then reads that global.
-    if let Some(app_data) = args.db.parent() {
+    if let Some(app_data) = db.parent() {
         photoproof_core::tuning::init_from(app_data);
     }
     let baseline = EvalConfig::default();
@@ -648,8 +733,8 @@ fn run(args: &Args) -> Result<(), String> {
 
     let overrides = parse_grid(&args.grid)?;
 
-    let searcher = Searcher::open(&args.db)
-        .map_err(|e| format!("opening library DB {}: {e}", args.db.display()))?;
+    let searcher =
+        Searcher::open(db).map_err(|e| format!("opening library DB {}: {e}", db.display()))?;
 
     // SEQUENTIAL by choice: the eval holds a single `Searcher` connection and
     // the rows must be deterministic for clean diffs. Parallelism would need
@@ -676,16 +761,464 @@ fn run(args: &Args) -> Result<(), String> {
             .iter()
             .find(|r| r.is_baseline)
             .ok_or("internal: baseline row missing from ranked set")?;
-        let text = render_proposal(winner, baseline_row, &args.queries, &args.metric);
-        // K14: we write ONLY the proposal path the founder named, NEVER
-        // tuning.toml. Guard against a caller pointing --propose at it.
-        if path.file_name().and_then(|n| n.to_str()) == Some("tuning.toml") {
-            return Err(
-                "refusing to write tuning.toml: pp-sweep PROPOSES only (K14). \
-                 Point --propose at e.g. tuning.proposed.toml."
-                    .into(),
-            );
+        let text = render_proposal(winner, baseline_row, queries, &args.metric);
+        guard_propose_target(path)?;
+        std::fs::write(path, text)
+            .map_err(|e| format!("writing proposal {}: {e}", path.display()))?;
+        eprintln!(
+            "wrote proposal to {} (review and copy into tuning.toml to apply)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// K14 write guard, shared by both arms: a `--propose` target may NEVER be
+/// `tuning.toml`. pp-sweep PROPOSES; the founder commits.
+fn guard_propose_target(path: &Path) -> Result<(), String> {
+    if path.file_name().and_then(|n| n.to_str()) == Some("tuning.toml") {
+        return Err(
+            "refusing to write tuning.toml: pp-sweep PROPOSES only (K14). \
+             Point --propose at e.g. tuning.proposed.toml."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Voice arm (DESIGN-TUNING-LOOP.md "voice"): sweep the [voice] dials over the
+// voice corpus via the shared pp-voice-bench pipeline, ranked by gating-cost.
+//
+// Reuses the search arm's scaffolding where it fits (the grid parser via
+// `parse_grid_with`, the deterministic enumeration, the K14 propose guard); the
+// scoring (one server spawn per config + a gated/raw WER pass) and the ASCENDING
+// gating-cost rank are voice-specific, so they live here beside the search rank.
+// ===========================================================================
+
+/// The voice knobs a grid may sweep, in a stable column order (the proposal /
+/// diff cell read the same way every run). Mirrors the `[voice]` tuning fields.
+const VOICE_KNOBS: [&str; 7] = [
+    "rule1",
+    "rule2",
+    "rule3",
+    "vad_enter",
+    "vad_exit",
+    "vad_hang",
+    "pre_roll_ms",
+];
+
+/// Range-validate one voice knob against its documented `[voice]` tuning bound
+/// (out-of-range is an error, not a clamp — same posture as the search arm).
+fn validate_voice_knob(knob: &str, v: f64) -> Result<(), String> {
+    let (min, max) = match knob {
+        "rule1" | "rule2" | "rule3" => (VOICE_RULE_MIN_S, VOICE_RULE_MAX_S),
+        "vad_enter" | "vad_exit" => (VOICE_VAD_PROB_MIN, VOICE_VAD_PROB_MAX),
+        "vad_hang" => (VOICE_VAD_HANG_MIN, VOICE_VAD_HANG_MAX),
+        "pre_roll_ms" => (VOICE_PRE_ROLL_MIN_MS, VOICE_PRE_ROLL_MAX_MS),
+        other => return Err(format!("unknown grid knob {other:?}")),
+    };
+    if !v.is_finite() || v < min || v > max {
+        return Err(format!(
+            "grid knob {knob:?} value {v} out of range [{min}, {max}]"
+        ));
+    }
+    // hang / pre_roll_ms are integer dials: a fractional grid value is a typo.
+    if matches!(knob, "vad_hang" | "pre_roll_ms") && v.fract() != 0.0 {
+        return Err(format!(
+            "grid knob {knob:?} value {v} must be a whole number"
+        ));
+    }
+    Ok(())
+}
+
+/// The voice arm's grid parse — `parse_grid_with` over `VOICE_KNOBS`.
+fn parse_voice_grid(grid: &str) -> Result<Vec<ConfigOverride>, String> {
+    parse_grid_with(grid, &VOICE_KNOBS, validate_voice_knob)
+}
+
+/// Fold a `ConfigOverride` onto a baseline `VoiceTuning` -> the concrete config a
+/// run uses (a knob absent from the override keeps the baseline value).
+fn apply_voice_override(baseline: VoiceTuning, ov: &ConfigOverride) -> VoiceTuning {
+    let mut c = baseline;
+    for (knob, v) in ov {
+        match knob.as_str() {
+            "rule1" => c.rule1 = *v,
+            "rule2" => c.rule2 = *v,
+            "rule3" => c.rule3 = *v,
+            "vad_enter" => c.vad_enter = *v,
+            "vad_exit" => c.vad_exit = *v,
+            "vad_hang" => c.vad_hang = *v as u32,
+            "pre_roll_ms" => c.pre_roll_ms = *v as u64,
+            _ => {} // parse_voice_grid already rejected unknown knobs
         }
+    }
+    c
+}
+
+/// The `VoiceKnobs` (the bench's knob bundle) for a concrete `VoiceTuning`. The
+/// sweep ALWAYS sets rule1/2/3 and pre_roll explicitly (so the config is exactly
+/// what runs, not a server/global fallback).
+fn knobs_of(c: VoiceTuning) -> VoiceKnobs {
+    VoiceKnobs {
+        rule1: Some(c.rule1 as f32),
+        rule2: Some(c.rule2 as f32),
+        rule3: Some(c.rule3 as f32),
+        endpoint_grace_ms: None,
+        enter: c.vad_enter as f32,
+        exit: c.vad_exit as f32,
+        hang: c.vad_hang,
+        pre_roll_ms: Some(c.pre_roll_ms),
+    }
+}
+
+/// One scored voice config: its label, the knobs differing from baseline, the
+/// concrete config, the gated/raw score, and the wall-time. `is_baseline` marks
+/// the always-present baseline row.
+struct VoiceRow {
+    label: String,
+    diff: Vec<(String, f64)>,
+    config: VoiceTuning,
+    score: ScoreResult,
+    wall_ms: u128,
+    is_baseline: bool,
+}
+
+/// The named voice metric off a score (the ranking key). gating_cost is the
+/// default (lower better); gated_wer/raw_wer let a caller rank by either WER.
+fn voice_metric_value(s: &ScoreResult, metric: &str) -> f64 {
+    match metric {
+        "gating_cost" => s.gating_cost(),
+        "gated_wer" => s.gated.wer,
+        "raw_wer" => s.raw.wer,
+        _ => s.gating_cost(),
+    }
+}
+
+/// The voice knobs in `ov` that differ from baseline, in `VOICE_KNOBS` order.
+fn voice_diff_from_baseline(baseline: VoiceTuning, ov: &ConfigOverride) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for knob in VOICE_KNOBS {
+        if let Some(v) = ov.get(knob) {
+            let base = voice_baseline_knob(baseline, knob);
+            if (*v - base).abs() > f64::EPSILON {
+                out.push((knob.to_owned(), *v));
+            }
+        }
+    }
+    out
+}
+
+/// The baseline value of one voice knob (for the diff label).
+fn voice_baseline_knob(b: VoiceTuning, knob: &str) -> f64 {
+    match knob {
+        "rule1" => b.rule1,
+        "rule2" => b.rule2,
+        "rule3" => b.rule3,
+        "vad_enter" => b.vad_enter,
+        "vad_exit" => b.vad_exit,
+        "vad_hang" => b.vad_hang as f64,
+        "pre_roll_ms" => b.pre_roll_ms as f64,
+        _ => f64::NAN,
+    }
+}
+
+/// Score the baseline plus every grid config over the corpus (UNSORTED — the
+/// caller ranks). Each config spawns its OWN `pp-asr-server` (rule1/2/3 are
+/// server-side flags) and runs the gated + raw WER passes. SEQUENTIAL by design:
+/// one server at a time keeps it deterministic and avoids N concurrent model
+/// loads. A config byte-identical to baseline is skipped (it would duplicate the
+/// baseline row).
+fn score_all_voice(
+    samples: &[f32],
+    reference: &str,
+    server: &Path,
+    model_dir: &Path,
+    baseline: VoiceTuning,
+    overrides: &[ConfigOverride],
+) -> Result<Vec<VoiceRow>, String> {
+    let mut rows = Vec::with_capacity(overrides.len() + 1);
+    rows.push(score_one_voice(
+        samples,
+        reference,
+        server,
+        model_dir,
+        baseline,
+        &BTreeMap::new(),
+        baseline,
+        "baseline",
+        true,
+    )?);
+    for (i, ov) in overrides.iter().enumerate() {
+        let config = apply_voice_override(baseline, ov);
+        if config == baseline {
+            continue; // a grid value equal to the current config: duplicate row
+        }
+        let label = format!("cfg{i}");
+        rows.push(score_one_voice(
+            samples, reference, server, model_dir, baseline, ov, config, &label, false,
+        )?);
+    }
+    Ok(rows)
+}
+
+/// Score one voice config over the corpus and time it.
+#[allow(clippy::too_many_arguments)]
+fn score_one_voice(
+    samples: &[f32],
+    reference: &str,
+    server: &Path,
+    model_dir: &Path,
+    baseline: VoiceTuning,
+    ov: &ConfigOverride,
+    config: VoiceTuning,
+    label: &str,
+    is_baseline: bool,
+) -> Result<VoiceRow, String> {
+    let knobs = knobs_of(config);
+    let started = Instant::now();
+    // One server per config (the endpoint rules are the server's). Kill-on-drop
+    // so a scoring error mid-grid never leaks a child.
+    let (child, addr) = voice_bench::spawn_server(server, model_dir, &knobs)?;
+    struct Reap(std::process::Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _reap = Reap(child);
+    let score = voice_bench::score_run(samples, addr, &knobs, reference);
+    let wall_ms = started.elapsed().as_millis();
+    Ok(VoiceRow {
+        label: label.to_owned(),
+        diff: voice_diff_from_baseline(baseline, ov),
+        config,
+        score,
+        wall_ms,
+        is_baseline,
+    })
+}
+
+/// Rank voice rows ASCENDING by the primary metric (lower gating-cost / WER is
+/// better — the OPPOSITE of search's descending sort), with a STABLE tiebreak
+/// (wall-time asc, then label) so two runs over the same grid produce
+/// byte-identical order. The baseline row is ranked alongside the rest.
+fn rank_voice(mut rows: Vec<VoiceRow>, metric: &str) -> Vec<VoiceRow> {
+    rows.sort_by(|a, b| {
+        voice_metric_value(&a.score, metric)
+            .total_cmp(&voice_metric_value(&b.score, metric))
+            .then_with(|| a.wall_ms.cmp(&b.wall_ms))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    rows
+}
+
+/// The "config" cell for a voice row: "baseline", else the differing knobs.
+fn voice_config_label(r: &VoiceRow) -> String {
+    if r.is_baseline {
+        return "baseline".to_owned();
+    }
+    if r.diff.is_empty() {
+        return r.label.clone();
+    }
+    r.diff
+        .iter()
+        .map(|(knob, v)| format!("{knob}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Human voice leaderboard. ASCII only (no em-dashes). gating-cost is the
+/// headline; gated/raw WER and the minted-segment count are shown alongside.
+fn print_voice_table(rows: &[VoiceRow], metric: &str) {
+    println!(
+        "voice sweep: {} configs ranked by {metric} (ascending; lower is better)",
+        rows.len()
+    );
+    println!(
+        "{:>4} {:<28} {:>9} {:>9} {:>9} {:>5} {:>4} {:>8}",
+        "rank", "config", "gate_cost", "gatedWER", "rawWER", "segs", "abnd", "ms"
+    );
+    for (i, r) in rows.iter().enumerate() {
+        let cfg = voice_config_label(r);
+        let s = &r.score;
+        println!(
+            "{:>4} {:<28} {:>+9.4} {:>9.4} {:>9.4} {:>5} {:>4} {:>8}",
+            i + 1,
+            truncate(&cfg, 28),
+            s.gating_cost(),
+            s.gated.wer,
+            s.raw.wer,
+            s.gated_segs.len(),
+            s.abandoned,
+            r.wall_ms,
+        );
+    }
+}
+
+/// Machine-diffable voice JSON (schema 1, stable order), mirroring the search
+/// arm's shape with the voice metric block.
+fn print_voice_json(rows: &[VoiceRow], args: &Args) {
+    let results: Vec<serde_json::Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let s = &r.score;
+            let diff: serde_json::Map<String, serde_json::Value> = r
+                .diff
+                .iter()
+                .map(|(knob, v)| (knob.clone(), serde_json::json!(v)))
+                .collect();
+            serde_json::json!({
+                "rank": i + 1,
+                "label": r.label,
+                "baseline": r.is_baseline,
+                "config_diff": diff,
+                "config": voice_config_json(r.config),
+                "gating_cost": s.gating_cost(),
+                "gated_wer": s.gated.wer,
+                "raw_wer": s.raw.wer,
+                "segments": s.gated_segs.len(),
+                "abandoned": s.abandoned,
+                "wall_ms": r.wall_ms,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "schema": 1,
+        "metric": args.metric,
+        "corpus": args.corpus.as_ref().map(|p| p.display().to_string()),
+        "expect": args.expect.as_ref().map(|p| p.display().to_string()),
+        "host": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "cores": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        },
+        "results": results,
+    });
+    println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+}
+
+/// A `VoiceTuning` as a JSON object (the full concrete config a row ran).
+fn voice_config_json(c: VoiceTuning) -> serde_json::Value {
+    serde_json::json!({
+        "rule1": c.rule1, "rule2": c.rule2, "rule3": c.rule3,
+        "vad_enter": c.vad_enter, "vad_exit": c.vad_exit, "vad_hang": c.vad_hang,
+        "pre_roll_ms": c.pre_roll_ms,
+    })
+}
+
+/// Render the proposed `[voice]` block: the WINNING config, a K14 header, and the
+/// baseline->winner delta (gating-cost + both WERs) as comments. PURE (no IO) so
+/// it is unit-testable; the caller writes the file. Mirrors the search arm's
+/// `render_proposal`.
+fn render_voice_proposal(
+    winner: &VoiceRow,
+    baseline: &VoiceRow,
+    corpus: &Path,
+    metric: &str,
+) -> String {
+    let w = winner.config;
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# PROPOSED by pp-sweep voice on {}; review and copy into tuning.toml to \
+         apply. The machine proposes; you commit (K14).\n",
+        corpus.display()
+    ));
+    if winner.is_baseline {
+        out.push_str("# baseline already optimal in this grid: no knob change is proposed.\n");
+    } else {
+        out.push_str("# knob changes (baseline -> winner):\n");
+        for (knob, v) in &winner.diff {
+            let base = voice_baseline_knob(baseline.config, knob);
+            out.push_str(&format!("#   {knob}: {base} -> {v}\n"));
+        }
+    }
+    let bs = &baseline.score;
+    let ws = &winner.score;
+    out.push_str(&format!(
+        "# {metric}: {:+.4} -> {:+.4} (delta {:+.4}; lower is better)\n",
+        voice_metric_value(bs, metric),
+        voice_metric_value(ws, metric),
+        voice_metric_value(ws, metric) - voice_metric_value(bs, metric),
+    ));
+    out.push_str(&format!(
+        "# winner: gating_cost={:+.4} gated_wer={:.4} raw_wer={:.4}\n",
+        ws.gating_cost(),
+        ws.gated.wer,
+        ws.raw.wer,
+    ));
+    out.push('\n');
+    // The `[voice]` block, in the same shape as tuning.default.toml so a copy
+    // into tuning.toml is a drop-in. Only the voice DIALS (never a contract).
+    out.push_str("[voice]\n");
+    out.push_str(&format!("rule1 = {}\n", w.rule1));
+    out.push_str(&format!("rule2 = {}\n", w.rule2));
+    out.push_str(&format!("rule3 = {}\n", w.rule3));
+    out.push_str(&format!("vad_enter = {}\n", w.vad_enter));
+    out.push_str(&format!("vad_exit = {}\n", w.vad_exit));
+    out.push_str(&format!("vad_hang = {}\n", w.vad_hang));
+    out.push_str(&format!("pre_roll_ms = {}\n", w.pre_roll_ms));
+    out
+}
+
+fn run_voice(args: &Args) -> Result<(), String> {
+    let corpus = args
+        .corpus
+        .as_ref()
+        .ok_or_else(|| format!("voice: missing --corpus (or PP_VOICE_CORPUS)\n{}", usage()))?;
+    let expect = args
+        .expect
+        .as_ref()
+        .ok_or_else(|| format!("voice: missing --expect (or PP_VOICE_EXPECT)\n{}", usage()))?;
+
+    // The baseline IS the committed `[voice]` config. Source it from the same
+    // `tuning.toml` the app reads when one sits beside the corpus; absent a file
+    // this is the shipped voice defaults. `tuning().voice` reads that global.
+    if let Some(app_data) = corpus.parent() {
+        photoproof_core::tuning::init_from(app_data);
+    }
+    let baseline = photoproof_core::tuning::tuning().voice;
+
+    let overrides = parse_voice_grid(&args.grid)?;
+
+    let samples = voice_bench::read_wav(corpus)
+        .map_err(|e| format!("reading corpus {}: {e}", corpus.display()))?;
+    let reference = std::fs::read_to_string(expect)
+        .map_err(|e| format!("reading --expect {}: {e}", expect.display()))?;
+
+    let server = args
+        .server
+        .clone()
+        .unwrap_or_else(voice_bench::default_server);
+    let model_dir = args
+        .model_dir
+        .clone()
+        .unwrap_or_else(voice_bench::default_model_dir);
+
+    let rows = score_all_voice(
+        &samples, &reference, &server, &model_dir, baseline, &overrides,
+    )?;
+    let ranked = rank_voice(rows, &args.metric);
+    if ranked.is_empty() {
+        return Err("voice sweep produced no rows (empty grid?)".into());
+    }
+
+    if args.json {
+        print_voice_json(&ranked, args);
+    } else {
+        print_voice_table(&ranked, &args.metric);
+    }
+
+    if let Some(path) = &args.propose {
+        let winner = &ranked[0];
+        let baseline_row = ranked
+            .iter()
+            .find(|r| r.is_baseline)
+            .ok_or("internal: baseline row missing from ranked set")?;
+        let text = render_voice_proposal(winner, baseline_row, corpus, &args.metric);
+        guard_propose_target(path)?;
         std::fs::write(path, text)
             .map_err(|e| format!("writing proposal {}: {e}", path.display()))?;
         eprintln!(
@@ -937,5 +1470,213 @@ mod tests {
         // a no-op rather than a blank file.
         assert!(text.contains("[search]"));
         assert!(text.contains("ndcg_at_k: 0.7000 -> 0.7000"), "{text}");
+    }
+
+    // =======================================================================
+    // Voice arm (deterministic logic only: grid parse, apply, rank, propose —
+    // the model-dependent scoring is covered by the env-guarded integration
+    // test in tests/, not here).
+    // =======================================================================
+    use photoproof_core::voice_bench::Seg;
+    use photoproof_core::voice_wer::WerScore;
+
+    fn voice_baseline() -> VoiceTuning {
+        VoiceTuning::default()
+    }
+
+    /// A `ScoreResult` with chosen gated/raw WER (the rest filled trivially).
+    fn vscore(gated: f64, raw: f64) -> ScoreResult {
+        let mk = |wer: f64| WerScore {
+            wer,
+            sub: 0,
+            del: 0,
+            ins: 0,
+            ref_words: 10,
+            hyp_words: 10,
+            hits: 10,
+        };
+        ScoreResult {
+            raw: mk(raw),
+            gated: mk(gated),
+            gated_segs: vec![Seg {
+                onset_ms: 0,
+                dur_ms: 1,
+                text: "x".into(),
+            }],
+            abandoned: 0,
+        }
+    }
+
+    fn vrow(label: &str, is_baseline: bool, gated: f64, raw: f64, wall_ms: u128) -> VoiceRow {
+        VoiceRow {
+            label: label.to_owned(),
+            diff: Vec::new(),
+            config: voice_baseline(),
+            score: vscore(gated, raw),
+            wall_ms,
+            is_baseline,
+        }
+    }
+
+    // --- voice grid parser --------------------------------------------------
+    #[test]
+    fn voice_grid_cartesian_product_is_deterministic() {
+        // 4 x 3 = 12; last knob (vad_hang) varies fastest within each rule2.
+        let configs = parse_voice_grid("rule2=0.8,1.0,1.2,1.5;vad_hang=10,15,20").unwrap();
+        assert_eq!(configs.len(), 12);
+        let first: Vec<(f64, f64)> = configs
+            .iter()
+            .take(3)
+            .map(|c| (*c.get("rule2").unwrap(), *c.get("vad_hang").unwrap()))
+            .collect();
+        assert_eq!(first, vec![(0.8, 10.0), (0.8, 15.0), (0.8, 20.0)]);
+    }
+
+    #[test]
+    fn voice_grid_unknown_and_out_of_range_error() {
+        // A search knob is unknown to the voice arm.
+        assert!(
+            parse_voice_grid("s4=1.0")
+                .unwrap_err()
+                .contains("unknown grid knob")
+        );
+        // rule below the 0.1 s floor.
+        assert!(
+            parse_voice_grid("rule2=0.0")
+                .unwrap_err()
+                .contains("out of range")
+        );
+        // VAD probability above 1.
+        assert!(
+            parse_voice_grid("vad_enter=1.5")
+                .unwrap_err()
+                .contains("out of range")
+        );
+        // A fractional integer dial is a typo.
+        assert!(
+            parse_voice_grid("vad_hang=12.5")
+                .unwrap_err()
+                .contains("whole number")
+        );
+    }
+
+    #[test]
+    fn voice_zero_vad_threshold_is_in_band() {
+        // The RAW-feed ceiling uses 0.0 thresholds; the grid must accept them.
+        let configs = parse_voice_grid("vad_exit=0.0,0.35").unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].get("vad_exit"), Some(&0.0));
+    }
+
+    // --- apply: absent knobs keep baseline ----------------------------------
+    #[test]
+    fn apply_voice_override_keeps_absent_knobs_at_baseline() {
+        let mut ov = ConfigOverride::new();
+        ov.insert("rule2".into(), 0.8);
+        ov.insert("vad_hang".into(), 20.0);
+        let c = apply_voice_override(voice_baseline(), &ov);
+        assert_eq!(c.rule2, 0.8);
+        assert_eq!(c.vad_hang, 20);
+        // Untouched knobs are baseline (the shipped defaults).
+        assert_eq!(c.rule1, 2.4);
+        assert_eq!(c.rule3, 20.0);
+        assert_eq!(c.vad_enter, 0.5);
+        assert_eq!(c.pre_roll_ms, 1_000);
+    }
+
+    // --- rank ASCENDING (lower gating-cost wins) ----------------------------
+    #[test]
+    fn voice_rank_sorts_ascending_by_gating_cost() {
+        // gating_cost = gated - raw: baseline +0.10, cfg0 +0.02 (best), cfg1 +0.07.
+        let rows = vec![
+            vrow("baseline", true, 0.20, 0.10, 5),
+            vrow("cfg0", false, 0.12, 0.10, 5),
+            vrow("cfg1", false, 0.17, 0.10, 5),
+        ];
+        let ranked = rank_voice(rows, "gating_cost");
+        let labels: Vec<&str> = ranked.iter().map(|r| r.label.as_str()).collect();
+        // Lower gating-cost first: cfg0 (+0.02) < cfg1 (+0.07) < baseline (+0.10).
+        assert_eq!(labels, vec!["cfg0", "cfg1", "baseline"]);
+    }
+
+    #[test]
+    fn voice_rank_tiebreaks_stably_on_walltime_then_label() {
+        // Equal gating-cost (all +0.0): faster wall first, then label.
+        let rows = vec![
+            vrow("cfg1", false, 0.10, 0.10, 20),
+            vrow("cfg0", false, 0.10, 0.10, 10),
+            vrow("cfg2", false, 0.10, 0.10, 10),
+        ];
+        let ranked = rank_voice(rows, "gating_cost");
+        let labels: Vec<&str> = ranked.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["cfg0", "cfg2", "cfg1"]);
+    }
+
+    // --- proposal emission --------------------------------------------------
+    #[test]
+    fn voice_proposal_contains_winner_dials_and_delta() {
+        let baseline_row = vrow("baseline", true, 0.20, 0.10, 5); // gating_cost +0.10
+        let mut winner = vrow("cfg0", false, 0.12, 0.10, 5); // gating_cost +0.02
+        winner.config = VoiceTuning {
+            rule2: 0.8,
+            vad_hang: 20,
+            ..VoiceTuning::default()
+        };
+        winner.diff = vec![("rule2".into(), 0.8), ("vad_hang".into(), 20.0)];
+        let text = render_voice_proposal(
+            &winner,
+            &baseline_row,
+            Path::new("corpus.wav"),
+            "gating_cost",
+        );
+        // K14 header present.
+        assert!(text.contains("The machine proposes; you commit (K14)."));
+        // The winning dials are in the [voice] block.
+        assert!(text.contains("[voice]"));
+        assert!(text.contains("rule2 = 0.8"), "{text}");
+        assert!(text.contains("vad_hang = 20"), "{text}");
+        // The knob delta and the gating-cost delta are present (baseline rule2
+        // is the shipped 1.2; baseline vad_hang is 15).
+        assert!(text.contains("rule2: 1.2 -> 0.8"), "{text}");
+        assert!(text.contains("vad_hang: 15 -> 20"), "{text}");
+        assert!(text.contains("gating_cost: +0.1000 -> +0.0200"), "{text}");
+        // The human instruction to copy into tuning.toml (K14) — never a write
+        // target (that refusal is enforced by guard_propose_target).
+        assert!(text.contains("copy into tuning.toml to apply"), "{text}");
+    }
+
+    #[test]
+    fn voice_proposal_when_baseline_wins_says_nothing_changed() {
+        let baseline_row = vrow("baseline", true, 0.15, 0.10, 5);
+        let text = render_voice_proposal(
+            &baseline_row,
+            &baseline_row,
+            Path::new("corpus.wav"),
+            "gating_cost",
+        );
+        assert!(
+            text.contains("baseline already optimal in this grid"),
+            "{text}"
+        );
+        // Still emits a valid [voice] block (the baseline config).
+        assert!(text.contains("[voice]"));
+        assert!(text.contains("rule2 = 1.2"), "{text}");
+    }
+
+    // --- K14: the propose guard refuses tuning.toml -------------------------
+    #[test]
+    fn propose_guard_refuses_tuning_toml() {
+        assert!(guard_propose_target(Path::new("/x/tuning.toml")).is_err());
+        assert!(guard_propose_target(Path::new("/x/tuning.proposed.toml")).is_ok());
+    }
+
+    // --- metric validation is per-subsystem ---------------------------------
+    #[test]
+    fn voice_metric_validation_rejects_search_metrics() {
+        assert!(validate_metric("voice", "gating_cost").is_ok());
+        assert!(validate_metric("voice", "gated_wer").is_ok());
+        assert!(validate_metric("voice", "ndcg_at_k").is_err());
+        assert!(validate_metric("search", "gating_cost").is_err());
+        assert!(validate_metric("search", "ndcg_at_k").is_ok());
     }
 }

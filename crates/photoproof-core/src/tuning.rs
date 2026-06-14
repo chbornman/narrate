@@ -200,6 +200,70 @@ const GRAPH_CLUSTER_K_MAX: u32 = 12;
 /// the full-library profile lands.
 const GRAPH_LOD_THRESHOLD: u32 = 1500;
 
+// --- Voice endpoint/VAD feel dials (DESIGN-TUNING-LOOP.md "voice" arm) -------
+//
+// The voice DIALS lifted out of `pp-asr-server`'s consts and the silero/engine
+// consts into config, so a swept winner (pp-sweep voice) is a FILE the app
+// reads — exactly like the search weights. These are FEEL knobs: how snappy a
+// final lands after you stop talking, how eager the gate opens, how much
+// cold-start audio is replayed. They are NOT the timing CONTRACTS: the onset
+// error budget (`ONSET_ERROR_BUDGET_MS`), the association skew bound
+// (`ASSOCIATION_MAX_SKEW_MS`), the drain window (`DRAIN_WINDOW_MS`), and the
+// trailing-ship window (`TRAILING_SHIP_MS`) stay FIXED consts in
+// `capture/engine.rs` — they are correctness invariants (a wrong target / a
+// lost trailing final), and a tuning.toml edit must never be able to break one.
+//
+// Defaults are BYTE-IDENTICAL to today's shipped const/flag values so lifting
+// them changes nothing until a `[voice]` section overrides one (proven by the
+// behavior-unchanged gate test below).
+
+/// Endpoint rule 1 (CAPTURE §6.3): minimum trailing silence, in SECONDS, when
+/// NOTHING has been decoded yet — the dead-air endpoint. sherpa's canonical
+/// default; today `pp-asr-server`'s `DEFAULT_RULE1_TRAILING_SILENCE_S`.
+const VOICE_RULE1_S: f64 = 2.4;
+/// Endpoint rule 2 (CAPTURE §6.3): minimum trailing silence, in SECONDS, AFTER
+/// decoded speech — the post-utterance latency a user feels after they stop.
+/// THE primary snappiness dial; today `DEFAULT_RULE2_TRAILING_SILENCE_S`.
+const VOICE_RULE2_S: f64 = 1.2;
+/// Endpoint rule 3 (CAPTURE §6.3): minimum utterance length, in SECONDS, that
+/// forces an endpoint regardless of silence; today `DEFAULT_RULE3_MIN_UTTERANCE_S`.
+const VOICE_RULE3_S: f64 = 20.0;
+/// silero ENTER threshold: speech-probability a window must reach to OPEN the
+/// gate (a fraction). Today `silero.rs`'s `ENTER`.
+const VOICE_VAD_ENTER: f64 = 0.5;
+/// silero EXIT threshold: speech-probability a window must DROP BELOW (for the
+/// hang count) to close the gate. Today `silero.rs`'s `EXIT`.
+const VOICE_VAD_EXIT: f64 = 0.35;
+/// silero HANG: consecutive below-EXIT windows (each 32 ms) before SpeechEnd —
+/// 15 × 32 ms = 480 ms hang. Today `silero.rs`'s `HANG_WINDOWS`. A u32 count.
+const VOICE_VAD_HANG: u32 = 15;
+/// §6.2 pre-roll, ms: silence-gated frames retained and flushed when shipping
+/// resumes, so a cold-start first word is not chopped. Today the capture
+/// engine's `PRE_ROLL_MS`.
+const VOICE_PRE_ROLL_MS: u64 = 1_000;
+
+// Validation bounds for the voice dials (clamp-or-default like every section).
+/// Endpoint rules are trailing-silence / utterance-length SECONDS. A negative
+/// or zero rule would disable endpointing (never finalize) or fire instantly
+/// (truncate every word); a huge one would never finalize. Span a sane window:
+/// from a tenth of a second to a minute. rule3 (utterance cap) lives in the
+/// same span — 60 s is already "effectively never forced".
+const VOICE_RULE_MIN_S: f64 = 0.1;
+const VOICE_RULE_MAX_S: f64 = 60.0;
+/// VAD thresholds are speech probabilities in [0, 1]. The RAW-feed sweep uses
+/// 0.0 (gate forced open), so 0 is a legal in-band value here.
+const VOICE_VAD_PROB_MIN: f64 = 0.0;
+const VOICE_VAD_PROB_MAX: f64 = 1.0;
+/// HANG is a window count: at least 1 (zero would close the gate the instant
+/// speech dips, shredding utterances), capped so a typo cannot hang the gate
+/// open for minutes. 300 windows = ~9.6 s, already absurdly long.
+const VOICE_VAD_HANG_MIN: u32 = 1;
+const VOICE_VAD_HANG_MAX: u32 = 300;
+/// Pre-roll ms: 0 disables it (legal — the pre-grace behavior); cap at 5 s so a
+/// typo cannot replay a huge stretch of stale audio into the recognizer.
+const VOICE_PRE_ROLL_MIN_MS: u64 = 0;
+const VOICE_PRE_ROLL_MAX_MS: u64 = 5_000;
+
 // Validation bounds for the graph knobs (clamp-or-default like every other
 // section: a hand-edited tuning.toml can never inject a silent bad number).
 /// α is a blend fraction; outside [0, 1] it would flip or over-weight a space.
@@ -467,6 +531,112 @@ impl Default for HeatmapTuning {
     }
 }
 
+/// Voice endpoint/VAD feel tuning (DESIGN-TUNING-LOOP.md "voice" arm). LIVE
+/// consumers: the ASR-wrapper launcher (`runtime::launch::asr_wrapper_args`
+/// passes `rule1/2/3` to `pp-asr-server`), the shell's silero VAD construction
+/// (`enter`/`exit`/`hang`), and the capture engine's pre-roll cap (`pre_roll_ms`).
+/// These are DIALS the founder sweeps by feel (pp-sweep voice); the timing
+/// CONTRACTS (onset budget, association skew, drain + trailing-ship windows)
+/// stay fixed consts in `capture/engine.rs` — they are correctness invariants,
+/// not feel dials.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceTuning {
+    /// Endpoint rule 1: trailing-silence seconds with nothing decoded yet.
+    pub rule1: f64,
+    /// Endpoint rule 2: trailing-silence seconds after decoded speech (the
+    /// primary snappiness dial).
+    pub rule2: f64,
+    /// Endpoint rule 3: utterance-length seconds that force an endpoint.
+    pub rule3: f64,
+    /// silero ENTER threshold (open the gate at this speech-probability).
+    pub vad_enter: f64,
+    /// silero EXIT threshold (close the gate below this, for `vad_hang` windows).
+    pub vad_exit: f64,
+    /// silero HANG: below-EXIT windows (32 ms each) before SpeechEnd.
+    pub vad_hang: u32,
+    /// §6.2 pre-roll, ms: withheld silence-gated audio replayed on resume.
+    pub pre_roll_ms: u64,
+}
+
+impl Default for VoiceTuning {
+    fn default() -> Self {
+        Self {
+            rule1: VOICE_RULE1_S,
+            rule2: VOICE_RULE2_S,
+            rule3: VOICE_RULE3_S,
+            vad_enter: VOICE_VAD_ENTER,
+            vad_exit: VOICE_VAD_EXIT,
+            vad_hang: VOICE_VAD_HANG,
+            pre_roll_ms: VOICE_PRE_ROLL_MS,
+        }
+    }
+}
+
+impl VoiceTuning {
+    fn validated(self) -> Self {
+        let d = Self::default();
+        VoiceTuning {
+            rule1: range_or_default(
+                "voice.rule1",
+                self.rule1,
+                VOICE_RULE_MIN_S,
+                VOICE_RULE_MAX_S,
+                d.rule1,
+            ),
+            rule2: range_or_default(
+                "voice.rule2",
+                self.rule2,
+                VOICE_RULE_MIN_S,
+                VOICE_RULE_MAX_S,
+                d.rule2,
+            ),
+            rule3: range_or_default(
+                "voice.rule3",
+                self.rule3,
+                VOICE_RULE_MIN_S,
+                VOICE_RULE_MAX_S,
+                d.rule3,
+            ),
+            vad_enter: range_or_default(
+                "voice.vad_enter",
+                self.vad_enter,
+                VOICE_VAD_PROB_MIN,
+                VOICE_VAD_PROB_MAX,
+                d.vad_enter,
+            ),
+            vad_exit: range_or_default(
+                "voice.vad_exit",
+                self.vad_exit,
+                VOICE_VAD_PROB_MIN,
+                VOICE_VAD_PROB_MAX,
+                d.vad_exit,
+            ),
+            vad_hang: count_or_default(
+                "voice.vad_hang",
+                self.vad_hang,
+                VOICE_VAD_HANG_MIN,
+                VOICE_VAD_HANG_MAX,
+                d.vad_hang,
+            ),
+            pre_roll_ms: if (VOICE_PRE_ROLL_MIN_MS..=VOICE_PRE_ROLL_MAX_MS)
+                .contains(&self.pre_roll_ms)
+            {
+                self.pre_roll_ms
+            } else {
+                tracing::warn!(
+                    field = "voice.pre_roll_ms",
+                    value = self.pre_roll_ms,
+                    min = VOICE_PRE_ROLL_MIN_MS,
+                    max = VOICE_PRE_ROLL_MAX_MS,
+                    "tuning value out of range; keeping default"
+                );
+                d.pre_roll_ms
+            },
+        }
+    }
+}
+
 impl GraphTuning {
     fn validated(self) -> Self {
         let d = Self::default();
@@ -627,6 +797,7 @@ pub struct Tuning {
     pub preview: PreviewTuning,
     pub graph: GraphTuning,
     pub heatmap: HeatmapTuning,
+    pub voice: VoiceTuning,
 }
 
 impl Tuning {
@@ -663,6 +834,7 @@ impl Tuning {
             preview: self.preview.validated(),
             graph: self.graph.validated(),
             heatmap: self.heatmap.validated(),
+            voice: self.voice.validated(),
         }
     }
 }
@@ -823,6 +995,79 @@ mod tests {
         assert_eq!(t.heatmap.dwell_grid_rate, 0.15);
         assert_eq!(t.heatmap.dwell_cap_ms, 60_000);
         assert_eq!(t.heatmap.recency_half_life_days, 14.0);
+        // Voice dials (DESIGN-TUNING-LOOP.md "voice" arm) — these MUST equal the
+        // old scattered const/flag values byte-for-byte, so lifting them is a
+        // no-op until a `[voice]` section overrides one: rule1/2/3 are
+        // pp-asr-server's DEFAULT_RULE*_S, enter/exit/hang are silero's
+        // ENTER/EXIT/HANG_WINDOWS, pre_roll_ms is the engine's PRE_ROLL_MS.
+        assert_eq!(t.voice.rule1, 2.4);
+        assert_eq!(t.voice.rule2, 1.2);
+        assert_eq!(t.voice.rule3, 20.0);
+        assert_eq!(t.voice.vad_enter, 0.5);
+        assert_eq!(t.voice.vad_exit, 0.35);
+        assert_eq!(t.voice.vad_hang, 15);
+        assert_eq!(t.voice.pre_roll_ms, 1_000);
+    }
+
+    /// A partial `[voice]` file sets one dial and leaves the rest (and every
+    /// other section) at their code defaults — the `#[serde(default)]` merge.
+    #[test]
+    fn partial_voice_toml_merges_over_defaults() {
+        let toml = r#"
+            [voice]
+            rule2 = 0.8
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        // The one set dial took (a snappier post-utterance endpoint):
+        assert_eq!(merged.voice.rule2, 0.8);
+        // The rest of the voice section stayed at the shipped defaults:
+        assert_eq!(merged.voice.rule1, 2.4);
+        assert_eq!(merged.voice.rule3, 20.0);
+        assert_eq!(merged.voice.vad_enter, 0.5);
+        assert_eq!(merged.voice.vad_hang, 15);
+        assert_eq!(merged.voice.pre_roll_ms, 1_000);
+        // Unrelated sections are pure defaults:
+        assert_eq!(merged.search, SearchTuning::default());
+        assert_eq!(merged.graph, GraphTuning::default());
+    }
+
+    /// Out-of-range voice dials reject back to defaults (never a silent bad
+    /// number): a sub-floor rule (would truncate every word), a > 1 VAD
+    /// probability, a 0 hang (would shred utterances), and an absurd pre-roll.
+    #[test]
+    fn out_of_range_voice_values_reject_to_default() {
+        let toml = r#"
+            [voice]
+            rule1 = 0.0
+            rule2 = 120.0
+            vad_enter = 1.5
+            vad_exit = -0.1
+            vad_hang = 0
+            pre_roll_ms = 999999
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        assert_eq!(merged.voice.rule1, 2.4); // below 0.1 s floor rejected
+        assert_eq!(merged.voice.rule2, 1.2); // above 60 s cap rejected
+        assert_eq!(merged.voice.vad_enter, 0.5); // > 1 probability rejected
+        assert_eq!(merged.voice.vad_exit, 0.35); // < 0 probability rejected
+        assert_eq!(merged.voice.vad_hang, 15); // 0 windows rejected
+        assert_eq!(merged.voice.pre_roll_ms, 1_000); // > 5 s rejected
+    }
+
+    /// The RAW-feed sweep forces the gate open with enter/exit = 0.0; that is a
+    /// LEGAL in-band value (the bounds are inclusive of 0), so it must survive
+    /// validation rather than snap back — otherwise the raw WER ceiling pass
+    /// could never be expressed as a config.
+    #[test]
+    fn voice_zero_vad_thresholds_are_in_band() {
+        let toml = r#"
+            [voice]
+            vad_enter = 0.0
+            vad_exit = 0.0
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        assert_eq!(merged.voice.vad_enter, 0.0);
+        assert_eq!(merged.voice.vad_exit, 0.0);
     }
 
     /// A partial `[graph]` override merges over defaults like every other

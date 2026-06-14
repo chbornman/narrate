@@ -92,6 +92,36 @@ dwell_cap_ms = 60000
 # "All-time" toggle turns the decay OFF (flat). Range (0, 365].
 recency_half_life_days = 14.0
 
+# ---------------------------------------------------------------------------
+# Voice — endpoint/VAD feel dials (DESIGN-TUNING-LOOP.md "voice" arm). How snappy
+# a final lands after you stop talking (the endpoint rules), how eager the gate
+# opens/closes (the silero hysteresis), and how much cold-start audio is replayed
+# (the pre-roll). These are FEEL knobs swept by `pp-sweep voice` over the voice
+# corpus, ranked by gating-cost (gated WER - raw WER). Lifted out of
+# pp-asr-server / silero / capture-engine consts so a swept winner is a file the
+# app reads. The launcher passes rule1/2/3 to pp-asr-server; the shell builds the
+# silero VAD from enter/exit/hang; the capture engine reads pre_roll_ms.
+# ---------------------------------------------------------------------------
+[voice]
+# Endpoint rules (CAPTURE §6.3), trailing-silence / utterance-length SECONDS.
+# Range [0.1, 60]. rule2 is THE snappiness dial (lower = a faster final after you
+# stop, at the risk of clipping a trailing word).
+rule1 = 2.4   # trailing silence with NOTHING decoded yet (dead-air endpoint)
+rule2 = 1.2   # trailing silence AFTER decoded speech (the felt post-utterance latency)
+rule3 = 20.0  # utterance length that forces an endpoint regardless of silence
+# silero VAD hysteresis. enter/exit are speech-probabilities, range [0, 1]
+# (0 forces the gate open — the RAW WER ceiling pass). hang is below-EXIT windows
+# (32 ms each) before SpeechEnd: 15 = 480 ms. Range [1, 300].
+vad_enter = 0.5   # open the gate at this speech-probability
+vad_exit = 0.35   # close the gate below this (for hang windows)
+vad_hang = 15     # below-EXIT windows before the gate closes
+# Pre-roll (CAPTURE §6.2), ms: withheld silence-gated audio replayed when
+# shipping resumes, so a cold-start first word is not chopped. 0 disables it.
+# Range [0, 5000].
+pre_roll_ms = 1000
+
 # FIXED contracts (deliberately NOT here — a config edit must never silently
-# break an invariant): the <100 ms search latency budget, and the embedded
-# aspect tolerance (0.02) that protects stroke geometry. See tuning.html.
+# break an invariant): the <100 ms search latency budget, the embedded aspect
+# tolerance (0.02) that protects stroke geometry, and the VOICE timing contracts
+# (the onset error budget, the association skew bound, the drain + trailing-ship
+# windows in capture/engine.rs). See tuning.html.

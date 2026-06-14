@@ -62,6 +62,14 @@ pub const TRAILING_SHIP_MS: u64 = 3_000;
 /// also needs warm left context before the FIRST words' tokens emit —
 /// 400 ms lost "Print this one" after 4 s gaps; 1 s restored it
 /// (corpus, June 12).
+///
+/// This is a FEEL DIAL, not a contract (unlike `TRAILING_SHIP_MS` /
+/// `DRAIN_WINDOW_MS` / the onset budget just above): it trades cold-start
+/// fidelity against replaying stale audio, so it is lifted into
+/// `tuning().voice.pre_roll_ms` (DESIGN-TUNING-LOOP.md voice arm) and the cap
+/// site below reads THAT. This const remains the CODE DEFAULT that the tuning
+/// global resolves to absent a `[voice]` override, so the value is unchanged by
+/// construction; it is re-exported for API stability and the tests that pin it.
 pub const PRE_ROLL_MS: u64 = 1_000;
 /// Debug-panel note cap (in-memory only).
 const DEBUG_NOTE_CAP: usize = 256;
@@ -211,6 +219,14 @@ pub struct CaptureEngine<'t, C: Clock> {
     /// back to an image event). Optional so the existing `new` signature and
     /// every test that does not exercise subjects stay untouched.
     note_sink: Option<Box<dyn SubjectNoteSink>>,
+    /// Per-engine pre-roll cap override, ms. `None` (the bare/shell engine)
+    /// reads the VOICE DIAL `tuning().voice.pre_roll_ms` from the process-global
+    /// tuning. The voice SWEEP (`pp-sweep voice`) sets this per config because it
+    /// runs every grid config in ONE process — the `OnceLock` tuning global can
+    /// only be installed once, so a per-config pre-roll cannot route through it;
+    /// this explicit override is that seam. It does NOT change the shipped path
+    /// (the shell never sets it, so the global dial still governs production).
+    pre_roll_ms_override: Option<u64>,
 }
 
 impl<'t, C: Clock> CaptureEngine<'t, C> {
@@ -242,7 +258,17 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             debug: Vec::new(),
             last_activity: None,
             note_sink: None,
+            pre_roll_ms_override: None,
         }
+    }
+
+    /// Override the pre-roll cap (ms) for THIS engine, bypassing the process
+    /// tuning global. Builder form (like `with_note_sink`) so the bare `new`
+    /// signature and every test stay untouched; only `pp-sweep voice` (which
+    /// sweeps pre-roll per config in one process) sets it. See the field's WHY.
+    pub fn with_pre_roll_ms(mut self, pre_roll_ms: u64) -> Self {
+        self.pre_roll_ms_override = Some(pre_roll_ms);
+        self
     }
 
     /// DESIGN-VOICE-SUBJECTS.md: wire the subject-note seam (the shell's
@@ -490,9 +516,18 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
             }
         } else {
             // Withheld: retain for the pre-roll, oldest evicted past the cap.
+            // The cap is the VOICE DIAL `tuning().voice.pre_roll_ms` (a feel
+            // knob the founder sweeps), defaulting to `PRE_ROLL_MS` absent a
+            // `[voice]` override — so the cap is unchanged by construction. The
+            // per-engine override (set only by `pp-sweep voice`) wins when
+            // present, since that sweep varies pre-roll per config in one
+            // process where the tuning global can be installed only once.
+            let pre_roll_ms = self
+                .pre_roll_ms_override
+                .unwrap_or_else(|| crate::tuning::tuning().voice.pre_roll_ms);
             self.pre_roll.push_back(frame);
             while let (Some(oldest), Some(newest)) = (self.pre_roll.front(), self.pre_roll.back()) {
-                if newest.captured_at.saturating_sub(oldest.captured_at) <= PRE_ROLL_MS {
+                if newest.captured_at.saturating_sub(oldest.captured_at) <= pre_roll_ms {
                     break;
                 }
                 self.pre_roll.pop_front();

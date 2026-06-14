@@ -2,9 +2,14 @@
 //! chunking tuning"; founder request, June 2026): known recordings in,
 //! the program's ACTUAL minted journal entries out. The whole production
 //! pipeline runs for real — silero VAD in-process, the supervised
-//! `pp-asr-server` wrapper child (spawned directly here), the capture
-//! engine with its onset binding and trailing-ship window — only the
-//! microphone is replaced by a wav file and the wall clock by FakeClock.
+//! `pp-asr-server` wrapper child, the capture engine with its onset
+//! binding and trailing-ship window — only the microphone is replaced by
+//! a wav file and the wall clock by FakeClock.
+//!
+//! The VAD+ASR+engine wiring and the gated-vs-raw scoring now live in the
+//! shared `photoproof_core::voice_bench` library module, so this bin and
+//! `pp-sweep voice` drive the SAME pipeline (they MUST agree on what a config
+//! scores). This bin is the thin CLI/printing wrapper plus the synth mode.
 //!
 //! Two modes:
 //!
@@ -46,20 +51,12 @@
 //! Audio never persists (kernel K10 applies to the bench too): frames go
 //! wav → ring → VAD → wire, all in memory; the journal db is a tempdir.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
-use photoproof_connectors::silero::SileroVad;
-use photoproof_connectors::transcriber::AudioFrame;
-use photoproof_connectors::{EndpointCell, SherpaOnlineTranscriber};
-use photoproof_core::capture::{CaptureEngine, FakeClock};
-use photoproof_core::{ContentHash, Event, EventStore, Payload, SessionContext};
-
-const SR: u32 = 16_000;
-const FRAME_MS: u64 = 50;
+use photoproof_core::voice_bench::{
+    self, SR, Seg, VoiceKnobs, default_model_dir, default_server, read_wav, write_wav,
+};
 
 struct Args {
     // synth mode
@@ -82,6 +79,10 @@ struct Args {
 }
 
 fn parse_args() -> Args {
+    // Silero hysteresis defaults come from the shipped `[voice]` tuning (which
+    // equals silero's own consts absent an override) so the bin's baseline
+    // matches the app's; explicit flags override.
+    let dflt = VoiceKnobs::default();
     let mut a = Args {
         synth: None,
         speech: None,
@@ -93,9 +94,9 @@ fn parse_args() -> Args {
         rule2: None,
         rule3: None,
         endpoint_grace_ms: None,
-        enter: 0.5,
-        exit: 0.35,
-        hang: 15,
+        enter: dflt.enter,
+        exit: dflt.exit,
+        hang: dflt.hang,
         json: false,
         expect: None,
     };
@@ -135,71 +136,32 @@ fn parse_args() -> Args {
     a
 }
 
-// ---------------------------------------------------------------------------
-// Minimal RIFF/PCM16 mono 16 kHz wav io (the silero fixture format).
-// ---------------------------------------------------------------------------
+impl Args {
+    /// The VOICE DIALS this run drives (the shared harness's knob bundle).
+    fn knobs(&self) -> VoiceKnobs {
+        VoiceKnobs {
+            rule1: self.rule1,
+            rule2: self.rule2,
+            rule3: self.rule3,
+            endpoint_grace_ms: self.endpoint_grace_ms,
+            enter: self.enter,
+            exit: self.exit,
+            hang: self.hang,
+            // The bin reads the global pre-roll dial (no per-run override flag).
+            pre_roll_ms: None,
+        }
+    }
+}
 
-fn read_wav(path: &PathBuf) -> Vec<f32> {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| {
-        eprintln!("pp-voice-bench: read {}: {e}", path.display());
+/// Synth mode: build N+1 copies of the speech clip separated by the gaps, plus a
+/// `<out>.expected.txt` (segmentation truth by construction).
+fn synth(out: &Path, speech: &Path, gaps: &[f64]) {
+    let clip = read_wav(speech).unwrap_or_else(|e| {
+        eprintln!("pp-voice-bench: read {}: {e}", speech.display());
         std::process::exit(1);
     });
-    // Chunk walk: verify fmt (PCM16 mono 16 kHz), find data.
-    assert!(
-        &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
-        "not a wav"
-    );
-    let mut at = 12usize;
-    let mut data: Option<&[u8]> = None;
-    while at + 8 <= bytes.len() {
-        let id = &bytes[at..at + 4];
-        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
-        let body = &bytes[at + 8..(at + 8 + len).min(bytes.len())];
-        if id == b"fmt " {
-            let channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
-            let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
-            let bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
-            assert!(
-                channels == 1 && rate == SR && bits == 16,
-                "need PCM16 mono 16 kHz, got {channels}ch {rate}Hz {bits}bit \
-                 (convert: ffmpeg -i in -ar 16000 -ac 1 -sample_fmt s16 out.wav)"
-            );
-        } else if id == b"data" {
-            data = Some(body);
-        }
-        at += 8 + len + (len & 1);
-    }
-    data.expect("wav has no data chunk")
-        .chunks_exact(2)
-        .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
-        .collect()
-}
-
-fn write_wav(path: &PathBuf, samples: &[f32]) {
-    let data_len = (samples.len() * 2) as u32;
-    let mut out = Vec::with_capacity(44 + samples.len() * 2);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&SR.to_le_bytes());
-    out.extend_from_slice(&(SR * 2).to_le_bytes()); // byte rate
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
-    for s in samples {
-        out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
-    }
-    std::fs::write(path, out).expect("write wav");
-}
-
-fn synth(out: &PathBuf, speech: &PathBuf, gaps: &[f64]) {
-    let clip = read_wav(speech);
-    // Trim the clip's own leading/trailing silence (-35 dB energy gate,
-    // the spike methodology) so the scripted gaps are the ONLY silence.
+    // Trim the clip's own leading/trailing silence (-35 dB energy gate, the
+    // spike methodology) so the scripted gaps are the ONLY silence.
     let peak = clip.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     let gate = peak * 10f32.powf(-35.0 / 20.0);
     let rms_over = |w: &[f32]| (w.iter().map(|v| v * v).sum::<f32>() / w.len() as f32).sqrt();
@@ -228,7 +190,7 @@ fn synth(out: &PathBuf, speech: &PathBuf, gaps: &[f64]) {
         ));
         samples.extend(vec![0.0f32; (gap * f64::from(SR)) as usize]);
     }
-    write_wav(out, &samples);
+    write_wav(out, &samples).expect("write wav");
     let expect_path = format!("{}.expected.txt", out.display());
     std::fs::write(&expect_path, expected.join("\n") + "\n").expect("write expected");
     println!(
@@ -240,196 +202,22 @@ fn synth(out: &PathBuf, speech: &PathBuf, gaps: &[f64]) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Run mode: the live pipeline against a recording.
-// ---------------------------------------------------------------------------
-
-fn default_model_dir() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME");
-    PathBuf::from(home).join(
-        "Library/Application Support/com.photoproof.desktop/models/\
-         nemotron-speech-streaming-en-0.6b-560ms-int8",
-    )
-}
-
-fn default_server() -> PathBuf {
-    // Workspace bins land side by side in target/{profile}/.
-    let exe = std::env::current_exe().expect("current exe");
-    exe.parent().expect("exe dir").join("pp-asr-server")
-}
-
-/// Spawn the wrapper child exactly as the supervisor does (ephemeral
-/// port, READY handshake on stdout) and return (child, addr).
-fn spawn_server(a: &Args) -> (Child, SocketAddr) {
-    let server = a.server.clone().unwrap_or_else(default_server);
-    let dir = a.model_dir.clone().unwrap_or_else(default_model_dir);
-    let mut args = vec![
-        "--port".into(),
-        "0".into(),
-        "--encoder".into(),
-        dir.join("encoder.int8.onnx").display().to_string(),
-        "--decoder".into(),
-        dir.join("decoder.int8.onnx").display().to_string(),
-        "--joiner".into(),
-        dir.join("joiner.int8.onnx").display().to_string(),
-        "--tokens".into(),
-        dir.join("tokens.txt").display().to_string(),
-        "--num-threads".into(),
-        "4".into(),
-    ];
-    for (flag, v) in [
-        ("--rule1", a.rule1),
-        ("--rule2", a.rule2),
-        ("--rule3", a.rule3),
-    ] {
-        if let Some(v) = v {
-            args.push(flag.into());
-            args.push(v.to_string());
-        }
-    }
-    if let Some(g) = a.endpoint_grace_ms {
-        args.push("--endpoint-grace-ms".into());
-        args.push(g.to_string());
-    }
-    let mut child = Command::new(&server)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap_or_else(|e| {
-            eprintln!("pp-voice-bench: spawn {}: {e}", server.display());
-            std::process::exit(1);
-        });
-    let stdout = child.stdout.take().expect("piped stdout");
-    let mut lines = BufReader::new(stdout).lines();
-    // Model load takes a few seconds; READY is the §8.1 handshake.
-    for line in &mut lines {
-        let line = line.expect("server stdout");
-        if let Some(port) = line.strip_prefix("READY port=") {
-            let port: u16 = port.trim().parse().expect("READY port");
-            return (child, SocketAddr::from(([127, 0, 0, 1], port)));
-        }
-    }
-    eprintln!("pp-voice-bench: server exited before READY (model files present?)");
-    std::process::exit(1);
-}
-
-struct Seg {
-    onset_ms: i64,
-    dur_ms: u32,
-    text: String,
-}
-
-fn seg_of(e: &Event, wall0: i64) -> Seg {
-    let dur_ms = match &e.payload {
-        Some(Payload::Voice { dur_ms, .. }) => *dur_ms,
-        _ => 0,
-    };
-    Seg {
-        onset_ms: e.ts.epoch_ms() - wall0,
-        dur_ms,
-        text: e.text.clone().unwrap_or_default(),
-    }
-}
-
-/// Drive the live pipeline once over `samples` with the given silero
-/// hysteresis, returning the minted segments and the abandoned count.
-///
-/// Factored out of `run` so `--expect` can drive it TWICE against the
-/// SAME recording — once GATED (the caller's VAD params, the production
-/// path that can truncate) and once RAW (gate forced open) — and score
-/// both feeds against one transcript. That raw-vs-gated WER gap is the
-/// founder's headline: it splits MODEL error from PIPELINE truncation.
-fn drive_pipeline(
-    samples: &[f32],
-    addr: SocketAddr,
-    enter: f32,
-    exit: f32,
-    hang: u32,
-) -> (Vec<Seg>, u64) {
-    // Scratch journal db (tempfile is a dev-dependency; bins get std).
-    // Unique per pass so a second drive in the same process never reopens
-    // the first pass's store.
-    let dir = std::env::temp_dir().join(format!(
-        "pp-voice-bench-{}-{}",
-        std::process::id(),
-        // nanos disambiguate the two passes of a single --expect run.
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    let store = EventStore::open(dir.join("bench.db")).expect("open store");
-    let session = store
-        .open_session(SessionContext {
-            app_version: "pp-voice-bench".into(),
-            device_id: "beefbeefbeefbeefbeefbeefbeefbeef".into(),
-            root_context: None,
-        })
-        .expect("open session");
-
-    let cell = EndpointCell::fixed(addr);
-    let transcriber = SherpaOnlineTranscriber::new("bench", cell);
-    let vad = SileroVad::with_params(enter, exit, hang).expect("silero");
-    // Anchor the fake clock at REAL now: event ids stay monotonic with
-    // the session row (no wall-regress warning); onsets report relative
-    // to this anchor either way.
-    let wall0 = photoproof_core::UtcMillis::now().epoch_ms();
-    let clock = FakeClock::new(wall0);
-    let mut engine = CaptureEngine::new(clock.clone(), &transcriber, Box::new(vad), session);
-    // One synthetic bound image, like a real selection.
-    engine.set_scope(vec![ContentHash::from_hex(&"ab".repeat(32)).expect("hash")]);
-    assert!(engine.arm().is_armed(), "arm failed (server reachable?)");
-
-    // Feed 50 ms frames; the fake clock IS the stream clock, so the
-    // run is deterministic in audio time regardless of decode speed
-    // (endpoint decisions live in received-audio time on the server).
-    let frame_len = (SR as u64 * FRAME_MS / 1000) as usize;
-    let mut segs: Vec<Seg> = Vec::new();
-    let mut at_ms: u64 = 0;
-    for chunk in samples.chunks(frame_len) {
-        let events = engine.push_audio(
-            &store,
-            AudioFrame {
-                samples: chunk.to_vec(),
-                captured_at: at_ms,
-            },
-        );
-        segs.extend(events.iter().map(|e| seg_of(e, wall0)));
-        clock.advance(FRAME_MS);
-        at_ms += FRAME_MS;
-    }
-    // End of recording: disarm and drive the drain like the shell's
-    // pp-mic-drain thread — real sleeps for the server's tail flush,
-    // SLOW fake-clock advance so the 5 s deadline does not outrun it.
-    segs.extend(engine.disarm(&store).iter().map(|e| seg_of(e, wall0)));
-    while engine.stream_open() {
-        std::thread::sleep(Duration::from_millis(100));
-        clock.advance(50);
-        segs.extend(engine.pump(&store).iter().map(|e| seg_of(e, wall0)));
-    }
-    let abandoned = engine.abandoned_count();
-    (segs, abandoned)
-}
-
-/// Concatenate a feed's minted segment text into one hypothesis string
-/// for WER scoring. Order is mint order (onset order), which is reading
-/// order — exactly what the reference transcript is in.
-fn hypothesis_of(segs: &[Seg]) -> String {
-    segs.iter()
-        .map(|s| s.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn run(a: &Args) {
     let wav = a.wav.as_ref().expect("--wav required (or --synth)");
-    let samples = read_wav(wav);
-    let (child, addr) = spawn_server(a);
-    // Kill-on-drop: a panic anywhere below must not leak the server (it
-    // inherits our stderr and would hold the caller's pipe open forever).
-    struct Reap(Child);
+    let samples = read_wav(wav).unwrap_or_else(|e| {
+        eprintln!("pp-voice-bench: read {}: {e}", wav.display());
+        std::process::exit(1);
+    });
+    let server = a.server.clone().unwrap_or_else(default_server);
+    let model_dir = a.model_dir.clone().unwrap_or_else(default_model_dir);
+    let knobs = a.knobs();
+    let (child, addr) =
+        voice_bench::spawn_server(&server, &model_dir, &knobs).unwrap_or_else(|e| {
+            eprintln!("pp-voice-bench: {e}");
+            std::process::exit(1);
+        });
+    // Kill-on-drop: a panic anywhere below must not leak the server.
+    struct Reap(std::process::Child);
     impl Drop for Reap {
         fn drop(&mut self) {
             let _ = self.0.kill();
@@ -438,38 +226,29 @@ fn run(a: &Args) {
     }
     let _reap = Reap(child);
 
-    // The production (GATED) pass: the caller's VAD hysteresis, the path
-    // that can truncate. This is the sole pass for the back-compat sweep
-    // flows (no --expect) and the "gated" feed when --expect is present.
-    let (segs, abandoned) = drive_pipeline(&samples, addr, a.enter, a.exit, a.hang);
+    // The production (GATED) pass; the sole pass without --expect.
+    let (segs, abandoned) = voice_bench::drive_pipeline(
+        &samples,
+        addr,
+        knobs.enter,
+        knobs.exit,
+        knobs.hang,
+        knobs.pre_roll_ms,
+    );
 
-    // --expect upgrade (BACKLOG "Audiobook WER stress harness"): score
-    // the produced hypotheses against a reference transcript. We drive a
-    // SECOND, RAW pass over the same recording with the gate forced open
-    // (enter/exit = 0.0 -> every window scores >= the threshold, so every
-    // frame ships to the ASR). RAW WER is the model-accuracy ceiling;
-    // GATED WER adds whatever the VAD/endpointer truncation costs. The
-    // gap between them is the founder's headline number. Computed only
-    // when --expect is given, so the no-expect path is byte-for-byte the
-    // old behavior (one pass, no transcript read).
+    // --expect upgrade: score gated + raw against the reference (the shared
+    // `score_run` drives the gated pass AGAIN under the hood — kept for shape
+    // parity with the no-expect path, where only the gated pass runs).
     let scoring = a.expect.as_ref().map(|expect| {
         let reference = std::fs::read_to_string(expect).unwrap_or_else(|e| {
             eprintln!("pp-voice-bench: read --expect {}: {e}", expect.display());
             std::process::exit(1);
         });
-        let gated_hyp = hypothesis_of(&segs);
-        let gated = photoproof_core::voice_wer::score(&reference, &gated_hyp);
-        // Raw pass: same recording, gate wide open.
-        let (raw_segs, _) = drive_pipeline(&samples, addr, 0.0, 0.0, a.hang);
-        let raw_hyp = hypothesis_of(&raw_segs);
-        let raw = photoproof_core::voice_wer::score(&reference, &raw_hyp);
-        (raw, gated)
+        voice_bench::score_run(&samples, addr, &knobs, &reference)
     });
 
     if a.json {
-        // Build the WER sub-object only when scoring ran; otherwise the
-        // JSON shape is unchanged for existing sweep consumers.
-        let wer_json = scoring.as_ref().map(|(raw, gated)| {
+        let wer_json = scoring.as_ref().map(|r| {
             let feed = |s: &photoproof_core::voice_wer::WerScore| {
                 serde_json::json!({
                     "wer": s.wer,
@@ -480,8 +259,8 @@ fn run(a: &Args) {
             };
             serde_json::json!({
                 "expect": a.expect.as_ref().map(|p| p.display().to_string()),
-                "raw": feed(raw),
-                "gated": feed(gated),
+                "raw": feed(&r.raw),
+                "gated": feed(&r.gated),
             })
         });
         let json = serde_json::json!({
@@ -499,16 +278,8 @@ fn run(a: &Args) {
         });
         println!("{json}");
     } else {
-        println!("{} entries minted ({} abandoned):", segs.len(), abandoned);
-        for s in &segs {
-            println!(
-                "  [{:7.2}s +{:5.2}s] {:?}",
-                s.onset_ms as f64 / 1000.0,
-                f64::from(s.dur_ms) / 1000.0,
-                s.text
-            );
-        }
-        if let Some((raw, gated)) = &scoring {
+        print_segments(&segs, abandoned);
+        if let Some(r) = &scoring {
             let line = |label: &str, s: &photoproof_core::voice_wer::WerScore| {
                 println!(
                     "  {label:5} WER {:.4}  (S {} D {} I {} N {}  hits {}  hit_rate {:.4})",
@@ -522,18 +293,26 @@ fn run(a: &Args) {
                 );
             };
             println!("WER vs {}:", a.expect.as_ref().expect("checked").display());
-            line("RAW", raw);
-            line("GATED", gated);
-            // The headline: how much WER the pipeline's gating ADDS on top
-            // of the model's own error (positive = truncation cost).
-            println!(
-                "  gating cost (gated - raw WER): {:+.4}",
-                gated.wer - raw.wer
-            );
+            line("RAW", &r.raw);
+            line("GATED", &r.gated);
+            // The headline: how much WER the pipeline's gating ADDS on top of
+            // the model's own error (positive = truncation cost).
+            println!("  gating cost (gated - raw WER): {:+.4}", r.gating_cost());
         }
     }
-    // Flush before exit (println buffers under pipes).
     let _ = std::io::stdout().flush();
+}
+
+fn print_segments(segs: &[Seg], abandoned: u64) {
+    println!("{} entries minted ({} abandoned):", segs.len(), abandoned);
+    for s in segs {
+        println!(
+            "  [{:7.2}s +{:5.2}s] {:?}",
+            s.onset_ms as f64 / 1000.0,
+            f64::from(s.dur_ms) / 1000.0,
+            s.text
+        );
+    }
 }
 
 fn main() {
