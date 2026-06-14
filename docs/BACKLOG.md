@@ -167,6 +167,64 @@ work lives here.
   in CI over .svelte template regions / string literals) so they don't
   creep back. (Founder, June 12 2026.)
 
+## Founder thread, June 14 2026 - model-usage walkthrough (decisions)
+
+Came out of a walkthrough of every ML model and where they overlap (see
+`docs/RUNTIME-MATRIX.md` "Model concurrency", `docs/ROADMAP.md`). Four items, two
+of them posture changes the founder made deliberately.
+
+- [ ] **Derived summaries become VISIBLE journal entries, marked "system" and
+  DELETABLE** (founder, June 14 2026: "I do want to have derived summaries be shown
+  to the user and marked as 'system', which allows users to delete them if the
+  system made an error instead of keeping that hidden wrong forever. All this can be
+  in the journal tab."). A DELIBERATE BEND of K14 (machine prose was "retrieval fuel
+  only, never user-visible"): instead of hiding machine summaries, SURFACE them in
+  the journal tab with a `system` source chip and let the user DELETE a wrong one (a
+  retraction on a system-authored entry) - transparency beats hidden-wrong-forever.
+  Spec impact: RETRIEVAL §9 (summaries no longer invisible fuel-only), EVENTS (a
+  `system` source + a user-deletable system entry; reuse retraction). Pairs with the
+  summary-GENERATION work (still unbuilt, M3) and the type-chip item below. The
+  derived-summary text must STILL be embedded by EmbeddingGemma into the
+  `image_summary` vector (the S3 search lane already consumes it) so a visible system
+  summary stays searchable - confirmed that is the existing design, just not yet
+  generating. (Founder, June 14 2026.)
+
+- [ ] **Journal entry type/source chips** (founder, June 14 2026): each journal
+  entry should show a small TYPE CHIP for its source/kind so a drawing vs a voice
+  annotation vs a written note vs an LLM "Summary" are distinct at a glance. Today
+  `source` (voice/typed/pencil/system) is only a hover-title on the timestamp
+  (`JournalEntry.svelte:85`) and kinds (remark/rating/stroke/revision/retraction/
+  redaction) are distinguished by content STRUCTURE only - no visible badge. Add
+  explicit chips: source (voice - typed - pencil - system) plus the system/"Summary"
+  tag from the item above. (Founder, June 14 2026.)
+
+- [ ] **Generate tags from our data and EXPORT them INTO the image files (writes
+  real file metadata)** (founder, June 14 2026: "a feature which is to generate tags
+  based off our data and export them directly to the images, with clear warnings
+  that this actually does change the meta-data of the actual files"). Generate
+  keyword tags from what the app already knows (collections, topic-graph clusters,
+  derived summaries, CLIP/embedding neighborhoods) and write them as IPTC/XMP
+  keywords INTO the originals (or an adjacent `.xmp`), for use in Lightroom / Bridge
+  / Finder. POSTURE CHANGE: this is the FIRST feature that writes to the user's
+  originals - it knowingly breaks the strict non-destructive posture, so it MUST be
+  opt-in, explicitly warned ("this modifies your actual files"), and ideally
+  backup/undo-aware. RELATION: goes beyond SIDECARS §14 (a one-way XMP *sidecar*
+  export that never touches files); and it REOPENS the "Won't build: metadata
+  editing" line at the bottom of this file - founder-directed, but scoped to warned,
+  opt-in tag EXPORT, not general in-app metadata management. Needs a design round
+  (what writes, where, how warned, reversibility). (Founder, June 14 2026.)
+
+- [ ] **Relax the capture-pause for GPU embedders** (founder, June 14 2026: "Once we
+  do have the ML model set up on GPU then we won't want to pause them while we're
+  doing ASR."). The scheduler currently pauses ALL background model work while the
+  mic is armed. That is correct TODAY because the embedders run on CPU and share
+  silicon with the CPU ASR. Once the embedders move to a GPU execution provider
+  (CoreML/CUDA, see RUNTIME-MATRIX), a GPU embed pass no longer contends with CPU
+  ASR, so the pause should be RELAXED per-model: keep pausing the GPU LLM during
+  capture (memory-bandwidth + thermal headroom), but let GPU embed passes continue.
+  A per-model pause policy instead of "pause all background." Gated on the GPU EP
+  landing. (Founder, June 14 2026.)
+
 ## Performance / SOTA (audit June 13 2026)
 
 Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). The
@@ -539,3 +597,9 @@ Color labels / pick-reject flags · metadata editing · image editing ·
 import/copy/move workflows · in-app deletion (D3) · multi-window/tabs ·
 auto-hide chrome · keyword taxonomies (collections are intent groupings with
 evented membership — "tags with time" — never hierarchical vocabularies).
+
+NOTE (June 14 2026): "metadata editing" is NARROWLY REOPENED as an opt-in, warned
+TAG-EXPORT-to-files feature (see the June 14 founder thread above) - generating
+keyword tags from app data and writing them into originals for interop. That is
+export, not in-app metadata management; editing existing metadata as a workflow
+stays off-thesis.

@@ -108,6 +108,11 @@ CUDA/CoreML providers if ever wanted. Default: stay on CPU.
 - **[planned]** DirectML EP option (Windows GPUs without CUDA).
 - **[later]** Vulkan path for the `ort` embedders - needs a non-`ort` runtime; the
   cross-platform GPU fallback.
+- **[planned, founder June 14 2026]** per-model capture-pause: once the embedders run
+  on a GPU EP, RELAX the mic-armed pause for GPU embed passes (a GPU embed no longer
+  contends with CPU ASR). Keep pausing the GPU LLM during capture (bandwidth/thermal).
+  Replaces today's blanket "pause all background" with a per-model policy. Gated on the
+  GPU EP landing. See `docs/BACKLOG.md` June 14 thread.
 - **[design -> implement]** the supervisor choosing EP/binary by DETECTED hardware +
   tier is already designed for llama.cpp; extend the same auto-detect + graceful
   fallback to the `ort` embedders (CoreML/CUDA/DirectML/CPU) once FP16 lands.
