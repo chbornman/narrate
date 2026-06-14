@@ -307,6 +307,25 @@ impl OrtEmbedder {
             model_id: self.model_id.clone(),
         }
     }
+
+    /// The visual tower's `image` input shape as ORT sees it (`-1` for any
+    /// dynamic/symbolic axis). Test-only: it backs the `visual_tower_is_batch_one`
+    /// guard, which is the executable form of the "batching needs a batch-dynamic
+    /// re-export" finding — if a future re-export makes dim0 dynamic, the test
+    /// flips and signals that the batched `embed_images` path is now unlockable.
+    #[cfg(test)]
+    fn clip_image_input_shape(&self) -> Option<Vec<i64>> {
+        let Inner::Clip { image_session, .. } = &self.inner else {
+            return None;
+        };
+        let session = image_session.lock().expect("poisoned ort session");
+        let input = session.inputs().iter().find(|i| i.name() == "image")?;
+        let ValueType::Tensor { shape, .. } = input.dtype() else {
+            return None;
+        };
+        // `Shape` derefs to `[i64]`; own it so the lock can drop at return.
+        Some(shape.to_vec())
+    }
 }
 
 // ----------------------------------------------------------- prompts -----
@@ -750,6 +769,26 @@ fn run_clip_text(
     extract_clip_embedding(&outputs, dims)
 }
 
+/// Embed ONE image through the visual tower (`[1,3,378,378]` -> `[1,1024]`).
+///
+/// WHY one-at-a-time and not a batched `[N,3,378,378]` forward pass: the DFN5B
+/// visual ONNX exports we ship — BOTH the int8 external-data tower AND the FP16
+/// single-file tower that runs on CoreML/CUDA — have the batch dimension FIXED
+/// at 1, not symbolic. Verified June 2026 against the on-disk graph metadata:
+/// the `image` input is `[1, 3, 378, 378]` (a concrete `1`, no dim_param) and
+/// the PyTorch trace baked that `1` into ~350 internal Reshape constants, so ORT
+/// rejects any other batch size; it is not something the runtime can flex.
+///
+/// Batching the GPU embed (the BACKLOG win: "GPUs love batches", ~24x on the MLX
+/// text spike) is therefore a MODEL-CONVERSION follow-up, NOT a code change here:
+/// re-export the visual tower with a dynamic batch axis
+/// (`torch.onnx.export(..., dynamic_axes={"image": {0: "batch"}})`), re-run the
+/// COCO eval to confirm the re-export is retrieval-safe, and only THEN add an
+/// `embed_images(&[DecodedImage]) -> Vec<Embedding>` that builds one `[N,...]`
+/// tensor plus the per-image-pass batching of the call site. Until that
+/// re-export exists a batched path would only hard-fail at runtime, so it is
+/// deliberately NOT added. The single query path stays one-at-a-time regardless
+/// (one embedding per search, like the batch=1 textual tower).
 fn run_clip_image(
     session: &Mutex<Session>,
     img: &DecodedImage,
@@ -1217,6 +1256,78 @@ mod real_model_tests {
         let a = pollster::block_on(e.embed_text("a person")).expect("text");
         let b = pollster::block_on(e.embed_text("a building")).expect("text");
         assert!(cos(&a, &b) < 0.99, "distinct captions too similar");
+    }
+
+    /// The executable form of the "batching is a model-conversion follow-up"
+    /// finding (lever 1): the shipped DFN5B visual tower's `image` input has its
+    /// batch axis FIXED at 1, so a batched `[N,3,378,378]` forward pass is not
+    /// possible without a batch-dynamic re-export. This guards both directions:
+    /// it documents WHY `run_clip_image` is one-at-a-time, AND if a future
+    /// re-export makes dim0 dynamic (`-1`) this assertion flips — a loud signal
+    /// that the batched `embed_images` path can finally be built. Two distinct
+    /// images are also embedded singly to confirm the path stays correct.
+    #[test]
+    #[ignore = "needs the local DFN5B snapshot"]
+    fn visual_tower_is_batch_one_so_batching_needs_a_reexport() {
+        let root = models_root().join("dfn5b");
+        let vis = root.join("visual/model.onnx");
+        let txt = root.join("textual/model.onnx");
+        let tok = root.join("textual/tokenizer.json");
+        if !vis.exists() || !txt.exists() || !tok.exists() {
+            eprintln!("skipping: DFN5B snapshot absent at {}", vis.display());
+            return;
+        }
+        let e = OrtEmbedder::clip("ViT-H-14-378-quickgelu__dfn5b", &vis, &txt, &tok, 1024)
+            .expect("load clip");
+        let shape = e
+            .clip_image_input_shape()
+            .expect("visual image input shape");
+        // [batch, 3, 378, 378]. dim0 == 1 (concrete) is the FIXED-batch case
+        // this packet documents. A `-1` here would mean a dynamic re-export
+        // landed and the batched path is now unlockable.
+        assert_eq!(
+            shape[0], 1,
+            "visual tower batch dim is {} (expected fixed 1); a dynamic re-export \
+             would unlock embed_images - update run_clip_image's note + add the path",
+            shape[0]
+        );
+        assert_eq!(
+            &shape[1..],
+            &[3, CLIP_IMAGE_EDGE as i64, CLIP_IMAGE_EDGE as i64]
+        );
+
+        // Single-image path stays correct: two distinct synthetic images embed
+        // to distinct unit vectors (not collapsed), the property a batched path
+        // would have to preserve (cosine ~1.0 vs the single path).
+        let mut light = DecodedImage {
+            width: 378,
+            height: 378,
+            rgb8: vec![200u8; 378 * 378 * 3],
+        };
+        // A diagonal gradient so the two images are genuinely different content.
+        for (i, px) in light.rgb8.chunks_exact_mut(3).enumerate() {
+            let v = (i % 256) as u8;
+            px[0] = v;
+        }
+        let dark = DecodedImage {
+            width: 378,
+            height: 378,
+            rgb8: vec![40u8; 378 * 378 * 3],
+        };
+        let il = pollster::block_on(e.embed_image(&light)).expect("image light");
+        let id = pollster::block_on(e.embed_image(&dark)).expect("image dark");
+        assert_eq!(il.vector.len(), 1024);
+        assert_eq!(id.vector.len(), 1024);
+        // Re-embedding the SAME image must be deterministic (cosine ~1.0): the
+        // exact parity bar a batched embed would have to clear against the single
+        // path. Same pixels in, same vector out.
+        let il2 = pollster::block_on(e.embed_image(&light)).expect("image light again");
+        assert!(
+            cos(&il, &il2) > 0.9999,
+            "single-image embed must be deterministic (cosine {})",
+            cos(&il, &il2)
+        );
+        assert!(cos(&il, &id) < 0.999, "distinct images should not collapse");
     }
 
     #[test]

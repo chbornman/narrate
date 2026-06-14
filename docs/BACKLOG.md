@@ -256,17 +256,36 @@ of them posture changes the founder made deliberately.
   DirectML when the Windows bucket opens -> WebGPU-EP spike in parallel. Lower priority
   than the M1 (done) + 5080/CUDA (in progress) targets. (Founder, June 14 2026.)
 
-- [ ] **The GPU embed moved the bottleneck to DECODE - two levers** (founder, June 14
+- [~] **The GPU embed moved the bottleneck to DECODE - two levers** (founder, June 14
   2026, after the 5080 hit 54x): now that CLIP image embedding is GPU-fast (54x on the
   5080, 8.77x on the M1 CoreML), decode/resize is the new ingest ceiling. Decode IS
-  parallel today (rayon pool `min(cores,8)`, `library/mod.rs:2986`; BLAKE3 `min(cores,8)`)
+  parallel today (rayon pool `min(cores,8)`, `library/mod.rs`; BLAKE3 `min(cores,8)`)
   but two wins are now worth it: (a) **re-bench the `min(cores,8)` decode-pool cap** - it
-  was tuned on the M1 (`preview.rs:754` "more workers thrash the cache"); on the 9900X
+  was tuned on the M1 (`preview.rs` "more workers thrash the cache"); on the 9900X
   (12c/24t) feeding a 54x GPU it likely STARVES the GPU, so make it per-machine/tunable
   and re-bench on the desktop; (b) **BATCH the GPU embed** - `OrtEmbedder::embed_image`
   does ONE image per forward pass; GPUs love batches (the MLX text spike saw ~24x batched
   vs single-item), so batching the CLIP visual tower (16-32/forward) could beat even the
   TensorRT +1.5x. These are the next perf frontier on capable GPUs. (Founder, June 14 2026.)
+  - LEVER (a) LANDED June 14: the ingest pool cap is now env-overridable via
+    `PHOTOPROOF_INGEST_WORKERS` (`ingest_pool_size()` in `library/mod.rs`; default UNSET =
+    the prior `min(cores,8)`, byte-for-byte). Re-tune on the desktop with the `#[ignore]`
+    `bench_ingest_pool_width` harness (`PP_BENCH_DECODE_DIR=/jpegs cargo test -p
+    photoproof-core -- --ignored --nocapture bench_ingest_pool_width`), which sweeps
+    candidate widths over a real JPEG folder and prints img/s. Graduate the winning value
+    to a config FIELD (pairs with the CoreML env->field graduation).
+  - LEVER (b) BLOCKED on a model re-export, NOT a code change: the shipped DFN5B visual
+    ONNX (BOTH the int8 external-data tower AND the FP16 single-file tower on CoreML/CUDA)
+    has its batch dim FIXED at 1 - the `image` input is `[1,3,378,378]` (concrete `1`, no
+    dim_param) and the PyTorch trace baked that `1` into ~350 internal Reshape constants,
+    so ORT rejects any other batch size (verified June 14 against the on-disk graph
+    metadata + asserted by the `#[ignore]` real-model test
+    `visual_tower_is_batch_one_so_batching_needs_a_reexport`). FOLLOW-UP: re-export the
+    visual tower with `dynamic_axes={"image":{0:"batch"}}`, re-run the COCO eval to confirm
+    retrieval-safety, THEN add `OrtEmbedder::embed_images(&[DecodedImage]) -> Vec<Embedding>`
+    (one `[N,...]` forward pass) + batch the image-embedding pass (16-32/wave). The note on
+    `run_clip_image` (`ort_embedder.rs`) records this; the test flips loud when a dynamic
+    re-export lands. Single query path stays one-at-a-time regardless.
 
 - [ ] **First-run onboarding flow: "optimizing for your hardware" + guided setup**
   (founder, June 14 2026: "on our welcome screen we should explain / walk through initial
