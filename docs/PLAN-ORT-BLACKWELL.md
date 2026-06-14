@@ -6,19 +6,28 @@
 > system (`/usr/lib/libcudnn.so`). Pointing `ORT_DYLIB_PATH` at its `libonnxruntime.so.1.26.0`
 > + the `cuda-dynamic` feature, the FP16 CLIP visual tower ran on the 5080 at **37.65 img/s
 > (2259 img/min) vs 0.69 img/s (41 img/min) CPU = 54.47x**, near-lossless (cosine 0.9998
-> mean, 0.9973 min). That is **14x the M1's CoreML path** and ~125x the M1 CPU. CUDA ALONE -
-> TensorRT fell through (`fail_silently`, no libnvinfer on `LD_LIBRARY_PATH`), so a TensorRT
-> install (Fallback B) adds the last ~1.5x.
+> mean, 0.9973 min). That was CUDA alone.
+>
+> ## TensorRT (Fallback B) -> 85.79x. Done.
+> Installing TensorRT 10.16.1 (`pip install 'tensorrt-cu12<11'` in a Python 3.12 venv - the
+> `<11` pin matches onnxruntime 1.26's `libnvinfer.so.10`; the wheel ships
+> `libnvinfer_builder_resource_sm120` = full Blackwell) and putting `tensorrt_libs/` on
+> `LD_LIBRARY_PATH`, the EP ladder's TensorRT-FP16 rung engaged (23.9s first engine build vs
+> CUDA's 1.1s, cached in `.trt-cache`): **60.59 img/s (3635 img/min) = 85.79x over CPU**,
+> +1.58x over CUDA, cosine 0.99994 (0 of 60 below 0.999). That is ~22x the M1 CoreML path and
+> ~200x the M1 CPU - the ceiling of the whole stack.
 >
 > Exact working invocation (margo):
 > ```bash
 > ORT_DIR=~/onnxruntime-linux-x64-gpu-1.26.0   # extracted from the cuda13 tgz
+> TRT_LIBS=~/trt-venv/lib/python3.12/site-packages/tensorrt_libs   # pip 'tensorrt-cu12<11'
 > ORT_DYLIB_PATH=$ORT_DIR/lib/libonnxruntime.so.1.26.0 \
-> LD_LIBRARY_PATH=$ORT_DIR/lib:/opt/cuda/lib64:/usr/lib \
+> LD_LIBRARY_PATH=$ORT_DIR/lib:$TRT_LIBS:/opt/cuda/lib64:/usr/lib \
 >   cargo test -p photoproof-connectors --features cuda-dynamic --test cuda_spike -- --ignored --nocapture
 > ```
-> REMAINING: wire `ORT_DYLIB_PATH` + the `cuda-dynamic` build into the desktop app launch on
-> NVIDIA (the analog of the macOS CoreML flip) + optionally the TensorRT EP for ~1.5x more.
+> REMAINING: wire `ORT_DYLIB_PATH` + `LD_LIBRARY_PATH` + the `cuda-dynamic` build into the
+> desktop app launch on NVIDIA (the analog of the macOS CoreML flip). Then: batch the embed +
+> re-bench the decode-pool cap (the bottleneck has moved to decode - see BACKLOG).
 
 Status: READY-TO-EXECUTE on margo (Arch Linux, Ryzen 9900X, RTX 5080, CUDA 13.3,
 driver 610, `paru`, sudo). No code change required — PhotoProof's `cuda-dynamic`

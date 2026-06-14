@@ -233,12 +233,14 @@ of them posture changes the founder made deliberately.
   committed. The Blackwell (sm_120) blocker (no prebuilt onnxruntime kernels) was
   solved with the official **cuda13 onnxruntime tarball** (real sm_120 SASS) loaded
   via `ort/load-dynamic` + `ORT_DYLIB_PATH` (recipe + result in
-  `docs/PLAN-ORT-BLACKWELL.md`). REMAINING: (a) wire `ORT_DYLIB_PATH` + the
-  `cuda-dynamic` build into the desktop app launch on NVIDIA (the analog of the macOS
-  CoreML flip); (b) the TensorRT EP for the last ~1.5x (install libnvinfer); (c)
-  re-measure EmbeddingGemma on CUDA (it takes the whole transformer graph, unlike
-  CoreML). The 5080 can also run a higher tier (bigger LLM + Gemma 4 MTP, see
-  PLAN-GEMMA-MTP). (Founder, June 14 2026.)
+  `docs/PLAN-ORT-BLACKWELL.md`). The TensorRT EP rung ALSO validated: **85.79x**
+  (3635 img/min, +1.58x over CUDA, cosine 0.99994) with TensorRT 10.16.1
+  (`pip 'tensorrt-cu12<11'`, ships the sm120 builder resource). REMAINING: (a) wire
+  `ORT_DYLIB_PATH` + `LD_LIBRARY_PATH` + the `cuda-dynamic` build into the desktop app
+  launch on NVIDIA (the analog of the macOS CoreML flip); (b) re-measure EmbeddingGemma
+  on CUDA/TensorRT (whole-graph, unlike CoreML); (c) the decode-pool + batching levers
+  (the bottleneck moved to decode). The 5080 can also run a higher tier (bigger LLM +
+  Gemma 4 MTP, see PLAN-GEMMA-MTP). (Founder, June 14 2026.)
 
 - [ ] **Cross-platform GPU path for the `ort` embedders (non-Apple, non-NVIDIA)**
   (founder, June 14 2026: "and Vulkan too") - CORRECTED framing, see `docs/PLAN-VULKAN.md`:
