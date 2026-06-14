@@ -42,7 +42,10 @@ use tungstenite::Message;
 
 #[cfg(feature = "engine-parakeet")]
 mod engine_parakeet;
-#[cfg(feature = "engine-sherpa")]
+// parakeet overrides sherpa when both are on (matches `make_engine`'s cfg),
+// so only compile the sherpa module when it is the actually-selected engine.
+// Otherwise its whole session type is dead code under `-D warnings`.
+#[cfg(all(feature = "engine-sherpa", not(feature = "engine-parakeet")))]
 mod engine_sherpa;
 
 /// Sample rate declared to the engine for every inbound binary frame. WHY:
