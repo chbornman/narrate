@@ -173,8 +173,10 @@ fn sweep_ranks_configs_by_metric_and_proposes_winner() {
         ..baseline
     };
 
-    let base_report = evaluate(&searcher, &query_set, baseline, k).unwrap();
-    let starved_report = evaluate(&searcher, &query_set, starved, k).unwrap();
+    // `None` rig = the keyword-only arm (no models): this CI fixture has no
+    // embedders/vectors, so it exercises the unchanged headless fallback path.
+    let base_report = evaluate(&searcher, &query_set, baseline, k, None).unwrap();
+    let starved_report = evaluate(&searcher, &query_set, starved, k, None).unwrap();
 
     // The healthy baseline scores a perfect nDCG (each answer is the top hit);
     // starving s2 cannot beat it.
@@ -227,8 +229,8 @@ fn sweep_evaluate_is_config_sensitive() {
         },
         ..a
     };
-    let ra = evaluate(&searcher, &query_set, a, k).unwrap();
-    let rb = evaluate(&searcher, &query_set, b, k).unwrap();
+    let ra = evaluate(&searcher, &query_set, a, k, None).unwrap();
+    let rb = evaluate(&searcher, &query_set, b, k, None).unwrap();
     assert!(ra.mean_ndcg_at_k.is_finite() && rb.mean_ndcg_at_k.is_finite());
     assert_eq!(ra.query_count, 3);
 

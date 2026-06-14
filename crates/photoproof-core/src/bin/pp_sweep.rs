@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use photoproof_core::retrieval_eval::{EvalConfig, EvalReport, QuerySet, evaluate};
+use photoproof_core::retrieval_eval::{EvalConfig, EvalReport, EvalRig, QuerySet, evaluate};
 use photoproof_core::search::Searcher;
 use photoproof_core::tuning::VoiceTuning;
 use photoproof_core::voice_bench::{self, ScoreResult, VoiceKnobs};
@@ -91,6 +91,11 @@ struct Args {
     // --- search arm paths (required for `search`) ---
     db: Option<PathBuf>,
     queries: Option<PathBuf>,
+    /// `--models-dir <path>` (SEARCH arm): the app-data `models/` directory.
+    /// Present + the library has vectors -> the FULL model-backed rig (S1/S4
+    /// vote); absent -> keyword-only (the no-models fallback). Distinct from the
+    /// voice arm's `--model-dir` (ASR weights); they never apply to one run.
+    models_dir: Option<PathBuf>,
     // --- voice arm paths (required for `voice`) ---
     /// `--corpus <wav>`: the single recording to score every config over.
     /// Mutually exclusive with `--corpus-manifest` (the n=1 form).
@@ -120,9 +125,10 @@ struct Args {
 fn usage() -> &'static str {
     "usage:\n\
      pp-sweep search --db <photoproof.db> --queries <queryset.json> \
-     --grid \"s4=0.5,1.0;beta=0.3,0.5\" \
+     [--models-dir <dir>] --grid \"s4=0.5,1.0;beta=0.3,0.5\" \
      [--metric ndcg_at_k] [--k N] [--max-latency-ms N] [--json] [--propose <file>]\n\
-     (search paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET; args win)\n\
+     (search paths also from env PP_RETRIEVAL_DB / PP_RETRIEVAL_QUERYSET / PP_RETRIEVAL_MODELS_DIR; args win)\n\
+     --models-dir lights up the FULL model-backed rig (S1/S4 vote, built once); absent it is keyword-only\n\
      search knobs: s1 s2 s3 s4 rrf_k beta ; metrics: ndcg_at_k precision_at_k recall_at_k mrr\n\
      \n\
      pp-sweep voice (--corpus <recording.wav> --expect <reference.txt> \
@@ -154,6 +160,7 @@ fn parse_args() -> Result<Args, String> {
     // env supplies path defaults; explicit flags override (args win).
     let mut db = std::env::var_os("PP_RETRIEVAL_DB").map(PathBuf::from);
     let mut queries = std::env::var_os("PP_RETRIEVAL_QUERYSET").map(PathBuf::from);
+    let mut models_dir = std::env::var_os("PP_RETRIEVAL_MODELS_DIR").map(PathBuf::from);
     let mut corpus = std::env::var_os("PP_VOICE_CORPUS").map(PathBuf::from);
     let mut expect = std::env::var_os("PP_VOICE_EXPECT").map(PathBuf::from);
     let mut corpus_manifest = std::env::var_os("PP_VOICE_MANIFEST").map(PathBuf::from);
@@ -177,6 +184,7 @@ fn parse_args() -> Result<Args, String> {
         match flag.as_str() {
             "--db" => db = Some(PathBuf::from(val("--db")?)),
             "--queries" => queries = Some(PathBuf::from(val("--queries")?)),
+            "--models-dir" => models_dir = Some(PathBuf::from(val("--models-dir")?)),
             "--corpus" => corpus = Some(PathBuf::from(val("--corpus")?)),
             "--expect" => expect = Some(PathBuf::from(val("--expect")?)),
             "--corpus-manifest" => corpus_manifest = Some(PathBuf::from(val("--corpus-manifest")?)),
@@ -219,6 +227,7 @@ fn parse_args() -> Result<Args, String> {
         subsystem,
         db,
         queries,
+        models_dir,
         corpus,
         expect,
         corpus_manifest,
@@ -418,10 +427,13 @@ fn score_all(
     baseline: EvalConfig,
     overrides: &[ConfigOverride],
     k: usize,
+    rig: Option<&EvalRig>,
 ) -> Result<Vec<Row>, String> {
     let mut rows = Vec::with_capacity(overrides.len() + 1);
 
-    // The baseline row is always first to compute; it anchors the deltas.
+    // The baseline row is always first to compute; it anchors the deltas. The
+    // SAME `rig` (built once) flows to every config — the embedding is
+    // config-independent, only the weights change.
     rows.push(score_one(
         searcher,
         query_set,
@@ -431,6 +443,7 @@ fn score_all(
         k,
         "baseline",
         true,
+        rig,
     )?);
 
     for (i, ov) in overrides.iter().enumerate() {
@@ -442,7 +455,7 @@ fn score_all(
         }
         let label = format!("cfg{i}");
         rows.push(score_one(
-            searcher, query_set, baseline, ov, config, k, &label, false,
+            searcher, query_set, baseline, ov, config, k, &label, false, rig,
         )?);
     }
     Ok(rows)
@@ -459,9 +472,10 @@ fn score_one(
     k: usize,
     label: &str,
     is_baseline: bool,
+    rig: Option<&EvalRig>,
 ) -> Result<Row, String> {
     let started = Instant::now();
-    let report = evaluate(searcher, query_set, config, k)?;
+    let report = evaluate(searcher, query_set, config, k, rig)?;
     let wall_ms = started.elapsed().as_millis();
     Ok(Row {
         label: label.to_owned(),
@@ -748,11 +762,25 @@ fn run_search(args: &Args) -> Result<(), String> {
     let searcher =
         Searcher::open(db).map_err(|e| format!("opening library DB {}: {e}", db.display()))?;
 
+    // Build the model-backed rig ONCE (the ort load is seconds) and reuse it
+    // across every grid config. WHY once-and-reuse: embedding the query set is
+    // config-INDEPENDENT (same towers, same stored vectors); only the fusion
+    // WEIGHTS move per config. Re-loading per config would multiply the heavy
+    // load by the grid size for zero benefit. Absent --models-dir the rig is
+    // `None` and the sweep is keyword-only (the no-models fallback).
+    let rig = build_search_rig(args.models_dir.as_deref(), db)?;
+    if rig.is_some() {
+        eprintln!("pp-sweep search: model-backed rig active (S1/S4 vote across all configs)");
+    } else {
+        eprintln!("pp-sweep search: keyword-only rig (no models dir; S1/S4 dark)");
+    }
+
     // SEQUENTIAL by choice: the eval holds a single `Searcher` connection and
     // the rows must be deterministic for clean diffs. Parallelism would need
     // per-config read-only connections (SQLite concurrent readers) and buys
-    // little here (the eval is keyword-only, no models), so correctness wins.
-    let rows = score_all(&searcher, &query_set, baseline, &overrides, k)?;
+    // little here, so correctness wins. With a model rig the embedders are
+    // shared read-only across configs (built once above).
+    let rows = score_all(&searcher, &query_set, baseline, &overrides, k, rig.as_ref())?;
     let ranked = rank(rows, &args.metric, args.max_latency_ms);
     if ranked.is_empty() {
         return Err(
@@ -783,6 +811,33 @@ fn run_search(args: &Args) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Resolve the optional model-backed search rig from the CLI/env models dir.
+/// Same policy as `pp-retrieval-eval`: an explicit `--models-dir` must exist
+/// (a typo errors, never silently degrades to keyword-only and reports
+/// misleading numbers); absent the flag, the DB's sibling `models/` is used IF
+/// present (the app-data layout), else the sweep stays keyword-only. A present
+/// dir over a library with no stored vectors errors (nothing to rank against).
+fn build_search_rig(models_dir: Option<&Path>, db: &Path) -> Result<Option<EvalRig>, String> {
+    let dir = match models_dir {
+        Some(explicit) => {
+            if !explicit.is_dir() {
+                return Err(format!(
+                    "--models-dir {} is not a directory",
+                    explicit.display()
+                ));
+            }
+            explicit.to_path_buf()
+        }
+        None => match db.parent().map(|p| p.join("models")) {
+            Some(sibling) if sibling.is_dir() => sibling,
+            _ => return Ok(None),
+        },
+    };
+    // `from_db` resolves the text/clip model ids off the live `vectors` table
+    // (read-only) and defaults the `vectors/` dir to the DB's sibling.
+    Ok(Some(EvalRig::from_db(&dir, db)?))
 }
 
 /// K14 write guard, shared by both arms: a `--propose` target may NEVER be

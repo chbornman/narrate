@@ -29,8 +29,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use photoproof_connectors::OrtEmbedder;
 use photoproof_connectors::config::{EmbedderBackend, TextEmbedderBackend};
-use photoproof_connectors::{OrtEmbedder, TextRecipe};
+use photoproof_connectors::model_specs::{
+    build_clip_embedder, build_text_embedder, is_known_clip_model, is_known_text_model,
+};
 use photoproof_core::runtime::plan::{ProcessPlan, RuntimePlan};
 
 /// One role's lifecycle. `Building` carries the model id whose load is in
@@ -64,58 +67,13 @@ impl Slot {
     }
 }
 
-/// Which text recipe + which on-disk onnx file a model id resolves to. The
-/// three embedders are PINNED (manifest.rs), so a match on id is the simple,
-/// obvious resolution — no discovery, no heuristics. dims mirror the spike
-/// (docs/SPIKE-P7-EMBED.md): EmbeddingGemma 768, Qwen3 1024, DFN5B 1024.
-struct TextSpec {
-    recipe: TextRecipe,
-    /// Relative to `models_dir/<id>/` — the manifest's pinned file paths.
-    onnx: &'static str,
-    tokenizer: &'static str,
-    dims: usize,
-}
-
-fn text_spec(model_id: &str) -> Option<TextSpec> {
-    match model_id {
-        "embeddinggemma-300m-q8" => Some(TextSpec {
-            recipe: TextRecipe::MeanPooled,
-            onnx: "onnx/model_quantized.onnx",
-            tokenizer: "tokenizer.json",
-            dims: 768,
-        }),
-        "qwen3-embedding-0.6b-int8" => Some(TextSpec {
-            recipe: TextRecipe::LastToken,
-            onnx: "onnx/model_int8.onnx",
-            tokenizer: "tokenizer.json",
-            dims: 1024,
-        }),
-        _ => None,
-    }
-}
-
-/// The DFN5B CLIP pair's on-disk layout (manifest.rs / dfn5b_files.rs). The
-/// visual tower's external-data files load RELATIVE to `visual/model.onnx`,
-/// so the subdirectory layout the path-preserving downloads keep (L1) is
-/// load-bearing here.
-struct ClipSpec {
-    visual: &'static str,
-    textual: &'static str,
-    tokenizer: &'static str,
-    dims: usize,
-}
-
-fn clip_spec(model_id: &str) -> Option<ClipSpec> {
-    match model_id {
-        "ViT-H-14-378-quickgelu__dfn5b" => Some(ClipSpec {
-            visual: "visual/model.onnx",
-            textual: "textual/model.onnx",
-            tokenizer: "textual/tokenizer.json",
-            dims: 1024,
-        }),
-        _ => None,
-    }
-}
+// The pinned model-id -> on-disk-layout table and the `OrtEmbedder::{text,clip}`
+// construction now live in `photoproof_connectors::model_specs`, so this host
+// and the offline retrieval-eval rig (`pp-retrieval-eval` / `pp-sweep`) build
+// the SAME embedder stack from the SAME models dir. This host keeps the
+// lifecycle (converge loop, slots, the off-thread build); it only delegates the
+// "id + dir -> OrtEmbedder" step (`build_text_embedder` / `build_clip_embedder`)
+// and the cheap id-known check (`is_known_text_model` / `is_known_clip_model`).
 
 /// The host. Both slots sit behind one mutex each (transitions are cheap;
 /// only the background build does real work, off-lock). Each role has its
@@ -269,15 +227,16 @@ impl EmbedderHost {
             return;
         };
         // An unknown id (no recipe) is a config/manifest mismatch — record
-        // it as Failed, dark, never a crash.
-        let Some(spec) = text_spec(model_id) else {
+        // it as Failed synchronously, dark, never a crash (so an unknown id
+        // never even dispatches a doomed build thread).
+        if !is_known_text_model(model_id) {
             *slot = Slot::Failed {
                 model_id: model_id.to_owned(),
                 msg: format!("no ort text recipe for {model_id}"),
             };
             return;
-        };
-        let dir = models_dir.join(model_id);
+        }
+        let models_dir = models_dir.to_owned();
         let model_id = model_id.to_owned();
         *slot = Slot::Building {
             model_id: model_id.clone(),
@@ -289,18 +248,13 @@ impl EmbedderHost {
         // Build OFF the converge thread (load is seconds). The result lands
         // back in the slot only if no newer build superseded it. The
         // build_lock serializes the heavy ort load against the other role.
+        // The "id + dir -> OrtEmbedder" step is the shared connectors seam.
         let _ = std::thread::Builder::new()
             .name("pp-embed-build-text".into())
             .spawn(move || {
                 let built = {
                     let _hold = build_lock.lock().expect("build lock");
-                    OrtEmbedder::text(
-                        model_id.clone(),
-                        spec.recipe,
-                        &dir.join(spec.onnx),
-                        &dir.join(spec.tokenizer),
-                        spec.dims,
-                    )
+                    build_text_embedder(&model_id, &models_dir)
                 };
                 land_build(&target_slot, &generation, dispatch, model_id, built);
             });
@@ -319,14 +273,14 @@ impl EmbedderHost {
             *slot = Slot::Idle;
             return;
         };
-        let Some(spec) = clip_spec(model_id) else {
+        if !is_known_clip_model(model_id) {
             *slot = Slot::Failed {
                 model_id: model_id.to_owned(),
                 msg: format!("no ort clip recipe for {model_id}"),
             };
             return;
-        };
-        let dir = models_dir.join(model_id);
+        }
+        let models_dir = models_dir.to_owned();
         let model_id = model_id.to_owned();
         *slot = Slot::Building {
             model_id: model_id.clone(),
@@ -340,13 +294,7 @@ impl EmbedderHost {
             .spawn(move || {
                 let built = {
                     let _hold = build_lock.lock().expect("build lock");
-                    OrtEmbedder::clip(
-                        model_id.clone(),
-                        &dir.join(spec.visual),
-                        &dir.join(spec.textual),
-                        &dir.join(spec.tokenizer),
-                        spec.dims,
-                    )
+                    build_clip_embedder(&model_id, &models_dir)
                 };
                 land_build(&target_slot, &generation, dispatch, model_id, built);
             });
@@ -505,27 +453,11 @@ mod tests {
         assert!(lines.contains("text-embedder: idle"), "{lines}");
     }
 
-    /// Resolution truth (PLAN-P7.4 decision 2/3): the three pinned ids map
-    /// to the right recipe + dims; an id with no spec resolves to None.
-    #[test]
-    fn pinned_ids_resolve_to_recipes() {
-        assert_eq!(text_spec("embeddinggemma-300m-q8").unwrap().dims, 768);
-        assert_eq!(
-            text_spec("embeddinggemma-300m-q8").unwrap().recipe,
-            TextRecipe::MeanPooled
-        );
-        assert_eq!(text_spec("qwen3-embedding-0.6b-int8").unwrap().dims, 1024);
-        assert_eq!(
-            text_spec("qwen3-embedding-0.6b-int8").unwrap().recipe,
-            TextRecipe::LastToken
-        );
-        assert_eq!(
-            clip_spec("ViT-H-14-378-quickgelu__dfn5b").unwrap().dims,
-            1024
-        );
-        assert!(text_spec("nope").is_none());
-        assert!(clip_spec("nope").is_none());
-    }
+    // The pinned id -> recipe/dims resolution moved to
+    // `photoproof_connectors::model_specs` (so the eval rig shares it); its
+    // `pinned_ids_resolve_to_recipes` test lives there now. This host's tests
+    // below still pin the host BEHAVIOR (unknown id fails dark, drop discards a
+    // stale build) through the delegated `is_known_*` / `build_*` seam.
 
     /// REGRESSION (review L4-host): a drop-to-Idle must discard a stale
     /// in-flight build. The Idle and Failed converge transitions bump the
