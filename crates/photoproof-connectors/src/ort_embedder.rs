@@ -154,10 +154,12 @@ impl OrtEmbedder {
         tokenizer_path: &Path,
         dims: usize,
     ) -> ConnectorResult<Self> {
-        // The text embedder (EmbeddingGemma / Qwen3) stays on CPU: it is int8,
-        // and int8 under CoreML hits a pathological compile (docs/SPIKE-COREML).
-        // CoreML/CUDA acceleration is the CLIP path, gated per-model in `clip`.
-        let session = build_session(model_path, false)?;
+        // The text embedder (EmbeddingGemma / Qwen3) stays on CPU: int8 under
+        // CoreML hits a pathological compile + the transformer graph barely
+        // partitions to the ANE (docs/SPIKE-COREML-TEXT.md). GPU acceleration is
+        // the CLIP path, gated per-model in `clip`. (NVIDIA/TensorRT may revisit
+        // text-embed - it takes the whole graph - but that is a separate measure.)
+        let session = build_session(model_path, Accel::Cpu)?;
         let tokenizer = load_tokenizer(tokenizer_path)?;
         let kv_feeds = zero_length_kv_feeds(&session);
         let has_position_ids = session.inputs().iter().any(|i| i.name() == "position_ids");
@@ -185,16 +187,14 @@ impl OrtEmbedder {
         dims: usize,
     ) -> ConnectorResult<Self> {
         let model_id = model_id.into();
-        // Per-model accelerator selection: CoreML (ANE/GPU) for the single-file
-        // FP16 CLIP on macOS - measured 8.77x over CPU, near-lossless
-        // (docs/SPIKE-COREML.md). The int8 external-data CLIP + the text embedder
-        // stay CPU (int8 under CoreML pathologically compiles). The `-fp16`
-        // model-id suffix marks the CoreML-ready single-file export. CUDA for
-        // NVIDIA is the analogous EP (planned, not yet wired). The env knob still
-        // force-enables CoreML for the spike harness (see `build_session`).
-        let coreml = cfg!(target_os = "macos") && model_id.ends_with("-fp16");
-        let image_session = build_session(image_model_path, coreml)?;
-        let text_session = build_session(text_model_path, coreml)?;
+        // Per-model accelerator selection (see `select_clip_accel`): the single-
+        // file FP16 CLIP runs on CoreML (macOS, ANE/GPU, measured 8.77x) or the
+        // NVIDIA EPs (TensorRT/CUDA, the `cuda`/`tensorrt` build features); the
+        // int8 external-data CLIP + the text embedder stay CPU. The `-fp16`
+        // model-id suffix marks the GPU-ready single-file export.
+        let accel = select_clip_accel(&model_id);
+        let image_session = build_session(image_model_path, accel)?;
+        let text_session = build_session(text_model_path, accel)?;
         let tokenizer = load_tokenizer(tokenizer_path)?;
         Ok(Self {
             model_id,
@@ -354,7 +354,48 @@ fn coreml_requested() -> bool {
     }
 }
 
-fn build_session(model_path: &Path, coreml: bool) -> ConnectorResult<Session> {
+/// Force the CPU EP regardless of the per-model accelerator: `PHOTOPROOF_ORT_FORCE_CPU`
+/// truthy. The GPU spike harnesses use it for the CPU-baseline arm (the SAME fp16
+/// weights on CPU vs the accelerator), so the speedup is a clean apples-to-apples.
+fn force_cpu_requested() -> bool {
+    match std::env::var("PHOTOPROOF_ORT_FORCE_CPU") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Which execution provider a model runs on, chosen per-model (`select_clip_accel`).
+/// `Nvidia` is only CONSTRUCTED on a `cuda`-feature build; allow it to read as
+/// dead elsewhere (the macOS/CPU builds match it but never produce it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+enum Accel {
+    Cpu,
+    CoreML,
+    Nvidia,
+}
+
+/// The accelerator for a CLIP model id. The single-file FP16 export (`-fp16`
+/// suffix) graduates to the platform GPU; the int8 external-data CLIP stays CPU
+/// (int8 + CoreML = pathological compile; the external-data split breaks CoreML).
+/// macOS -> CoreML; a `cuda`-feature build elsewhere -> NVIDIA (TensorRT/CUDA);
+/// else CPU. Exactly one cfg arm compiles per build, so the return is total.
+fn select_clip_accel(model_id: &str) -> Accel {
+    if !model_id.ends_with("-fp16") {
+        return Accel::Cpu;
+    }
+    #[cfg(target_os = "macos")]
+    return Accel::CoreML;
+    #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
+    return Accel::Nvidia;
+    #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
+    return Accel::Cpu;
+}
+
+fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
     // CPU EP is ort's default; 4 intra-op threads is the spike posture.
     // GraphOptimizationLevel::Level3 matches onnxruntime python's default
     // (ORT_ENABLE_ALL) the spike measured against. The builder option
@@ -368,35 +409,43 @@ fn build_session(model_path: &Path, coreml: bool) -> ConnectorResult<Session> {
         .map_err(|e| err(e.to_string()))?
         .with_intra_threads(INTRA_OP_THREADS)
         .map_err(|e| err(e.to_string()))?;
-    // CoreML EP (P2 SPIKE), behind the env knob. OFF by default. We register
-    // with `.error_on_failure()` so a runtime that lacks the CoreML EP (the
-    // prebuilt onnxruntime may not carry it — it is a build-time onnxruntime
-    // option) surfaces as an explicit Decode error rather than ort's silent
-    // CPU fallback; a spike that "succeeds" by quietly running on CPU would be
-    // a false positive. Per-op CPU<->ANE partition is CoreML's own internal
-    // decision and is read from `with_profile_compute_plan` logs, not here.
-    // CoreML when the caller selected it for THIS model (the FP16 CLIP on macOS,
-    // chosen in `clip`) OR the env knob forces it (the spike harness). int8
-    // models + the text embedder pass `coreml=false` and stay on the CPU EP.
-    if coreml || coreml_requested() {
-        // Cache the compiled CoreML MLProgram beside the model so the multi-
-        // minute first-load compile is paid ONCE, not on every launch (the FP16
-        // production caveat: ~16.5 min first compile, docs/SPIKE-COREML.md).
-        // Best-effort: if the cache dir cannot be created we proceed without it
-        // (correct, just slower). CoreML re-keys on graph structure, so a stale
-        // cache from a model swap simply recompiles.
-        let cache = coreml_cache_dir(model_path);
-        builder = build_session_with_coreml(builder, cache.as_deref()).map_err(err)?;
-        // Stderr (not tracing): this crate installs no subscriber, and the
-        // "CoreML path taken" signal must be visible regardless of host logging.
-        eprintln!(
-            "[ort coreml] registered CoreML EP for {} (CPUAndNeuralEngine, MLProgram{})",
-            model_path.display(),
-            match &cache {
-                Some(c) => format!(", cache {}", c.display()),
-                None => " - NO cache (recompiles each load)".to_string(),
-            }
-        );
+    // Resolve the effective accelerator: an explicit force-CPU wins (the GPU
+    // spike baseline); otherwise the per-model choice; the legacy CoreML env
+    // knob still forces CoreML for a CPU-selected model (the CoreML spike harness).
+    let accel = if force_cpu_requested() {
+        Accel::Cpu
+    } else if accel == Accel::Cpu && coreml_requested() {
+        Accel::CoreML
+    } else {
+        accel
+    };
+    match accel {
+        // CPU EP is ort's default - nothing to register.
+        Accel::Cpu => {}
+        Accel::CoreML => {
+            // Cache the compiled CoreML MLProgram beside the model so the multi-
+            // minute first-load compile is paid ONCE, not on every launch (the
+            // FP16 production caveat: ~16.5 min, docs/SPIKE-COREML.md). Best-effort.
+            let cache = coreml_cache_dir(model_path);
+            builder = build_session_with_coreml(builder, cache.as_deref()).map_err(err)?;
+            // Stderr (not tracing): this crate installs no subscriber, and the
+            // "GPU path taken" signal must be visible regardless of host logging.
+            eprintln!(
+                "[ort coreml] registered CoreML EP for {} (CPUAndNeuralEngine, MLProgram{})",
+                model_path.display(),
+                match &cache {
+                    Some(c) => format!(", cache {}", c.display()),
+                    None => " - NO cache (recompiles each load)".to_string(),
+                }
+            );
+        }
+        Accel::Nvidia => {
+            builder = build_session_with_nvidia(builder, model_path).map_err(err)?;
+            eprintln!(
+                "[ort nvidia] registered NVIDIA EP ladder (TensorRT-fp16 -> CUDA -> CPU) for {}",
+                model_path.display()
+            );
+        }
     }
     builder
         .commit_from_file(model_path)
@@ -447,6 +496,63 @@ fn build_session_with_coreml(
     builder
         .with_execution_providers([ep.build().error_on_failure()])
         .map_err(|e| e.to_string())
+}
+
+/// Register the NVIDIA EP ladder on `builder` for the FP16 CLIP on the desktop
+/// (the Ryzen 9900X + RTX 5080). TensorRT-FP16 is tried first (the fastest, the
+/// `tensorrt` feature) with an on-disk ENGINE CACHE - TensorRT builds a per-GPU
+/// engine on first load (slow, the analog of the CoreML compile), so it MUST be
+/// cached or every launch pays it; CUDA-FP16 is next (the `cuda` floor); CPU is
+/// ort's implicit last rung. `.fail_silently()` makes the ladder DESCEND
+/// gracefully (the opposite of CoreML's loud `.error_on_failure()`): a missing
+/// or unloadable EP just falls through to the next rung. The SAME single-file
+/// FP16 model that CoreML validated feeds these (docs/PLAN-TENSORRT.md).
+#[cfg(feature = "cuda")]
+fn build_session_with_nvidia(
+    builder: ort::session::builder::SessionBuilder,
+    model_path: &Path,
+) -> Result<ort::session::builder::SessionBuilder, String> {
+    use ort::ep::CUDA;
+    #[cfg(not(feature = "tensorrt"))]
+    let _ = model_path; // only TensorRT needs the engine-cache path
+    let mut eps = Vec::new();
+    #[cfg(feature = "tensorrt")]
+    {
+        use ort::ep::TensorRT;
+        let mut trt = TensorRT::default().with_fp16(true);
+        if let Some(dir) = nvidia_engine_cache_dir(model_path) {
+            let p = dir.to_string_lossy().to_string();
+            trt = trt
+                .with_engine_cache(true)
+                .with_engine_cache_path(p.clone())
+                .with_timing_cache(true)
+                .with_timing_cache_path(p);
+        }
+        eps.push(trt.build().fail_silently());
+    }
+    eps.push(CUDA::default().build().fail_silently());
+    builder
+        .with_execution_providers(eps)
+        .map_err(|e| e.to_string())
+}
+
+/// No-op when the `cuda` feature is off (the macOS/CPU builds): `select_clip_accel`
+/// never returns `Accel::Nvidia` there, but the match arm must still compile.
+#[cfg(not(feature = "cuda"))]
+fn build_session_with_nvidia(
+    builder: ort::session::builder::SessionBuilder,
+    _model_path: &Path,
+) -> Result<ort::session::builder::SessionBuilder, String> {
+    Ok(builder)
+}
+
+/// The TensorRT engine-cache dir for `model_path`: a `.trt-cache` beside the
+/// model (per-GPU engines + timing cache reused across launches). Best-effort.
+#[cfg(feature = "tensorrt")]
+fn nvidia_engine_cache_dir(model_path: &Path) -> Option<PathBuf> {
+    let dir = model_path.parent()?.join(".trt-cache");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 fn load_tokenizer(path: &Path) -> ConnectorResult<Tokenizer> {
