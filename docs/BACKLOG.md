@@ -254,6 +254,33 @@ of them posture changes the founder made deliberately.
   DirectML when the Windows bucket opens -> WebGPU-EP spike in parallel. Lower priority
   than the M1 (done) + 5080/CUDA (in progress) targets. (Founder, June 14 2026.)
 
+- [ ] **The GPU embed moved the bottleneck to DECODE - two levers** (founder, June 14
+  2026, after the 5080 hit 54x): now that CLIP image embedding is GPU-fast (54x on the
+  5080, 8.77x on the M1 CoreML), decode/resize is the new ingest ceiling. Decode IS
+  parallel today (rayon pool `min(cores,8)`, `library/mod.rs:2986`; BLAKE3 `min(cores,8)`)
+  but two wins are now worth it: (a) **re-bench the `min(cores,8)` decode-pool cap** - it
+  was tuned on the M1 (`preview.rs:754` "more workers thrash the cache"); on the 9900X
+  (12c/24t) feeding a 54x GPU it likely STARVES the GPU, so make it per-machine/tunable
+  and re-bench on the desktop; (b) **BATCH the GPU embed** - `OrtEmbedder::embed_image`
+  does ONE image per forward pass; GPUs love batches (the MLX text spike saw ~24x batched
+  vs single-item), so batching the CLIP visual tower (16-32/forward) could beat even the
+  TensorRT +1.5x. These are the next perf frontier on capable GPUs. (Founder, June 14 2026.)
+
+- [ ] **First-run onboarding flow: "optimizing for your hardware" + guided setup**
+  (founder, June 14 2026: "on our welcome screen we should explain / walk through initial
+  setup... we probably want a whole flow"). Today there is a welcome card + a consent gate
+  for model download, but not a guided FIRST-RUN FLOW. Build one that: (1) welcomes +
+  explains the local-first thesis (your photos never leave; models run on-device); (2)
+  **DETECTS the hardware and SHOWS it** - "optimizing for your Apple M1 Pro: CoreML / your
+  RTX 5080: CUDA / no GPU detected: CPU" - turning the intelligent-detection matrix
+  (`docs/RUNTIME-MATRIX.md`) into a visible, reassuring moment; (3) walks the model-download
+  consent (sizes, the license gates, what each model enables, what works WITHOUT models =
+  the Tier-0 floor); (4) the first-folder / watched-root add; (5) progress while the library
+  digests (ties into the "Digest visibility" item). Should gracefully convey "you'll get
+  the best your hardware allows" without jargon. A real design round - it is the user's
+  first impression + the place the hardware intelligence becomes legible. Pairs with the
+  Station / progressive-import / digest-visibility items. (Founder, June 14 2026.)
+
 ## Performance / SOTA (audit June 13 2026)
 
 Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). The
