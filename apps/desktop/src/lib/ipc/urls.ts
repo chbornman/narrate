@@ -12,6 +12,17 @@ export const thumbUrl = (hash: string): string =>
   `photoproof://localhost/thumb/${hash}`;
 
 /**
+ * The MICRO preview tier (96 px): the Visualizer graph's tiny node thumbnail.
+ * Nodes draw at ~20-132 px, so the 512 px thumb was wildly oversized and
+ * decoding hundreds of them stalled the graph's initial open. A derived
+ * on-disk-only artifact (preview.rs MICRO_EDGE); it 404s until the
+ * generator_version-3 regen has written it, so the graph loader falls back to
+ * thumbUrl on error.
+ */
+export const microUrl = (hash: string): string =>
+  `photoproof://localhost/micro/${hash}`;
+
+/**
  * The hash a preview URL names — the last path segment, with any
  * cache-busting query stripped ("" for non-URL strings, e.g. an empty
  * `currentSrc`).

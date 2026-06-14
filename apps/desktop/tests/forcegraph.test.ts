@@ -359,6 +359,36 @@ describe("force-placed anchors", () => {
     expect(Number.isFinite(a.x)).toBe(true);
   });
 
+  it("the anchorCentering tether bounds anchors when NO image holds to them", () => {
+    // Regression (June 2026): a degenerate affinity set (every affinity 0, e.g. a
+    // CLIP model mismatch) gives the anchors NO centroid pull, so with only mutual
+    // repulsion they accelerated apart FOREVER ("topics float away from each other
+    // forever"). The weak anchorCentering tether must bound them at a finite
+    // radius instead. Two anchors, no images, strong repulsion, many steps.
+    const tetherCfg: ForceConfig = {
+      ...anchorCfg,
+      anchorAttraction: 0.1, // healthy value — but no images means it never acts
+      anchorRepulsion: 60000,
+      anchorCentering: 0.01,
+    };
+    const a: TopicAnchor = { topic: 0, x: 5, y: 0, vx: 0, vy: 0 };
+    const b: TopicAnchor = { topic: 1, x: -5, y: 0, vx: 0, vy: 0 };
+    for (let i = 0; i < 5000; i++) step([], [a, b], tetherCfg);
+    // Bounded (not flung to infinity) AND still separated by the repulsion.
+    const sep = Math.hypot(a.x - b.x, a.y - b.y);
+    expect(Number.isFinite(a.x) && Number.isFinite(b.x)).toBe(true);
+    expect(Math.hypot(a.x, a.y)).toBeLessThan(1000);
+    expect(sep).toBeGreaterThan(20);
+
+    // And WITHOUT the tether (the pre-fix behavior) the same setup runs away: the
+    // anchors end up far past where the tether would have held them.
+    const noTether: ForceConfig = { ...tetherCfg, anchorCentering: 0 };
+    const c: TopicAnchor = { topic: 0, x: 5, y: 0, vx: 0, vy: 0 };
+    const d: TopicAnchor = { topic: 1, x: -5, y: 0, vx: 0, vy: 0 };
+    for (let i = 0; i < 5000; i++) step([], [c, d], noTether);
+    expect(Math.hypot(c.x, c.y)).toBeGreaterThan(Math.hypot(a.x, a.y));
+  });
+
   it("two topics sharing images drift CLOSER than two topics that share none", () => {
     // Shared: both anchors' images overlap in space, so the centroid pull draws
     // the anchors together. Disjoint: each anchor's images sit far apart, so the

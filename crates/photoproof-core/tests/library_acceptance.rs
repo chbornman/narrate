@@ -750,7 +750,7 @@ fn l13_03_interrupt_resume() {
             image::open(&entry).unwrap_or_else(|e| panic!("torn artifact {name}: {e}"));
         }
     }
-    assert_eq!(artifacts, 2 * n, "thumb + display per image");
+    assert_eq!(artifacts, 3 * n, "micro + thumb + display per image");
 }
 
 fn walk_files(dir: &Path) -> Vec<PathBuf> {

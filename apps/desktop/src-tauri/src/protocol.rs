@@ -59,6 +59,7 @@ pub enum Route {
 pub fn parse_path(path: &str) -> Option<(Route, ContentHash)> {
     let mut parts = path.trim_start_matches('/').splitn(2, '/');
     let route = match parts.next()? {
+        "micro" => Route::Artifact(ArtifactKind::Micro),
         "thumb" => Route::Artifact(ArtifactKind::Thumb),
         "display" => Route::Artifact(ArtifactKind::Display),
         "original" => Route::Original,
@@ -210,6 +211,19 @@ mod tests {
         assert_eq!(parsed, h);
         let (r, _) = parse_path(&format!("/display/{}.webp", h.as_str())).unwrap();
         assert_eq!(r, Route::Artifact(ArtifactKind::Display));
+    }
+
+    #[test]
+    fn parses_the_micro_graph_tier_path() {
+        let h = hash();
+        let (r, parsed) = parse_path(&format!("/micro/{}", h.as_str())).unwrap();
+        assert_eq!(r, Route::Artifact(ArtifactKind::Micro));
+        assert_eq!(parsed, h);
+        // Same artifact discipline: a trailing .webp is tolerated, a bad hash 404s.
+        let (r, _) = parse_path(&format!("/micro/{}.webp", h.as_str())).unwrap();
+        assert_eq!(r, Route::Artifact(ArtifactKind::Micro));
+        assert!(parse_path("/micro/not-a-hash").is_none());
+        assert!(parse_path("/micro/../../etc/passwd").is_none());
     }
 
     #[test]

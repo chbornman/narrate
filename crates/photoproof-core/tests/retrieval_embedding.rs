@@ -307,6 +307,75 @@ fn passes_drain_per_configured_embedder() {
     );
 }
 
+/// A CLIP MODEL SWAP re-embeds the library. Pass completion used to be
+/// model-BLIND, so changing the embedder (the fp16 CLIP default change) left
+/// every image-embedding pass `done` and topic affinities scored against a
+/// vector space the new model never wrote — every affinity silently 0. The
+/// model-aware re-pend must notice the new model_id and re-embed every image
+/// under it, then NOT churn once the models match.
+#[test]
+fn a_clip_model_swap_repends_and_reembeds_the_library() {
+    let rig = Rig::new();
+    // First drain under the original CLIP model: 3 text (no annotations => no
+    // chunks, still done) + 3 clip.
+    let report = rig.drain_embeddings();
+    assert_eq!(report.done, 6);
+    assert_eq!(
+        rig.count(&format!(
+            "SELECT COUNT(*) FROM vectors WHERE vec_kind = 'image_clip' \
+             AND model_id = '{CLIP_MODEL}' AND deleted = 0"
+        )),
+        3
+    );
+    // The passes now RECORD the model they embedded with (was NULL before).
+    assert_eq!(
+        rig.count(&format!(
+            "SELECT COUNT(*) FROM ingest_passes WHERE pass_name = 'image-embedding' \
+             AND state = 'done' AND model_id = '{CLIP_MODEL}'"
+        )),
+        3
+    );
+
+    // Swap the CLIP model (keep the text model), as the fp16 default did.
+    const NEW_CLIP_MODEL: &str = "mock-dfn5b-clip-fp16";
+    let new_clip = MockEmbedder::clip(NEW_CLIP_MODEL, DIMS);
+    let swapped = EmbeddingRig {
+        text: Some(&rig.text),
+        clip: Some(&new_clip),
+        vectors: &rig.store,
+    };
+    let report = rig
+        .env
+        .lib
+        .process_embedding_queue(&swapped, &QueueOptions::default())
+        .unwrap();
+    // The 3 image passes were re-pended and re-embedded under the new model;
+    // the text passes already match the current text model, so they don't churn.
+    assert_eq!(report.done, 3, "clip re-embedded under the new model");
+    // Vectors now exist under the NEW model — the space topic affinities query.
+    assert_eq!(
+        rig.count(&format!(
+            "SELECT COUNT(*) FROM vectors WHERE vec_kind = 'image_clip' \
+             AND model_id = '{NEW_CLIP_MODEL}' AND deleted = 0"
+        )),
+        3
+    );
+    assert_eq!(
+        rig.count(&format!(
+            "SELECT COUNT(*) FROM ingest_passes WHERE pass_name = 'image-embedding' \
+             AND state = 'done' AND model_id = '{NEW_CLIP_MODEL}'"
+        )),
+        3
+    );
+    // Idempotent: a second drain with the same models re-pends nothing.
+    let report = rig
+        .env
+        .lib
+        .process_embedding_queue(&swapped, &QueueOptions::default())
+        .unwrap();
+    assert_eq!(report.done, 0, "no re-pend once the model matches");
+}
+
 /// The end-to-end happy path: chunks + clip vectors with §1.2 metadata,
 /// multi-target events stored once, searches resolving back to events.
 #[test]

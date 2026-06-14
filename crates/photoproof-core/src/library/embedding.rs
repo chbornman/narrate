@@ -93,6 +93,29 @@ impl Library {
     ) -> Result<QueueReport, LibraryError> {
         let mut report = QueueReport::default();
         self.enqueue_embedding_backfill(rig.text.is_some(), rig.clip.is_some())?;
+        // Model-aware re-pend: if the configured embedder differs from the model
+        // that last completed a pass (or a legacy NULL row), re-pend it so the
+        // library re-embeds under the new model. Pass completion is otherwise
+        // model-blind — swapping the CLIP/text model would leave every pass
+        // `done` and topic affinities would silently score against a vector space
+        // the new model never wrote (the fp16 CLIP default regression).
+        {
+            let conn = self.db.lock().expect("poisoned");
+            if let Some(clip) = rig.clip {
+                ingest::repend_passes_for_model(
+                    &conn,
+                    ingest::PassName::ImageEmbedding,
+                    clip.model_id(),
+                )?;
+            }
+            if let Some(text) = rig.text {
+                ingest::repend_passes_for_model(
+                    &conn,
+                    ingest::PassName::TextEmbedding,
+                    text.model_id(),
+                )?;
+            }
+        }
         // Physical hygiene first: rows the events engine marked deleted
         // (revision/retraction/redaction — RETRIEVAL §1.1) get their flat
         // file bytes zeroed and their metadata reclaimed before any new
@@ -241,7 +264,9 @@ impl Library {
         }
 
         let conn = self.db.lock().expect("poisoned");
-        ingest::mark_done(&conn, item, self.now())?;
+        // Record the text embedder's model_id so a later model swap re-pends
+        // this pass (model-aware completion; see ingest::mark_done_with_model).
+        ingest::mark_done_with_model(&conn, item, embedder.model_id(), self.now())?;
         report.done += 1;
         Ok(())
     }
@@ -411,7 +436,9 @@ impl Library {
             && existing == hash
         {
             let conn = self.db.lock().expect("poisoned");
-            ingest::mark_done(&conn, item, self.now())?;
+            // Already fresh under THIS model — record the model so the row is
+            // recognized as current (and not re-pended again next drain).
+            ingest::mark_done_with_model(&conn, item, embedder.model_id(), self.now())?;
             report.done += 1;
             return Ok(());
         }
@@ -470,7 +497,8 @@ impl Library {
             return Ok(());
         }
         let conn = self.db.lock().expect("poisoned");
-        ingest::mark_done(&conn, item, self.now())?;
+        // Record the CLIP embedder's model_id so a model swap re-pends this pass.
+        ingest::mark_done_with_model(&conn, item, embedder.model_id(), self.now())?;
         report.done += 1;
         Ok(())
     }

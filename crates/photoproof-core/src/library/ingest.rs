@@ -317,6 +317,63 @@ pub fn mark_done(conn: &Connection, item: &QueueItem, now: UtcMillis) -> rusqlit
     Ok(())
 }
 
+/// Complete a MODEL pass (image/text embedding), RECORDING the embedder's
+/// `model_id` on the row. The plain [`mark_done`] leaves `model_id` NULL, which
+/// made pass completion model-BLIND: swapping the CLIP/text model left every
+/// pass `done` so the library was never re-embedded, and topic affinities
+/// silently scored against a vector space the new model never wrote (the fp16
+/// CLIP default regression, June 2026). Recording the model here is what lets
+/// [`repend_passes_for_model`] detect a model change and re-pend. Same
+/// `running`-only guard as [`mark_done`] (an events-engine re-pend mid-run must
+/// win).
+pub fn mark_done_with_model(
+    conn: &Connection,
+    item: &QueueItem,
+    model_id: &str,
+    now: UtcMillis,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE ingest_passes
+         SET state = 'done', error = NULL, completed_at = ?4, not_before = NULL,
+             model_id = ?5
+         WHERE image_hash = ?1 AND pass_name = ?2 AND pass_version = ?3
+           AND state = 'running'",
+        params![
+            item.image_hash.as_str(),
+            item.pass.as_str(),
+            item.pass_version,
+            now.to_rfc3339(),
+            model_id
+        ],
+    )?;
+    Ok(())
+}
+
+/// Re-pend the `done` rows of a MODEL pass whose recorded `model_id` differs
+/// from the embedder now configured (a NULL legacy row — written before
+/// [`mark_done_with_model`] existed — counts as "different" and re-pends once).
+/// This is how a model swap re-embeds the library: pass completion alone is
+/// model-blind, so without this a changed model scores against a vector space it
+/// never wrote. Only `done` rows are touched — a `skipped` row (e.g. an
+/// annotation-less image's text pass, or an undecodable preview) produced no
+/// vector by design and must not churn, and `error`/`pending` rows have their
+/// own paths. Idempotent: after the re-pended pass re-runs it records the
+/// current model, so the next call is a no-op. Returns the rows re-pended.
+pub fn repend_passes_for_model(
+    conn: &Connection,
+    pass: PassName,
+    current_model_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE ingest_passes
+         SET state = 'pending', started_at = NULL, completed_at = NULL,
+             not_before = NULL, error = NULL, attempts = 0
+         WHERE pass_name = ?1 AND pass_version = ?2 AND state = 'done'
+           AND (model_id IS NULL OR model_id <> ?3)",
+        params![pass.as_str(), PASS_VERSION, current_model_id],
+    )
+}
+
 pub fn mark_skipped(
     conn: &Connection,
     item: &QueueItem,

@@ -404,6 +404,12 @@
   const scope = (): ipc.GraphScope =>
     fullLibrary ? { kind: "library" } : ui.graphScope();
 
+  // Weak origin spring on the topic anchors — a SAFETY TETHER (see
+  // ForceConfig.anchorCentering), not a tunable feel knob. Bounds the anchors at
+  // a finite radius when affinities go degenerate (all zero) instead of letting
+  // mutual repulsion fling them off-canvas forever.
+  const ANCHOR_CENTERING = 0.01;
+
   function forceConfig(): ForceConfig {
     const t = tuning;
     return {
@@ -417,6 +423,11 @@
       anchorAttraction: t?.anchor_attraction ?? 0.08,
       anchorRepulsion: t?.anchor_repulsion ?? 60000,
       anchorDamping: t?.anchor_damping ?? 0.8,
+      // Safety tether so anchors can't drift to infinity when affinities are
+      // degenerate (all zero). A fixed SAFETY constant, not a feel knob (so it's
+      // not in GraphTuning): weak enough that healthy centroid attraction
+      // (anchor_attraction, ~8x) still wins. See ForceConfig.anchorCentering.
+      anchorCentering: ANCHOR_CENTERING,
       // The live reheat multiplier on the attraction terms; cooled each frame in
       // the rAF loop back toward the 1.0 steady state.
       heat,
@@ -1593,6 +1604,43 @@
   const LOD_ZOOM_EXPAND = 2.0;
   const LOD_ZOOM_COLLAPSE = 1.2;
 
+  // A wheel gesture fires many events per second; re-running the LOD
+  // expand/collapse (each a node-set rebuild + worker resync + restartLoop) on
+  // every tick is what made zoom stutter. We DEBOUNCE it: the wheel only moves
+  // the view transform (cheap, rAF-coalesced like pan), and the LOD transition
+  // is evaluated ONCE after the gesture settles. Founder: "zooming is not smooth".
+  const LOD_ZOOM_SETTLE_MS = 120;
+  let lodZoomTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Evaluate the LOD expand/collapse for the CURRENT zoom, once the wheel
+   * gesture has settled. Only this path rebuilds the node set + restarts the
+   * sim; the per-tick wheel handler never does, so the zoom itself stays smooth. */
+  function applyLodZoomTransition() {
+    if (!lodActive) return;
+    const anyExpanded = nodes.some((n) => n.members === undefined);
+    const anyAggregated = nodes.some((n) => n.members !== undefined);
+    if (zoom >= LOD_ZOOM_EXPAND && anyAggregated) {
+      // Zoomed in: expand every remaining super-node into its members.
+      for (const n of [...nodes]) {
+        if (n.members !== undefined) {
+          nodes = expandSuperNode(nodes, n.hash, affinity, topics.length);
+        }
+      }
+      nodeCount = nodes.length;
+      // The node set changed (super-nodes expanded), so resync the worker.
+      staticDirty = true;
+      restartLoop();
+    } else if (zoom <= LOD_ZOOM_COLLAPSE && anyExpanded) {
+      // Zoomed out: re-aggregate the full detail set back into super-nodes.
+      const fullNodes = seedNodes([...affinity.keys()], affinity, topics.length);
+      nodes = aggregateToSuperNodes(fullNodes, topics.length);
+      nodeCount = nodes.length;
+      // The node set changed (re-aggregated), so resync the worker.
+      staticDirty = true;
+      restartLoop();
+    }
+  }
+
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -1607,35 +1655,18 @@
     panX = cx - width / 2 - (cx - width / 2 - panX) * ratio;
     panY = cy - height / 2 - (cy - height / 2 - panY) * ratio;
     zoom = zoom1;
+    // Redraw through the SAME rAF coalescer the pan uses (at most one paint per
+    // frame), not a synchronous draw() per wheel tick. The LOD transition is
+    // deferred to a settle timer so a rapid scroll doesn't restart the sim
+    // mid-gesture.
+    requestPanDraw();
     if (lodActive) {
-      const anyExpanded = nodes.some((n) => n.members === undefined);
-      const anyAggregated = nodes.some((n) => n.members !== undefined);
-      if (zoom >= LOD_ZOOM_EXPAND && anyAggregated) {
-        // Zoomed in: expand every remaining super-node into its members.
-        for (const n of [...nodes]) {
-          if (n.members !== undefined) {
-            nodes = expandSuperNode(nodes, n.hash, affinity, topics.length);
-          }
-        }
-        nodeCount = nodes.length;
-        // The node set changed (super-nodes expanded), so resync the worker.
-        staticDirty = true;
-        restartLoop();
-      } else if (zoom <= LOD_ZOOM_COLLAPSE && anyExpanded) {
-        // Zoomed out: re-aggregate the full detail set back into super-nodes.
-        const fullNodes = seedNodes(
-          [...affinity.keys()],
-          affinity,
-          topics.length,
-        );
-        nodes = aggregateToSuperNodes(fullNodes, topics.length);
-        nodeCount = nodes.length;
-        // The node set changed (re-aggregated), so resync the worker.
-        staticDirty = true;
-        restartLoop();
-      }
+      if (lodZoomTimer !== null) clearTimeout(lodZoomTimer);
+      lodZoomTimer = setTimeout(() => {
+        lodZoomTimer = null;
+        applyLodZoomTransition();
+      }, LOD_ZOOM_SETTLE_MS);
     }
-    draw();
   }
 
   // -- persist / restore across close → reopen (the instant-reopen fix) -------
@@ -1862,6 +1893,11 @@
         clearTimeout(fieldTimer);
         fieldTimer = null;
       }
+      // Likewise drop a pending LOD-zoom settle so it can't fire into a dead view.
+      if (lodZoomTimer !== null) {
+        clearTimeout(lodZoomTimer);
+        lodZoomTimer = null;
+      }
       // NOTE: we do NOT dispose `thumbs` — it is the MODULE-LEVEL cache that must
       // survive this unmount so a reopen reuses the loaded thumbnails. Detaching
       // the repaint hook (above) already makes any in-flight load that completes
@@ -1891,7 +1927,7 @@
   // covers the initial set, and tuning===null means we are pre-load).
   let lastTopicKey = "";
   $effect(() => {
-    const key = topics.join(" ");
+    const key = topics.join("");
     untrack(() => {
       if (tuning !== null && key !== lastTopicKey) {
         lastTopicKey = key;

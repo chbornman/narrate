@@ -110,6 +110,16 @@ export interface ForceConfig {
   /** Per-step damping for the anchors (their own cooling). Anchors carry a lot
    * of weight, so a slightly heavier damping keeps them from oscillating. */
   anchorDamping: number;
+  /** Weak spring pulling each anchor toward the origin — a SAFETY TETHER, not a
+   * layout force. When affinities are healthy the centroid attraction
+   * (`anchorAttraction`, ~8x stronger) dominates and this barely moves anything.
+   * But when NO image holds to an anchor (a degenerate/zero-affinity set, e.g. a
+   * CLIP model mismatch leaving every affinity 0), the centroid attraction is
+   * skipped and only mutual repulsion acts — without this tether the anchors
+   * accelerate apart FOREVER. The spring balances that repulsion at a finite
+   * radius, so a broken-affinity graph rests in a bounded neutral ring instead of
+   * flying off-canvas. Absent ⇒ 0 (the pre-tether behavior). */
+  anchorCentering?: number;
   /** Current sim HEAT (a reheat multiplier on the attraction terms, image AND
    * anchor). 1 = the steady-state attraction; a fresh topic-set/alpha change
    * boosts this above 1 and the caller cools it toward 1, so the layout settles
@@ -249,7 +259,15 @@ export function step(
   // Anchor centroid attraction: pull each anchor toward the affinity-weighted
   // centroid of the images holding to it. Two topics sharing many images have
   // overlapping centroids, so their anchors drift TOGETHER (the founder feature).
+  const anchorCentering = config.anchorCentering ?? 0;
   for (let a = 0; a < t; a++) {
+    // Safety tether to the origin (see ForceConfig.anchorCentering): always
+    // applied, but so weak that the centroid attraction below dominates whenever
+    // any image holds to this anchor. Its only real job is to bound an anchor
+    // that has NO images pulling it (wsum == 0), which otherwise sees only
+    // repulsion and drifts away without limit.
+    afx[a] -= anchorCentering * anchors[a].x;
+    afy[a] -= anchorCentering * anchors[a].y;
     if (wsum[a] <= 0) continue;
     const cx = wsumX[a] / wsum[a];
     const cy = wsumY[a] / wsum[a];

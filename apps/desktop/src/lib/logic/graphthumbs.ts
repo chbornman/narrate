@@ -14,15 +14,16 @@
  * number load CONCURRENTLY, and pending requests are served NEAREST-FIRST (lowest
  * `priority` = most visible), so the viewport fills before off-screen nodes.
  *
- * The loading itself uses the DOM `Image()` element + the photoproof:// thumb URL
- * (the SMALL preview tier, ipc/urls.thumbUrl — same artifact the grid cell loads),
- * so the webview's immutable HTTP cache backs repeat views. The PURE pieces — the
+ * The loading itself uses the DOM `Image()` element + the photoproof:// MICRO URL
+ * (the 96 px graph tier, ipc/urls.microUrl; falls back to the 512 px thumbUrl when
+ * the micro file is missing on a pre-regen cache), so the webview's immutable HTTP
+ * cache backs repeat views. The PURE pieces — the
  * priority queue's ordering + bounded-concurrency bookkeeping (logic/thumbqueue.ts)
  * and the node draw-size mapping (below) — are split out so they unit-test without
  * a DOM. The Image() plumbing here is the thin, hard-to-test shell.
  */
 
-import { thumbUrl } from "../ipc/urls";
+import { microUrl, thumbUrl } from "../ipc/urls";
 import { ThumbQueue } from "./thumbqueue";
 
 /** How many thumb loads may be in flight at once. Raised 6 -> 12 (founder:
@@ -139,10 +140,25 @@ export class GraphThumbCache {
     this.entries.set(hash, { state: "loading", img });
     this.inFlight++;
     img.onload = () => this.settle(hash, img, true);
-    img.onerror = () => this.settle(hash, img, false);
+    img.onerror = () => this.onLoadError(hash, img);
     // Set src LAST so the handlers are wired before a synchronous cache-hit can
     // fire (the webview's immutable HTTP cache can complete a repeat load fast).
-    img.src = thumbUrl(hash);
+    // The MICRO tier (96 px) is the graph's right-sized thumbnail; it loads far
+    // faster than the 512 px thumb on the initial open of a hundreds-of-images
+    // graph (the founder's "too slow on initial load").
+    img.src = microUrl(hash);
+  }
+
+  /** Micro load failed. It 404s until the generator_version-3 regen has written
+   * the micro file, so fall back to the 512 px thumb ONCE (reusing the same
+   * in-flight slot) before settling on the placeholder. A graph on a pre-regen
+   * cache still shows previews; a truly missing preview settles to a dot. */
+  private onLoadError(hash: string, img: HTMLImageElement): void {
+    if (img.src.includes("/micro/")) {
+      img.src = thumbUrl(hash); // handlers stay wired; slot stays in-flight
+      return;
+    }
+    this.settle(hash, img, false);
   }
 
   /** Record a completed load (success or failure), free its slot, notify the

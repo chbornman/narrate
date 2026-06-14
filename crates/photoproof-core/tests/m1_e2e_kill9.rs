@@ -217,7 +217,11 @@ fn c3_kill9_process_harness() {
                 }
             }
         }
-        assert_eq!(artifacts, 2 * tree.unique_hashes, "thumb + display each");
+        assert_eq!(
+            artifacts,
+            3 * tree.unique_hashes,
+            "micro + thumb + display each"
+        );
     }
 
     // Sidecars converge: drain the dirty queue, then reconcile the tree —

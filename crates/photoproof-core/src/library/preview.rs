@@ -28,10 +28,26 @@ use crate::metrics::PipelineMetrics;
 /// v2 (June 2026): two-step resize + libwebp method 2 (pp-bench-driven) —
 /// artifact bytes changed, existing caches regenerate at backfill
 /// priority via the §9.8 machinery.
-pub const GENERATOR_VERSION: i64 = 2;
+/// v3 (June 2026): added the MICRO tier (96 px) the Visualizer graph loads —
+/// `write_artifacts` now emits a third on-disk file, so the artifact SET
+/// changed; existing caches regenerate to gain their micro file.
+pub const GENERATOR_VERSION: i64 = 3;
 
 pub const THUMB_EDGE: u32 = 512;
 pub const THUMB_QUALITY: f32 = 75.0;
+
+/// Micro tier longest edge (px). The Visualizer graph draws image nodes at
+/// ~20-132 px on screen, so the 512 px thumb was 4-25x oversized — decoding
+/// hundreds of them on the graph's initial open was the stall the founder hit
+/// ("too slow on initial load" with hundreds of images). 96 px covers the
+/// common node range crisply and is ~16x fewer bytes to fetch+decode. A pure
+/// DERIVED on-disk artifact: it is NOT recorded in `preview_artifacts` (that
+/// table's `kind` CHECK is thumb/display), the protocol serves it by file
+/// existence, and the graph falls back to /thumb if it is missing mid-regen.
+pub const MICRO_EDGE: u32 = 96;
+/// A touch below the thumb quality (75): at 96 px the file is tiny either way,
+/// and the graph never zooms a node to where 70 vs 75 is distinguishable.
+pub const MICRO_QUALITY: f32 = 70.0;
 // DISPLAY_EDGE moved to the centralized tuning config (`crate::tuning`,
 // DESIGN-TUNING-CONFIG.md): it is a display-size judgment knob, file-
 // overridable without a rebuild. `write_artifacts` reads
@@ -63,9 +79,14 @@ pub enum PreviewError {
     Decode(String),
 }
 
-/// `preview_artifacts.kind`.
+/// A cached preview tier. `Thumb`/`Display` are tracked in `preview_artifacts`
+/// (the `kind` column); `Micro` is a DERIVED on-disk-only tier (the Visualizer
+/// graph's tiny thumbnail, [`MICRO_EDGE`]) that is NOT recorded there — it is
+/// written alongside the others by [`write_artifacts`] and served by file
+/// existence, so it never reaches the table's thumb/display CHECK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
+    Micro,
     Thumb,
     Display,
 }
@@ -73,6 +94,7 @@ pub enum ArtifactKind {
 impl ArtifactKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            ArtifactKind::Micro => "micro",
             ArtifactKind::Thumb => "thumb",
             ArtifactKind::Display => "display",
         }
@@ -114,6 +136,7 @@ pub struct GeneratedArtifact {
 pub fn artifact_path(cache_dir: &Path, hash: &ContentHash, kind: ArtifactKind) -> PathBuf {
     let h = hash.as_str();
     let suffix = match kind {
+        ArtifactKind::Micro => "micro",
         ArtifactKind::Thumb => "thumb",
         ArtifactKind::Display => "disp",
     };
@@ -875,6 +898,18 @@ pub fn write_artifacts(
             bytes: encoded.len() as i64,
         });
     }
+    // The MICRO tier (the Visualizer graph's tiny node thumbnail): derived from
+    // the already-resized thumb (one more small resize, no extra decode) and
+    // written to disk alongside the others. It is DELIBERATELY not pushed to
+    // `out` — `preview_artifacts.kind` is thumb/display only, so the caller
+    // never inserts a row for it; the protocol serves it by file existence and
+    // the graph falls back to /thumb if it is absent mid-regen. See MICRO_EDGE.
+    let micro = metrics.resize.time(|| resize_to_edge(&thumb, MICRO_EDGE));
+    let micro_bytes = metrics.encode.time(|| encode_webp(&micro, MICRO_QUALITY));
+    let micro_dest = artifact_path(cache_dir, hash, ArtifactKind::Micro);
+    metrics
+        .write
+        .time(|| atomic_write(&micro_dest, &micro_bytes))?;
     Ok(out)
 }
 

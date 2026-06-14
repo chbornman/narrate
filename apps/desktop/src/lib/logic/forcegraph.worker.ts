@@ -37,6 +37,7 @@ let config: ForceConfig = {
   anchorAttraction: 0.08,
   anchorRepulsion: 60000,
   anchorDamping: 0.8,
+  anchorCentering: 0.01,
 };
 
 self.onmessage = (ev: MessageEvent<MainToWorker>) => {

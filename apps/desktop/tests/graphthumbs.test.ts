@@ -139,10 +139,32 @@ describe("GraphThumbCache — bounded concurrency + lazy load", () => {
     expect(cache.get("ok")).not.toBeNull();
     expect(ready).toHaveBeenCalledWith("ok");
 
-    made[1].fireError();
+    // The graph loads the MICRO tier first; a failure falls back to /thumb ONCE
+    // before settling, so an error settles only after BOTH tiers fail.
+    expect(made[1].src).toContain("/micro/");
+    made[1].fireError(); // micro 404 -> retry thumb on the same slot
+    expect(cache.hasErrored("bad")).toBe(false); // still loading the fallback
+    expect(made[1].src).toContain("/thumb/");
+    made[1].fireError(); // thumb also failed -> settle on placeholder
     expect(cache.get("bad")).toBeNull(); // never a ready image
     expect(cache.hasErrored("bad")).toBe(true);
     expect(ready).toHaveBeenCalledTimes(1); // error does NOT notify
+  });
+
+  it("falls back from the micro tier to the thumb tier on a micro 404", () => {
+    const ready = vi.fn();
+    const { factory, made } = fakeImageFactory();
+    const cache = new GraphThumbCache(ready, 4, factory);
+    cache.request("x", 1);
+    // First attempt is the micro tier (the right-sized graph thumbnail).
+    expect(made[0].src).toContain("/micro/");
+    made[0].fireError(); // micro file not generated yet (pre-regen cache)
+    // Same in-flight slot retries the 512 px thumb — no new Image() allocated.
+    expect(made.length).toBe(1);
+    expect(made[0].src).toContain("/thumb/");
+    made[0].fireLoad(); // the thumb is present -> ready, exactly as before
+    expect(cache.get("x")).not.toBeNull();
+    expect(ready).toHaveBeenCalledWith("x");
   });
 
   it("requesting an already-loaded/in-flight hash is a no-op (no double load)", () => {
