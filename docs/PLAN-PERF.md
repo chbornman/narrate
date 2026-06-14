@@ -103,6 +103,8 @@ Fixes the embedding bottleneck we hit live (~20 img/min CLIP on CPU).
 - Effort: MEDIUM. Risk: LOW-MEDIUM (cache invalidation is handled).
 - Win: better demosaic quality (fewer zipper/maze artifacts), maybe speed.
 - Validate: develop tests; visual spot-check on a few RAWs.
+- STATUS: LANDED `761bc14` (rawler PPG; bilinear fallback < 8px; RAW_DEVELOP_VERSION
+  2 -> 3).
 
 ## P5. CLIP-preprocess `fast_image_resize`  [gated by re-validation]
 

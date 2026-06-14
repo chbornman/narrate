@@ -33,6 +33,15 @@ their original wording.
   img/min. A real win needs an FP16 single-file re-export (path documented; needs
   the original fp32 source not in our int8 snapshot). Kept the wired-off code + the
   reproducible #[ignore] spike harness for when FP16 models exist.
+- [x] **P4 RAW demosaic -> PPG** - `761bc14`. Replaced the hand-rolled bilinear
+  Bayer demosaic with rawler 0.7.2's built-in PPG (Patterned Pixel Grouping) for
+  RGGB crops - fills green along the minimum-gradient direction then reconstructs
+  R/B from the completed green plane, removing zipper/maze artifacts on edges +
+  fine texture. Only the interpolation changes; our WB + camera->sRGB matrix fix +
+  gamma + EXIF orientation stay. Sub-8px crops fall back to bilinear (PPG needs a
+  3px border) so the develop property tests stay panic-free. Bumped
+  RAW_DEVELOP_VERSION 2 -> 3 so cached `-full-v2` artifacts re-develop at the
+  higher quality.
 
 ## June 13 2026 - Real image benchmark for search (COCO)
 
