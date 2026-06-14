@@ -5,7 +5,41 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Default ASR engine is the sherpa-onnx Rust crate (the live, shipped path).
+default = ["engine-sherpa"]
+# The sherpa-onnx transducer engine (RUNTIME §3.2, B67). The default — the
+# binary is byte-for-byte today's child with only this feature on.
+engine-sherpa = ["dep:sherpa-onnx"]
+# The parakeet-rs Nemotron 3.5 streaming engine (docs/PLAN-NEMOTRON-35-SIDECAR.md).
+# Pure Rust over `ort` (the same rc the connectors crate already vendors); CPU
+# EP only (the parakeet-rs README: "CoreML is unstable with this model" -> CPU,
+# which matches our ASR-CPU-by-design). OFF by default; the sherpa path is the
+# reversible default until the WER/latency gate passes.
+# `dep:ort` pulls a direct ort dependency whose only job is to turn ON
+# `download-binaries`: parakeet-rs depends on ort with default-features off
+# (no prebuilt onnxruntime), so without this the link fails (no
+# libonnxruntime). Cargo unifies the single ort rc across both deps, so
+# enabling it here links a prebuilt CPU onnxruntime for the whole binary.
+# No coreml/cuda feature: CPU EP only (PLAN-NEMOTRON-35-SIDECAR; ASR is
+# CPU-by-design).
+engine-parakeet = ["dep:parakeet-rs", "dep:ort"]
+
 [dependencies]
 serde_json.workspace = true
-sherpa-onnx = "1.13.2"
+# Default engine. Optional so `--no-default-features --features engine-parakeet`
+# builds the parakeet child without pulling the sherpa-onnx crate at all.
+sherpa-onnx = { version = "1.13.2", optional = true }
+# The parakeet-rs Nemotron 3.5 streaming engine. Pinned; CPU EP (no coreml/cuda
+# feature) per docs/PLAN-NEMOTRON-35-SIDECAR.md. ort is rc.12 — the SAME rc the
+# connectors crate already vendors, so there is no second ONNX Runtime build.
+parakeet-rs = { version = "0.3.6", optional = true, default-features = false }
+# Direct ort dep ONLY to enable download-binaries so the binary links a
+# prebuilt onnxruntime (see the engine-parakeet feature comment).
+# default-features = true gives the SAME working set the connectors crate
+# uses (download-binaries + tls-native + copy-dylibs + api-24); ort-sys's
+# download build script needs tls-native, so we must NOT strip defaults.
+# Deliberately NO `coreml`/`cuda` feature: CPU EP only (the README warns
+# CoreML is unstable for this model; ASR is CPU-by-design).
+ort = { version = "2.0.0-rc.12", optional = true }
 tungstenite = "0.29"
