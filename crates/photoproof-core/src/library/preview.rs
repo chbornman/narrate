@@ -810,6 +810,16 @@ fn resize_to_edge(img: &DynamicImage, edge: u32) -> DynamicImage {
     }
 }
 
+/// Test-only window onto `resize_to_edge` for the ingest-pool-width bench
+/// (`mod.rs::bench_ingest_pool_width`), which times the real decode+resize the
+/// preview wave runs while sweeping pool widths. `#[cfg(test)]` keeps it out of
+/// the shipped API; it exists only so the bench measures the production resampler
+/// rather than a copy that could drift from it.
+#[cfg(test)]
+pub(super) fn resize_to_edge_for_bench(img: &DynamicImage, edge: u32) -> DynamicImage {
+    resize_to_edge(img, edge)
+}
+
 /// WebP at libwebp `method` 2 (pp-bench, June 2026): the default method 4
 /// spent ~30% of total ingest wall-time inside the encoder; method 2
 /// roughly halves encode time for a few percent larger artifacts. Cache

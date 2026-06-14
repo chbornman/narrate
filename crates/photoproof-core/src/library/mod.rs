@@ -2987,17 +2987,51 @@ impl QueueReport {
 /// of ingest, so size like the hashing pool (`min(cores, 8)` — §1.2's
 /// reasoning applies unchanged) but keep it SEPARATE: sharing one pool
 /// would let a scan's hash burst starve previews and vice versa. The cap
-/// also bounds transient decode memory (a wave holds up to 8 full-size
-/// decoded frames).
+/// also bounds transient decode memory (a wave holds up to N full-size
+/// decoded frames). Width is env-overridable (`ingest_pool_size`).
 fn worker_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(hashing::hash_pool_size())
+            .num_threads(ingest_pool_size())
             .thread_name(|i| format!("pp-ingest-{i}"))
             .build()
             .expect("ingest worker pool")
     })
+}
+
+/// The ingest decode/resize/encode pool width, with an env override.
+///
+/// WHY a knob now: the default `min(cores, 8)` cap was benched on the M1
+/// (`preview.rs` "more workers thrash the cache"), back when CLIP image
+/// embedding ran on CPU and decode was NOT the ceiling. The GPU embed (54x
+/// on the 5080, 8.77x on the M1 CoreML) moved the bottleneck to decode, so on
+/// a wide desktop (12c/24t) feeding a 54x GPU the `8` cap likely STARVES the
+/// GPU. `PHOTOPROOF_INGEST_WORKERS` lets that machine widen the pool and
+/// re-bench WITHOUT a recompile (see the `#[ignore]` `bench_ingest_pool_width`
+/// harness in the tests below). It is an env knob, not a config field, for the
+/// same reason the CoreML / force-CPU spike knobs are (`ort_embedder.rs`): a
+/// measurement toggle the operator and the bench can flip with zero API surface
+/// and zero default change; if a desktop value wins, it graduates to a real
+/// config field alongside the CoreML one (BACKLOG: "graduate the env knob to a
+/// config FIELD").
+///
+/// Default (UNSET, empty, or unparseable): the current `hash_pool_size()` —
+/// byte-for-byte the same behavior as before, so NOTHING changes by default. A
+/// set value is clamped to `>= 1` (0 threads would deadlock rayon's pool).
+fn ingest_pool_size() -> usize {
+    parse_pool_override("PHOTOPROOF_INGEST_WORKERS").unwrap_or_else(hashing::hash_pool_size)
+}
+
+/// Parse a worker-count env override: a positive integer wins; anything else
+/// (unset, empty, non-numeric, or `0`) yields `None` so the caller keeps its
+/// default. A free function so the default-vs-override decision is unit-tested
+/// (`pool_override_parsing`) without mutating process env across the suite.
+fn parse_pool_override(var: &str) -> Option<usize> {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
 }
 
 /// The full-raw-decode pool (LIBRARY §10.3): a SEPARATE, NARROWER pool than
@@ -3321,5 +3355,139 @@ mod tests {
         let d = c.now();
         assert!(b > a);
         assert!(d > b);
+    }
+
+    #[test]
+    fn pool_override_parsing_falls_back_unless_a_positive_int() {
+        // A uniquely-named var keeps this test from racing any real knob; we
+        // exercise every branch of the override parser (the lever-2 contract:
+        // only a positive integer overrides, everything else keeps the default).
+        // SAFETY: set_var/remove_var are unsafe in edition 2024 (env mutation is
+        // process-global); the unique name + restore-to-unset bounds the effect
+        // to this test.
+        const VAR: &str = "PHOTOPROOF_INGEST_WORKERS_TEST_ONLY";
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        // Unset -> None (caller keeps hash_pool_size()).
+        assert_eq!(parse_pool_override(VAR), None);
+        // A positive integer (with surrounding whitespace) wins.
+        unsafe {
+            std::env::set_var(VAR, " 24 ");
+        }
+        assert_eq!(parse_pool_override(VAR), Some(24));
+        // Zero is rejected (0 rayon threads would deadlock) -> default.
+        unsafe {
+            std::env::set_var(VAR, "0");
+        }
+        assert_eq!(parse_pool_override(VAR), None);
+        // Non-numeric -> default.
+        unsafe {
+            std::env::set_var(VAR, "lots");
+        }
+        assert_eq!(parse_pool_override(VAR), None);
+        // Empty -> default.
+        unsafe {
+            std::env::set_var(VAR, "");
+        }
+        assert_eq!(parse_pool_override(VAR), None);
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+    }
+
+    #[test]
+    fn ingest_pool_size_defaults_to_hash_pool_size() {
+        // With the real knob UNSET, the ingest pool width is byte-for-byte the
+        // pre-knob behavior: `hash_pool_size()` (`min(cores, 8)`). This guards
+        // the "zero default change" promise of lever 2. (We do not set the real
+        // var here — that would perturb other tests sharing the process env.)
+        if std::env::var("PHOTOPROOF_INGEST_WORKERS").is_err() {
+            assert_eq!(ingest_pool_size(), hashing::hash_pool_size());
+        }
+    }
+
+    /// Bench harness for re-tuning the ingest pool cap on a NEW machine (the
+    /// lever-2 deliverable: the `min(cores, 8)` cap was an M1 number; a wide
+    /// desktop feeding a 54x GPU may want more). `#[ignore]` so it never runs in
+    /// the normal gate; run it with:
+    ///
+    /// ```text
+    /// PP_BENCH_DECODE_DIR=/path/to/jpegs \
+    ///   cargo test -p photoproof-core -- --ignored --nocapture bench_ingest_pool_width
+    /// ```
+    ///
+    /// It sweeps a few candidate widths over the JPEGs in `PP_BENCH_DECODE_DIR`,
+    /// running the SAME decode+resize a preview wave does (longest-edge 2560),
+    /// and prints img/s per width so the operator can pick the knob value. It
+    /// SKIPS CLEANLY (returns, no failure) when the env dir is unset/empty, so a
+    /// `--ignored` run on a bare machine stays green.
+    #[test]
+    #[ignore = "perf bench; needs PP_BENCH_DECODE_DIR pointing at a folder of JPEGs"]
+    fn bench_ingest_pool_width() {
+        use std::time::Instant;
+
+        let Ok(dir) = std::env::var("PP_BENCH_DECODE_DIR") else {
+            eprintln!("skipping: set PP_BENCH_DECODE_DIR to a folder of JPEGs to bench");
+            return;
+        };
+        let paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("read PP_BENCH_DECODE_DIR")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                matches!(
+                    p.extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase),
+                    Some(ref x) if x == "jpg" || x == "jpeg"
+                )
+            })
+            .collect();
+        if paths.is_empty() {
+            eprintln!("skipping: no .jpg/.jpeg files in {dir}");
+            return;
+        }
+        eprintln!("benching {} images from {dir}", paths.len());
+
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // Candidate widths bracket the current cap: the M1 default, half the
+        // machine, the full machine, and 1.5x (oversubscription is sometimes a
+        // win when each worker stalls on IO). Dedup so a small machine does not
+        // run the same width thrice.
+        let mut widths = vec![
+            hashing::hash_pool_size(),
+            logical / 2,
+            logical,
+            logical * 3 / 2,
+        ];
+        widths.retain(|&w| w >= 1);
+        widths.sort_unstable();
+        widths.dedup();
+
+        for width in widths {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(width)
+                .build()
+                .expect("bench pool");
+            let t0 = Instant::now();
+            pool.install(|| {
+                use rayon::prelude::*;
+                paths.par_iter().for_each(|p| {
+                    // The preview hot path: decode then longest-edge resize to
+                    // the display target. Errors are ignored here (a bad file is
+                    // not what we are timing); the throughput is what matters.
+                    if let Ok(img) = image::open(p) {
+                        let _ = preview::resize_to_edge_for_bench(&img, 2560);
+                    }
+                });
+            });
+            let secs = t0.elapsed().as_secs_f64();
+            eprintln!(
+                "width {width:>3}: {:.1} img/s ({:.2}s for {} imgs)",
+                paths.len() as f64 / secs,
+                secs,
+                paths.len()
+            );
+        }
     }
 }
