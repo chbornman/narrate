@@ -31,10 +31,14 @@ spikes measure the real numbers on our hardware.
   `Lanczos3` (sharper). Keep the `resize_to_edge(&DynamicImage, u32) -> DynamicImage`
   signature so no caller changes.
 - Effort: LOW. Risk: LOW (pure isolated fn).
-- Win: ~7x on the resize step (Neoverse-N1 bench; directional on M-series).
+- Win: **MEASURED 3.66x** on the resize step on M-series (pp-bench, 240 resizes:
+  81.59 -> 22.27 ms/resize). The plan's ~7x was the Neoverse-N1 bench, flagged
+  directional; 3.66x is the real Apple-Silicon figure (resolves open question #3).
+  CatmullRom kernel kept -> byte-identical geometry, +-1 LSB convolution only.
 - Validate: the preview-artifact reproducibility tests; A/B CatmullRom (parity)
   vs Lanczos3 (sharper) through `pp-bench` for size + speed.
 - Gating: none.
+- STATUS: LANDED `b1422a1`.
 
 ## P2. CoreML execution-provider spike  [HIGHEST UPSIDE - measure-first]
 
@@ -164,6 +168,7 @@ libwebp method-2 (chosen post-`pp-bench` for artifact size).
 1. Measured ViT-H CoreML speedup, FP16 vs int8, and the embedding accuracy delta
    vs the CPU FP32 reference (P2).
 2. How badly our ViT-H partitions under the CoreML EP (profile) (P2).
-3. Real M-series `fast_image_resize` numbers (measure in `pp-bench`) (P1).
+3. ~~Real M-series `fast_image_resize` numbers~~ RESOLVED: 3.66x measured (P1
+   landed `b1422a1`).
 4. Whether the worker-sim alone gets the Visualizer smooth enough, or P6 (WebGL)
    is needed (P3 first).
