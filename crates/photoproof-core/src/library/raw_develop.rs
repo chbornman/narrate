@@ -12,10 +12,12 @@
 //! but MUST preserve display-oriented geometry — strokes land where drawn).
 //!
 //! SCOPE (OD-2, "typical neutral decode, just need real resolution"):
-//! bilinear demosaic, RGGB/Bayer family only; clip-to-white highlights; no
-//! denoise/sharpen/lens correction (those live in real editors — FEATURES
-//! non-features). X-Trans / RGBE / CYGM and monochrome are skipped clean
-//! (`UnsupportedCfa`) so the embedded preview always stands.
+//! PPG demosaic (rawler's Patterned Pixel Grouping; bilinear fallback only for
+//! crops too small for PPG's bordered interior — PLAN-PERF P4), RGGB/Bayer
+//! family only; clip-to-white highlights; no denoise/sharpen/lens correction
+//! (those live in real editors — FEATURES non-features). X-Trans / RGBE / CYGM
+//! and monochrome are skipped clean (`UnsupportedCfa`) so the embedded preview
+//! always stands.
 //!
 //! rawler 0.7.2 API hazards this code routes AROUND (verified against the
 //! crate source — several sibling methods are `todo!()` panics):
@@ -60,6 +62,16 @@ pub enum DevelopError {
 // allow); f32 cannot represent all 7 digits but the rounding is identical, so
 // keeping the literals byte-for-byte equal to rawler's keeps the two color
 // paths bit-comparable.
+/// Minimum crop dimension (per axis) for which we run rawler's PPG demosaic.
+/// PPG's interior interpolation loops assume a 3-pixel border on every side
+/// (`.skip(3).take(dim - 6)`, plus a `dim - 3` border bound) and UNDERFLOW-
+/// PANIC for crops smaller than that. Real sensor crops are far larger; only
+/// the synthetic develop fixtures are this small, and a sub-8px patch has no
+/// PPG interior to improve, so below this we use our bilinear path (still
+/// correct, just no quality upgrade where there is nothing to upgrade). 8 (not
+/// 7) gives a one-pixel margin over PPG's exact `dim >= 7` lower bound.
+const PPG_MIN_DIM: usize = 8;
+
 #[allow(clippy::excessive_precision)]
 const SRGB_TO_XYZ_D65: [[f32; 3]; 3] = [
     [0.4124564, 0.3575761, 0.1804375],
@@ -96,7 +108,11 @@ pub fn develop_to_display_oriented(
                     cfg.cfa.name, cfg.cfa.width, cfg.cfa.height
                 )));
             }
-            Some(cfg.cfa.clone())
+            // Keep the PlaneColor next to the CFA: rawler's PPG demosaic takes
+            // it (the channel-name map) alongside the pattern. PPG's own body
+            // ignores it, but the trait signature requires it, so we carry the
+            // real one rather than synthesize a fake.
+            Some((cfg.cfa.clone(), cfg.colors.clone()))
         }
         // A linear DNG is ALREADY demosaiced (cpp == 3): WB + matrix + gamma
         // only, NO demosaic. We still run it through the same scaling + colour
@@ -169,7 +185,8 @@ pub fn develop_to_display_oriented(
         )));
     }
     // Demosaic reads the 4 orthogonal/diagonal neighbours; a 2×2-or-smaller
-    // crop has no interior, which the bilinear kernel's edge-clamp tolerates,
+    // crop has no interior, which the bilinear fallback's edge-clamp tolerates
+    // (PPG is only used for crops >= PPG_MIN_DIM, see the demosaic dispatch),
     // but a degenerate 1-px crop is not a meaningful develop. Guard it.
     if cfa.is_some() && (out_w < 2 || out_h < 2) {
         return Err(DevelopError::Decode("crop too small to demosaic".into()));
@@ -216,7 +233,7 @@ pub fn develop_to_display_oriented(
     };
 
     let rgb = match &cfa {
-        Some(cfa) => {
+        Some((cfa, colors)) => {
             // CFA-PHASE ALIGNMENT (the fiddly bit). `raw.camera.cfa` describes
             // the pattern at the FULL-sensor origin (0,0). After cropping by
             // (crop_x, crop_y), the cropped pixel (0,0) sits on full-sensor
@@ -227,18 +244,54 @@ pub fn develop_to_display_oriented(
             // pattern size". So we shift by (crop_x, crop_y) and then index the
             // shifted pattern with CROPPED coordinates. (color_at takes (row,
             // col) = (y, x); shift takes (x, y) — note the argument order.)
+            //
+            // DEMOSAIC CHOICE (PLAN-PERF P4). We prefer rawler 0.7.2's built-in
+            // PPG (Patterned Pixel Grouping, Chuan-kai Lin) over our hand-rolled
+            // bilinear: PPG interpolates green along the minimum-gradient
+            // direction (gradient-of-gradients) and then reconstructs R/B from
+            // the completed green plane via hue-transit, which removes the
+            // zipper/maze artifacts bilinear leaves on edges and fine texture.
+            // We keep the REST of our pipeline (WB, the camera->sRGB matrix fix,
+            // gamma, EXIF orientation) intact; only the interpolation changes.
+            //
+            // WHY a size guard, not pure PPG: rawler's PPG interior loops use
+            // `.skip(3).take(h - 6)` / `.take(w - 6)` and a `h - 3` border
+            // bound, which UNDERFLOW-PANIC (debug) for crops smaller than the
+            // 6/3-pixel borders they assume. Real sensor crops are millions of
+            // pixels, so this never bites in production; but our synthetic
+            // develop tests (and the property test) drive tiny 3x3/4x4 crops.
+            // For anything below PPG's safe interior we fall back to our proven
+            // bilinear (a 4x4 patch has no PPG interior to improve anyway), so
+            // PPG's quality win lands on real images while tiny crops stay
+            // correct and panic-free.
             let cropped_cfa = cfa.shift(crop_x, crop_y);
-            demosaic_bilinear_rggb(
-                &data,
-                full_w,
-                crop_x,
-                crop_y,
-                out_w,
-                out_h,
-                &cropped_cfa,
-                &wb,
-                &cam_rgb_to_srgb,
-            )
+            if out_w >= PPG_MIN_DIM && out_h >= PPG_MIN_DIM {
+                demosaic_ppg_rggb(
+                    &data,
+                    full_w,
+                    full_h,
+                    crop_x,
+                    crop_y,
+                    out_w,
+                    out_h,
+                    cfa,
+                    colors,
+                    &wb,
+                    &cam_rgb_to_srgb,
+                )
+            } else {
+                demosaic_bilinear_rggb(
+                    &data,
+                    full_w,
+                    crop_x,
+                    crop_y,
+                    out_w,
+                    out_h,
+                    &cropped_cfa,
+                    &wb,
+                    &cam_rgb_to_srgb,
+                )
+            }
         }
         None => {
             // Linear DNG: cpp == 3, already demosaiced, interleaved R,G,B per
@@ -542,6 +595,72 @@ fn finish_pixel(r: f32, g: f32, b: f32, wb: &[f32; 4], m: &[[f32; 3]; 3]) -> [u8
     ]
 }
 
+/// PPG (Patterned Pixel Grouping) demosaic of an RGGB-family Bayer crop via
+/// rawler 0.7.2's built-in `PPGDemosaic`, then OUR WB + matrix + gamma. `data`
+/// is the FULL-sensor scaled float raster (`full_w` x `full_h`); we develop the
+/// `out_w x out_h` window at origin (`crop_x`, `crop_y`).
+///
+/// WHY PPG over our bilinear: bilinear averages same-colour neighbours
+/// isotropically, which smears across edges and produces the classic
+/// zipper/maze artifacts on high-frequency detail. PPG instead (a) fills green
+/// along the direction of MINIMUM gradient (a gradient-of-gradients test, so
+/// edges are interpolated ALONG them, not across), then (b) reconstructs R/B
+/// from the now-complete green plane using hue-transit interpolation, which
+/// keeps colour edges aligned with luminance edges. Same family of algorithm
+/// real RAW developers ship; markedly fewer artifacts for ~no extra code on our
+/// side (rawler owns the kernel). We keep our colour-matrix fix, gamma, and
+/// orientation exactly as-is — only the interpolation step changes.
+///
+/// CFA PHASE: we hand PPG the FULL-sensor pattern (`cfa`, origin (0,0)) and the
+/// crop as a `Rect`; PPG does its OWN `cfa.shift(roi.x, roi.y)` internally
+/// (verified in rawler's `ppg.rs`), so phase alignment matches our bilinear
+/// path's `cfa.shift(crop_x, crop_y)` exactly. Output is camera-RGB linear,
+/// out_w x out_h, which we then run through the shared `finish_pixel` kernel.
+///
+/// The caller guarantees `out_w >= PPG_MIN_DIM && out_h >= PPG_MIN_DIM` so
+/// PPG's border-assuming interior loops never underflow.
+#[allow(clippy::too_many_arguments)]
+fn demosaic_ppg_rggb(
+    data: &[f32],
+    full_w: usize,
+    full_h: usize,
+    crop_x: usize,
+    crop_y: usize,
+    out_w: usize,
+    out_h: usize,
+    cfa: &CFA,
+    colors: &rawler::cfa::PlaneColor,
+    wb: &[f32; 4],
+    m: &[[f32; 3]; 3],
+) -> Vec<u8> {
+    use rawler::imgop::sensor::bayer::Demosaic;
+    use rawler::imgop::sensor::bayer::ppg::PPGDemosaic;
+    use rawler::imgop::{Dim2, Point, Rect};
+    use rawler::pixarray::Pix2D;
+
+    // PPG needs an owned full-sensor PixF32 (it reads with full-sensor
+    // coordinates inside the ROI). `data` is a borrow of rawler's Cow buffer,
+    // so we hand PPG its own copy; the extra full-sensor f32 buffer is fine for
+    // an on-demand develop and is freed as soon as PPG returns.
+    let pix = Pix2D::new_with(data.to_vec(), full_w, full_h);
+    let roi = Rect::new(Point::new(crop_x, crop_y), Dim2::new(out_w, out_h));
+
+    // rawler's PPG: green-first via minimum-gradient, then R/B from green. The
+    // result is an out_w x out_h camera-RGB linear image ([R,G,B] per pixel).
+    let rgb = PPGDemosaic::new().demosaic(&pix, cfa, colors, roi);
+    let pixels = rgb.pixels();
+
+    let mut out = vec![0u8; out_w * out_h * 3];
+    for (i, px) in pixels.iter().enumerate() {
+        // px is camera-RGB linear; finish_pixel applies WB + camera->sRGB
+        // matrix + sRGB gamma (the unchanged tail of our pipeline).
+        let dev = finish_pixel(px[0], px[1], px[2], wb, m);
+        let o = i * 3;
+        out[o..o + 3].copy_from_slice(&dev);
+    }
+    out
+}
+
 /// Bilinear demosaic of an RGGB-family Bayer crop, fused with WB + matrix +
 /// gamma. `data` is the FULL-sensor scaled float raster (`full_w` wide); we
 /// read a `out_w × out_h` window at origin (`crop_x`, `crop_y`). `cropped_cfa`
@@ -825,6 +944,59 @@ mod tests {
         let db = (p[1] as i16 - p[2] as i16).abs();
         // Identity matrix → exactly neutral; allow a couple LSB of rounding.
         assert!(dr <= 2 && db <= 2, "non-neutral gray: {:?}", p);
+    }
+
+    /// THE PPG-PATH TEST (PLAN-PERF P4). A crop at/above `PPG_MIN_DIM` routes
+    /// through rawler's PPG demosaic instead of bilinear. On a uniform RGGB
+    /// mosaic (every R=R_VAL, G=G_VAL, B=B_VAL) PPG's interior must reconstruct
+    /// each channel back to its source value (a flat field has no gradients, so
+    /// every interpolation direction agrees), then the unchanged matrix+gamma
+    /// tail sRGB-encodes it. This proves: (a) the PPG path runs without the
+    /// border-underflow panic, (b) CFA phase wiring through rawler is correct,
+    /// and (c) our colour tail is unchanged. We read an interior pixel (PPG's
+    /// 3px border uses plain bilinear, the interior is the PPG win).
+    #[test]
+    fn ppg_path_demosaics_uniform_field() {
+        // 16x16 is comfortably above PPG_MIN_DIM (8), giving a real interior.
+        let (w, h) = (16usize, 16usize);
+        let r_lin = 0.5_f32;
+        let g_lin = 0.25_f32;
+        let b_lin = 0.75_f32;
+        let to_u16 = |v: f32| (v * u16::MAX as f32) as u16;
+        let cfa = CFA::new("RGGB");
+        let mut pix = vec![0u16; w * h];
+        for row in 0..h {
+            for col in 0..w {
+                pix[row * w + col] = match cfa.color_at(row, col) {
+                    0 => to_u16(r_lin),
+                    1 => to_u16(g_lin),
+                    _ => to_u16(b_lin),
+                };
+            }
+        }
+        let raw = raw_input(
+            w,
+            h,
+            RawImageData::Integer(pix),
+            rggb_config(),
+            1,
+            [1.0, 1.0, 1.0, 1.0],
+            None,
+        );
+        let img = develop_to_display_oriented(raw, 1).expect("develops via PPG");
+        assert_eq!(img.dimensions(), (16, 16));
+        let px = img.to_rgb8();
+        let (er, eg, eb) = (
+            preview::srgb_encode_u8(r_lin as f64),
+            preview::srgb_encode_u8(g_lin as f64),
+            preview::srgb_encode_u8(b_lin as f64),
+        );
+        // An interior pixel (8,8): well inside PPG's 3px border.
+        let c = px.get_pixel(8, 8);
+        let close = |a: u8, b: u8| (a as i16 - b as i16).abs() <= 1;
+        assert!(close(c[0], er), "PPG R {} vs {}", c[0], er);
+        assert!(close(c[1], eg), "PPG G {} vs {}", c[1], eg);
+        assert!(close(c[2], eb), "PPG B {} vs {}", c[2], eb);
     }
 
     /// A non-identity orientation (6 = 90° CW) must rotate the output so the

@@ -155,7 +155,12 @@ pub const FULL_DECODE_JPEG_QUALITY: u8 = 90;
 /// matrix). Treating those as "v1" and shipping the post-fix develop as v2 means
 /// every black artifact on disk is now a miss and re-develops in colour, with no
 /// manual cache clear. Any future develop-algorithm change MUST bump this.
-pub const RAW_DEVELOP_VERSION: i64 = 2;
+///
+/// v3 (PLAN-PERF P4): the demosaic moved from our hand-rolled bilinear to
+/// rawler's PPG (Patterned Pixel Grouping) for Bayer/RGGB crops, removing
+/// zipper/maze artifacts. A demosaic change alters every developed pixel, so the
+/// bump forces cached `-full-v2` artifacts to re-develop at the higher quality.
+pub const RAW_DEVELOP_VERSION: i64 = 3;
 
 /// Which container the full-resolution artifact landed in (WebP preferred for
 /// cache consistency; JPEG only when WebP's dimension cap bites). The serve
