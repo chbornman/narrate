@@ -317,6 +317,29 @@ fn assemble_query_prompt(recipe: TextRecipe, text: &str) -> String {
 
 // ------------------------------------------------------------ loading ----
 
+/// Env knob (PLAN-PERF P2 CoreML SPIKE): when set to a truthy value
+/// (`1`/`true`/`on`, case-insensitive) the CoreML execution provider is
+/// registered ahead of the default CPU EP. UNSET (the default, and the only
+/// shippable posture today) leaves the byte-identical CPU-only path that every
+/// stored PPVEC vector was embedded under. WHY an env var and not a config
+/// field: a spike wants a zero-API-surface, zero-default-change toggle that the
+/// measurement harness and a curious operator can flip without touching the
+/// host's converge loop or the persisted config schema; if the spike ships, it
+/// graduates to a real config knob.
+const COREML_ENV: &str = "PHOTOPROOF_ORT_COREML";
+
+/// True iff `PHOTOPROOF_ORT_COREML` names a truthy value. Anything else
+/// (unset, empty, `0`, `false`) keeps the CPU default.
+fn coreml_requested() -> bool {
+    match std::env::var(COREML_ENV) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
+
 fn build_session(model_path: &Path) -> ConnectorResult<Session> {
     // CPU EP is ort's default; 4 intra-op threads is the spike posture.
     // GraphOptimizationLevel::Level3 matches onnxruntime python's default
@@ -325,16 +348,59 @@ fn build_session(model_path: &Path) -> ConnectorResult<Session> {
     // Decode error explicitly rather than chaining over mixed Results.
     let err =
         |e: String| ConnectorError::Decode(format!("ort session {}: {e}", model_path.display()));
-    let builder = Session::builder()
+    let mut builder = Session::builder()
         .map_err(|e| err(e.to_string()))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| err(e.to_string()))?
         .with_intra_threads(INTRA_OP_THREADS)
         .map_err(|e| err(e.to_string()))?;
-    let mut builder = builder;
+    // CoreML EP (P2 SPIKE), behind the env knob. OFF by default. We register
+    // with `.error_on_failure()` so a runtime that lacks the CoreML EP (the
+    // prebuilt onnxruntime may not carry it — it is a build-time onnxruntime
+    // option) surfaces as an explicit Decode error rather than ort's silent
+    // CPU fallback; a spike that "succeeds" by quietly running on CPU would be
+    // a false positive. Per-op CPU<->ANE partition is CoreML's own internal
+    // decision and is read from `with_profile_compute_plan` logs, not here.
+    if coreml_requested() {
+        builder = build_session_with_coreml(builder).map_err(err)?;
+        // Stderr (not tracing): this crate installs no subscriber, and the
+        // spike wants the "CoreML path taken" signal visible in the harness
+        // output regardless of host logging.
+        eprintln!(
+            "[ort coreml spike] registered CoreML EP for {} (compute units: CPUAndNeuralEngine, MLProgram)",
+            model_path.display()
+        );
+    }
     builder
         .commit_from_file(model_path)
         .map_err(|e| err(e.to_string()))
+}
+
+/// Register the CoreML EP on `builder` (P2 SPIKE). Split out so `build_session`
+/// stays linear and the exact ort rc.12 builder chain lives in one documented
+/// place. The chain mirrors the research note, adjusted to the rc.12 API:
+/// `ep::CoreML` (not `CoreMLExecutionProvider`), `with_compute_units` (was
+/// `with_ane_only`), `with_subgraphs(true)` (now takes a bool), MLProgram
+/// format (Core ML 5+, supports more ops than NeuralNetwork), and
+/// `.error_on_failure()` so a runtime without the EP is loud, not silent.
+///
+/// Returns `Err(String)` (not ort's `BuilderResult`) deliberately: that result
+/// carries the recoverable `SessionBuilder` in its error variant (~144 bytes),
+/// which trips `clippy::result_large_err` if it escapes; collapsing to the
+/// message at the boundary keeps the large error from propagating.
+fn build_session_with_coreml(
+    builder: ort::session::builder::SessionBuilder,
+) -> Result<ort::session::builder::SessionBuilder, String> {
+    use ort::ep::CoreML;
+    use ort::ep::coreml::{ComputeUnits, ModelFormat};
+    builder
+        .with_execution_providers([CoreML::default()
+            .with_compute_units(ComputeUnits::CPUAndNeuralEngine)
+            .with_model_format(ModelFormat::MLProgram)
+            .with_subgraphs(true)
+            .build()
+            .error_on_failure()])
+        .map_err(|e| e.to_string())
 }
 
 fn load_tokenizer(path: &Path) -> ConnectorResult<Tokenizer> {

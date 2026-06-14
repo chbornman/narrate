@@ -17,7 +17,17 @@ toml = "0.8"
 # metadata — the onnx-community causal-LM exports demand them (the spike's
 # verified KV trap; docs/SPIKE-P7-EMBED.md). The pinned exports are f32, but
 # shaping from metadata stays dtype-honest for either.
-ort = { version = "2.0.0-rc.12", features = ["half"] }
+#
+# `coreml` links a CoreML-EP-capable onnxruntime (the prebuilt onnxruntime
+# `ort` downloads is NOT guaranteed to carry the CoreML EP; the feature pulls
+# `ort-sys/coreml`). This is the PLAN-PERF P2 CoreML SPIKE: the EP is wired but
+# OFF by default. The default (CPU) path is unchanged and does not require the
+# CoreML EP to be functional at runtime — registration is gated on an env knob
+# (`PHOTOPROOF_ORT_COREML`, see `ort_embedder::build_session`). WHY pin the
+# version: the ort builder API for the CoreML EP drifts across rc tags
+# (`with_ane_only` -> `with_compute_units`, `with_subgraphs(bool)`), so the
+# exact rc this was written against is load-bearing.
+ort = { version = "2.0.0-rc.12", features = ["half", "coreml"] }
 half = "2"
 # tokenizer.json loading for the in-process ort embedders (EmbeddingGemma /
 # Qwen3 / DFN5B textual). default-features off: we only deserialize a
@@ -27,3 +37,9 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 [dev-dependencies]
 pollster = "0.4"
+# Image decode for the CoreML SPIKE measurement harness (the #[ignore]
+# `coreml_spike_*` tests decode real COCO JPEGs through the CLIP visual tower
+# to measure CPU vs CoreML img/s + embedding accuracy). dev-only: the shipped
+# connector takes an already-decoded DecodedImage from core, so this never
+# enters the production build.
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
