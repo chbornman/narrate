@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photoproof - Diagrams</title>
+<style>
+  :root {
+    --bg: #141414;
+    --panel: #1d1d1d;
+    --panel2: #242424;
+    --line: #3a3a3a;
+    --text: #e8e6e1;
+    --dim: #9a968e;
+    --faint: #6b675f;
+    --red: #c0392b;        /* the grease pencil */
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.55; font-size: 15px;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 4px; }
+  h1 .pencil { color: var(--red); }
+  .subtitle { color: var(--dim); margin: 0 0 6px; }
+  .stamp { color: var(--faint); font-family: var(--mono); font-size: 12px; margin-bottom: 40px; }
+  h2 {
+    font-size: 19px; font-weight: 600; margin: 56px 0 6px;
+    padding-top: 18px; border-top: 1px solid var(--line);
+  }
+  h2 .no { color: var(--faint); font-family: var(--mono); font-size: 14px; margin-right: 10px; }
+  .lede { color: var(--dim); margin: 0 0 22px; max-width: 72ch; }
+  a { color: inherit; text-decoration: none; }
+
+  /* The legend chips reused from the architecture page idiom. */
+  .legend { display: flex; gap: 22px; flex-wrap: wrap; margin: 14px 0 0; color: var(--dim); font-size: 12.5px; }
+  .legend span { display: inline-flex; align-items: center; }
+  .legend .swatch { display: inline-block; width: 22px; height: 0; margin-right: 7px; vertical-align: middle; }
+  .legend .solid { border-top: 2px solid var(--dim); }
+  .legend .dashed { border-top: 2px dashed var(--red); }
+  .legend .accent { border-top: 2px solid var(--red); }
+  .legend .pill {
+    display: inline-block; padding: 1px 9px; border-radius: 9px;
+    font-family: var(--mono); font-size: 11px; margin-right: 7px;
+  }
+  .legend .pill-spec { background: #2a2a2a; color: var(--dim); }
+
+  /* The mermaid host: same card chrome as architecture .diagram. */
+  .diagram {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px; margin: 18px 0; overflow-x: auto;
+  }
+  .diagram .mermaid { display: flex; justify-content: center; }
+
+  footer { color: var(--faint); font-size: 12.5px; margin-top: 64px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Photoproof <span class="pencil">/</span> diagrams</h1>
+<p class="subtitle">Seven Mermaid diagrams for understanding the system: processes, models, capture, ingest, search, scheduling, and fallbacks.</p>
+<p class="stamp">generated June 14, 2026 - sources: docs/RUNTIME-MATRIX.md, docs/architecture.html, spec/, docs/STATUS.md - complements architecture.html</p>
+
+<p class="lede">
+This page is the moving-parts companion to <a href="architecture.html" style="border-bottom:1px solid var(--line)">architecture.html</a>'s
+static layout. Each diagram is drawn from the specs and the capability ledger,
+so build status is honest: anything not shipping today is marked. Where a
+diagram and a spec disagree, the spec wins.
+</p>
+
+<div class="legend">
+  <span><span class="swatch solid"></span>live - shipping and exercised today</span>
+  <span><span class="swatch dashed"></span>planned / M3 / partial - spec'd, not wired in the shipped app</span>
+  <span><span class="swatch accent"></span>the red accent marks the grease-pencil / truth path</span>
+</div>
+<p class="lede" style="margin-top:14px; font-size:13.5px;">
+Read the dashed red edges and the <b>(M3)</b> / <b>(planned)</b> labels as "not built yet."
+That covers: VLM captions, summary generation, the LLM query-parse wiring in
+the shipped app, and the GPU execution providers (CoreML / CUDA) for the
+embedders. The embedders run on CPU in production today. Voice (VAD + ASR)
+runs on CPU by design - that is a feature, not a fallback.
+</p>
+
+<h2><span class="no">1</span>Process and truth-store architecture</h2>
+<p class="lede">
+One Tauri desktop process owns every durable byte. Big or crash-prone model work lives in
+supervised child processes (<span style="font-family:var(--mono);font-size:13px">llama-server</span>,
+<span style="font-family:var(--mono);font-size:13px">pp-asr-server</span>); only tiny,
+fixed-shape models run in-process through ONNX Runtime. The sidecar JSON files beside your
+images are the truth; SQLite, PPVEC, and the preview cache are rebuildable indexes derived
+from them. Image bytes reach the webview through a custom <span style="font-family:var(--mono);font-size:13px">photoproof://</span>
+protocol, never as base64 over IPC. This shows what runs and where truth lives.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph DESKTOP["photoproof desktop - one Tauri process (Rust core)"]
+    direction TB
+    WV["webview (Svelte 5)<br/>grid / look / search<br/>thin: zero business logic"]
+    CORE["photoproof-core<br/>event log, folds, redaction<br/>capture, library, search, runtime"]
+    ORT["in-process ONNX Runtime (ort)<br/>silero VAD - text-embed - CLIP<br/>tiny / deterministic / fixed-shape only"]
+    WV ---|"photoproof:// image bytes<br/>(never base64 over IPC)"| CORE
+    CORE --- ORT
+  end
+
+  ASR["pp-asr-server (child)<br/>sherpa-onnx + Nemotron 0.6B"]
+  LLM["llama-server (child)<br/>Gemma 4 E2B + vision projector"]
+
+  CORE ---|"WS - raw f32 frames"| ASR
+  CORE ---|"HTTP - OpenAI-compatible"| LLM
+
+  subgraph TRUTH["truth - canonical, walk away anytime"]
+    SC[".photoproof.json sidecars<br/>beside every annotated image"]
+    COL["collections.photoproof.json"]
+  end
+
+  subgraph DERIVED["derived - delete and rebuild from truth"]
+    DB[("SQLite (WAL)<br/>events, library, FTS5, queue")]
+    VEC[("PPVEC<br/>int8 vectors")]
+    PV[("preview cache<br/>WebP 512 / 2560")]
+  end
+
+  CORE ==>|"2 s debounce - the truth path"| SC
+  CORE ==> COL
+  CORE -->|"transactional index"| DB
+  CORE --> VEC
+  CORE --> PV
+
+  classDef accent stroke:#c0392b,stroke-width:2px;
+  class CORE,SC,COL accent;
+</pre>
+</div>
+
+<h2><span class="no">2</span>The five models at a glance</h2>
+<p class="lede">
+Three runtimes, three acceleration stories. The LLM (llama.cpp) already picks Metal / CUDA /
+Vulkan / CPU by detected hardware. The ASR runs on CPU by design - a 0.6B streaming model is
+real-time on a laptop and keeping it off the GPU removes the worst VRAM contention. VAD is
+tiny and lives on CPU forever. The two embedders (text and image / CLIP) run on CPU in
+production today; their GPU execution providers (CoreML on Mac, CUDA on NVIDIA) are in
+progress / planned, gated on an FP16 single-file export. This shows each model's runtime,
+accelerator, and what it produces.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph LC["llama.cpp - cross-platform accelerated"]
+    LLM["LLM - Gemma 4 E2B QAT q4_0<br/>accel: Metal / CUDA / Vulkan / CPU<br/>produces: query parse - captions (M3) - summaries (M3)"]
+  end
+
+  subgraph SH["sherpa-onnx - CPU by design"]
+    ASR["ASR - Nemotron 0.6B en int8<br/>accel: CPU (feature, not fallback)<br/>produces: streaming transcript finals"]
+  end
+
+  subgraph ORTR["ONNX Runtime (ort) - CPU today, GPU EP pending"]
+    VAD["VAD - silero-vad v5 int8<br/>accel: CPU (always - tiny)<br/>produces: speech onset + gate"]
+    TXT["Text-embed - EmbeddingGemma 300m<br/>accel: CPU now - CoreML/CUDA planned<br/>produces: annotation + query vectors (768-dim)"]
+    CLIP["CLIP - DFN5B ViT-H-14-378<br/>accel: CPU now - CoreML/CUDA planned<br/>produces: image + visual-query vectors (1024-dim)"]
+  end
+
+  TXT -.->|"FP16 single-file export in progress"| GPUEP(["GPU / ANE accel<br/>CoreML - CUDA - DirectML (planned)"])
+  CLIP -.-> GPUEP
+
+  classDef planned stroke:#c0392b,stroke-width:1.5px,stroke-dasharray:5 4;
+  class GPUEP planned;
+</pre>
+</div>
+
+<h2><span class="no">3</span>Capture flow (voice)</h2>
+<p class="lede">
+The one path with real-time constraints. You arm the mic (Space / M), silero VAD stamps the
+authoritative speech onset, and the write-scope is snapshotted at that onset - so words follow
+your eyes even if you click to the next image mid-sentence. The ASR streams partials and then a
+final; the event id is minted at onset but the row lands at finalization, folded and written to
+the sidecar (truth) and the index (derived). Audio never touches disk. This shows the VAD-onset
+binding rule that makes voice attribution correct.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant U as You
+  participant Mic as cpal mic (16 kHz f32)
+  participant VAD as silero VAD (ort, CPU)
+  participant Eng as capture engine (scope ring)
+  participant ASR as pp-asr-server (CPU)
+  participant Store as event log
+  participant SC as sidecar (truth)
+
+  U->>Mic: arm (Space / M)
+  Mic->>VAD: gated frames
+  VAD->>Eng: SpeechStart - authoritative onset ts
+  Note over Eng: snapshot write-scope at onset<br/>(bind here, no grace window)
+  Eng->>Store: mint event id at onset ts
+  Mic->>ASR: gated frames over WS
+  ASR-->>Eng: partials (streaming)
+  ASR->>Eng: Final (carries all partial text)
+  Note over Eng: final binds by nearest onset<br/>(2 s skew bound, B72)
+  Eng->>Store: commit remark, folded
+  Store->>SC: write within seconds (2 s debounce)
+  Note over Mic: 60 s in-memory ring, zeroed on disarm
+</pre>
+</div>
+
+<h2><span class="no">4</span>Ingest pipeline</h2>
+<p class="lede">
+A watched root feeds a queue whose rows <i>are</i> the work: each pass is a row in
+<span style="font-family:var(--mono);font-size:13px">ingest_passes</span>. Discovery hashes
+the file (BLAKE3 = identity), extracts EXIF, and builds preview tiers (512 px thumb, 2560 px
+display). The CLIP image-embedding pass and text-embedding of notes run as background passes
+that yield to voice and interactive search. The caption pass (VLM) and summary generation are
+spec'd but not built - their pass names exist with no runner. This shows what produces an
+image's derived data and in what order.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  ROOT["watched root<br/>(live watcher + reconciliation scans)"] --> DISC["discover file"]
+  DISC --> HASH["hash - BLAKE3-256<br/>= image identity (P0/P1)"]
+  HASH --> EXIF["exif subset<br/>capture ts, gear, GPS"]
+  HASH --> PREV["preview tiers<br/>512 thumb + 2560 display WebP"]
+  PREV -.->|"flagged RAW / HEIC below threshold"| FRD["full-raw-decode backfill<br/>(M1.5, queued by design, no worker)"]
+
+  HASH --> EMB["embed passes (background, concurrency 1)"]
+  EMB --> CLIPE["image-embedding - CLIP image tower<br/>image_clip vectors"]
+  EMB --> TXTE["annotation-embedding - text notes<br/>annotation_chunk vectors"]
+
+  HASH -.->|"M3, not built"| CAP["caption - VLM caption<br/>(registry name only, no runner)"]
+  HASH -.->|"M3, not built"| SUM["per-image summary generation<br/>(storage + search exist, generation unwired)"]
+
+  classDef planned stroke:#c0392b,stroke-width:1.5px,stroke-dasharray:5 4;
+  class CAP,SUM,FRD planned;
+</pre>
+</div>
+
+<h2><span class="no">5</span>Search fusion</h2>
+<p class="lede">
+A query fans out into up to four signals and fuses them with weighted Reciprocal Rank Fusion
+(k = 60). S1 is your annotation text as vectors (the primary signal), S2 is keyword FTS5 over
+your words, S3 is machine summaries (M3, awaiting generation), and S4 is visual CLIP matching
+(the fallback for un-annotated or explicitly visual asks). The text embedder embeds the query
+once for S1 and S3; the CLIP text tower embeds it only when S4 activates. Your own words
+outrank the machine's: machine signals only add ways to find an image, never substitute for
+your words. The LLM query-parse step is mock-only in the shipped app (its slot is None). This
+shows how a question reaches a photograph.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  Q["query"] -.->|"M3, partial - llm slot is None today"| PARSE["LLM parse<br/>filters + collection resolution"]
+  Q --> TXTQ["text-embed(query)<br/>EmbeddingGemma"]
+  Q --> CLIPQ["CLIP-text(query)<br/>only when S4 activates"]
+
+  PARSE -.-> FILT["structured filters<br/>(WHERE constraints - filter, never rank)"]
+  TXTQ --> S1["S1 - annotation_chunk vectors<br/>PRIMARY (your words, as meaning) w=1.0"]
+  Q --> S2["S2 - event_fts keyword (FTS5)<br/>your words, exact w=1.0"]
+  TXTQ -.->|"awaiting summary generation (M3)"| S3["S3 - summaries FTS + vectors<br/>w=0.5 each"]
+  CLIPQ --> S4["S4 - image_clip visual<br/>activates if visual or &lt; 10 candidates w=1.0"]
+
+  S1 --> RRF["weighted RRF fusion<br/>k = 60, max per signal"]
+  S2 --> RRF
+  S3 -.-> RRF
+  S4 --> RRF
+  FILT -.-> RRF
+  RRF --> RES["ranked results + honest provenance<br/>your own quote, dated"]
+
+  classDef planned stroke:#c0392b,stroke-width:1.5px,stroke-dasharray:5 4;
+  class PARSE,FILT,S3 planned;
+  classDef accent stroke:#c0392b,stroke-width:2px;
+  class S1,S2,RES accent;
+</pre>
+</div>
+
+<h2><span class="no">6</span>Model concurrency: the priority ladder</h2>
+<p class="lede">
+WHERE models run is half the story; WHEN is governed by a scheduler enforcing a strict
+priority ladder: <b>live voice &gt; interactive search &gt; background fuel</b>. Arming the mic
+pauses all background model work (it resumes about 5 s after disarm). An interactive LLM query
+parse preempts a background LLM job that would otherwise make it wait more than 250 ms. The LLM
+is one server with two slots (interactive + background, never more); GPU / embedding passes run
+at concurrency 1. This shows what pauses or preempts what. The ladder is wired today; the
+background LLM jobs it would schedule (captions, summaries) are M3.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph TIER0["live voice - highest priority"]
+    VOICE["mic armed: VAD + ASR (CPU)"]
+  end
+  subgraph TIER1["interactive - second"]
+    ISEARCH["interactive search<br/>LLM parse (M3) + query embed"]
+  end
+  subgraph TIER2["background fuel - lowest"]
+    BG["background passes<br/>image + note embedding (live)<br/>LLM captions / summaries (M3)"]
+  end
+
+  VOICE ==>|"mic-armed pauses all background<br/>(resumes +5 s after disarm)"| BG
+  ISEARCH ==>|"interactive LLM parse preempts<br/>background LLM if wait &gt; 250 ms"| BG
+  VOICE ==>|"voice protected over everything"| ISEARCH
+
+  Note["GPU / embedding passes: concurrency 1<br/>one llama-server, 2 slots, 1 active per lane"]
+
+  classDef accent stroke:#c0392b,stroke-width:2px;
+  class VOICE accent;
+</pre>
+</div>
+
+<h2><span class="no">7</span>Fallback chains (robustness)</h2>
+<p class="lede">
+Robustness is two layers. Per model: try the best accelerator, fall back to CPU, then let just
+that feature go dark. Per product: the Tier-0 floor is a complete product with no models at all
+- typed notes, the grease pencil, ratings, and FTS5 keyword search. Every runtime failure (a
+model that will not download, an execution provider that will not load, a native crash) lands
+at Tier 0 quietly: voice off is not the app broken, semantic search off still leaves keyword
+search. This shows that nothing the models add is load-bearing for the journal.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph LLMC["LLM"]
+    L1["Metal / CUDA / Vulkan<br/>(by detected hardware)"] --> L2["CPU"] --> L3["LLM features dark"]
+  end
+  subgraph EMBC["CLIP / text-embed"]
+    E1["CoreML / CUDA / DirectML FP16<br/>(planned)"] -.-> E2["CPU int8 (live default)"] --> E3["semantic search degrades<br/>to keyword (still works)"]
+  end
+  subgraph ASRC["ASR"]
+    A1["CPU int8 (by design)"] --> A3["voice dark<br/>(journal unaffected)"]
+  end
+  subgraph VADC["VAD"]
+    V1["CPU (always - tiny)"]
+  end
+
+  L3 --> FLOOR
+  E3 --> FLOOR
+  A3 --> FLOOR
+  V1 --> FLOOR
+
+  FLOOR["Tier 0 floor - a complete product<br/>typed notes + grease pencil + ratings + FTS5 search"]
+
+  classDef planned stroke:#c0392b,stroke-width:1.5px,stroke-dasharray:5 4;
+  class E1 planned;
+  classDef accent stroke:#c0392b,stroke-width:2px;
+  class FLOOR accent;
+</pre>
+</div>
+
+<footer>
+Photoproof diagrams - one page, hand-maintained beside docs/architecture.html.
+Where this page and a spec disagree, the spec wins; spec section ids and
+decision numbers live there, not here. No build tooling: this file is
+self-contained HTML plus one CDN script tag (Mermaid v11); edit and reload.
+</footer>
+
+</main>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    securityLevel: "loose",
+    themeVariables: {
+      // Match the docs dark theme: panel backgrounds, red grease-pencil accent, muted grays.
+      darkMode: true,
+      background: "#1d1d1d",
+      fontFamily: "-apple-system, 'Segoe UI', system-ui, sans-serif",
+      primaryColor: "#242424",
+      primaryTextColor: "#e8e6e1",
+      primaryBorderColor: "#c0392b",
+      secondaryColor: "#1d1d1d",
+      secondaryBorderColor: "#3a3a3a",
+      tertiaryColor: "#1d1d1d",
+      tertiaryBorderColor: "#3a3a3a",
+      lineColor: "#6b675f",
+      textColor: "#e8e6e1",
+      mainBkg: "#242424",
+      nodeBorder: "#3a3a3a",
+      clusterBkg: "#1a1a1a",
+      clusterBorder: "#3a3a3a",
+      titleColor: "#e8e6e1",
+      edgeLabelBackground: "#1d1d1d",
+      // sequence diagram
+      actorBkg: "#242424",
+      actorBorder: "#c0392b",
+      actorTextColor: "#e8e6e1",
+      signalColor: "#9a968e",
+      signalTextColor: "#e8e6e1",
+      labelBoxBkgColor: "#242424",
+      labelBoxBorderColor: "#3a3a3a",
+      labelTextColor: "#e8e6e1",
+      noteBkgColor: "#2a2620",
+      noteTextColor: "#e8e6e1",
+      noteBorderColor: "#8a8455"
+    }
+  });
+</script>
+</body>
+</html>
