@@ -36,6 +36,12 @@ walkdir = "2.5.0"
 # Already in the lock tree transitively; pinned here as a direct dep.
 filetime = "0.2.29"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp", "rayon"] }
+# NEON-SIMD downscaler for the preview tiers (PLAN-PERF P1). The `image`
+# feature wires up IntoImageView/IntoImageViewMut for the image crate's
+# DynamicImage so we resize straight into/out of it (needs image >= 0.25.6;
+# we are on 0.25.10). Replaces image-rs's scalar resample in
+# `preview::resize_to_edge` with a vectorized convolution.
+fast_image_resize = { version = "6.0.0", features = ["image"] }
 webp = "0.3.1"
 kamadak-exif = "0.6.1"
 rawler = "0.7.2"

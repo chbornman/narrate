@@ -17,6 +17,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use fast_image_resize::{self as fir, ResizeAlg, ResizeOptions, Resizer};
 use image::{DynamicImage, GenericImageView, ImageDecoder};
 
 use crate::id::ContentHash;
@@ -752,7 +753,56 @@ fn resize_to_edge(img: &DynamicImage, edge: u32) -> DynamicImage {
     if w.max(h) <= edge {
         return img.clone();
     }
-    img.resize(edge, edge, image::imageops::FilterType::CatmullRom)
+    // WHY fast_image_resize: image-rs's resampler is scalar; this crate runs a
+    // NEON-SIMD separable convolution (~7x on the resize step, PLAN-PERF P1).
+    // We keep FilterType::CatmullRom — the SAME kernel image::resize used — so
+    // output stays at near-parity (a convolution can differ by ±1 LSB, never
+    // geometry). The `image` Cargo feature gives DynamicImage the
+    // IntoImageView/IntoImageViewMut impls, so we resize straight into a
+    // destination DynamicImage of the source's own pixel type (preview feeds
+    // Rgb8/Rgba8; we preserve whatever it is rather than force a conversion).
+    //
+    // WHY this aspect math: image::resize(edge, edge, Fit) does NOT stretch to
+    // a square — it scales so the longest side lands on `edge` and preserves
+    // aspect. We replicate image-rs's exact `resize_dimensions` arithmetic
+    // (ratio = min(edge/w, edge/h); round; clamp >= 1) so the cached artifact
+    // geometry is byte-identical to before. The overflow guard image-rs adds is
+    // irrelevant here: this is a pure downscale (the early return covers the
+    // no-upscale case), so the scaled dims never exceed the source.
+    let ratio = f64::min(
+        f64::from(edge) / f64::from(w),
+        f64::from(edge) / f64::from(h),
+    );
+    let tw = ((f64::from(w) * ratio).round() as u64).max(1) as u32;
+    let th = ((f64::from(h) * ratio).round() as u64).max(1) as u32;
+
+    // Destination must carry the source's pixel type for the IntoImageViewMut
+    // impl to round-trip without a lossy conversion. Match the source variant;
+    // fall back to image-rs's scalar resize for any exotic type fast_image_resize
+    // cannot view (belt-and-suspenders — preview only ever produces Rgb8/Rgba8).
+    let mut dst = match img {
+        DynamicImage::ImageRgb8(_) => DynamicImage::new_rgb8(tw, th),
+        DynamicImage::ImageRgba8(_) => DynamicImage::new_rgba8(tw, th),
+        DynamicImage::ImageLuma8(_) => DynamicImage::new_luma8(tw, th),
+        DynamicImage::ImageLumaA8(_) => DynamicImage::new_luma_a8(tw, th),
+        DynamicImage::ImageRgb16(_) => DynamicImage::new_rgb16(tw, th),
+        DynamicImage::ImageRgba16(_) => DynamicImage::new_rgba16(tw, th),
+        DynamicImage::ImageLuma16(_) => DynamicImage::new_luma16(tw, th),
+        DynamicImage::ImageLumaA16(_) => DynamicImage::new_luma_a16(tw, th),
+        DynamicImage::ImageRgb32F(_) => DynamicImage::new_rgb32f(tw, th),
+        DynamicImage::ImageRgba32F(_) => DynamicImage::new_rgba32f(tw, th),
+        _ => return img.resize(edge, edge, image::imageops::FilterType::CatmullRom),
+    };
+
+    let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(fir::FilterType::CatmullRom));
+    let mut resizer = Resizer::new();
+    match resizer.resize(img, &mut dst, &opts) {
+        Ok(()) => dst,
+        // Should not happen for the supported pixel types above; if the SIMD
+        // path ever rejects an input, fall back to the scalar resize rather
+        // than panic mid-ingest.
+        Err(_) => img.resize(edge, edge, image::imageops::FilterType::CatmullRom),
+    }
 }
 
 /// WebP at libwebp `method` 2 (pp-bench, June 2026): the default method 4
