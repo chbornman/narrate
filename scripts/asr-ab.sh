@@ -62,25 +62,32 @@ echo
 # TERMs it; model residency dominates peak (streaming adds only small buffers).
 peak_rss_mb() { # server args...  -> echoes MB
   local bin="$1"; shift
-  local tlog; tlog=$(mktemp)
   local slog; slog=$(mktemp)
+  local i
   if [[ "$(uname)" == "Darwin" ]]; then
+    # macOS: /usr/bin/time -l reports ru_maxrss (bytes) for the signalled child.
+    local tlog; tlog=$(mktemp)
     /usr/bin/time -l "$bin" "$@" >"$slog" 2>"$tlog" &
-  else
-    /usr/bin/time -v "$bin" "$@" >"$slog" 2>"$tlog" &
-  fi
-  local tpid=$!
-  local i; for i in $(seq 1 80); do grep -q READY "$slog" 2>/dev/null && break; sleep 0.5; done
-  sleep 2  # settle past load
-  local spid; spid=$(pgrep -P "$tpid" | head -1 || true)
-  [[ -n "$spid" ]] && kill -TERM "$spid" 2>/dev/null || true
-  wait "$tpid" 2>/dev/null || true
-  if [[ "$(uname)" == "Darwin" ]]; then
+    local tpid=$!
+    for i in $(seq 1 80); do grep -q READY "$slog" 2>/dev/null && break; sleep 0.5; done
+    sleep 2  # settle past load
+    local spid; spid=$(pgrep -P "$tpid" | head -1 || true)
+    [[ -n "$spid" ]] && kill -TERM "$spid" 2>/dev/null || true
+    wait "$tpid" 2>/dev/null || true
     grep 'maximum resident set size' "$tlog" | awk '{printf "%.0f", $1/1048576}'
+    rm -f "$tlog"
   else
-    grep 'Maximum resident set size' "$tlog" | awk '{printf "%.0f", $NF/1024}'
+    # Linux: /proc/<pid>/status VmHWM is the kernel peak-RSS high-water mark
+    # (== ru_maxrss), counts mmap'd resident pages, needs no GNU time package.
+    "$bin" "$@" >"$slog" 2>&1 &
+    local spid=$!
+    for i in $(seq 1 80); do grep -q READY "$slog" 2>/dev/null && break; sleep 0.5; done
+    sleep 2  # settle past load
+    awk '/^VmHWM:/{printf "%.0f", $2/1024}' "/proc/$spid/status" 2>/dev/null
+    kill -TERM "$spid" 2>/dev/null || true
+    wait "$spid" 2>/dev/null || true
   fi
-  rm -f "$tlog" "$slog"
+  rm -f "$slog"
 }
 
 run_engine() {
