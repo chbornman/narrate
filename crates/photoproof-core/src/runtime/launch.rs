@@ -21,15 +21,55 @@ use std::path::Path;
 /// count — do not "correct" it to one.
 pub const NGL_OFFLOAD_ALL: u32 = 99;
 
+/// MTP (multi-token prediction) speculative-decode launch inputs
+/// (docs/PLAN-GEMMA-MTP.md). MTP is LOSSLESS — the target verifies every
+/// drafted token, so output is byte-identical to plain decoding — and it
+/// is a CUDA win but a Metal LOSS (ggml-org/llama.cpp #23752, closed:
+/// 11-28% SLOWER on Apple Silicon, the draft-eval overhead exceeds the
+/// gain). The supervisor therefore resolves this to `None` on macOS/Metal
+/// and to `Some(..)` only when (a) the chosen model entry ships an `mtp-`
+/// drafter file AND (b) the platform is non-Metal. When `None`, the argv is
+/// EXACTLY the legacy path — no behavior change for the shipped E2B config.
+#[derive(Debug, Clone)]
+pub struct MtpDraft {
+    /// Path to the `mtp-*.gguf` drafter (shares the target's KV cache).
+    pub draft_model: std::path::PathBuf,
+    /// `--spec-draft-n-max`: max drafted tokens per step (Unsloth card uses
+    /// 4; 1-4 is the tested range). Higher helps high-acceptance CUDA runs,
+    /// hurts low-acceptance ones.
+    pub n_max: u32,
+}
+
 /// §3.1 — `llama-server` argv. `mmproj`: the vision projector when the
 /// model entry ships one (captions); `gpu_layers`: `None` = offload all
-/// (`-ngl 99`, the Metal/CUDA default posture).
+/// (`-ngl 99`, the Metal/CUDA default posture). Back-compat wrapper around
+/// [`llama_server_args_mtp`] with MTP disabled — every existing caller and
+/// the shipped E2B config flow through here, byte-for-byte unchanged.
 pub fn llama_server_args(
     model: &Path,
     mmproj: Option<&Path>,
     ctx_size: u32,
     parallel_slots: u32,
     gpu_layers: Option<u32>,
+) -> Vec<String> {
+    llama_server_args_mtp(model, mmproj, ctx_size, parallel_slots, gpu_layers, None)
+}
+
+/// §3.1 + MTP — `llama-server` argv with an OPTIONAL multi-token-prediction
+/// drafter. When `mtp` is `Some`, appends the mainline llama.cpp MTP flags
+/// (`--spec-type draft-mtp`, `--model-draft <mtp.gguf>`, `--spec-draft-n-max
+/// <n>`); requires a vendored binary built after 2026-06-08 (#24282 added
+/// the `gemma4-assistant` drafter arch + E2B/E4B support). When `None`, the
+/// argv is IDENTICAL to the legacy path. The Metal-vs-CUDA gate lives in the
+/// supervisor (which resolves `mtp` to `None` on Apple Silicon, #23752), so
+/// this builder stays a pure, platform-agnostic argv mapping.
+pub fn llama_server_args_mtp(
+    model: &Path,
+    mmproj: Option<&Path>,
+    ctx_size: u32,
+    parallel_slots: u32,
+    gpu_layers: Option<u32>,
+    mtp: Option<&MtpDraft>,
 ) -> Vec<String> {
     let mut args = vec![
         "--host".into(),
@@ -51,6 +91,15 @@ pub fn llama_server_args(
     if let Some(p) = mmproj {
         args.push("--mmproj".into());
         args.push(p.display().to_string());
+    }
+    // MTP draft decoding — lossless, gated to non-Metal by the supervisor.
+    if let Some(m) = mtp {
+        args.push("--spec-type".into());
+        args.push("draft-mtp".into());
+        args.push("--model-draft".into());
+        args.push(m.draft_model.display().to_string());
+        args.push("--spec-draft-n-max".into());
+        args.push(m.n_max.to_string());
     }
     args
 }
@@ -135,6 +184,48 @@ mod tests {
         assert!(joined.contains("--mmproj /m/mmproj.gguf"));
         assert!(joined.contains("--ctx-size 8192"));
         assert!(joined.contains("-ngl 0"), "explicit CPU-only respected");
+    }
+
+    /// MTP `None` is byte-for-byte the legacy argv — the shipped E2B
+    /// (and every existing caller) is provably unaffected by the new path.
+    #[test]
+    fn mtp_none_is_identical_to_the_legacy_argv() {
+        let legacy = llama_server_args(Path::new("/m/model.gguf"), None, 16384, 2, None);
+        let via_mtp = llama_server_args_mtp(Path::new("/m/model.gguf"), None, 16384, 2, None, None);
+        assert_eq!(legacy, via_mtp, "no-MTP path must not drift");
+        assert!(
+            !via_mtp.join(" ").contains("draft-mtp"),
+            "no MTP flags when disabled"
+        );
+    }
+
+    /// When the supervisor passes a drafter (non-Metal, model ships `mtp-`),
+    /// the mainline MTP flags land in order; the reasoning-budget + mmproj
+    /// invariants survive alongside them.
+    #[test]
+    fn mtp_some_appends_the_draft_mtp_flags() {
+        let draft = MtpDraft {
+            draft_model: PathBuf::from("/m/mtp-gemma-4-E2B-it.gguf"),
+            n_max: 4,
+        };
+        let args = llama_server_args_mtp(
+            Path::new("/m/model.gguf"),
+            Some(Path::new("/m/mmproj.gguf")),
+            16384,
+            2,
+            None,
+            Some(&draft),
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("--spec-type draft-mtp"), "{joined}");
+        assert!(
+            joined.contains("--model-draft /m/mtp-gemma-4-E2B-it.gguf"),
+            "{joined}"
+        );
+        assert!(joined.contains("--spec-draft-n-max 4"), "{joined}");
+        // The load-bearing existing flags are still present.
+        assert!(joined.contains("--reasoning-budget 0"), "{joined}");
+        assert!(joined.contains("--mmproj /m/mmproj.gguf"), "{joined}");
     }
 
     /// The sherpa default of 1 thread decodes slower than real time —
