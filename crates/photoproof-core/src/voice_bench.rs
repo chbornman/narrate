@@ -199,6 +199,11 @@ pub fn spawn_server(
         model_dir.join("joiner.int8.onnx").display().to_string(),
         "--tokens".into(),
         model_dir.join("tokens.txt").display().to_string(),
+        // Additive + inert for the sherpa engine (it reads the four paths above);
+        // the parakeet engine reads --model-dir instead of the int8 four-file set.
+        // Passing both lets one bench drive either engine via the same spawner.
+        "--model-dir".into(),
+        model_dir.display().to_string(),
         "--num-threads".into(),
         "4".into(),
     ];
