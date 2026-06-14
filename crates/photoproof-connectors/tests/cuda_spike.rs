@@ -152,7 +152,10 @@ fn cuda_spike_clip_image_cpu_vs_gpu() {
     let t0 = Instant::now();
     let cpu_vecs = embed_all(&cpu, timed);
     let cpu_ips = timed.len() as f64 / t0.elapsed().as_secs_f64();
-    println!("[cuda-spike] CPU(fp16): {cpu_ips:.2} img/s ({:.1} img/min)", cpu_ips * 60.0);
+    println!(
+        "[cuda-spike] CPU(fp16): {cpu_ips:.2} img/s ({:.1} img/min)",
+        cpu_ips * 60.0
+    );
 
     // --- NVIDIA EP ladder (TensorRT/CUDA) on the FP16 tower ---
     let t_load = Instant::now();
@@ -174,11 +177,21 @@ fn cuda_spike_clip_image_cpu_vs_gpu() {
     let t1 = Instant::now();
     let gpu_vecs = embed_all(&gpu, timed);
     let gpu_ips = timed.len() as f64 / t1.elapsed().as_secs_f64();
-    println!("[cuda-spike] GPU: {gpu_ips:.2} img/s ({:.1} img/min)", gpu_ips * 60.0);
-    println!("[cuda-spike] speedup (GPU / CPU): {:.2}x", gpu_ips / cpu_ips);
+    println!(
+        "[cuda-spike] GPU: {gpu_ips:.2} img/s ({:.1} img/min)",
+        gpu_ips * 60.0
+    );
+    println!(
+        "[cuda-spike] speedup (GPU / CPU): {:.2}x",
+        gpu_ips / cpu_ips
+    );
 
     // --- Accuracy: cosine(CPU vec, GPU vec) per image ---
-    let cosines: Vec<f32> = cpu_vecs.iter().zip(&gpu_vecs).map(|(a, b)| cos(a, b)).collect();
+    let cosines: Vec<f32> = cpu_vecs
+        .iter()
+        .zip(&gpu_vecs)
+        .map(|(a, b)| cos(a, b))
+        .collect();
     let mean = cosines.iter().sum::<f32>() / cosines.len() as f32;
     let min = cosines.iter().cloned().fold(f32::INFINITY, f32::min);
     let below = cosines.iter().filter(|&&c| c < 0.999).count();
@@ -186,5 +199,8 @@ fn cuda_spike_clip_image_cpu_vs_gpu() {
         "[cuda-spike] cosine CPU-vs-GPU: mean {mean:.6}, min {min:.6}, {below} of {} below 0.999",
         cosines.len()
     );
-    assert!(mean > 0.9, "GPU embeddings diverged from CPU (mean cosine {mean:.4})");
+    assert!(
+        mean > 0.9,
+        "GPU embeddings diverged from CPU (mean cosine {mean:.4})"
+    );
 }
