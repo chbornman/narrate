@@ -78,6 +78,17 @@
     type ViewTransform,
   } from "../../logic/forcegraph";
   import {
+    makeMutableBuffer,
+    packFlags,
+    packMutable,
+    unpackMutable,
+  } from "../../logic/forcegraph.soa";
+  import type {
+    StaticMessage,
+    ComputeMessage,
+    WorkerToMain,
+  } from "../../logic/forcegraph.protocol";
+  import {
     engagedTopics,
     nodeOverlay,
     overlookedTopics,
@@ -257,6 +268,44 @@
   let width = $state(800);
   let height = $state(600);
   let raf = 0;
+
+  // -- off-thread sim (PLAN-PERF.md P3) ---------------------------------------
+  // The force sim's O(N^2) image-image repulsion is the heavy per-frame compute.
+  // We run `step` in a Web Worker so it stops blocking the UI main thread: the
+  // main thread stays free to paint the Canvas + handle pointer input (the
+  // "buttery smooth" Visualizer goal) while the worker computes the next frame's
+  // physics. The STATE stays here (nodes/anchors are the source of truth); only
+  // the COMPUTE moves. Each frame we transfer a Float64 buffer of the MUTABLE
+  // state (x/y/vx/vy per body) to the worker and get it back with the energy;
+  // transferables avoid a per-frame copy. The STATIC inputs (affinity, mass,
+  // anchor topics, ForceConfig) are sent ONLY when they change, never per frame.
+  //
+  // FALLBACK: if Worker is unavailable (an old webview, or the test/SSR env) we
+  // run `step` INLINE on the main thread exactly as before - the worker is a
+  // pure performance move, not a behavior change, so the fallback is the v1 loop.
+  let simWorker: Worker | null = null;
+  /** True once the worker module has posted "ready" (so we drive compute through
+   * it). Until then - and forever in the fallback - the inline rAF loop runs. */
+  let workerReady = false;
+  /** The reusable transferable buffers: the mutable x/y/vx/vy lane (Float64) and
+   * the per-frame fixed/pinned flag lane (Uint8). Re-allocated only when the
+   * node/anchor COUNT changes (a topic add, an expand/collapse), reused every
+   * frame otherwise. While transferred to the worker they are detached here, so
+   * we only touch them after the worker hands them back. */
+  let mutBuf: Float64Array | null = null;
+  let flagBuf: Uint8Array | null = null;
+  /** The worker's static mirror is stale (a topic/config change happened): the
+   * next compute must be preceded by a fresh "static" resync. Set by everything
+   * that restarts the loop after changing the node/anchor SET or the config. */
+  let staticDirty = true;
+  /** A compute round-trip is in flight (the buffers are with the worker): we do
+   * not post another until it returns, which is exactly the pipeline - the main
+   * thread is free to draw frame N-1 while the worker computes frame N. */
+  let computeInFlight = false;
+  /** The settle-frame counter (mirrors the inline loop's `cool`): a few quiet
+   * frames must pass before we stop posting compute, guarding an early-zero on
+   * the opening frame. Lives at this scope so the worker reply handler reads it. */
+  let settleCount = 0;
 
   // -- per-topic INFLUENCE FIELD (founder, June 2026) -------------------------
   // A soft colored glow behind the nodes showing each topic's "power level"
@@ -470,6 +519,9 @@
     // A fresh topic-set / alpha / scope change REHEATS the sim so the new layout
     // snaps into place in about a second instead of oozing in (founder dogfood).
     reheat();
+    // The node/anchor SET (and its affinities) just changed, so the worker's
+    // static mirror is stale: the next compute resyncs it before stepping.
+    staticDirty = true;
     restartLoop();
   }
 
@@ -631,14 +683,131 @@
     });
   }
 
-  // -- the rAF physics loop ---------------------------------------------------
+  // -- the physics loop (worker-driven, inline fallback) ----------------------
+  // The loop has the SAME shape on both paths: per frame, advance
+  // subStepsForHeat(heat) sim sub-steps, cool the heat one frame, draw, then
+  // stop once the layout is at rest AND the reheat has fully cooled (a fresh
+  // recompute or a drag restarts it). On the WORKER path the sim sub-steps run
+  // off-thread; on the FALLBACK path they run inline exactly as v1.
+
+  /** Shared idle predicate: the layout is at rest, the reheat has fully cooled,
+   * and a few settle frames have passed (guarding an early-zero opening frame).
+   * Identical threshold to the v1 loop so behavior is unchanged. */
+  function isSettled(energy: number): boolean {
+    return energy < 1e-2 && heat <= 1.0001 && settleCount > 30;
+  }
+
+  /** What a settle does (both paths): stop ticking and recompute the influence
+   * field from the final positions (throttled). The cheap, non-per-frame field
+   * recompute point the design calls for. */
+  function onSettled() {
+    cancelAnimationFrame(raf);
+    scheduleFieldRecompute();
+  }
+
+  /** (Re)send the worker its STATIC mirror: the affinity rows + mass, the anchor
+   * topics, and the ForceConfig. Sent ONLY when the node/anchor SET or the
+   * config changed (staticDirty), never per frame, so the per-frame envelope
+   * stays tiny. Also (re)allocates the transferable buffers when the body count
+   * changed (a topic add / expand / collapse), since their length is fixed by
+   * the count. */
+  function resyncWorkerStatic() {
+    if (simWorker === null) return;
+    const msg: StaticMessage = {
+      kind: "static",
+      // The heat lives in the per-frame compute message (it cools every frame),
+      // so the static config carries the steady-state attraction with heat 1.
+      config: { ...forceConfig(), heat: 1 },
+      nodes: nodes.map((n) => ({ affinity: n.affinity, mass: n.mass })),
+      anchors: anchors.map((a) => ({ topic: a.topic })),
+    };
+    simWorker.postMessage(msg);
+    // Size the transferable buffers to the current body count (re-alloc only on
+    // a count change; the per-frame path reuses them otherwise).
+    const need = (nodes.length + anchors.length) * 4;
+    if (mutBuf === null || mutBuf.length !== need) {
+      mutBuf = makeMutableBuffer(nodes.length, anchors.length);
+      flagBuf = new Uint8Array(nodes.length + anchors.length);
+    }
+    staticDirty = false;
+  }
+
+  /** Post one compute request to the worker: pack the CURRENT mutable state +
+   * flags (so a drag since the last frame is picked up), transfer them, and ask
+   * for subStepsForHeat(heat) steps at the current heat. No-op if a round-trip
+   * is already in flight (the pipeline) or the buffers are detached/missing. */
+  function postCompute() {
+    if (simWorker === null || computeInFlight) return;
+    if (staticDirty) resyncWorkerStatic();
+    if (mutBuf === null || flagBuf === null) return;
+    packMutable(mutBuf, nodes, anchors);
+    packFlags(flagBuf, nodes, anchors);
+    const msg: ComputeMessage = {
+      kind: "compute",
+      buffer: mutBuf,
+      flags: flagBuf,
+      heat,
+      subSteps: subStepsForHeat(heat),
+    };
+    computeInFlight = true;
+    // Transfer the buffers (their memory moves to the worker); they come back on
+    // the "stepped" reply. We must not touch them until then.
+    simWorker.postMessage(msg, [mutBuf.buffer, flagBuf.buffer]);
+    mutBuf = null;
+    flagBuf = null;
+  }
+
+  /** The worker's reply handler for a computed frame: reclaim the transferred
+   * buffers, write the new positions back onto the live state, cool the heat,
+   * draw, and either stop (settled) or post the next compute (continue the
+   * pipeline on the next rAF so draws stay paced to the display). */
+  function onWorkerStepped(buffer: Float64Array, flags: Uint8Array, energy: number) {
+    computeInFlight = false;
+    mutBuf = buffer;
+    flagBuf = flags;
+    // Write the worker's integrated positions back onto the live objects. A body
+    // the user is actively DRAGGING is re-asserted from the live drag position
+    // below, so an in-flight compute never tugs the grabbed body off the cursor.
+    unpackMutable(buffer, nodes, anchors);
+    if (dragging !== null) {
+      // The drag handler keeps writing dragging.x/y live; honor that over the
+      // (one-frame-stale) value the worker echoed back for the held node.
+      dragging.vx = 0;
+      dragging.vy = 0;
+    }
+    if (draggingAnchor !== null) {
+      draggingAnchor.vx = 0;
+      draggingAnchor.vy = 0;
+    }
+    settleCount++;
+    heat = coolHeat(heat);
+    draw();
+    if (isSettled(energy)) {
+      onSettled();
+      return;
+    }
+    // Pace the next compute to the display: request it on the next animation
+    // frame so we draw at most once per refresh (the worker computes frame N
+    // while the main thread is otherwise idle between frames).
+    raf = requestAnimationFrame(() => postCompute());
+  }
+
   function restartLoop() {
     cancelAnimationFrame(raf);
-    let cool = 0;
+    settleCount = 0;
+    // WORKER PATH: kick the pipeline. If a compute is mid-flight its reply will
+    // continue the loop with the now-current (reheated / re-dragged) state, so we
+    // only post a fresh one when the worker is idle.
+    if (workerReady && simWorker !== null) {
+      if (!computeInFlight) postCompute();
+      return;
+    }
+    // FALLBACK PATH: the v1 inline rAF loop, unchanged - run the sim on the main
+    // thread when no Worker is available (old webview, or the test/SSR env).
     const tick = () => {
       // During the HOT phase of a reheat, advance MULTIPLE sim sub-steps per
       // frame so the layout closes the distance fast (the founder's "snap, not
-      // ooze") — a single frame of wall-clock buys several integration steps,
+      // ooze") - a single frame of wall-clock buys several integration steps,
       // while the expensive canvas paint still runs once below. As the heat
       // cools, subStepsForHeat drops back to 1 step/frame for the steady state.
       const subSteps = subStepsForHeat(heat);
@@ -651,15 +820,11 @@
       // ticking even if the energy momentarily dips, so a reheat fully plays out.
       heat = coolHeat(heat);
       draw();
+      settleCount++;
       // Stop ticking once the layout is at rest AND the reheat has fully cooled
-      // (saves battery); a fresh recompute or a drag restarts it. A few settle
-      // frames guard against an early-zero on the opening frame.
-      if (energy < 1e-2 && heat <= 1.0001 && ++cool > 30) {
-        cancelAnimationFrame(raf);
-        // The layout has SETTLED: recompute the influence field from the final
-        // node positions (throttled, so a quick re-settle coalesces). This is
-        // the cheap, non-per-frame recompute point the design calls for.
-        scheduleFieldRecompute();
+      // (saves battery); a fresh recompute or a drag restarts it.
+      if (isSettled(energy)) {
+        onSettled();
         return;
       }
       raf = requestAnimationFrame(tick);
@@ -1292,6 +1457,9 @@
   function expandSuper(node: ImageNode) {
     nodes = expandSuperNode(nodes, node.hash, affinity, topics.length);
     nodeCount = nodes.length;
+    // The node set changed (a super-node became its members), so the worker's
+    // static mirror + buffer sizes must resync before the next compute.
+    staticDirty = true;
     restartLoop();
   }
   /** A small movement threshold (screen px) so a tiny jitter during a click is
@@ -1450,6 +1618,8 @@
           }
         }
         nodeCount = nodes.length;
+        // The node set changed (super-nodes expanded), so resync the worker.
+        staticDirty = true;
         restartLoop();
       } else if (zoom <= LOD_ZOOM_COLLAPSE && anyExpanded) {
         // Zoomed out: re-aggregate the full detail set back into super-nodes.
@@ -1460,6 +1630,8 @@
         );
         nodes = aggregateToSuperNodes(fullNodes, topics.length);
         nodeCount = nodes.length;
+        // The node set changed (re-aggregated), so resync the worker.
+        staticDirty = true;
         restartLoop();
       }
     }
@@ -1556,6 +1728,9 @@
     nodes = snap.nodes;
     anchors = snap.anchors;
     affinity = snap.affinity;
+    // Restored node/anchor objects: the worker's static mirror does not know
+    // them, so the first compute (a later drag/reheat) must resync first.
+    staticDirty = true;
     zoom = snap.zoom;
     panX = snap.panX;
     panY = snap.panY;
@@ -1587,6 +1762,45 @@
 
   // -- lifecycle --------------------------------------------------------------
   onMount(() => {
+    // Spin up the off-thread sim worker (PLAN-PERF.md P3) so the O(N^2) physics
+    // stops blocking the UI main thread. FEATURE-DETECT Worker: an old webview or
+    // the test/SSR env has none, and there the inline rAF loop (the v1 path) runs
+    // unchanged. The Vite `new URL(..., import.meta.url)` form is how Vite bundles
+    // a module worker; { type: "module" } so the worker's ES imports resolve.
+    if (typeof Worker !== "undefined") {
+      try {
+        simWorker = new Worker(
+          new URL("../../logic/forcegraph.worker.ts", import.meta.url),
+          { type: "module" },
+        );
+        simWorker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
+          const msg = ev.data;
+          if (msg.kind === "ready") {
+            workerReady = true;
+            // If a layout is still settling on the inline fallback (the worker
+            // came up mid-settle), hand the loop off to the worker now.
+            if (raf !== 0 || computeInFlight) {
+              cancelAnimationFrame(raf);
+              restartLoop();
+            }
+            return;
+          }
+          // A computed frame: reclaim the buffers, apply positions, continue.
+          onWorkerStepped(msg.buffer, msg.flags, msg.energy);
+        };
+        // A worker error must not freeze the Visualizer: drop back to the inline
+        // loop (the layout keeps moving on the main thread).
+        simWorker.onerror = () => {
+          workerReady = false;
+          simWorker = null;
+          computeInFlight = false;
+          restartLoop();
+        };
+      } catch {
+        // Construction failed (no module-worker support): the fallback stands.
+        simWorker = null;
+      }
+    }
     // Re-target the shared thumbnail cache's repaint at THIS instance: a thumb
     // that finishes after a previous close→reopen must repaint the CURRENT
     // canvas, not the prior (dead) one.
@@ -1630,6 +1844,18 @@
       thumbRepaint = null;
       cancelAnimationFrame(raf);
       cancelAnimationFrame(panRaf);
+      // Tear down the off-thread sim worker (PLAN-PERF.md P3): terminate it so it
+      // stops computing for a dead view, and drop our refs. A new mount spins up
+      // a fresh worker. computeInFlight is reset so a reopen starts clean.
+      if (simWorker !== null) {
+        simWorker.terminate();
+        simWorker = null;
+      }
+      workerReady = false;
+      computeInFlight = false;
+      mutBuf = null;
+      flagBuf = null;
+      staticDirty = true;
       // A pending throttled field recompute would fire into a dead canvas; drop
       // it (the next mount recomputes/restores the field itself).
       if (fieldTimer !== null) {
