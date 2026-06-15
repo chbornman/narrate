@@ -123,6 +123,11 @@ export interface IngestStatus {
   /** Files discovered so far by in-flight walks (after exclusions) — the
    * empty grid's quiet "N photographs found so far…" line. */
   discovered: number;
+  /** OFFLINE volumes the library has photos on (founder: warn + pause). Each
+   * carries its label + how many images it hides, so the shell can warn
+   * "drive disconnected, N photos unavailable" instead of stalling silently.
+   * Empty in the normal all-online case. */
+  offlineVolumes: { label: string; images: number }[];
 }
 
 /** RUNTIME (P6.2): tier + consent + per-model license/progress rows.

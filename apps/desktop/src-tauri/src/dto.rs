@@ -202,6 +202,21 @@ pub struct IngestStatus {
     /// Files discovered so far by in-flight walks (after exclusions) —
     /// the empty grid's quiet "N photographs found so far…" line.
     pub discovered: u64,
+    /// OFFLINE volumes that hold library photos (founder: warn + pause). Each
+    /// carries its display name + how many images it hides, so the shell can
+    /// say "drive X disconnected, N photos unavailable" instead of leaving the
+    /// user to wonder why ingest stalled. Empty in the normal all-online case.
+    pub offline_volumes: Vec<OfflineVolume>,
+}
+
+/// One offline volume the library has photos on (the warn surface).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OfflineVolume {
+    /// Volume label, or the volume id when it has no label.
+    pub label: String,
+    /// Distinct images with an active path on this (now offline) volume.
+    pub images: u64,
 }
 
 /// One still-digesting pass kind: `remaining` = pending + running rows.

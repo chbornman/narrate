@@ -16,7 +16,7 @@ import {
 import type { ModelRowDto, RuntimeStatus } from "../src/lib/types/dto";
 
 const base: StationInput = {
-  ingest: { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+  ingest: { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
   runtime: null,
   micState: "disarmed",
   asrReady: false,
@@ -68,7 +68,7 @@ describe("the quiet default", () => {
     const m = stationModel({
       ...base,
       asrReady: true,
-      ingest: { running: true, done: 1, total: 2, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 1, total: 2, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(m.seats.map((s) => [s.id, s.actionId])).toEqual([
       ["mic", "mic-press"],
@@ -83,7 +83,7 @@ describe("ingest and digest activities", () => {
   it("sized ingest carries locale counts and a 0..1 fraction; the station pulses", () => {
     const m = stationModel({
       ...base,
-      ingest: { running: true, done: 1240, total: 48377, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 1240, total: 48377, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(m.pulsing).toBe(true);
     const row = m.activities.find((a) => a.kind === "ingest");
@@ -95,12 +95,12 @@ describe("ingest and digest activities", () => {
   it("unsized discovery says scanning honestly; errors surface as a quiet hint", () => {
     const scanning = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(scanning.activities[0].text).toBe("Indexing - scanning…");
     const errored = stationModel({
       ...base,
-      ingest: { running: true, done: 5, total: 10, errors: 2, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 5, total: 10, errors: 2, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(errored.activities[0].hint).toBe("2 errors");
   });
@@ -119,7 +119,7 @@ describe("ingest and digest activities", () => {
           { name: "settled", remaining: 0 }, // drained: no row
         ],
         scanning: false,
-        discovered: 0,
+        discovered: 0, offlineVolumes: []
       },
     });
     expect(m.activities.map((a) => a.text)).toEqual([
@@ -218,7 +218,7 @@ describe("activity ordering and the info seat", () => {
         errors: 0,
         passes: [{ name: "exif", remaining: 9 }],
         scanning: false,
-        discovered: 0,
+        discovered: 0, offlineVolumes: []
       },
       runtime: runtime([model({ state: "downloading", downloadedBytes: 0 })]),
       micState: "armedSpeaking",
@@ -238,7 +238,7 @@ describe("activity ordering and the info seat", () => {
     expect(stationModel(base).seats.some((s) => s.id === "info")).toBe(false);
     const busy = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(busy.seats.some((s) => s.id === "info")).toBe(true);
   });
@@ -313,7 +313,7 @@ describe("the border resolves end-to-end through stationModel", () => {
       ...base,
       asrReady: true,
       micState: "armedIdle",
-      ingest: { running: true, done: 1, total: 9, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 1, total: 9, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(m.border).toBe("mic");
   });
@@ -329,7 +329,7 @@ describe("the border resolves end-to-end through stationModel", () => {
         errors: 0,
         passes: [{ name: "preview", remaining: 40 }],
         scanning: false,
-        discovered: 0,
+        discovered: 0, offlineVolumes: []
       },
       runtime: runtime([model({ id: "dfn5b", role: "embedder", state: "not-downloaded" })]),
     });
@@ -344,7 +344,7 @@ describe("the border resolves end-to-end through stationModel", () => {
   it("only background work → the working border; settled → none", () => {
     const working = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     });
     expect(working.border).toBe("working");
     expect(stationModel(base).border).toBe("none");
@@ -421,7 +421,7 @@ describe("transient icons — active while live, then retire", () => {
   it("ingest = the work icon with a count badge + a 0..1 arc fraction", () => {
     const m = stationModel({
       ...base,
-      ingest: { running: true, done: 1240, total: 5000, errors: 0, passes: [], scanning: false, discovered: 5000 },
+      ingest: { running: true, done: 1240, total: 5000, errors: 0, passes: [], scanning: false, discovered: 5000, offlineVolumes: [] },
     });
     const work = m.transients.find((t) => t.id === "work");
     expect(work?.icon).toBe("loader");
@@ -432,7 +432,7 @@ describe("transient icons — active while live, then retire", () => {
   it("unsized discovery shows the discovered count, no arc", () => {
     const m = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 312 },
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 312, offlineVolumes: [] },
     });
     const work = m.transients.find((t) => t.id === "work");
     expect(work?.count).toBe(312);
@@ -453,7 +453,7 @@ describe("transient icons — active while live, then retire", () => {
           { name: "text-embedding", remaining: 200 },
         ],
         scanning: false,
-        discovered: 0,
+        discovered: 0, offlineVolumes: []
       },
     });
     const ids = m.transients.map((t) => t.id);
@@ -511,7 +511,7 @@ describe("every transient is its own click target (founder, June 13 2026)", () =
       errors: 0,
       passes: [{ name: "image-embedding", remaining: 50 }],
       scanning: false,
-      discovered: 100,
+      discovered: 100, offlineVolumes: []
     },
     runtime: runtime([
       model({ id: "dfn5b", role: "embedder", state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
@@ -532,7 +532,7 @@ describe("every transient is its own click target (founder, June 13 2026)", () =
     // zero new verbs (the missing-model prompt lives in that detail panel).
     const infoVerb = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 },
+      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
     }).seats.find((s) => s.id === "info")?.actionId;
     expect(infoVerb).toBe("toggle-station-detail");
     for (const t of live.transients) expect(t.actionId).toBe(infoVerb);

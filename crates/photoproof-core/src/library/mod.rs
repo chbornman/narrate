@@ -890,6 +890,30 @@ impl Library {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// `(display name, unavailable image count)` for each OFFLINE volume that
+    /// still holds at least one active path. Drives the "drive disconnected"
+    /// warning (founder: warn + pause): the app should TELL the user a volume is
+    /// gone and how many photos that hides, not churn silently. A volume with no
+    /// active paths (nothing of the library lives on it) is omitted, so an
+    /// unrelated unplugged drive never raises a false alarm.
+    pub fn offline_volume_burden(&self) -> Result<Vec<(String, u64)>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(NULLIF(v.label, ''), v.volume_id) AS name,
+                    COUNT(DISTINCT p.image_hash) AS images
+             FROM volumes v
+             JOIN paths p ON p.volume_id = v.volume_id AND p.state = 'active'
+             WHERE v.state = 'offline'
+             GROUP BY v.volume_id
+             HAVING images > 0
+             ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // -----------------------------------------------------------------------
     // Watched roots (§5)
     // -----------------------------------------------------------------------

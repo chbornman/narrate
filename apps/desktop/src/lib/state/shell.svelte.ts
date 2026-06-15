@@ -8,7 +8,12 @@
 import * as note from "../logic/note";
 import { transitionPops } from "../logic/station";
 import type { MenuSurface } from "../actions/menus";
-import type { IndicatorState, IngestStatus, RuntimeStatus, ScopeView } from "../types/dto";
+import type {
+  IndicatorState,
+  IngestStatus,
+  RuntimeStatus,
+  ScopeView,
+} from "../types/dto";
 import type { SurroundLevel } from "../theme/surround";
 import { surround as surroundStore } from "../theme/surround-store.svelte";
 import * as prefs from "./prefs";
@@ -150,6 +155,7 @@ export class ShellSlice {
     passes: [],
     scanning: false,
     discovered: 0,
+    offlineVolumes: [],
   });
   /** Optimistic "ingest is coming" bridge (founder, June 2026): between
    * the add-root/rescan click and the pump's first scanning=true emit,
@@ -279,7 +285,11 @@ export class ShellSlice {
     this.pops = this.pops.filter((p) => p.id !== id);
   }
 
-  openContextMenu(seat: MenuSurface, anchor: { x: number; y: number } | null, arg?: unknown) {
+  openContextMenu(
+    seat: MenuSurface,
+    anchor: { x: number; y: number } | null,
+    arg?: unknown,
+  ) {
     this.contextMenu = { seat, anchor, arg };
   }
 
@@ -312,7 +322,10 @@ export class ShellSlice {
     this.mic = state.mic;
     this.streamingUtterance = state.streamingUtterance;
     this.asrUnavailable = state.degraded.asrUnavailable;
-    const next = { mic: state.mic, streaming: state.streamingUtterance !== null };
+    const next = {
+      mic: state.mic,
+      streaming: state.streamingUtterance !== null,
+    };
     for (const text of transitionPops(prev, next)) this.stationPop(text);
   }
 

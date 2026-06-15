@@ -6,7 +6,11 @@
  * pass breakdown IS the complete jobs story.
  */
 import { describe, expect, it } from "vitest";
-import { jobsRemaining, jobsTitle } from "../src/lib/logic/jobs";
+import {
+  jobsRemaining,
+  jobsTitle,
+  offlineWarningTitle,
+} from "../src/lib/logic/jobs";
 import type { IngestStatus } from "../src/lib/types/dto";
 
 const status = (passes: IngestStatus["passes"]): IngestStatus => ({
@@ -17,6 +21,7 @@ const status = (passes: IngestStatus["passes"]): IngestStatus => ({
   passes,
   scanning: false,
   discovered: 0,
+  offlineVolumes: [],
 });
 
 describe("jobs.ts — the background-jobs register", () => {
@@ -49,5 +54,20 @@ describe("jobs.ts — the background-jobs register", () => {
     expect(jobsTitle(status([{ name: "palette", remaining: 3 }]))).toBe(
       "Still digesting - palette 3",
     );
+  });
+});
+
+describe("offlineWarningTitle — the warn + pause hover detail", () => {
+  it("empty list yields empty copy (the chip is hidden anyway)", () => {
+    expect(offlineWarningTitle([])).toBe("");
+  });
+
+  it("names each drive and pluralizes its photo count", () => {
+    expect(
+      offlineWarningTitle([
+        { label: "Field SSD", images: 412 },
+        { label: "Archive", images: 1 },
+      ]),
+    ).toBe("Reconnect to ingest: Field SSD (412 photos), Archive (1 photo)");
   });
 });

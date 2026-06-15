@@ -49,7 +49,19 @@ pub fn ingest_status(app: &App) -> IngestStatus {
         Err(_) => IngestStatus::default(),
     };
     let (scanning, discovered) = app.scans.snapshot();
-    overlay_walk(queue, scanning, discovered)
+    let mut status = overlay_walk(queue, scanning, discovered);
+    // Warn surface (founder: warn + pause): list offline volumes the library
+    // lives on so the shell can say "drive disconnected, N photos unavailable"
+    // instead of silently stalling. A read failure degrades to "no warning"
+    // (never blocks the status the rest of the header needs).
+    status.offline_volumes = app
+        .library
+        .offline_volume_burden()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(label, images)| crate::dto::OfflineVolume { label, images })
+        .collect();
+    status
 }
 
 /// Overlay the LIVE walk state onto the queue-derived status. Pass rows

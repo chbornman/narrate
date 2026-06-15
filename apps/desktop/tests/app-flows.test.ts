@@ -63,7 +63,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "list_archived_roots":
         return [];
       case "ingest_status":
-        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
+        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
       case "search":
         // Fused-order result hashes; the test seeds them via failSearch-free
         // default of three results r1..r3 (overridable per-test isn't needed).
@@ -389,7 +389,7 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
       errors: 0,
       passes: [],
       scanning: true,
-      discovered: 42,
+      discovered: 42, offlineVolumes: []
     });
     // The walk-aware status owns the copy now — and carries the count.
     expect(ui.shell.ingestExpecting).toBe(false);
@@ -409,7 +409,7 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
       errors: 0,
       passes: [],
       scanning: false,
-      discovered: 0,
+      discovered: 0, offlineVolumes: []
     });
     expect(ui.shell.ingestExpecting).toBe(false);
   });
@@ -439,22 +439,22 @@ describe("mid-scan grid re-list (founder, SMB, June 2026)", () => {
     const nowSpy = vi.spyOn(Date, "now");
 
     nowSpy.mockReturnValue(100_000);
-    await ui2.onIngestProgress({ running: true, done: 1, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
+    await ui2.onIngestProgress({ running: true, done: 1, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] });
     expect(calls()).toBe(before + 1); // first running tick lists
 
     nowSpy.mockReturnValue(100_500);
-    await ui2.onIngestProgress({ running: true, done: 2, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
+    await ui2.onIngestProgress({ running: true, done: 2, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] });
     expect(calls()).toBe(before + 1); // inside the 2 s throttle: no re-list
 
     nowSpy.mockReturnValue(103_000);
-    await ui2.onIngestProgress({ running: true, done: 5, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
+    await ui2.onIngestProgress({ running: true, done: 5, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] });
     expect(calls()).toBe(before + 2); // throttle elapsed
 
-    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
+    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] });
     expect(calls()).toBe(before + 3); // running→idle edge: exact final state
     expect(ui2.shell.ingest.running).toBe(false);
 
-    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0 });
+    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] });
     expect(calls()).toBe(before + 3); // already idle: indicator only
     nowSpy.mockRestore();
   });

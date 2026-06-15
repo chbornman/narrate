@@ -123,7 +123,7 @@ describe("Titlebar platform chrome", () => {
     // bar. Everything queued in ingest_passes (ingest, rebuilds, doctor
     // re-pends, model backfills) flows through the same passes list.
     stubNavigator("MacIntel", MAC_UA);
-    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
+    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
     const idle = render(Titlebar, { title: "shoots" });
     expect(idle.container.querySelector(".jobs")).toBeNull();
 
@@ -138,7 +138,7 @@ describe("Titlebar platform chrome", () => {
         { name: "image-embedding", remaining: 485 },
       ],
       scanning: false,
-      discovered: 0,
+      discovered: 0, offlineVolumes: []
     };
     const busy = render(Titlebar, { title: "shoots" });
     const pill = busy.container.querySelector(".jobs");
@@ -146,7 +146,7 @@ describe("Titlebar platform chrome", () => {
     expect(pill?.getAttribute("title")).toBe(
       "Still digesting - hashing 12 · embedding images 485",
     );
-    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0 };
+    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
   });
 
   it("the bar itself stays a drag region on both platforms", () => {

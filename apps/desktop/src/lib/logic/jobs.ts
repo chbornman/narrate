@@ -36,3 +36,18 @@ export function jobsTitle(status: IngestStatus): string {
   );
   return `Still digesting - ${parts.join(" · ")}`;
 }
+
+/** The offline-volume warning's hover detail (founder: warn + pause). Names
+ * each disconnected drive and how many photos it hides, e.g.
+ * "Reconnect to ingest: Field SSD (412 photos), Archive (18 photos)". Pure so
+ * the copy pins in a unit test. No em-dashes (gate: check:emdash). */
+export function offlineWarningTitle(
+  volumes: IngestStatus["offlineVolumes"],
+): string {
+  if (volumes.length === 0) return "";
+  const parts = volumes.map(
+    (v) =>
+      `${v.label} (${v.images.toLocaleString()} ${v.images === 1 ? "photo" : "photos"})`,
+  );
+  return `Reconnect to ingest: ${parts.join(", ")}`;
+}
