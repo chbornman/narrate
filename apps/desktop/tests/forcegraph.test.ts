@@ -361,7 +361,12 @@ describe("semantic-neighbor attraction", () => {
       const a: ImageNode = { hash: "A", x: -100, y: 0, vx: 0, vy: 0, affinity: [], neighbors: [{ i: 1, w }] };
       const b: ImageNode = { hash: "B", x: 100, y: 0, vx: 0, vy: 0, affinity: [] };
       const nodes = [a, b];
-      for (let i = 0; i < 10; i++) step(nodes, [], baseCfg);
+      // Run HOT: the per-step clamp is heat-tied (annealing), so a steady-state
+      // (heat 1) caller is frozen at ANNEAL_FLOOR and the two weights would clamp
+      // to the SAME 0.5px/step, hiding the difference. At REHEAT_START the full
+      // clamp is in force, so the stiffer spring genuinely travels farther.
+      for (let i = 0; i < 10; i++)
+        step(nodes, [], { ...baseCfg, heat: REHEAT_START });
       return a.x; // how far A travelled toward B (more positive = closer)
     };
     expect(run(1)).toBeGreaterThan(run(0.2));
@@ -372,7 +377,10 @@ describe("semantic-neighbor attraction", () => {
     const a: ImageNode = { hash: "A", x: 80, y: -40, vx: 0, vy: 0, affinity: [], fixed: true };
     const b: ImageNode = { hash: "B", x: -80, y: 40, vx: 0, vy: 0, affinity: [], neighbors: [{ i: 0, w: 1 }] };
     const nodes = [a, b];
-    for (let i = 0; i < 200; i++) step(nodes, [], baseCfg);
+    // Run HOT so the heat-tied (annealing) clamp permits real travel; a cooled
+    // caller would freeze B near its seed at the ANNEAL_FLOOR per-step clamp.
+    for (let i = 0; i < 200; i++)
+      step(nodes, [], { ...baseCfg, heat: REHEAT_START });
     expect(a.x).toBe(80); // fixed node held exactly
     expect(a.y).toBe(-40);
     // B drew NEAR the held A (the spring pulled it in).
@@ -494,7 +502,11 @@ describe("force-placed anchors", () => {
     ];
     const x0 = anchor.x;
     const y0 = anchor.y;
-    for (let i = 0; i < 200; i++) step(imgs, [anchor], anchorCfg);
+    // Run HOT: the anchor's per-step clamp is heat-tied (annealing), so a cooled
+    // (heat 1) caller would freeze it at ANNEAL_FLOOR before it reaches the
+    // centroid. REHEAT_START gives the full clamp so it converges to ~(200, 20).
+    for (let i = 0; i < 200; i++)
+      step(imgs, [anchor], { ...anchorCfg, heat: REHEAT_START });
     // It moved toward the images' centroid (right and down from the ring top).
     expect(anchor.x).toBeGreaterThan(x0 + 50);
     expect(anchor.y).toBeGreaterThan(y0 + 50);
@@ -882,6 +894,86 @@ describe("stability at scale (visualizer audit: the never-settling fix)", () => 
       // Bounded: a few ring radii, never flung to 1e7.
       expect(Math.hypot(nd.x, nd.y)).toBeLessThan(scaleCfg.ringRadius * 8);
     }
+  }, 30000);
+
+  it("a DENSE frustrated neighbor graph SETTLES and clusters (annealing fix)", () => {
+    // The exact scenario that churned forever before annealing: 80 nodes, NO
+    // topics, each linked to its 6 nearest ring-neighbors with high similarity so
+    // the similarity graph is dense and transitively all-connected. The springs
+    // fight each other (a frustrated system that never truly force-balances), so
+    // the old constant clamp left it spinning at the clamp ceiling indefinitely.
+    // The heat-tied annealing clamp (driven by simulate's internal cool) freezes
+    // the residual motion, so it SETTLES, CLUSTERS (linked neighbors end close),
+    // and does NOT collapse to a point.
+    const N = 80;
+    const K = 3; // links to ±1..±K ring neighbors => degree 6
+    const denseCfg: ForceConfig = {
+      attraction: 0,
+      repulsion: 200,
+      damping: 0.85,
+      centering: 0.01,
+      ringRadius: 320,
+      anchorAttraction: 0,
+      anchorRepulsion: 0,
+      anchorDamping: 0.8,
+    };
+    const build = (): ImageNode[] => {
+      const nodes: ImageNode[] = [];
+      for (let i = 0; i < N; i++) {
+        // Deterministic spread seed (golden-angle spiral) so the run is stable.
+        const ang = i * 2.399963229;
+        const rad = 4 * Math.sqrt(i + 1);
+        const edges: { i: number; w: number }[] = [];
+        for (let k = 1; k <= K; k++) {
+          edges.push({ i: (i + k) % N, w: 0.8 });
+          edges.push({ i: (i - k + N) % N, w: 0.8 });
+        }
+        nodes.push({
+          hash: "d" + i,
+          x: Math.cos(ang) * rad,
+          y: Math.sin(ang) * rad,
+          vx: 0,
+          vy: 0,
+          affinity: [],
+          neighbors: edges,
+        });
+      }
+      return nodes;
+    };
+
+    const nodes = build();
+    const steps = simulate(nodes, [], denseCfg, 4000, 1e-4);
+    // It SETTLED within the budget (the churn-forever scenario now terminates).
+    expect(steps).toBeLessThan(4000);
+
+    // Every node is finite and bounded (no divergence).
+    for (const nd of nodes) {
+      expect(Number.isFinite(nd.x) && Number.isFinite(nd.y)).toBe(true);
+    }
+
+    // CLUSTERS: linked neighbors ended close together on average.
+    let edgeSum = 0;
+    let edgeCount = 0;
+    for (const nd of nodes) {
+      for (const e of nd.neighbors!) {
+        const o = nodes[e.i];
+        edgeSum += Math.hypot(nd.x - o.x, nd.y - o.y);
+        edgeCount++;
+      }
+    }
+    const avgNeighborDist = edgeSum / edgeCount;
+    expect(avgNeighborDist).toBeLessThan(120);
+
+    // Does NOT collapse to a point: the bounding box has real extent (the cluster
+    // spread out, it didn't implode), and is finite/bounded.
+    const xs = nodes.map((n) => n.x);
+    const ys = nodes.map((n) => n.y);
+    const bbox = Math.max(
+      Math.max(...xs) - Math.min(...xs),
+      Math.max(...ys) - Math.min(...ys),
+    );
+    expect(bbox).toBeGreaterThan(50);
+    expect(bbox).toBeLessThan(denseCfg.ringRadius * 8);
   }, 30000);
 
   it("the same cluster does NOT settle WITHOUT the clamp (regression proof)", () => {

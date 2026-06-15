@@ -112,6 +112,15 @@ export interface ForceConfig {
    * does not overwhelm the anchor pull or collapse the layout. Absent ⇒
    * [`DEFAULT_NEIGHBOR_ATTRACTION`]; 0 disables the spring entirely. */
   neighborAttraction?: number;
+  /** REST LENGTH of the semantic-neighbor spring, in sim-space px. The spring
+   * pulls two neighbors together ONLY while they are farther apart than this; at
+   * the rest length the force is zero. CRITICAL for stability: a zero-rest-length
+   * spring (pull-to-coincidence) on a dense similarity graph is far too stiff for
+   * the explicit integrator and never dissipates, so the cluster churns at the
+   * clamp velocity forever (the "spinning blob"). A finite rest length gives each
+   * edge a stable target distance, so the layout settles. Absent ⇒
+   * [`DEFAULT_NEIGHBOR_REST_LENGTH`]. */
+  neighborRestLength?: number;
   /** Per-step velocity retention (cooling): 1 = frictionless, 0 = frozen. */
   damping: number;
   /** Pull toward the origin (un-topic'd nodes settle at the center). */
@@ -189,6 +198,27 @@ const EPSILON = 1;
  * more steps to cross a long gap instead of teleporting and destabilizing. */
 export const DEFAULT_MAX_STEP = 20;
 
+/** ANNEALING floor (visualizer audit, June 2026) — the smallest per-step
+ * displacement the heat-tied clamp ever allows, in sim-space px. A FRUSTRATED
+ * dense semantic-neighbor graph (every node linked to ~6 transitively-connected
+ * neighbors) never reaches kinetic rest: the springs fight each other and the
+ * cluster churns forever at the constant per-step clamp ceiling (the founder's
+ * "big blob spinning, never settles"). The fix is ANNEALING: `step` derives the
+ * effective clamp from the heat — hot heat permits the full `maxStep` (fast
+ * organizing), and as the caller cools heat toward 1 the clamp shrinks to this
+ * floor, FREEZING residual motion so the layout settles even when the forces
+ * never truly balance. 0.5px is below visual perception at any zoom, so the
+ * frozen state looks at rest. CONSEQUENCE: with heat absent/1 the clamp IS this
+ * floor, so any caller that wants the sim to MOVE must cool heat down from
+ * REHEAT_START (see `simulate`, which now anneals internally). */
+export const ANNEAL_FLOOR = 0.5;
+
+/** Clamp a scalar to [0, 1] — the annealing interpolation parameter (how hot the
+ * sim still is, 1 = fully hot at REHEAT_START, 0 = fully cooled at heat 1). */
+function clamp01(x: number): number {
+  return Math.max(0, Math.min(1, x));
+}
+
 /** Default semantic-neighbor spring stiffness when `ForceConfig.neighborAttraction`
  * is absent. ~0.06 sits just BELOW the topic anchor attraction's effective pull
  * (a node feels several neighbor edges, each weighted by its similarity ≤ 1, so
@@ -199,6 +229,13 @@ export const DEFAULT_MAX_STEP = 20;
  * clusters pinch. Verified only against the unit fixtures (the live visual feel
  * is the founder's to tune). */
 export const DEFAULT_NEIGHBOR_ATTRACTION = 0.06;
+
+/** Default rest length of the semantic-neighbor spring (sim-space px). Neighbors
+ * pull together until they sit about this far apart, then stop — so a cluster of
+ * alike photos packs to a legible disc instead of collapsing to a point or
+ * churning at the clamp speed. ~40px is a comfortable thumbnail spacing; tunable
+ * alongside DEFAULT_NEIGHBOR_ATTRACTION. */
+export const DEFAULT_NEIGHBOR_REST_LENGTH = 40;
 
 /** Clamp a velocity/displacement vector to at most `max` magnitude, scaling both
  * components so direction is preserved. Returns the (possibly scaled) pair. */
@@ -332,6 +369,8 @@ export function step(
   // discarded at integrate time, matching the existing anchor/centering forces).
   const neighborAttraction =
     (config.neighborAttraction ?? DEFAULT_NEIGHBOR_ATTRACTION) * heat;
+  const neighborRestLength =
+    config.neighborRestLength ?? DEFAULT_NEIGHBOR_REST_LENGTH;
   if (neighborAttraction !== 0) {
     for (let i = 0; i < n; i++) {
       const edges = nodes[i].neighbors;
@@ -344,8 +383,19 @@ export function step(
         // neighbors not in the current node set, but never trust an edge blindly)
         // and the self-edge a k-NN can emit.
         if (j < 0 || j >= n || j === i || w === 0) continue;
-        fx[i] += neighborAttraction * w * (nodes[j].x - xi);
-        fy[i] += neighborAttraction * w * (nodes[j].y - yi);
+        const dx = nodes[j].x - xi;
+        const dy = nodes[j].y - yi;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        // REST-LENGTH spring: attract only while farther apart than the rest
+        // length, and only by the EXCESS distance (force 0 at rest). This is the
+        // stability fix vs the old pull-to-coincidence spring, which on a dense
+        // similarity graph stayed stiff and churned the cluster at clamp speed
+        // forever. Below the rest length, repulsion alone handles spacing.
+        if (d > neighborRestLength) {
+          const pull = (neighborAttraction * w * (d - neighborRestLength)) / d;
+          fx[i] += pull * dx;
+          fy[i] += pull * dy;
+        }
       }
     }
   }
@@ -429,7 +479,26 @@ export function step(
   // accelerates LESS for the same force, so an aggregate of N images does not
   // lurch — it drifts to the cluster's home like a single weighty body. (A
   // single image has mass 1, so this is exactly the v1 unit-mass integrator.)
+  //
+  // ANNEALING (visualizer audit, June 2026): the per-step clamp is HEAT-TIED, not
+  // constant. While the sim is hot it permits the full `maxStep` (fast
+  // organizing); as the caller cools heat toward 1 the clamp shrinks toward
+  // ANNEAL_FLOOR, freezing residual motion so a FRUSTRATED dense neighbor graph
+  // (which never reaches true force balance and otherwise churns at the clamp
+  // ceiling forever) settles. `t` is how hot we still are: 1 at REHEAT_START, 0
+  // at the heat-1 steady state. With `maxStep` Infinity (the divergence
+  // regression) `effMax` stays Infinity, preserving the unbounded-integrator
+  // proof. With heat absent/1, `t` is 0 so `effMax` is the floor — callers MUST
+  // cool heat down for the sim to move (see `simulate`).
   const maxStep = config.maxStep ?? DEFAULT_MAX_STEP;
+  const anneal = clamp01((heat - 1) / (REHEAT_START - 1));
+  // An unbounded clamp (maxStep Infinity, the divergence regression) stays
+  // unbounded at every heat — interpolating Infinity would hit Infinity·0 = NaN
+  // at the steady state, so short-circuit it. Otherwise interpolate from the full
+  // clamp (hot) down to ANNEAL_FLOOR (cooled), so motion freezes as heat -> 1.
+  const effMax = Number.isFinite(maxStep)
+    ? ANNEAL_FLOOR + (maxStep - ANNEAL_FLOOR) * anneal
+    : maxStep;
   let energy = 0;
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
@@ -446,7 +515,7 @@ export function step(
     [node.vx, node.vy] = clampStep(
       (node.vx + fx[i] / mass) * config.damping,
       (node.vy + fy[i] / mass) * config.damping,
-      maxStep,
+      effMax,
     );
     node.x += node.vx;
     node.y += node.vy;
@@ -467,7 +536,7 @@ export function step(
     [anchor.vx, anchor.vy] = clampStep(
       ((anchor.vx ?? 0) + afx[a]) * config.anchorDamping,
       ((anchor.vy ?? 0) + afy[a]) * config.anchorDamping,
-      maxStep,
+      effMax,
     );
     anchor.x += anchor.vx;
     anchor.y += anchor.vy;
@@ -479,7 +548,16 @@ export function step(
 /** Run the simulation to (approximate) rest: step until the kinetic energy
  * drops below `restEnergy` or `maxSteps` is hit. Returns the step count taken —
  * the test uses it to assert deterministic convergence; the live component
- * prefers `step` per rAF so the user sees the layout settle. */
+ * prefers `step` per rAF so the user sees the layout settle.
+ *
+ * ANNEALING (visualizer audit, June 2026): `step`'s per-step clamp is now
+ * HEAT-TIED — with heat at the 1.0 steady state the clamp is pinned at
+ * ANNEAL_FLOOR and the layout barely moves. So `simulate` drives its OWN anneal:
+ * it starts an internal heat at REHEAT_START (full clamp, hot organizing) and
+ * cools it toward 1 each step with `coolHeat`, so the clamp shrinks to the floor
+ * and even a FRUSTRATED dense neighbor graph (which never truly force-balances)
+ * freezes into rest instead of churning forever. The caller's own `config.heat`
+ * is overridden by this internal schedule. */
 export function simulate(
   nodes: ImageNode[],
   anchors: TopicAnchor[],
@@ -492,8 +570,12 @@ export function simulate(
   // nodes of irreducible micro-jitter sum past it and the loop runs forever).
   // Compare the MEAN per-body energy so "at rest" is scale-invariant.
   const bodyCount = Math.max(1, nodes.length + anchors.length);
+  let heat = REHEAT_START;
   for (let s = 1; s <= maxSteps; s++) {
-    const energy = step(nodes, anchors, config);
+    // Pass the annealing heat to step (it derives the effective clamp from it),
+    // then cool one notch so the clamp tightens toward the floor over the run.
+    const energy = step(nodes, anchors, { ...config, heat });
+    heat = coolHeat(heat);
     if (energy / bodyCount < restEnergy) return s;
   }
   return maxSteps;
@@ -511,13 +593,17 @@ export function simulate(
  * close the distance fast; `coolHeat` decays it back toward the 1.0 steady
  * state over the following frames. */
 export const REHEAT_START = 10;
-/** Per-frame geometric cooling toward 1.0. A START of 10 cooling at 0.88 reaches
- * ~1.0 in well under a second (≈ 14 frames to halve the excess at ~60 fps), so
- * the layout SNAPS into place then relaxes — the founder's "should snap the
- * photos over, not ooze". A higher start + faster cool than the original (6 /
- * 0.92), paired with the hot-phase sub-stepping below, makes the settle visible
- * in a fraction of a second. */
-export const HEAT_COOL = 0.88;
+/** Per-frame geometric cooling toward 1.0. SLOWED to 0.95 (was 0.88) for the
+ * ANNEALING fix: the heat now also drives the per-step clamp (it shrinks toward
+ * ANNEAL_FLOOR as heat cools), so the heat schedule IS the anneal schedule. A
+ * frustrated dense neighbor graph needs enough HOT frames at the full clamp to
+ * organize before the clamp freezes it, and 0.88 cooled too fast — the cluster
+ * locked before it spread. 0.95 reaches ~1.0 in a couple of seconds (≈ 14 frames
+ * to halve the excess at ~60 fps), giving the hot organizing phase room while
+ * still snapping into place then relaxing — the founder's "should snap the
+ * photos over, not ooze". Paired with the hot-phase sub-stepping below, the
+ * settle stays quick. */
+export const HEAT_COOL = 0.95;
 
 /** Heat above this counts as the "hot phase" of a reheat: while the layout is
  * pulling hard the caller runs MULTIPLE sim sub-steps per animation frame so the

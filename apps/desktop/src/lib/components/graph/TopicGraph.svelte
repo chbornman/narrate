@@ -434,10 +434,13 @@
   // mutual repulsion fling them off-canvas forever.
   const ANCHOR_CENTERING = 0.01;
 
-  // Per-body kinetic-energy threshold for "at rest" (see isSettled). Scale-
-  // invariant: total energy / body count, so the loop stops whether the scope is
-  // 6 nodes or 1,000. ~1e-3 ⇒ mean speed ~0.03 sim-px/step, visually still.
-  const REST_ENERGY_PER_BODY = 1e-3;
+  // LENIENT per-body kinetic-energy GUARD for "at rest" (see isSettled). With the
+  // annealing clamp the heat schedule drives termination; this only guards us from
+  // declaring rest mid-snap. Scale-invariant (total energy / body count). 1.0 ⇒
+  // mean speed ~1 sim-px/step, the ceiling once the cooled clamp has frozen a
+  // frustrated graph's residual jitter; the strict gate never tripped on such a
+  // graph, so we relax it and lean on heat always cooling to 1.
+  const REST_ENERGY_PER_BODY = 1.0;
 
   function forceConfig(): ForceConfig {
     const t = tuning;
@@ -873,16 +876,25 @@
   /** Shared idle predicate: the layout is at rest, the reheat has fully cooled,
    * and a few settle frames have passed (guarding an early-zero opening frame).
    *
-   * PER-BODY rest test (visualizer audit, June 2026): the sim returns TOTAL
-   * kinetic energy summed over all bodies, so the old fixed `energy < 1e-2`
-   * (tuned on a ~6-node fixture) never tripped at scale: hundreds of nodes of
-   * irreducible micro-jitter sum past it, so the loop ran forever and draw()
-   * repainted every frame indefinitely (the founder's "never settles" + the
-   * main-thread theft that compounded the slow load). Dividing by the body count
-   * makes "at rest" scale-invariant, matching `simulate`'s rest test. */
+   * ANNEALING termination (visualizer audit, June 2026): the per-step clamp is
+   * now HEAT-TIED inside step() — once the reheat has cooled (heat -> 1) the
+   * clamp sits at ANNEAL_FLOOR, so any residual motion is bounded to a fraction
+   * of a sim-px per step (sub-perceptual, looks at rest). On a FRUSTRATED dense
+   * semantic-neighbor graph the springs never truly force-balance, so the strict
+   * per-body energy gate would never trip and the loop ran forever (the founder's
+   * "big blob spinning, never settles"). We RELAX the gate to terminate on the
+   * heat schedule, which ALWAYS cools: settle once the reheat is fully cooled and
+   * a few settle frames have passed. A LENIENT per-body energy bound stays as a
+   * guard so we never declare rest mid-snap, but it is generous enough that the
+   * frozen-clamp residual jitter clears it. Heat always reaching 1 guarantees
+   * termination. Runs on BOTH the inline and worker paths (both call this); the
+   * clamp is derived inside step() from heat, which the worker already receives,
+   * so no new worker plumbing is needed. */
   function isSettled(energy: number): boolean {
     const bodies = Math.max(1, nodes.length + anchors.length);
-    return energy / bodies < REST_ENERGY_PER_BODY && heat <= 1.0001 && settleCount > 30;
+    return (
+      energy / bodies < REST_ENERGY_PER_BODY && heat <= 1.0001 && settleCount > 30
+    );
   }
 
   /** What a settle does (both paths): stop ticking and recompute the influence
