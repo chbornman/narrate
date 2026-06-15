@@ -20,6 +20,29 @@ import {
 } from "../src/lib/theme/theme";
 import { ThemeStore } from "../src/lib/theme/theme-store.svelte";
 
+/** In-memory stand-in for the Tauri cross-window event API. `emit` dispatches
+ * SYNCHRONOUSLY to every registered listener (including the sender's own — the
+ * real broadcast echoes back to the emitting window too), so the two-webview
+ * theme propagation is testable with no Tauri runtime. Hoisted so the vi.mock
+ * factory can close over it. */
+const bus = vi.hoisted(() => {
+  const listeners = new Map<string, Set<(e: { payload: unknown }) => void>>();
+  return {
+    emit: (name: string, payload: unknown) => {
+      for (const cb of [...(listeners.get(name) ?? [])]) cb({ payload });
+      return Promise.resolve();
+    },
+    listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+      const set = listeners.get(name) ?? new Set();
+      set.add(cb);
+      listeners.set(name, set);
+      return Promise.resolve(() => set.delete(cb));
+    },
+    reset: () => listeners.clear(),
+  };
+});
+vi.mock("@tauri-apps/api/event", () => ({ emit: bus.emit, listen: bus.listen }));
+
 /** A minimal, controllable matchMedia stub. `dark` seeds the initial OS value;
  * `fire()` flips it and dispatches `change` to every registered listener — the
  * exact shape watchSystemTheme subscribes to. */
@@ -195,5 +218,59 @@ describe("matchMedia listener", () => {
     os.fire(true); // OS flips, but mode is now explicit → no repaint
     expect(dataTheme()).toBe("dark");
     unwatch();
+  });
+});
+
+describe("cross-window broadcast (main <-> Settings)", () => {
+  // The app runs two webviews, each with its own ThemeStore. A change in one
+  // must reach the other over the `theme-changed` event — the bug was the main
+  // window NOT following a switch made in the Settings window.
+  beforeEach(() => {
+    installMatchMedia(true); // stable OS dark; isolate the broadcast path
+    bus.reset();
+    // inTauri() gates the emit/listen; make it true so the store wires them.
+    (window as unknown as { __TAURI_INTERNALS__: object }).__TAURI_INTERNALS__ = {};
+  });
+  afterEach(() => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+  });
+
+  it("a set() in one webview applies in the other (and self-echo doesn't loop)", async () => {
+    const main = new ThemeStore();
+    const settings = new ThemeStore();
+    main.init();
+    settings.init();
+    await Promise.resolve(); // flush the listen() promises
+
+    // User flips the toggle in the Settings window.
+    settings.set("light");
+    expect(settings.mode).toBe("light");
+    // The MAIN window followed — the bug fix. (If the sender's self-echo looped,
+    // the synchronous emit would have recursed and this test would hang.)
+    expect(main.mode).toBe("light");
+    expect(dataTheme()).toBe("light");
+
+    // And back the other way.
+    main.set("dark");
+    expect(settings.mode).toBe("dark");
+    expect(dataTheme()).toBe("dark");
+
+    main.dispose();
+    settings.dispose();
+  });
+
+  it("a disposed window stops following theme changes", async () => {
+    const main = new ThemeStore();
+    const settings = new ThemeStore();
+    main.init();
+    settings.init();
+    await Promise.resolve();
+
+    main.dispose(); // main window closed
+    await Promise.resolve(); // the unlisten chains off the listen promise
+    settings.set("light");
+    expect(main.mode).toBe("system"); // unchanged: its listener is gone
+    settings.dispose();
   });
 });
