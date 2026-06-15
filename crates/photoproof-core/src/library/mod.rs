@@ -194,17 +194,33 @@ impl Library {
         // §10.5: `error` rows auto-retry on app restart.
         let recovered = ingest::recover_running(&conn)?;
         ingest::retry_errors(&conn)?;
-        // §9.8 regeneration: a `generator_version` bump (compile-time
-        // constant covering encoder, sizes, color pipeline) re-enqueues the
-        // preview pass at backfill priority for every stale artifact.
+        // §9.8 regeneration: a `generator_version` change (compile-time constant
+        // covering encoder, sizes, color pipeline) re-enqueues the preview pass
+        // at backfill priority for every artifact NOT at the current version.
+        // The `<>` (not `<`) also catches a DOWNGRADE: an older binary opening a
+        // DB whose artifacts a newer binary wrote at a higher version would
+        // otherwise serve those future-format artifacts undetected
+        // (STATE-INTEGRITY-AUDIT.md). Regenerating them at the running version
+        // keeps disk and code in agreement in both directions.
         let regen = conn.execute(
             "UPDATE ingest_passes
              SET state = 'pending', not_before = NULL, priority = ?2
              WHERE pass_name = 'preview' AND state = 'done'
                AND image_hash IN (SELECT image_hash FROM preview_artifacts
-                                  WHERE generator_version < ?1)",
+                                  WHERE generator_version <> ?1)",
             params![preview::GENERATOR_VERSION, ingest::PRIORITY_BACKFILL],
         )?;
+        // Distinguish a downgrade for the operator: the highest version ever
+        // written exceeding what this build produces means a newer app touched
+        // this library. Recovery is automatic (the re-pend above regenerates),
+        // but it is worth a log line rather than a silent reshape.
+        let max_gen: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(generator_version), 0) FROM preview_artifacts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
         let cache_dir = cache_dir.into();
         // §9.8 crash hygiene: stranded temp files from a mid-write crash.
         let swept = preview::sweep_temp_files(&cache_dir)?;
@@ -224,8 +240,15 @@ impl Library {
             ));
         }
         if regen > 0 {
+            let direction = if max_gen > preview::GENERATOR_VERSION {
+                "DOWNGRADE (newer app wrote these)"
+            } else {
+                "bump"
+            };
             lib.log(format!(
-                "generator_version bump: {regen} preview passes re-enqueued at backfill priority"
+                "generator_version {direction}: running v{}, cache had up to v{max_gen}; \
+                 {regen} preview passes re-enqueued at backfill priority",
+                preview::GENERATOR_VERSION
             ));
         }
         if swept > 0 {

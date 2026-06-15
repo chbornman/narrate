@@ -480,6 +480,21 @@ impl RuntimeHost {
         // sessions, including a degraded-with-error load (§3.3).
         lines.extend(self.embedders.debug_lines());
         lines.extend(state.config_warnings.iter().cloned());
+        // manifest_version drift (STATE-INTEGRITY-AUDIT.md): installed weights
+        // whose recorded manifest version is behind the running manifest may be
+        // stale. Surfaced, not auto-re-downloaded (a global bump must not nuke
+        // every model); the user can re-download to refresh.
+        let stale = photoproof_core::runtime::plan::stale_installed_models(
+            &self.manifest,
+            &self.manager_installed(&state),
+        );
+        if !stale.is_empty() {
+            lines.push(format!(
+                "model manifest drift: {} installed behind current manifest (re-download to refresh): {}",
+                stale.len(),
+                stale.join(", ")
+            ));
+        }
         for (id, (done, total)) in &state.downloads {
             lines.push(format!("download {id}: {done}/{total} bytes"));
         }

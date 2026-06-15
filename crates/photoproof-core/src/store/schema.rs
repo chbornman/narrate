@@ -8,6 +8,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use super::StoreError;
+
 /// §5.2–5.5, verbatim from the spec.
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE annotation_events (
@@ -612,11 +614,28 @@ CREATE TABLE IF NOT EXISTS topic_notes ( -- append-only, like collection_notes
 );
 "#;
 
+/// The highest `user_version` this build knows how to produce. Bump this in
+/// lockstep with the last `if version < N` block below. It is the upper bound
+/// the downgrade guard enforces: a DB stamped higher than this was written by a
+/// newer app and must not be opened by this one.
+pub(crate) const CURRENT_VERSION: i64 = 15;
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
-pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
+///
+/// Refuses a database NEWER than [`CURRENT_VERSION`] (a downgrade): the old
+/// binary cannot safely read a schema a newer app upgraded, and the migration
+/// ladder only moves forward, so opening it would silently operate on a
+/// partially-understood schema. We surface `IncompatibleVersion` instead.
+pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > CURRENT_VERSION {
+        return Err(StoreError::IncompatibleVersion {
+            found: version,
+            supported: CURRENT_VERSION,
+        });
+    }
     if version < 1 {
         conn.execute_batch(SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 1")?;
@@ -826,5 +845,31 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 15);
+    }
+
+    /// A database stamped NEWER than this build supports (a downgrade) is refused
+    /// rather than opened with partial schema knowledge (STATE-INTEGRITY-AUDIT.md
+    /// "newer-version DB opens silently"). A current/older DB still opens.
+    #[test]
+    fn refuses_a_newer_schema_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap(); // bring it to CURRENT_VERSION
+        // Simulate a newer app having upgraded the DB.
+        run_pragma(
+            &conn,
+            &format!("PRAGMA user_version = {}", CURRENT_VERSION + 1),
+        )
+        .unwrap();
+        let err = migrate(&conn).unwrap_err();
+        match err {
+            StoreError::IncompatibleVersion { found, supported } => {
+                assert_eq!(found, CURRENT_VERSION + 1);
+                assert_eq!(supported, CURRENT_VERSION);
+            }
+            other => panic!("expected IncompatibleVersion, got {other:?}"),
+        }
+        // Exactly-current is fine (idempotent re-open), and so is older.
+        run_pragma(&conn, &format!("PRAGMA user_version = {CURRENT_VERSION}")).unwrap();
+        assert!(migrate(&conn).is_ok());
     }
 }

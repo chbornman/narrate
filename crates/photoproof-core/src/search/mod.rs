@@ -41,6 +41,7 @@ use rusqlite::{Connection, InterruptHandle};
 use thiserror::Error;
 
 use crate::id::{ContentHash, EventId, SessionId, UtcMillis};
+use crate::store::StoreError;
 use crate::store::schema;
 
 pub use fuzzy::FuzzyField;
@@ -358,6 +359,18 @@ impl From<rusqlite::Error> for SearchError {
             return SearchError::Interrupted;
         }
         SearchError::Sqlite(e)
+    }
+}
+
+impl From<StoreError> for SearchError {
+    fn from(e: StoreError) -> Self {
+        // The Searcher opens the SAME db the EventStore already migrated, so a
+        // schema error here is unexpected; preserve the sqlite/interrupt mapping
+        // and carry any other StoreError (e.g. IncompatibleVersion) as its text.
+        match e {
+            StoreError::Sqlite(s) => s.into(),
+            other => SearchError::Corrupt(other.to_string()),
+        }
     }
 }
 

@@ -40,6 +40,16 @@ pub enum StoreError {
     SessionNotFound(String),
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// The database's `user_version` is NEWER than this build understands: a
+    /// downgrade (older app opening a DB a newer app upgraded). Opening it would
+    /// let the old code read a schema it only partly knows and silently corrupt
+    /// derived data, so we refuse instead. Recovery: run the newer app, or
+    /// restore/clear the database. (STATE-INTEGRITY-AUDIT.md: newer-version DB.)
+    #[error(
+        "database schema version {found} is newer than this app supports (max {supported}); \
+         update PhotoProof to open this library"
+    )]
+    IncompatibleVersion { found: i64, supported: i64 },
     /// `PRAGMA wal_checkpoint(TRUNCATE)` stayed blocked by a concurrent
     /// reader after bounded retries (§5.1, §7 step 8). The triggering write
     /// is committed and durable; only the WAL hygiene is incomplete — retry

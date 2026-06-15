@@ -92,6 +92,27 @@ fn local_model_plan(
     }
 }
 
+/// Models whose installed `manifest_version` is BEHIND the running manifest:
+/// their on-disk weights may be stale (a manifest upgrade could have changed the
+/// entry's files/revision). Previously `InstalledRecord.manifest_version` was
+/// written at install time and never read, so a manifest upgrade silently ran
+/// old weights (STATE-INTEGRITY-AUDIT.md). This SURFACES the drift rather than
+/// forcing a re-download: a global manifest bump for one model must not nuke
+/// every other model's weights, so the shell logs this (and may offer a
+/// re-download) while the models keep running. Pure + testable.
+pub fn stale_installed_models(
+    manifest: &Manifest,
+    installed: &BTreeMap<String, InstalledRecord>,
+) -> Vec<String> {
+    let mut stale: Vec<String> = installed
+        .iter()
+        .filter(|(_, rec)| rec.manifest_version < manifest.manifest_version)
+        .map(|(id, _)| id.clone())
+        .collect();
+    stale.sort(); // deterministic order for logs + tests
+    stale
+}
+
 /// Resolve the plan. `effective_tier` comes from tier::decide_tier (user
 /// override already applied — it always wins, §6.2).
 pub fn plan(
@@ -172,6 +193,31 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn stale_installed_models_flags_only_behind_records() {
+        let manifest = compiled_manifest(); // manifest_version = 1
+        let rec = |v: u32| InstalledRecord {
+            manifest_version: v,
+            when: "2026-06-11T00:00:00Z".into(),
+        };
+        let installed: BTreeMap<String, InstalledRecord> = [
+            ("old-a".to_owned(), rec(0)),   // behind -> stale
+            ("current".to_owned(), rec(1)), // at manifest version -> fine
+            ("old-b".to_owned(), rec(0)),   // behind -> stale
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            stale_installed_models(&manifest, &installed),
+            vec!["old-a".to_owned(), "old-b".to_owned()],
+            "only records behind the manifest version are stale, sorted"
+        );
+        // A fully-current install reports nothing.
+        let current: BTreeMap<String, InstalledRecord> =
+            [("current".to_owned(), rec(1))].into_iter().collect();
+        assert!(stale_installed_models(&manifest, &current).is_empty());
     }
 
     #[test]
