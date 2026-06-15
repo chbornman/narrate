@@ -233,17 +233,30 @@ pub fn promote(
 /// worker are claimed — `full-raw-decode` (M1.5) and the model passes stay
 /// pending in the queue by design.
 pub fn claim_next(conn: &Connection, now: UtcMillis) -> rusqlite::Result<Option<QueueItem>> {
-    claim_next_of(conn, now, &[PassName::Exif, PassName::Preview])
+    // Exif + Preview both READ the original file, so an image whose only paths
+    // are on an offline volume cannot proceed: skip it at claim time (true)
+    // instead of claiming → discovering offline → deferring on every wake. That
+    // claim/defer sweep is the "volume offline" log-spam churn (founder, June
+    // 2026); skipping at claim lets the pump idle, and the volume's online
+    // transition re-pends these rows (mark_online_locked) so work resumes.
+    claim_next_of(conn, now, &[PassName::Exif, PassName::Preview], true)
 }
 
 /// Claim the next runnable pending row among `allowed` passes. The
 /// embedding drain claims only the passes whose embedder is configured —
 /// unconfigured model passes sit pending (idle, NotConfigured-style; never
 /// errors), exactly like the rest of the degraded posture.
+///
+/// `require_online_path`: when true, only claim an image that has an ACTIVE path
+/// on an ONLINE volume. File-reading passes (hash/exif/preview/full-raw-decode)
+/// set this so an offline drive does not drive a perpetual claim→defer sweep;
+/// the embedding passes set it false (they read cached previews/text, which
+/// survive a drive going offline).
 pub fn claim_next_of(
     conn: &Connection,
     now: UtcMillis,
     allowed: &[PassName],
+    require_online_path: bool,
 ) -> rusqlite::Result<Option<QueueItem>> {
     if allowed.is_empty() {
         return Ok(None);
@@ -256,6 +269,15 @@ pub fn claim_next_of(
         .map(|p| format!("'{}'", p.as_str()))
         .collect::<Vec<_>>()
         .join(",");
+    // Gate file-reading passes on an online location (see `require_online_path`).
+    // `image_hash` correlates to the outer row; `paths_by_image` indexes it.
+    let online_filter = if require_online_path {
+        "AND EXISTS (SELECT 1 FROM paths p JOIN volumes v ON v.volume_id = p.volume_id \
+         WHERE p.image_hash = ingest_passes.image_hash AND p.state = 'active' \
+         AND v.state = 'online')"
+    } else {
+        ""
+    };
     let row = conn
         .query_row(
             &format!(
@@ -264,6 +286,7 @@ pub fn claim_next_of(
                  WHERE state = 'pending'
                    AND pass_name IN ({in_list})
                    AND (not_before IS NULL OR not_before <= ?1)
+                   {online_filter}
                  ORDER BY priority, enqueued_at
                  LIMIT 1"
             ),
@@ -584,7 +607,7 @@ mod tests {
             now,
         )
         .unwrap();
-        let item = claim_next_of(&conn, now, &[PassName::TextEmbedding])
+        let item = claim_next_of(&conn, now, &[PassName::TextEmbedding], false)
             .unwrap()
             .expect("claimable");
 
@@ -598,7 +621,7 @@ mod tests {
         assert_eq!(state, "pending", "stale completion must not win");
 
         // The unraced path still completes normally.
-        let item = claim_next_of(&conn, now, &[PassName::TextEmbedding])
+        let item = claim_next_of(&conn, now, &[PassName::TextEmbedding], false)
             .unwrap()
             .expect("claimable again");
         mark_done(&conn, &item, now).unwrap();
@@ -606,5 +629,76 @@ mod tests {
             .query_row("SELECT state FROM ingest_passes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(state, "done");
+    }
+
+    /// Volume-offline "pause" (founder: warn + pause, June 2026): a file-reading
+    /// pass (Exif/Preview) for an image whose only active path is on an OFFLINE
+    /// volume is skipped at claim time, so the pump idles instead of sweeping the
+    /// whole offline backlog (claim→defer) on every wake. Embedding passes (which
+    /// read cached previews) stay claimable, and the file pass resumes the moment
+    /// the volume is back online.
+    #[test]
+    fn claim_skips_offline_volume_for_file_passes_not_embeddings() {
+        let (_tmp, conn) = setup();
+        let now = UtcMillis::now();
+        let ts = now.to_rfc3339();
+        let hash = ContentHash::from_hex(&"cd".repeat(32)).unwrap();
+        conn.execute(
+            "INSERT INTO volumes (volume_id, state, first_seen_at, last_seen_at)
+             VALUES ('vol-1', 'offline', ?1, ?1)",
+            params![ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p1', ?1, 'vol-1', 'a.jpg', 1, 1, 'active', ?2, ?2)",
+            params![hash.as_str(), ts],
+        )
+        .unwrap();
+        enqueue(
+            &conn,
+            &hash,
+            PassName::Preview,
+            PassState::Pending,
+            PRIORITY_WATCHER,
+            None,
+            now,
+        )
+        .unwrap();
+        enqueue(
+            &conn,
+            &hash,
+            PassName::TextEmbedding,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+
+        // Offline: the file pass is NOT claimed (no claim/defer churn)...
+        assert!(
+            claim_next(&conn, now).unwrap().is_none(),
+            "an offline-only image yields no file-reading claim"
+        );
+        // ...but the embedding pass runs anyway (cached previews survive offline).
+        assert!(
+            claim_next_of(&conn, now, &[PassName::TextEmbedding], false)
+                .unwrap()
+                .is_some(),
+            "embedding is claimable while the source volume is offline"
+        );
+
+        // Volume returns: the file pass is claimable again.
+        conn.execute(
+            "UPDATE volumes SET state = 'online' WHERE volume_id = 'vol-1'",
+            [],
+        )
+        .unwrap();
+        let item = claim_next(&conn, now)
+            .unwrap()
+            .expect("file pass claimable once the volume is online");
+        assert_eq!(item.pass, PassName::Preview);
     }
 }

@@ -2075,7 +2075,9 @@ impl Library {
             }
             let item = {
                 let conn = self.db.lock().expect("poisoned");
-                ingest::claim_next_of(&conn, self.now(), &allowed)?
+                // Full-RAW decode reads the original file: require an online path
+                // so an offline volume does not churn the queue.
+                ingest::claim_next_of(&conn, self.now(), &allowed, true)?
             };
             let Some(item) = item else { break };
             report.processed += 1;

@@ -168,7 +168,10 @@ impl Library {
             }
             let item = {
                 let conn = self.db.lock().expect("poisoned");
-                ingest::claim_next_of(&conn, self.now(), &allowed)?
+                // Embedding reads cached previews / folded text, not the original
+                // file, so it runs even while the source volume is offline: no
+                // online-path requirement (false).
+                ingest::claim_next_of(&conn, self.now(), &allowed, false)?
             };
             let Some(item) = item else { break };
             report.processed += 1;
