@@ -143,6 +143,15 @@
    * hidden and the cluster + n-gram suggestions stand in. */
   let llmSuggestions = $state<string[]>([]);
   let alpha = $state(0.5);
+  /** Live TOPIC STRENGTH = the image->topic `attraction` (founder: "change the
+   * strength of hard topics up to break up unnamed clusters"). Surfaced as a
+   * slider so the balance vs the semantic-neighbor pull is a direct manipulation:
+   * crank it UP and matched images snap onto their topics (the unnamed clumps
+   * dissolve), pull it DOWN and the natural CLIP/note clusters re-form. Seeded
+   * from tuning.attraction on load; forceConfig() reads it instead of the static
+   * tuning value, so a drag re-lays-out live. */
+  let topicStrength = $state(0.08);
+  let lastTopicStrength = 0.08;
   /** Point the lens at the WHOLE library (the scale spike) vs the current grid
    * scope. The founder flips this to "feel the scale wall" (DESIGN §scale). */
   let fullLibrary = $state(false);
@@ -447,7 +456,8 @@
   function forceConfig(): ForceConfig {
     const t = tuning;
     return {
-      attraction: t?.attraction ?? 0.08,
+      // Live topic-strength slider overrides the static tuning value.
+      attraction: topicStrength,
       repulsion: t?.repulsion ?? 800,
       // Semantic-neighbor spring (CLIP/note similarity), file-tunable so the
       // founder balances "congregate around topics" (attraction) vs "clump alike
@@ -2048,6 +2058,11 @@
       } catch {
         /* defaults stand (forceConfig falls back) */
       }
+      // Seed the live topic-strength slider from the tuned attraction (both the
+      // restore and cold-open paths below run after this), pre-setting the dedup
+      // guard so it does not fire a redundant relayout on first paint.
+      if (tuning !== null) topicStrength = tuning.attraction;
+      lastTopicStrength = topicStrength;
       // INSTANT REOPEN: if this exact (scope, topic-set) was snapshotted on a
       // prior close, restore its settled layout + view + field and paint it
       // immediately — no affinity fetch, no reseed, no reheat. Suggestions are
@@ -2127,6 +2142,21 @@
       if (tuning !== null && a !== lastAlpha) {
         lastAlpha = a;
         void recompute();
+      }
+    });
+  });
+
+  // Re-layout live when the topic-strength slider moves. Unlike alpha this does
+  // NOT change affinities (no refetch) — only the force balance — so we just
+  // reheat + restart the sim with the new attraction (cheap), not a full
+  // recompute. Dedup on the last applied value so the onMount seed doesn't fire.
+  $effect(() => {
+    const s = topicStrength;
+    untrack(() => {
+      if (s !== lastTopicStrength) {
+        lastTopicStrength = s;
+        reheat();
+        restartLoop();
       }
     });
   });
@@ -2250,6 +2280,22 @@
         aria-label="Looks versus said blend"
       />
       <span>looks</span>
+    </label>
+
+    <!-- Topic strength: the live image->topic attraction. Up = images snap onto
+         their topics (unnamed clusters break apart); down = the natural CLIP/note
+         clusters re-form. A direct manipulation of the balance the founder tunes. -->
+    <label class="alpha">
+      <span>loose</span>
+      <input
+        type="range"
+        min="0"
+        max="0.3"
+        step="0.01"
+        bind:value={topicStrength}
+        aria-label="Topic strength: how hard images are pulled onto their topics"
+      />
+      <span>topics</span>
     </label>
 
     <label class="full-lib">
