@@ -24,6 +24,27 @@ import {
 import { SurroundStore } from "../src/lib/theme/surround-store.svelte";
 import { theme } from "../src/lib/theme/theme-store.svelte";
 
+/** In-memory stand-in for the Tauri cross-window event API (see theme.test.ts).
+ * `emit` dispatches synchronously to every listener, so the two-webview surround
+ * propagation is testable with no Tauri runtime. */
+const bus = vi.hoisted(() => {
+  const listeners = new Map<string, Set<(e: { payload: unknown }) => void>>();
+  return {
+    emit: (name: string, payload: unknown) => {
+      for (const cb of [...(listeners.get(name) ?? [])]) cb({ payload });
+      return Promise.resolve();
+    },
+    listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+      const set = listeners.get(name) ?? new Set();
+      set.add(cb);
+      listeners.set(name, set);
+      return Promise.resolve(() => set.delete(cb));
+    },
+    reset: () => listeners.clear(),
+  };
+});
+vi.mock("@tauri-apps/api/event", () => ({ emit: bus.emit, listen: bus.listen }));
+
 /** Controllable matchMedia stub (same shape as theme.test.ts): seed the OS
  * value, then flip it and notify the watcher to simulate an OS theme switch. */
 function installMatchMedia(dark: boolean) {
@@ -164,5 +185,55 @@ describe("manual override", () => {
 
     s.setMode("manual");
     expect(s.level).toBe("black"); // flipping back restores the pinned level
+  });
+});
+
+describe("cross-window broadcast (main <-> Settings)", () => {
+  // The surround MODE and pinned manual LEVEL live in per-webview localStorage,
+  // so a change in the Settings window must be broadcast to the main window.
+  beforeEach(() => {
+    installMatchMedia(true);
+    bus.reset();
+    (window as unknown as { __TAURI_INTERNALS__: object }).__TAURI_INTERNALS__ = {};
+  });
+  afterEach(() => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+  });
+
+  it("a pick()/setMode() in one webview applies in the other", async () => {
+    const main = new SurroundStore();
+    const settings = new SurroundStore();
+    main.init();
+    settings.init();
+    await Promise.resolve();
+
+    // User pins a manual level in the Settings window.
+    settings.pick("white");
+    expect(settings.mode).toBe("manual");
+    expect(main.mode).toBe("manual"); // main window followed
+    expect(main.manualLevel).toBe("white");
+    expect(main.level).toBe("white");
+
+    // Flip back to follow-theme in Settings; main follows.
+    settings.setMode("follow-theme");
+    expect(main.mode).toBe("follow-theme");
+
+    main.dispose();
+    settings.dispose();
+  });
+
+  it("a disposed window stops following", async () => {
+    const main = new SurroundStore();
+    const settings = new SurroundStore();
+    main.init();
+    settings.init();
+    await Promise.resolve();
+
+    main.dispose();
+    await Promise.resolve(); // unlisten chains off the listen promise
+    settings.pick("light");
+    expect(main.mode).toBe("follow-theme"); // unchanged: listener gone
+    settings.dispose();
   });
 });

@@ -27,12 +27,24 @@ import {
   saveSurround,
   saveSurroundMode,
 } from "../state/prefs";
+import { broadcast, subscribe } from "../state/crosswindow";
 import { theme } from "./theme-store.svelte";
 import {
   surroundForTheme,
   type SurroundLevel,
   type SurroundMode,
 } from "./surround";
+
+/** Cross-window broadcast of a surround change. Like the theme, the surround
+ * MODE and pinned manual LEVEL live in per-webview localStorage, so a change in
+ * the Settings window never reached the main window (STATE-INTEGRITY-AUDIT.md).
+ * (The follow-theme path already follows cross-window via theme.resolved, which
+ * the theme store now broadcasts; this covers the manual mode/level changes.) */
+const SURROUND_EVENT = "surround-changed";
+interface SurroundBroadcast {
+  mode: SurroundMode;
+  manualLevel: SurroundLevel;
+}
 
 export class SurroundStore {
   /** follow-theme | manual; default follow-theme (loadSurroundMode). */
@@ -49,19 +61,58 @@ export class SurroundStore {
     this.mode === "follow-theme" ? surroundForTheme(theme.resolved) : this.manualLevel,
   );
 
-  /** Set the mode (the Settings toggle). Persisted. Switching to follow-theme
-   * does NOT clear the pinned manual level — flipping back restores it. */
+  #unsub: (() => void) | null = null;
+
+  /** Arm the cross-window listener so a surround change made in the OTHER webview
+   * applies here. Call once per webview at boot (main.ts / settings-main.ts),
+   * like theme.init(). Idempotent. */
+  init(): void {
+    this.#unsub?.();
+    this.#unsub = subscribe<SurroundBroadcast>(SURROUND_EVENT, (p) =>
+      this.#applyExternal(p),
+    );
+  }
+
+  /** Apply a surround change that arrived from another window. No-ops when it
+   * already matches (ignores the sender's self-echo, no loop). Persists to this
+   * webview's own localStorage so a later independent boot is consistent. */
+  #applyExternal(p: SurroundBroadcast): void {
+    if (p.mode === this.mode && p.manualLevel === this.manualLevel) return;
+    this.mode = p.mode;
+    this.manualLevel = p.manualLevel;
+    saveSurroundMode(p.mode);
+    saveSurround(p.manualLevel);
+  }
+
+  /** Broadcast the current (mode, manualLevel) to the other webview. */
+  #broadcast(): void {
+    broadcast(SURROUND_EVENT, { mode: this.mode, manualLevel: this.manualLevel });
+  }
+
+  /** Set the mode (the Settings toggle). Persisted + broadcast. Switching to
+   * follow-theme does NOT clear the pinned manual level — flipping back restores
+   * it. */
   setMode(mode: SurroundMode): void {
     this.mode = mode;
     saveSurroundMode(mode);
+    this.#broadcast();
   }
 
   /** Pick a specific level — the manual control (the set-surround action's
-   * backdrop/gutter right-click, D6). Implies manual mode and persists both. */
+   * backdrop/gutter right-click, D6). Implies manual mode and persists both,
+   * then broadcasts the final state to the other webview. */
   pick(level: SurroundLevel): void {
     this.manualLevel = level;
     saveSurround(level);
+    // setMode already broadcasts; only broadcast here when mode is unchanged.
     if (this.mode !== "manual") this.setMode("manual");
+    else this.#broadcast();
+  }
+
+  /** Tear down the cross-window listener (tests; webview teardown). */
+  dispose(): void {
+    this.#unsub?.();
+    this.#unsub = null;
   }
 }
 
