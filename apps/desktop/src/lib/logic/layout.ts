@@ -57,6 +57,12 @@ export function computeStaticLayout(
   // 1. Raw weighted-centroid target per node (no declump yet). A node with no
   //    affinity to anything (all zero — e.g. a degenerate/broken set) gets the
   //    origin, exactly where the sim's centering spring rested it.
+  //
+  //    A node the user MANUALLY PLACED (fixed === true) is skipped entirely: it
+  //    keeps the x/y/v it was dragged to, is never bucketed, and is never moved.
+  //    This preserves a dragged node where the user dropped it across a
+  //    re-layout (a topic add, an anchor drag), instead of snapping it back to
+  //    its computed centroid.
   const target = nodes.map((n) => {
     let wx = 0;
     let wy = 0;
@@ -73,8 +79,11 @@ export function computeStaticLayout(
   });
 
   // 2. Bucket by quantized centroid so coincident targets share a spiral.
+  //    Fixed (manually-placed) nodes are excluded from bucketing so they never
+  //    join a declump spiral and never shift.
   const buckets = new Map<string, number[]>();
   for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].fixed === true) continue;
     const key =
       anchors.length === 0
         ? "origin"

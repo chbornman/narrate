@@ -103,6 +103,33 @@ describe("computeStaticLayout — declump + stability", () => {
     expect(nodes[0].vx).toBe(0);
     expect(nodes[0].vy).toBe(0);
   });
+
+  it("preserves a manually-placed (fixed) node while laying out the rest", () => {
+    const anchors = ringAnchors(3, RING);
+    // A node the user dragged to an arbitrary spot, marked fixed, plus two
+    // ordinary nodes that should be laid out at their centroids.
+    const dragged = {
+      hash: "dragged",
+      x: 137,
+      y: -42,
+      vx: 3,
+      vy: -3,
+      fixed: true,
+      affinity: [1, 0, 0],
+    };
+    const a = node("a", [1, 0, 0]);
+    const c = node("c", [0, 0, 1]);
+    const nodes = [dragged, a, c];
+    computeStaticLayout(nodes, anchors, { ringRadius: RING });
+    // The fixed node keeps its exact position AND velocity, untouched.
+    expect(dragged.x).toBe(137);
+    expect(dragged.y).toBe(-42);
+    expect(dragged.vx).toBe(3);
+    expect(dragged.vy).toBe(-3);
+    // The other nodes still land at their respective anchors.
+    expect(nearestAnchor(a, anchors)).toBe(0);
+    expect(nearestAnchor(c, anchors)).toBe(2);
+  });
 });
 
 describe("computeStaticLayout — degenerate inputs", () => {
