@@ -332,6 +332,27 @@ impl RuntimeHost {
         .installed()
     }
 
+    /// The model id each vector `vec_kind` is actively embedded under today,
+    /// from the resolved config (the embedder host writes vectors under exactly
+    /// these ids). Feeds the startup doctor's space reconciliation
+    /// (STATE-INTEGRITY-AUDIT): a stored space under any OTHER model id for the
+    /// same kind is superseded. ImageClip follows the CLIP embedder; the two
+    /// text-embedder spaces (annotation_chunk + image_summary) follow the text
+    /// embedder.
+    pub fn active_vector_models(
+        &self,
+    ) -> std::collections::HashMap<photoproof_connectors::vector_store::VecKind, String> {
+        use photoproof_connectors::vector_store::VecKind;
+        let state = self.state.lock().expect("runtime state");
+        let clip = state.config.embedder.model.clone();
+        let text = state.config.embedder.text.model.clone();
+        std::collections::HashMap::from([
+            (VecKind::ImageClip, clip),
+            (VecKind::AnnotationChunk, text.clone()),
+            (VecKind::ImageSummary, text),
+        ])
+    }
+
     // ------------------------------------------------------------ status ----
 
     pub fn status(&self) -> RuntimeStatus {

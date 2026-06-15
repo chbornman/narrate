@@ -12,6 +12,7 @@
 mod commands;
 #[cfg(any(feature = "debug-panel", debug_assertions))]
 mod debug;
+mod doctor;
 mod dto;
 mod embedders;
 mod error;
@@ -177,6 +178,19 @@ pub fn run() {
                         ),
                     }
                 }
+            }
+
+            // Unified startup doctor (STATE-INTEGRITY-AUDIT): one ordered,
+            // logged disk-vs-DB integrity sweep. On a background thread so a
+            // large library's preview existence walk never blocks the window
+            // from showing; it only touches DERIVED state (vector spaces +
+            // preview cache) and re-pends what must rebuild.
+            {
+                let doc = Arc::clone(&state);
+                std::thread::Builder::new()
+                    .name("pp-startup-doctor".into())
+                    .spawn(move || doctor::run_startup_doctor(&doc))
+                    .expect("spawn startup-doctor thread");
             }
 
             app.manage(state);

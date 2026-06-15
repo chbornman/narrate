@@ -343,6 +343,30 @@ impl Library {
         Ok(n)
     }
 
+    /// Re-pend every `done` pass of one stage so the next drain re-runs it
+    /// (fresh attempt budget, no backoff, backfill priority; `running` rows left
+    /// in flight). Unlike [`ingest::repend_passes_for_model`] this is
+    /// UNCONDITIONAL on the model id: the startup doctor uses it after deleting a
+    /// vector space whose file vanished, where the pass row still records the
+    /// CURRENT model (so the model-aware re-pend would no-op) yet the vectors
+    /// must be rebuilt from scratch. Returns rows re-pended.
+    pub fn repend_pass(&self, pass: ingest::PassName) -> Result<usize, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let n = conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'pending', started_at = NULL, completed_at = NULL,
+                 attempts = 0, not_before = NULL, error = NULL,
+                 priority = CASE WHEN state = 'pending'
+                                 THEN MIN(priority, ?2) ELSE ?2 END
+             WHERE pass_name = ?1 AND state = 'done'",
+            params![pass.as_str(), ingest::PRIORITY_BACKFILL],
+        )?;
+        if n > 0 {
+            self.log(format!("doctor: re-pended {n} {} passes", pass.as_str()));
+        }
+        Ok(n)
+    }
+
     fn now(&self) -> UtcMillis {
         self.clock.now()
     }
