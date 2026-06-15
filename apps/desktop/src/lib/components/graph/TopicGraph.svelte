@@ -67,7 +67,6 @@
     REHEAT_START,
     ringAnchors,
     screenToSim,
-    seedNearAnchors,
     seedNodes,
     shouldUseLod,
     simToScreen,
@@ -78,6 +77,7 @@
     type TopicAnchor,
     type ViewTransform,
   } from "../../logic/forcegraph";
+  import { computeStaticLayout } from "../../logic/layout";
   import {
     makeMutableBuffer,
     packFlags,
@@ -598,13 +598,14 @@
       nodes = fullNodes;
       scaleNote = null;
     }
-    // SNAP each node to its dominant topic's anchor neighborhood immediately
-    // (founder: a topic add should snap its photos over, not ooze). With the
-    // reheat below, the layout now settles from NEAR its home instead of drifting
-    // across the whole canvas from the central spiral. Applies to both the
-    // full-detail nodes and the LOD super-nodes (a super-node carries its bin's
-    // mean affinity, so it snaps toward the topic it aggregates).
-    seedNearAnchors(nodes, anchors);
+    // Place nodes at the CLOSED-FORM equilibrium (visualizer audit Stage 2): the
+    // affinity-weighted centroid of their anchors, declumped on a deterministic
+    // spiral. This is the layout the force sim was only ever chasing, computed
+    // instantly — so the brief bounded settle below relaxes from the answer
+    // instead of oozing across the canvas from a random spiral. Applies to both
+    // full-detail nodes and LOD super-nodes (a super-node carries its bin's mean
+    // affinity, so it lands where the cluster it stands for belongs).
+    computeStaticLayout(nodes, anchors, { ringRadius: forceConfig().ringRadius });
     nodeCount = nodes.length;
 
     // A fresh node set (scope/topic/alpha change): drop stale PENDING thumb
