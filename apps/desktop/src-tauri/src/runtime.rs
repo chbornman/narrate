@@ -343,14 +343,22 @@ impl RuntimeHost {
         &self,
     ) -> std::collections::HashMap<photoproof_connectors::vector_store::VecKind, String> {
         use photoproof_connectors::vector_store::VecKind;
-        let state = self.state.lock().expect("runtime state");
-        let clip = state.config.embedder.model.clone();
-        let text = state.config.embedder.text.model.clone();
-        std::collections::HashMap::from([
-            (VecKind::ImageClip, clip),
-            (VecKind::AnnotationChunk, text.clone()),
-            (VecKind::ImageSummary, text),
-        ])
+        // Read the RESOLVED plan, not raw config: the embedder bypass may run a
+        // DIFFERENT model than config names (e.g. the unhostable fp16 default
+        // falls back to an installed dfn5b). The doctor must reconcile vector
+        // spaces against the model that actually WRITES them, or it would drop
+        // the live fallback's space as "superseded". A NotConfigured slot
+        // contributes nothing, so the doctor leaves that kind's spaces alone.
+        let plan = self.plan();
+        let mut models = std::collections::HashMap::new();
+        if let ProcessPlan::Run { model_id } = &plan.clip_embedder {
+            models.insert(VecKind::ImageClip, model_id.clone());
+        }
+        if let ProcessPlan::Run { model_id } = &plan.text_embedder {
+            models.insert(VecKind::AnnotationChunk, model_id.clone());
+            models.insert(VecKind::ImageSummary, model_id.clone());
+        }
+        models
     }
 
     // ------------------------------------------------------------ status ----

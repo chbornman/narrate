@@ -113,6 +113,44 @@ pub fn stale_installed_models(
     stale
 }
 
+/// Embedder slot resolution WITH a bypass (STATE-INTEGRITY-AUDIT; founder: the
+/// fp16 CLIP default is locally-converted and not hosted, so a fresh/unstaged
+/// machine cannot download it). When the CONFIGURED embedder model is not
+/// installed, fall back to ANY installed model of the same manifest `role`
+/// offered at this tier, so the app uses a real embedder instead of going dark
+/// on a download that can only 404. The configured model still wins when it IS
+/// installed; an `External` config path is handled by the caller, not here.
+/// Deterministic: installed ids are sorted, first same-role match wins.
+fn embedder_plan(
+    configured_id: &str,
+    role: &str,
+    tier: u8,
+    manifest: &Manifest,
+    installed: &BTreeMap<String, InstalledRecord>,
+) -> ProcessPlan {
+    let direct = local_model_plan(configured_id, tier, manifest, installed);
+    if matches!(direct, ProcessPlan::Run { .. }) {
+        return direct; // configured model is installed: it wins
+    }
+    // Configured model is not runnable (not installed / unknown / wrong tier).
+    // Bypass to an installed same-role model offered at this tier.
+    let mut candidates: Vec<&String> = installed
+        .keys()
+        .filter(|id| {
+            manifest
+                .model(id)
+                .is_some_and(|e| e.role == role && e.tiers.contains(&tier))
+        })
+        .collect();
+    candidates.sort();
+    match candidates.first() {
+        Some(fallback) => ProcessPlan::Run {
+            model_id: (*fallback).clone(),
+        },
+        None => direct, // keep the honest NotConfigured (nothing to fall back to)
+    }
+}
+
 /// Resolve the plan. `effective_tier` comes from tier::decide_tier (user
 /// override already applied — it always wins, §6.2).
 pub fn plan(
@@ -160,14 +198,16 @@ pub fn plan(
         effective_tier,
         llm,
         asr,
-        clip_embedder: local_model_plan(
+        clip_embedder: embedder_plan(
             &config.embedder.model,
+            "embedder",
             effective_tier,
             manifest,
             installed,
         ),
-        text_embedder: local_model_plan(
+        text_embedder: embedder_plan(
             &config.embedder.text.model,
+            "text-embedder",
             effective_tier,
             manifest,
             installed,
@@ -352,5 +392,54 @@ mod tests {
             .config;
         let p = plan(&cfg, 1, &compiled_manifest(), &installed(&[]));
         assert!(matches!(&p.asr, ProcessPlan::NotConfigured { .. }));
+    }
+
+    /// The embedder bypass (founder: the fp16 CLIP default is not hosted, so an
+    /// unstaged machine cannot download it). The DEFAULT config names the fp16
+    /// CLIP; if only the base dfn5b (same "embedder" role) is installed, the
+    /// clip slot falls back to it instead of going dark on a 404 download.
+    #[test]
+    fn embedder_bypass_falls_back_to_installed_same_role_model() {
+        let cfg = from_toml_str("").unwrap().config; // default CLIP = fp16
+        let p = plan(
+            &cfg,
+            1,
+            &compiled_manifest(),
+            // fp16 NOT installed; the base dfn5b + the text embedder ARE.
+            &installed(&["ViT-H-14-378-quickgelu__dfn5b", "embeddinggemma-300m-q8"]),
+        );
+        assert_eq!(
+            p.clip_embedder,
+            ProcessPlan::Run {
+                model_id: "ViT-H-14-378-quickgelu__dfn5b".into()
+            },
+            "bypass to the installed base dfn5b when the fp16 default is absent"
+        );
+        assert_eq!(
+            p.text_embedder,
+            ProcessPlan::Run {
+                model_id: "embeddinggemma-300m-q8".into()
+            }
+        );
+    }
+
+    /// With nothing of the embedder role installed, the bypass has nothing to
+    /// fall back to: keep the honest NotConfigured (fixable by download), never
+    /// invent a model.
+    #[test]
+    fn embedder_bypass_keeps_notconfigured_with_no_candidate() {
+        let cfg = from_toml_str("").unwrap().config;
+        let p = plan(&cfg, 1, &compiled_manifest(), &installed(&[]));
+        assert!(
+            matches!(
+                p.clip_embedder,
+                ProcessPlan::NotConfigured {
+                    fixable_by_download: true,
+                    ..
+                }
+            ),
+            "no same-role model installed => honest NotConfigured: {:?}",
+            p.clip_embedder
+        );
     }
 }
