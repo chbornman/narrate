@@ -31,7 +31,7 @@
 //! discards any compaction the crash interrupted, so remapped pointers are
 //! never paired with the pre-compaction file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -120,6 +120,54 @@ pub struct VecMeta {
 pub struct PpvecStore {
     db: Mutex<Connection>,
     dir: PathBuf,
+}
+
+/// Why the startup doctor acted on one vector space (STATE-INTEGRITY-AUDIT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceReconcileReason {
+    /// The ACTIVE model's space has rows but its `.ppvec` file is GONE (the
+    /// vectors dir was mangled outside the app). The rows are dangling pointers;
+    /// re-embedding would take the upsert UPDATE branch and write at the stale
+    /// `file_row` offsets into a freshly-created sparse file (silent corruption,
+    /// every other row reads as zeros). So the rows are deleted and the embedding
+    /// pass is re-pended to rebuild a dense file from row 0.
+    DanglingActiveFileMissing,
+    /// A live space for a SUPERSEDED model: a newer ACTIVE model's space for the
+    /// same `vec_kind` exists AND is populated, so this one is stale duplicate
+    /// data (e.g. `dfn5b` lingering after the swap to `dfn5b-fp16`). Rows + file
+    /// dropped; no re-pend (the active space already carries the embeddings).
+    SupersededByActiveModel,
+    /// A `.ppvec` FILE on disk with NO live rows pointing at it: pure orphaned
+    /// derived bytes (a crash between metadata delete and file removal, or a
+    /// dropped space's leftover file). The file is removed.
+    OrphanFile,
+}
+
+/// One space the startup doctor reconciled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledSpace {
+    pub vec_kind: VecKind,
+    pub model_id: String,
+    /// Live rows the space held before reconciliation (0 for an orphan file).
+    pub rows: u64,
+    pub reason: SpaceReconcileReason,
+}
+
+/// What [`PpvecStore::reconcile_spaces`] found + did. Empty when the on-disk
+/// vector spaces already matched the DB and the active models.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceReconcileReport {
+    pub reconciled: Vec<ReconciledSpace>,
+    /// `(vec_kind, model_id)` whose rows were dropped because the ACTIVE model's
+    /// file was missing: the shell must re-pend the matching embedding pass so
+    /// the space rebuilds. Superseded/orphan cleanups never need a re-pend.
+    pub repend: Vec<(VecKind, String)>,
+}
+
+impl SpaceReconcileReport {
+    pub fn is_empty(&self) -> bool {
+        self.reconciled.is_empty()
+    }
 }
 
 impl PpvecStore {
@@ -586,6 +634,152 @@ impl PpvecStore {
         )
         .optional()
         .map_err(db_err)
+    }
+
+    /// Startup-doctor disk-vs-DB reconciliation of the vector spaces
+    /// (STATE-INTEGRITY-AUDIT.md; founder: "fully robust"). `active` maps each
+    /// `vec_kind` to the model id the live embedder writes today (from config /
+    /// the loaded embedder). Three silent-failure classes are healed:
+    ///
+    /// 1. ACTIVE model, file MISSING ⇒ the rows are dangling pointers; delete
+    ///    them and ask the shell to re-pend so the space rebuilds dense (a
+    ///    re-embed over dangling rows would corrupt the file via stale offsets).
+    /// 2. SUPERSEDED model (a populated active-model space exists for the same
+    ///    kind) ⇒ stale duplicate; drop its rows so its file becomes an orphan.
+    /// 3. ORPHAN `.ppvec` FILE (no live row maps to it, including the files the
+    ///    superseded drop just orphaned) ⇒ remove the bytes.
+    ///
+    /// CONSERVATIVE: a superseded space is dropped ONLY when the active model's
+    /// space is populated (`> 0` rows), so a half-finished re-embed never loses
+    /// the only copy of a library's vectors. A kind with no active model entry
+    /// (embedder unloaded + nothing to compare against) is left untouched.
+    /// Idempotent: a second run over a healthy store reports nothing.
+    pub fn reconcile_spaces(
+        &self,
+        active: &HashMap<VecKind, String>,
+    ) -> VectorStoreResult<SpaceReconcileReport> {
+        let conn = self.db.lock().expect("poisoned");
+        let _io = file_io_lock();
+        let mut report = SpaceReconcileReport::default();
+
+        // Live spaces grouped by kind: (model_id, live_row_count) per kind.
+        let live: Vec<(String, String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT vec_kind, model_id, COUNT(*) FROM vectors
+                     WHERE deleted = 0 GROUP BY vec_kind, model_id",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(db_err)?;
+            rows.collect::<Result<_, _>>().map_err(db_err)?
+        };
+        let mut by_kind: HashMap<VecKind, Vec<(String, i64)>> = HashMap::new();
+        for (kind_str, model_id, count) in live {
+            let Some(kind) = vec_kind_from_str(&kind_str) else {
+                continue; // unknown kind string is not ours to touch
+            };
+            by_kind.entry(kind).or_default().push((model_id, count));
+        }
+
+        // Pass 1 + 2: dangling-active and superseded row drops.
+        for (kind, spaces) in &by_kind {
+            let active_model = active.get(kind);
+            let active_rows = active_model
+                .and_then(|am| spaces.iter().find(|(m, _)| m == am))
+                .map(|(_, c)| *c)
+                .unwrap_or(0);
+            for (model_id, count) in spaces {
+                let is_active = active_model == Some(model_id);
+                let path = space_file_path(&self.dir, vec_kind_str(*kind), model_id);
+                if is_active {
+                    if !path.exists() {
+                        delete_space_rows(&conn, *kind, model_id)?;
+                        report.repend.push((*kind, model_id.clone()));
+                        report.reconciled.push(ReconciledSpace {
+                            vec_kind: *kind,
+                            model_id: model_id.clone(),
+                            rows: *count as u64,
+                            reason: SpaceReconcileReason::DanglingActiveFileMissing,
+                        });
+                    }
+                } else if active_model.is_some() && active_rows > 0 {
+                    // Safe to retire the superseded space: the active one is
+                    // ready. Drop rows AND the file here so the orphan sweep
+                    // below does not re-report the same space as a stray file.
+                    delete_space_rows(&conn, *kind, model_id)?;
+                    if path.exists() {
+                        fs::remove_file(&path)?;
+                    }
+                    report.reconciled.push(ReconciledSpace {
+                        vec_kind: *kind,
+                        model_id: model_id.clone(),
+                        rows: *count as u64,
+                        reason: SpaceReconcileReason::SupersededByActiveModel,
+                    });
+                }
+                // else: no active model to compare against, or it is not yet
+                // populated -> leave this space alone (cannot judge safely).
+            }
+        }
+
+        // Pass 3: orphan-file sweep. The set of filenames any REMAINING live row
+        // maps to is the keep-set; every other `.ppvec` file is orphaned bytes
+        // (this also sweeps the files the superseded drop above just orphaned).
+        let keep: HashSet<String> = {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT vec_kind, model_id FROM vectors WHERE deleted = 0")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |r| {
+                    let k: String = r.get(0)?;
+                    let m: String = r.get(1)?;
+                    Ok((k, m))
+                })
+                .map_err(db_err)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(db_err)?
+                .into_iter()
+                .filter_map(|(k, m)| {
+                    space_file_path(&self.dir, &k, &m)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_owned())
+                })
+                .collect()
+        };
+        if self.dir.exists() {
+            for entry in fs::read_dir(&self.dir)? {
+                let p = entry?.path();
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                // Only judge committed space files; compaction temp files are the
+                // recover_pending_compactions sweep's business, not ours.
+                if !name.ends_with(".ppvec") || keep.contains(name) {
+                    continue;
+                }
+                fs::remove_file(&p)?;
+                report.reconciled.push(ReconciledSpace {
+                    // The kind/model are not recoverable from the sanitized
+                    // filename; record what we can identify (the kind prefix).
+                    vec_kind: vec_kind_from_prefix(name).unwrap_or(VecKind::ImageClip),
+                    model_id: name.to_owned(),
+                    rows: 0,
+                    reason: SpaceReconcileReason::OrphanFile,
+                });
+            }
+        }
+        // Deterministic order (HashMap iteration is not): the report feeds a log
+        // line + tests, both of which want a stable shape.
+        report.reconciled.sort_by(|a, b| {
+            (vec_kind_str(a.vec_kind), &a.model_id).cmp(&(vec_kind_str(b.vec_kind), &b.model_id))
+        });
+        report
+            .repend
+            .sort_by(|a, b| (vec_kind_str(a.0), &a.1).cmp(&(vec_kind_str(b.0), &b.1)));
+        Ok(report)
     }
 
     /// Score a SPECIFIC set of image hashes against a topic query embedding,
@@ -1472,6 +1666,36 @@ fn vec_kind_str(kind: VecKind) -> &'static str {
         VecKind::ImageSummary => "image_summary",
         VecKind::ImageClip => "image_clip",
     }
+}
+
+/// Inverse of [`vec_kind_str`] for the `vec_kind` strings stored in the DB.
+/// `None` for an unrecognized string (forward-compat / corruption guard).
+fn vec_kind_from_str(s: &str) -> Option<VecKind> {
+    match s {
+        "annotation_chunk" => Some(VecKind::AnnotationChunk),
+        "image_summary" => Some(VecKind::ImageSummary),
+        "image_clip" => Some(VecKind::ImageClip),
+        _ => None,
+    }
+}
+
+/// Best-effort kind from a `.ppvec` FILENAME (`{vec_kind}.{model}.ppvec`): the
+/// model id is sanitized + irrecoverable, but the kind prefix is intact. Used
+/// only to label an orphan-file cleanup in the report.
+fn vec_kind_from_prefix(file_name: &str) -> Option<VecKind> {
+    let prefix = file_name.split('.').next()?;
+    vec_kind_from_str(prefix)
+}
+
+/// Drop ALL metadata rows of one space (live or already-deleted). The flat file
+/// is left to the orphan-file sweep, which removes any `.ppvec` no live row maps
+/// to. Caller holds the connection lock + the file IO lock.
+fn delete_space_rows(conn: &Connection, kind: VecKind, model_id: &str) -> VectorStoreResult<usize> {
+    conn.execute(
+        "DELETE FROM vectors WHERE vec_kind = ?1 AND model_id = ?2",
+        params![vec_kind_str(kind), model_id],
+    )
+    .map_err(db_err)
 }
 
 /// `(WHERE fragment, ?3, ?4)` for one `VecUnit`. Two positional params

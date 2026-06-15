@@ -17,7 +17,8 @@ mod ppvec;
 pub use chunk::{Chunk, ChunkContext, PREFIX_SCHEME_VERSION, chunk_folded_text};
 pub use ppvec::{
     COMPACT_DEAD_FRACTION, COMPACT_DEAD_ROWS, DTYPE_F32, DTYPE_INT8, MRL_DIMS, PpvecHeader,
-    PpvecStore, VecMeta, default_vectors_dir, mrl_truncate_normalize, sanitize_model_id,
+    PpvecStore, ReconciledSpace, SpaceReconcileReason, SpaceReconcileReport, VecMeta,
+    default_vectors_dir, mrl_truncate_normalize, sanitize_model_id,
 };
 pub(crate) use ppvec::{zero_deleted_rows_for_event, zero_deleted_rows_for_image};
 

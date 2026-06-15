@@ -13,7 +13,10 @@ use photoproof_connectors::embedder::Embedding;
 use photoproof_connectors::vector_store::{
     VecHit, VecKey, VecKind, VecSpace, VecUnit, VectorStore, VectorStoreError,
 };
-use photoproof_core::retrieval::{DTYPE_INT8, MRL_DIMS, PpvecStore, mrl_truncate_normalize};
+use photoproof_core::retrieval::{
+    DTYPE_INT8, MRL_DIMS, PpvecStore, SpaceReconcileReason, mrl_truncate_normalize,
+};
+use std::collections::HashMap;
 
 const MODEL: &str = "mock-text-embedder";
 
@@ -658,4 +661,170 @@ fn file_layout_per_space() {
         "annotation_chunk.Qwen_Embedding_0.6B.ppvec"
     );
     assert_eq!(path.parent().unwrap(), Path::new(&fx.vectors_dir()));
+}
+
+// ---------------------------------------------------------------------------
+// Startup-doctor space reconciliation (STATE-INTEGRITY-AUDIT.md)
+// ---------------------------------------------------------------------------
+
+/// Write one `image_clip` vector for `image_hash` under `model`.
+fn upsert_clip(store: &PpvecStore, model: &str, image_hash: &str, axis: usize) {
+    let key = VecKey {
+        space: VecSpace {
+            vec_kind: VecKind::ImageClip,
+            model_id: model.into(),
+        },
+        unit: VecUnit::Image {
+            image_hash: image_hash.into(),
+        },
+    };
+    let e = Embedding {
+        vector: planted(1024, axis, 0.3),
+        model_id: model.into(),
+    };
+    store.upsert(key, &e).unwrap();
+}
+
+fn clip_space(model: &str) -> VecSpace {
+    VecSpace {
+        vec_kind: VecKind::ImageClip,
+        model_id: model.into(),
+    }
+}
+
+fn active_clip(model: &str) -> HashMap<VecKind, String> {
+    HashMap::from([(VecKind::ImageClip, model.to_owned())])
+}
+
+/// The live duplicate-space bug (founder's machine: `dfn5b` lingered after the
+/// swap to `dfn5b-fp16`): a superseded model's space whose ACTIVE replacement is
+/// populated is dropped, rows and file, with no re-pend.
+#[test]
+fn reconcile_drops_superseded_clip_space_rows_and_file() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    upsert_clip(&store, "old", "a", 1);
+    upsert_clip(&store, "old", "b", 2);
+    upsert_clip(&store, "new", "a", 1);
+    upsert_clip(&store, "new", "b", 2);
+    assert!(store.file_path(&clip_space("old")).exists());
+
+    let report = store.reconcile_spaces(&active_clip("new")).unwrap();
+
+    assert_eq!(report.reconciled.len(), 1, "only the old space acted on");
+    assert_eq!(report.reconciled[0].model_id, "old");
+    assert_eq!(
+        report.reconciled[0].reason,
+        SpaceReconcileReason::SupersededByActiveModel
+    );
+    assert!(report.repend.is_empty(), "superseded never needs a re-pend");
+    // Old rows gone, old file swept; the active space is untouched.
+    assert!(store.any_model_id(VecKind::ImageClip).unwrap().is_some());
+    assert!(!store.file_path(&clip_space("old")).exists());
+    assert!(store.file_path(&clip_space("new")).exists());
+    let (live, _) = store.space_stats(&clip_space("new")).unwrap();
+    assert_eq!(live, 2, "active space rows survive intact");
+}
+
+/// The CONSERVATIVE guard: a superseded space is NOT dropped while the active
+/// model's space is empty (a half-finished re-embed), so the only copy of the
+/// vectors is never lost.
+#[test]
+fn reconcile_keeps_superseded_when_active_space_is_empty() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    upsert_clip(&store, "old", "a", 1);
+    // active says "new" but nothing is embedded under it yet.
+    let report = store.reconcile_spaces(&active_clip("new")).unwrap();
+    assert!(report.is_empty(), "nothing safe to drop yet: {report:?}");
+    assert!(store.file_path(&clip_space("old")).exists());
+    let (live, _) = store.space_stats(&clip_space("old")).unwrap();
+    assert_eq!(live, 1);
+}
+
+/// An ACTIVE space whose `.ppvec` file vanished (vectors dir mangled): the rows
+/// are dangling pointers, so they are deleted and the embedding pass is flagged
+/// for a re-pend rather than left to corrupt a re-embed at stale offsets.
+#[test]
+fn reconcile_repends_active_space_when_file_missing() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    upsert_clip(&store, "new", "a", 1);
+    upsert_clip(&store, "new", "b", 2);
+    std::fs::remove_file(store.file_path(&clip_space("new"))).unwrap();
+
+    let report = store.reconcile_spaces(&active_clip("new")).unwrap();
+
+    assert_eq!(report.reconciled.len(), 1);
+    assert_eq!(
+        report.reconciled[0].reason,
+        SpaceReconcileReason::DanglingActiveFileMissing
+    );
+    assert_eq!(
+        report.repend,
+        vec![(VecKind::ImageClip, "new".to_owned())],
+        "the shell must re-pend the embedding pass to rebuild the space"
+    );
+    assert!(
+        store.any_model_id(VecKind::ImageClip).unwrap().is_none(),
+        "dangling rows are cleared so a re-embed rebuilds dense from row 0"
+    );
+}
+
+/// A `.ppvec` file with no live rows pointing at it (a crash between metadata
+/// delete and file removal) is swept as orphaned bytes.
+#[test]
+fn reconcile_sweeps_orphan_file() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    upsert_clip(&store, "new", "a", 1);
+    // A stray file no row references.
+    let orphan = fx.vectors_dir().join("image_clip.ghost.ppvec");
+    std::fs::write(&orphan, b"PPVEC\x02 not really a space").unwrap();
+
+    let report = store.reconcile_spaces(&active_clip("new")).unwrap();
+
+    assert_eq!(report.reconciled.len(), 1);
+    assert_eq!(
+        report.reconciled[0].reason,
+        SpaceReconcileReason::OrphanFile
+    );
+    assert!(!orphan.exists(), "orphan bytes removed");
+    assert!(
+        store.file_path(&clip_space("new")).exists(),
+        "the live space's file is kept"
+    );
+}
+
+/// A healthy store, and a second run after a heal, both report nothing: the
+/// doctor is safe to run on every startup.
+#[test]
+fn reconcile_is_idempotent_on_a_healthy_store() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    upsert_clip(&store, "new", "a", 1);
+    upsert_clip(&store, "old", "a", 1);
+
+    let first = store.reconcile_spaces(&active_clip("new")).unwrap();
+    assert_eq!(first.reconciled.len(), 1, "drops the superseded old space");
+
+    let second = store.reconcile_spaces(&active_clip("new")).unwrap();
+    assert!(second.is_empty(), "nothing left to do: {second:?}");
+}
+
+/// No active-model entry for a kind (embedder unloaded, nothing to compare to)
+/// leaves every space of that kind alone: the doctor never guesses.
+#[test]
+fn reconcile_without_active_model_touches_nothing() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    upsert_clip(&store, "old", "a", 1);
+    upsert_clip(&store, "new", "a", 1);
+    let report = store.reconcile_spaces(&HashMap::new()).unwrap();
+    assert!(
+        report.is_empty(),
+        "no active model => no judgement: {report:?}"
+    );
+    assert!(store.file_path(&clip_space("old")).exists());
+    assert!(store.file_path(&clip_space("new")).exists());
 }
