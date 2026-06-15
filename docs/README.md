@@ -31,6 +31,7 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 | `index.html` | The docs landing page (self-contained HTML): this catalog as a linked map — one row per doc, Live / Reference / spec/. |
 | `MODELS.md` | The connector-options matrix: per seam, the current pick, alternates evaluated, candidates, watch triggers. |
 | `LICENSES.md` | The license inventory: our own code, the Rust + npm dep trees, the ML runtimes, the GPU runtimes, and the model weights, with the copyleft + model-license flags. Re-run `cargo license` when deps/models change. |
+| `STATE-INTEGRITY-AUDIT.md` | Data/state integrity audit: silent-failure bugs, version/downgrade guards, disk-vs-DB reconciliation, recovery/reset gaps, plus a living checklist for new state classes. Re-run `scripts/state-integrity-audit.workflow.js`. |
 | `SPIKE-ASR35.md` | Nemotron 3.5 dev evaluation + the chunk-size root-cause finding (B74). |
 | `SPIKE-P6.3.md` | Model-spike findings and recipes (ASR/LLM/VAD pins, flags, measurements) — load-bearing for RUNTIME. |
 | `SPEC-GAPS.md` | CLOSED historical record: the gap-id registry the spec status banners cite ("Closes E5"). Not a TODO. |
