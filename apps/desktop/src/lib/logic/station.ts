@@ -40,7 +40,11 @@ export interface StationSeat {
   id: "mic" | "search" | "info" | "note";
   /** The registry row this seat dispatches — seats carry registry actions
    * ONLY (resolveAction gates availability; zero new verb paths). */
-  actionId: "mic-press" | "open-search" | "toggle-station-detail" | "summon-note";
+  actionId:
+    | "mic-press"
+    | "open-search"
+    | "toggle-station-detail"
+    | "summon-note";
   /** resolveAction arg for the row. The mic seat resolves mic-press with
    * "toggle": a click IS a tap, so the pointer form keeps plain toggle
    * semantics while the key runs the tap-vs-hold machine (michold.ts). */
@@ -56,7 +60,14 @@ export interface StationSeat {
 export interface StationActivity {
   /** Stable per-source id (keyed each + dedupe by construction). */
   id: string;
-  kind: "ingest" | "digest" | "download" | "download-failed" | "mic" | "utterance";
+  kind:
+    | "ingest"
+    | "digest"
+    | "download"
+    | "download-failed"
+    | "offline"
+    | "mic"
+    | "utterance";
   text: string;
   /** Quiet second clause (error counts, retry hints). */
   hint?: string;
@@ -163,7 +174,10 @@ export interface StationModel {
 const NEEDED_ROLES: Record<string, { feature: string; modelLabel: string }> = {
   // The DFN5B CLIP embedder (manifest.rs role "embedder"): without it the
   // image vectors never build, so semantic search and find-similar are dark.
-  embedder: { feature: "Semantic search needs the CLIP model", modelLabel: "the CLIP model" },
+  embedder: {
+    feature: "Semantic search needs the CLIP model",
+    modelLabel: "the CLIP model",
+  },
   // The text embedder (EmbeddingGemma): the query side of semantic search.
   "text-embedder": {
     feature: "Semantic search needs the text model",
@@ -270,21 +284,46 @@ function micSeat(micState: MicState, asrReady: boolean): StationSeat | null {
 
 export function stationModel(input: StationInput): StationModel {
   const activities: StationActivity[] = [];
+  const ing = input.ingest;
+
+  // Offline-volume notice FIRST (founder: previews/indexing "stuck" with no
+  // reason shown). When a drive holding library photos is disconnected, the
+  // file-reading passes (indexing, previews) are PAUSED because the source files
+  // cannot be read, so the counters freeze. Say WHY right next to them instead
+  // of leaving the user to guess this is the warn half of warn + pause, surfaced
+  // where they actually look (the station detail, not just the titlebar chip).
+  const offline = ing.offlineVolumes;
+  const offlinePhotos = offline.reduce((n, v) => n + v.images, 0);
+  if (offline.length > 0) {
+    activities.push({
+      id: "offline",
+      kind: "offline",
+      text:
+        offline.length === 1
+          ? `Paused - ${offline[0].label} offline`
+          : `Paused - ${offline.length} drives offline`,
+      hint: `reconnect to resume (${offlinePhotos.toLocaleString()} ${offlinePhotos === 1 ? "photo" : "photos"} unavailable)`,
+    });
+  }
 
   // Ingest headline: counts while the total is known; an honest
   // "scanning…" while discovery hasn't sized the work yet.
-  const ing = input.ingest;
   if (ing.running) {
     if (ing.total > 0) {
       activities.push({
         id: "ingest",
         kind: "ingest",
         text: `Indexing - ${ing.done.toLocaleString()} of ${ing.total.toLocaleString()}`,
-        hint: ing.errors > 0 ? `${ing.errors.toLocaleString()} errors` : undefined,
+        hint:
+          ing.errors > 0 ? `${ing.errors.toLocaleString()} errors` : undefined,
         fraction: Math.min(1, ing.done / ing.total),
       });
     } else {
-      activities.push({ id: "ingest", kind: "ingest", text: "Indexing - scanning…" });
+      activities.push({
+        id: "ingest",
+        kind: "ingest",
+        text: "Indexing - scanning…",
+      });
     }
   }
 
@@ -323,7 +362,9 @@ export function stationModel(input: StationInput): StationModel {
       dlDone += m.downloadedBytes;
       dlTotal += m.totalBytes;
       const pct =
-        m.totalBytes > 0 ? Math.floor((m.downloadedBytes / m.totalBytes) * 100) : 0;
+        m.totalBytes > 0
+          ? Math.floor((m.downloadedBytes / m.totalBytes) * 100)
+          : 0;
       activities.push({
         id: `download:${m.id}`,
         kind: "download",
@@ -353,7 +394,11 @@ export function stationModel(input: StationInput): StationModel {
       activities.push({ id: "mic", kind: "mic", text: "Listening…" });
       break;
     case "armedSpeaking":
-      activities.push({ id: "mic", kind: "mic", text: "Listening - speech detected" });
+      activities.push({
+        id: "mic",
+        kind: "mic",
+        text: "Listening - speech detected",
+      });
       break;
     case "disarmedError":
       activities.push({
@@ -390,7 +435,12 @@ export function stationModel(input: StationInput): StationModel {
   const seats: StationSeat[] = [];
   const mic = micSeat(input.micState, input.asrReady);
   if (mic !== null) seats.push(mic);
-  seats.push({ id: "search", actionId: "open-search", icon: "search", title: "Search" });
+  seats.push({
+    id: "search",
+    actionId: "open-search",
+    icon: "search",
+    title: "Search",
+  });
   if (activities.length > 0) {
     seats.push({
       id: "info",
@@ -399,7 +449,12 @@ export function stationModel(input: StationInput): StationModel {
       title: "What's happening - click to pin the detail open",
     });
   }
-  seats.push({ id: "note", actionId: "summon-note", icon: "pencil", title: "Write a note" });
+  seats.push({
+    id: "note",
+    actionId: "summon-note",
+    icon: "pencil",
+    title: "Write a note",
+  });
 
   // Station 2.0 transient icons (DESIGN-STATION.md): fade in + pulse only
   // while live, then retire. Derived from the SAME evented state as the
@@ -483,11 +538,19 @@ export function stationModel(input: StationInput): StationModel {
     input.micState === "armedIdle" || input.micState === "armedSpeaking";
   const border = borderState({
     micArmed,
-    hasError: downloadFailed || missing.length > 0,
-    working: ing.running || embedRemaining > 0 || digestRemaining > 0 || downloading,
+    hasError: downloadFailed || missing.length > 0 || offline.length > 0,
+    working:
+      ing.running || embedRemaining > 0 || digestRemaining > 0 || downloading,
   });
 
-  return { pulsing, seats, activities, transients, border, missingModels: missing };
+  return {
+    pulsing,
+    seats,
+    activities,
+    transients,
+    border,
+    missingModels: missing,
+  };
 }
 
 // ---------------------------------------------------------------------------

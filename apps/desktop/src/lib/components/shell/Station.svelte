@@ -231,7 +231,10 @@
           <div class="row dim" title={positionSeg.title}>{positionSeg.text}</div>
         {/if}
         {#each model.activities as a (a.id)}
-          <div class="activity">
+          <div
+            class="activity"
+            class:warn={a.kind === "offline" || a.kind === "download-failed"}
+          >
             <span class="text">{a.text}</span>
             {#if a.hint !== undefined}<span class="hint">{a.hint}</span>{/if}
             {#if a.fraction !== undefined}
@@ -625,6 +628,11 @@
     gap: 8px;
     font-size: 12px;
     color: var(--text-dim);
+  }
+  /* Offline / failed rows read as a problem, not routine background work:
+     the station error color, so a paused-because-offline cause stands out. */
+  .activity.warn .text {
+    color: var(--station-error);
   }
   .activity .hint {
     color: var(--text-faint);

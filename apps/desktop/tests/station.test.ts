@@ -16,7 +16,16 @@ import {
 import type { ModelRowDto, RuntimeStatus } from "../src/lib/types/dto";
 
 const base: StationInput = {
-  ingest: { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+  ingest: {
+    running: false,
+    done: 0,
+    total: 0,
+    errors: 0,
+    passes: [],
+    scanning: false,
+    discovered: 0,
+    offlineVolumes: [],
+  },
   runtime: null,
   micState: "disarmed",
   asrReady: false,
@@ -68,7 +77,16 @@ describe("the quiet default", () => {
     const m = stationModel({
       ...base,
       asrReady: true,
-      ingest: { running: true, done: 1, total: 2, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 1,
+        total: 2,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(m.seats.map((s) => [s.id, s.actionId])).toEqual([
       ["mic", "mic-press"],
@@ -83,7 +101,16 @@ describe("ingest and digest activities", () => {
   it("sized ingest carries locale counts and a 0..1 fraction; the station pulses", () => {
     const m = stationModel({
       ...base,
-      ingest: { running: true, done: 1240, total: 48377, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 1240,
+        total: 48377,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(m.pulsing).toBe(true);
     const row = m.activities.find((a) => a.kind === "ingest");
@@ -95,12 +122,30 @@ describe("ingest and digest activities", () => {
   it("unsized discovery says scanning honestly; errors surface as a quiet hint", () => {
     const scanning = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(scanning.activities[0].text).toBe("Indexing - scanning…");
     const errored = stationModel({
       ...base,
-      ingest: { running: true, done: 5, total: 10, errors: 2, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 5,
+        total: 10,
+        errors: 2,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(errored.activities[0].hint).toBe("2 errors");
   });
@@ -119,7 +164,8 @@ describe("ingest and digest activities", () => {
           { name: "settled", remaining: 0 }, // drained: no row
         ],
         scanning: false,
-        discovered: 0, offlineVolumes: []
+        discovered: 0,
+        offlineVolumes: [],
       },
     });
     expect(m.activities.map((a) => a.text)).toEqual([
@@ -136,7 +182,12 @@ describe("download activities (RUNTIME §5.2 rows)", () => {
     const m = stationModel({
       ...base,
       runtime: runtime([
-        model({ state: "downloading", totalBytes: 1000, downloadedBytes: 620, error: "retrying, attempt 2" }),
+        model({
+          state: "downloading",
+          totalBytes: 1000,
+          downloadedBytes: 620,
+          error: "retrying, attempt 2",
+        }),
       ]),
     });
     expect(m.pulsing).toBe(true);
@@ -160,7 +211,10 @@ describe("download activities (RUNTIME §5.2 rows)", () => {
   it("installed/not-downloaded rows leave no activity", () => {
     const m = stationModel({
       ...base,
-      runtime: runtime([model(), model({ id: "other", state: "not-downloaded" })]),
+      runtime: runtime([
+        model(),
+        model({ id: "other", state: "not-downloaded" }),
+      ]),
     });
     expect(m.activities).toEqual([]);
   });
@@ -179,15 +233,25 @@ describe("the mic seat mirrors CAPTURE §6.4/§11 (the modes.ts mapping)", () =>
   });
 
   it("armed = solid with the privacy claim; speaking breathes and pulses", () => {
-    const idle = stationModel({ ...base, asrReady: true, micState: "armedIdle" });
+    const idle = stationModel({
+      ...base,
+      asrReady: true,
+      micState: "armedIdle",
+    });
     expect(idle.seats[0].tone).toBeUndefined();
     expect(idle.seats[0].title).toContain("never written to disk");
     expect(idle.pulsing).toBe(false); // quiet listening is not "happening"
     expect(idle.activities.map((a) => a.text)).toEqual(["Listening…"]);
-    const speaking = stationModel({ ...base, asrReady: true, micState: "armedSpeaking" });
+    const speaking = stationModel({
+      ...base,
+      asrReady: true,
+      micState: "armedSpeaking",
+    });
     expect(speaking.seats[0].tone).toBe("live");
     expect(speaking.pulsing).toBe(true);
-    expect(speaking.activities.map((a) => a.text)).toEqual(["Listening - speech detected"]);
+    expect(speaking.activities.map((a) => a.text)).toEqual([
+      "Listening - speech detected",
+    ]);
   });
 
   it("degraded = the muted-mic glyph + the §7.3 line, even before asrReady", () => {
@@ -204,7 +268,9 @@ describe("the streaming utterance (§5.4)", () => {
   it("names where words land and pulses while in flight", () => {
     const m = stationModel({ ...base, streaming: { kind: "multi", count: 3 } });
     expect(m.pulsing).toBe(true);
-    expect(m.activities.map((a) => a.text)).toEqual(["Capturing - words land on ● 3"]);
+    expect(m.activities.map((a) => a.text)).toEqual([
+      "Capturing - words land on ● 3",
+    ]);
   });
 });
 
@@ -218,7 +284,8 @@ describe("activity ordering and the info seat", () => {
         errors: 0,
         passes: [{ name: "exif", remaining: 9 }],
         scanning: false,
-        discovered: 0, offlineVolumes: []
+        discovered: 0,
+        offlineVolumes: [],
       },
       runtime: runtime([model({ state: "downloading", downloadedBytes: 0 })]),
       micState: "armedSpeaking",
@@ -238,7 +305,16 @@ describe("activity ordering and the info seat", () => {
     expect(stationModel(base).seats.some((s) => s.id === "info")).toBe(false);
     const busy = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(busy.seats.some((s) => s.id === "info")).toBe(true);
   });
@@ -247,13 +323,22 @@ describe("activity ordering and the info seat", () => {
 describe("transitionPops — the generalized pop move", () => {
   it("a clean arm pops; a clean disarm pops; no change pops nothing", () => {
     expect(
-      transitionPops({ mic: "disarmed", streaming: false }, { mic: "armedIdle", streaming: false }),
+      transitionPops(
+        { mic: "disarmed", streaming: false },
+        { mic: "armedIdle", streaming: false },
+      ),
     ).toEqual(["Mic armed"]);
     expect(
-      transitionPops({ mic: "armedIdle", streaming: false }, { mic: "disarmed", streaming: false }),
+      transitionPops(
+        { mic: "armedIdle", streaming: false },
+        { mic: "disarmed", streaming: false },
+      ),
     ).toEqual(["Mic off"]);
     expect(
-      transitionPops({ mic: "armedIdle", streaming: false }, { mic: "armedSpeaking", streaming: false }),
+      transitionPops(
+        { mic: "armedIdle", streaming: false },
+        { mic: "armedSpeaking", streaming: false },
+      ),
     ).toEqual([]);
   });
 
@@ -284,16 +369,24 @@ describe("transitionPops — the generalized pop move", () => {
 
 describe("borderState — the collapsed pill's priority resolver", () => {
   it("mic armed beats everything (red)", () => {
-    expect(borderState({ micArmed: true, hasError: true, working: true })).toBe("mic");
+    expect(borderState({ micArmed: true, hasError: true, working: true })).toBe(
+      "mic",
+    );
   });
   it("error beats working when the mic is not armed (amber)", () => {
-    expect(borderState({ micArmed: false, hasError: true, working: true })).toBe("error");
+    expect(
+      borderState({ micArmed: false, hasError: true, working: true }),
+    ).toBe("error");
   });
   it("working when only background work is live (cool hue)", () => {
-    expect(borderState({ micArmed: false, hasError: false, working: true })).toBe("working");
+    expect(
+      borderState({ micArmed: false, hasError: false, working: true }),
+    ).toBe("working");
   });
   it("idle = no border", () => {
-    expect(borderState({ micArmed: false, hasError: false, working: false })).toBe("none");
+    expect(
+      borderState({ micArmed: false, hasError: false, working: false }),
+    ).toBe("none");
   });
 
   it("the full priority ladder, mic > error > working > idle", () => {
@@ -313,7 +406,16 @@ describe("the border resolves end-to-end through stationModel", () => {
       ...base,
       asrReady: true,
       micState: "armedIdle",
-      ingest: { running: true, done: 1, total: 9, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 1,
+        total: 9,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(m.border).toBe("mic");
   });
@@ -329,22 +431,37 @@ describe("the border resolves end-to-end through stationModel", () => {
         errors: 0,
         passes: [{ name: "preview", remaining: 40 }],
         scanning: false,
-        discovered: 0, offlineVolumes: []
+        discovered: 0,
+        offlineVolumes: [],
       },
-      runtime: runtime([model({ id: "dfn5b", role: "embedder", state: "not-downloaded" })]),
+      runtime: runtime([
+        model({ id: "dfn5b", role: "embedder", state: "not-downloaded" }),
+      ]),
     });
     expect(m.border).toBe("error");
   });
 
   it("a failed download is the error border", () => {
-    const m = stationModel({ ...base, runtime: runtime([model({ state: "failed" })]) });
+    const m = stationModel({
+      ...base,
+      runtime: runtime([model({ state: "failed" })]),
+    });
     expect(m.border).toBe("error");
   });
 
   it("only background work → the working border; settled → none", () => {
     const working = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     });
     expect(working.border).toBe("working");
     expect(stationModel(base).border).toBe("none");
@@ -361,7 +478,9 @@ describe("missingModels — a feature's model is absent", () => {
       missingModels(runtime([model({ role: "embedder", state: "installed" })])),
     ).toEqual([]);
     expect(
-      missingModels(runtime([model({ role: "embedder", state: "downloading" })])),
+      missingModels(
+        runtime([model({ role: "embedder", state: "downloading" })]),
+      ),
     ).toEqual([]);
   });
 
@@ -388,7 +507,14 @@ describe("missingModels — a feature's model is absent", () => {
 
   it("an accepted-license model needs no license step", () => {
     const out = missingModels(
-      runtime([model({ role: "embedder", state: "failed", acceptanceRequired: true, accepted: true })]),
+      runtime([
+        model({
+          role: "embedder",
+          state: "failed",
+          acceptanceRequired: true,
+          accepted: true,
+        }),
+      ]),
     );
     expect(out[0].needsLicense).toBe(false);
   });
@@ -406,7 +532,13 @@ describe("missingModels — a feature's model is absent", () => {
 
   it("MB-scale models read in MB, not a 0.0 GB", () => {
     const out = missingModels(
-      runtime([model({ role: "text-embedder", state: "not-downloaded", totalBytes: 316_000_000 })]),
+      runtime([
+        model({
+          role: "text-embedder",
+          state: "not-downloaded",
+          totalBytes: 316_000_000,
+        }),
+      ]),
     );
     expect(out[0].sizeLabel).toBe("316 MB");
     expect(out[0].feature).toBe("Semantic search needs the text model");
@@ -421,7 +553,16 @@ describe("transient icons — active while live, then retire", () => {
   it("ingest = the work icon with a count badge + a 0..1 arc fraction", () => {
     const m = stationModel({
       ...base,
-      ingest: { running: true, done: 1240, total: 5000, errors: 0, passes: [], scanning: false, discovered: 5000, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 1240,
+        total: 5000,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 5000,
+        offlineVolumes: [],
+      },
     });
     const work = m.transients.find((t) => t.id === "work");
     expect(work?.icon).toBe("loader");
@@ -432,7 +573,16 @@ describe("transient icons — active while live, then retire", () => {
   it("unsized discovery shows the discovered count, no arc", () => {
     const m = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 312, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 312,
+        offlineVolumes: [],
+      },
     });
     const work = m.transients.find((t) => t.id === "work");
     expect(work?.count).toBe(312);
@@ -453,7 +603,8 @@ describe("transient icons — active while live, then retire", () => {
           { name: "text-embedding", remaining: 200 },
         ],
         scanning: false,
-        discovered: 0, offlineVolumes: []
+        discovered: 0,
+        offlineVolumes: [],
       },
     });
     const ids = m.transients.map((t) => t.id);
@@ -470,7 +621,12 @@ describe("transient icons — active while live, then retire", () => {
       ...base,
       runtime: runtime([
         model({ state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
-        model({ id: "b", state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
+        model({
+          id: "b",
+          state: "downloading",
+          totalBytes: 1000,
+          downloadedBytes: 250,
+        }),
       ]),
     });
     const dl = m.transients.find((t) => t.id === "download");
@@ -511,17 +667,25 @@ describe("every transient is its own click target (founder, June 13 2026)", () =
       errors: 0,
       passes: [{ name: "image-embedding", remaining: 50 }],
       scanning: false,
-      discovered: 100, offlineVolumes: []
+      discovered: 100,
+      offlineVolumes: [],
     },
     runtime: runtime([
-      model({ id: "dfn5b", role: "embedder", state: "downloading", totalBytes: 1000, downloadedBytes: 250 }),
+      model({
+        id: "dfn5b",
+        role: "embedder",
+        state: "downloading",
+        totalBytes: 1000,
+        downloadedBytes: 250,
+      }),
       model({ id: "txt", role: "text-embedder", state: "not-downloaded" }),
     ]),
   });
 
   it("work, embed, download, and missing all carry a registry actionId", () => {
     // No transient may be left as read-only chrome — each is clickable.
-    for (const t of live.transients) expect(t.actionId).toBe("toggle-station-detail");
+    for (const t of live.transients)
+      expect(t.actionId).toBe("toggle-station-detail");
     expect(new Set(live.transients.map((t) => t.id))).toEqual(
       new Set(["work", "embed", "download", "missing"]),
     );
@@ -532,7 +696,16 @@ describe("every transient is its own click target (founder, June 13 2026)", () =
     // zero new verbs (the missing-model prompt lives in that detail panel).
     const infoVerb = stationModel({
       ...base,
-      ingest: { running: true, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] },
+      ingest: {
+        running: true,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: [],
+      },
     }).seats.find((s) => s.id === "info")?.actionId;
     expect(infoVerb).toBe("toggle-station-detail");
     for (const t of live.transients) expect(t.actionId).toBe(infoVerb);
@@ -545,5 +718,47 @@ describe("every transient is its own click target (founder, June 13 2026)", () =
       // No em-dashes in user-visible copy (gate: check:emdash).
       expect(t.title).not.toContain("—");
     }
+  });
+});
+
+describe("offline-volume notice (warn + pause, surfaced in the detail)", () => {
+  const offline = (volumes: { label: string; images: number }[]) =>
+    stationModel({
+      ...base,
+      ingest: {
+        running: false,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: false,
+        discovered: 0,
+        offlineVolumes: volumes,
+      },
+    });
+
+  it("names the drive + photo count and tints the pill amber", () => {
+    const m = offline([{ label: "HomeNAS", images: 414 }]);
+    const row = m.activities.find((a) => a.kind === "offline");
+    expect(row?.text).toBe("Paused - HomeNAS offline");
+    expect(row?.hint).toBe("reconnect to resume (414 photos unavailable)");
+    // The collapsed pill flags a problem, not routine work.
+    expect(m.border).toBe("error");
+  });
+
+  it("summarizes when more than one drive is offline", () => {
+    const m = offline([
+      { label: "HomeNAS", images: 400 },
+      { label: "Archive", images: 1 },
+    ]);
+    const row = m.activities.find((a) => a.kind === "offline");
+    expect(row?.text).toBe("Paused - 2 drives offline");
+    expect(row?.hint).toBe("reconnect to resume (401 photos unavailable)");
+  });
+
+  it("no offline volumes: no notice, no amber border", () => {
+    const m = offline([]);
+    expect(m.activities.find((a) => a.kind === "offline")).toBeUndefined();
+    expect(m.border).toBe("none");
   });
 });
