@@ -55,6 +55,10 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
       vy: 0,
       affinity: s.affinity,
       mass: s.mass,
+      // Carry the static SEMANTIC-NEIGHBOR edges onto the mirror node so the
+      // worker's `step` applies the same similarity spring as the inline path
+      // (index-based, so no hash lookup is needed here).
+      neighbors: s.neighbors,
     }));
     anchors = msg.anchors.map((s) => ({
       topic: s.topic,

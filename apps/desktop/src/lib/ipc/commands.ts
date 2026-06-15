@@ -16,6 +16,7 @@ import type {
   FolderNode,
   GridItem,
   ImageMetadataDto,
+  ImageNeighbors,
   ImagePathsDto,
   IndicatorState,
   IngestStatus,
@@ -247,6 +248,20 @@ export const clusterTopics = (scope: GraphScope, k?: number) => {
  * connector lands. */
 export const suggestTopicsLlm = (scope: GraphScope) =>
   invoke<LlmSuggestions>("suggest_topics_llm", { scope });
+
+/** The sparse semantic k-NN graph the Visualizer's force layout reads to pull
+ * CLIP/note-similar photos together (semantic-neighbor attraction). Each
+ * in-scope image carries its top-`k` most-similar neighbors (default k = 6),
+ * each with a cosine `weight` (roughly [0,1], higher = more alike). `scope` is
+ * the same GraphScope shape `topicAffinities`/`clusterTopics` use; neighbors
+ * depend ONLY on scope (not on the topic set or alpha). Never errors on a
+ * degraded rig — an un-embedded scope resolves to `[]` (the layout then runs on
+ * topic attraction alone). */
+export const graphNeighbors = (scope: GraphScope, k?: number) => {
+  const args: Record<string, unknown> = { scope };
+  if (k !== undefined) args.k = k;
+  return invoke<ImageNeighbors[]>("graph_neighbors", args);
+};
 
 /** The GraphTuning knobs the force sim + alpha slider read. */
 export const graphTuning = () => invoke<GraphTuning>("graph_tuning");

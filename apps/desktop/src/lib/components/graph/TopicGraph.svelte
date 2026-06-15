@@ -15,9 +15,20 @@
    */
   import { GraphThumbCache } from "../../logic/graphthumbs";
   import { AffinityCache } from "../../logic/affinitycache";
+  import { scopeKey } from "../../logic/affinitycache";
   import type { AffinityReport } from "../../ipc/commands";
+  import type { ImageNeighbors } from "../../types/dto";
 
   const moduleAffinityCache = new AffinityCache<AffinityReport>();
+
+  /** MODULE-LEVEL semantic-neighbor cache, keyed on SCOPE ONLY. Unlike
+   * affinities, the k-NN neighbor graph depends only on the scope's image set
+   * (CLIP/note similarity), NOT on the topic set or the alpha blend — so adding a
+   * topic or moving the blend slider must REUSE the already-fetched neighbors
+   * instead of re-running the vector scan. Outlives the lens mount/unmount like
+   * the affinity + thumb caches so a close→reopen reuses it. A scope change is
+   * the only thing that produces a different key (and thus a fresh fetch). */
+  const moduleNeighborCache = new Map<string, ImageNeighbors[]>();
 
   /** The live component's repaint hook for the shared thumbnail cache. Each mount
    * re-points this at ITS draw(), so a thumb that finishes after a close→reopen
@@ -171,6 +182,10 @@
   // embed+scan it already paid for (the founder's "reopen re-renders
   // everything"). Pure data keyed by content, safe to share app-wide.
   const affinityCache = moduleAffinityCache;
+  /** Scope-keyed semantic-neighbor cache (the k-NN graph) — see
+   * moduleNeighborCache. Reused across topic/alpha changes (those don't change
+   * the neighbors), refetched only on a scope change. */
+  const neighborCache = moduleNeighborCache;
   /** The total image count behind the current layout (M), even when the sim runs
    * over far fewer super-nodes (N = nodeCount). The status reports both. */
   let imageTotal = $state(0);
@@ -518,6 +533,61 @@
     }
   }
 
+  /** Fetch (or reuse the scope-cached) semantic-neighbor graph and SET each
+   * full-detail node's `neighbors` to the resolved {i, w} edges over the CURRENT
+   * `nodes` array (index-based, so the worker needs no hashes). Neighbors whose
+   * hash is not in the current node set are dropped. Applied ONLY in full-detail
+   * mode (LOD super-nodes aggregate many images; semantic edges between
+   * aggregates are out of scope — they keep `neighbors` undefined and the
+   * existing forces handle them). Resilient: a throw or empty result leaves
+   * every node without neighbors, so the layout still works on topic attraction
+   * alone. Mutates `nodes` in place.
+   *
+   * Cached on SCOPE ONLY: the k-NN graph depends on the scope's image set, not
+   * on the topic set or alpha, so this is reused across a topic add / blend move
+   * without a refetch. */
+  async function applyNeighbors(sc: ipc.GraphScope) {
+    // LOD super-nodes never carry semantic edges (see above): clear any stale
+    // list and skip the fetch entirely.
+    if (lodActive) {
+      for (const n of nodes) n.neighbors = undefined;
+      return;
+    }
+    const key = scopeKey(sc);
+    let graph = neighborCache.get(key);
+    if (graph === undefined) {
+      try {
+        graph = await ipc.graphNeighbors(sc);
+      } catch {
+        // A degraded/unreachable backend (or an un-embedded scope) leaves the
+        // layout on topic attraction alone — never throw under the user.
+        graph = [];
+      }
+      neighborCache.set(key, graph);
+    }
+    // Map hash -> index over the CURRENT node set, so neighbor edges resolve to
+    // array indices the (hash-free) sim + worker can apply directly.
+    const indexOf = new Map<string, number>();
+    for (let i = 0; i < nodes.length; i++) indexOf.set(nodes[i].hash, i);
+    const byHash = new Map(graph.map((g) => [g.hash, g.neighbors]));
+    for (const node of nodes) {
+      const raw = byHash.get(node.hash);
+      if (raw === undefined || raw.length === 0) {
+        node.neighbors = undefined;
+        continue;
+      }
+      const edges: { i: number; w: number }[] = [];
+      for (const nb of raw) {
+        const j = indexOf.get(nb.hash);
+        // Drop a neighbor not in the current node set (it dropped out of scope)
+        // and the self-edge a k-NN can emit.
+        if (j === undefined || nodes[j] === node) continue;
+        edges.push({ i: j, w: nb.weight });
+      }
+      node.neighbors = edges.length > 0 ? edges : undefined;
+    }
+  }
+
   // -- affinity fetch + (re)seed ----------------------------------------------
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
@@ -607,6 +677,14 @@
     // affinity, so it lands where the cluster it stands for belongs).
     computeStaticLayout(nodes, anchors, { ringRadius: forceConfig().ringRadius });
     nodeCount = nodes.length;
+
+    // SEMANTIC-NEIGHBOR attraction: resolve each full-detail node's k-NN edges
+    // to indices into THIS node set so the sim (and worker) pull alike photos
+    // together. Cached on scope only (neighbors don't change with topic/alpha),
+    // and a no-op in LOD mode. Resilient: an un-embedded scope just leaves the
+    // layout on topic attraction. Done BEFORE the staticDirty/restartLoop below
+    // so the worker's static resync carries the neighbors with the new node set.
+    await applyNeighbors(sc);
 
     // A fresh node set (scope/topic/alpha change): drop stale PENDING thumb
     // requests so the new layout's nearest nodes load first. Already-loaded
@@ -828,7 +906,14 @@
       // The heat lives in the per-frame compute message (it cools every frame),
       // so the static config carries the steady-state attraction with heat 1.
       config: { ...forceConfig(), heat: 1 },
-      nodes: nodes.map((n) => ({ affinity: n.affinity, mass: n.mass })),
+      nodes: nodes.map((n) => ({
+        affinity: n.affinity,
+        mass: n.mass,
+        // SEMANTIC-NEIGHBOR edges ride the STATIC message (they change only with
+        // the node set, not per frame), so the worker's `step` applies the same
+        // similarity spring as the inline path.
+        neighbors: n.neighbors,
+      })),
       anchors: anchors.map((a) => ({ topic: a.topic })),
     };
     simWorker.postMessage(msg);

@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   aggregateToSuperNodes,
   coolHeat,
+  DEFAULT_NEIGHBOR_ATTRACTION,
   expandSuperNode,
   HOT_HEAT,
   HOT_SUBSTEPS,
@@ -296,6 +297,171 @@ describe("force sim handles super-nodes (mass)", () => {
     step([b], [], config);
     expect(a.x).toBeCloseTo(b.x, 10);
     expect(a.vx).toBeCloseTo(b.vx, 10);
+  });
+});
+
+// Semantic-neighbor attraction (CLIP/note similarity): a sparse spring pulls
+// alike photos together. The edges are INDICES into the same nodes array + a
+// similarity weight; `step` adds a directional pull toward each neighbor scaled
+// by neighborAttraction · w · heat. It is attraction only (no new repulsion).
+describe("semantic-neighbor attraction", () => {
+  // No topics / no anchors, so ONLY the neighbor spring (plus the default
+  // centering/repulsion) acts — isolating the semantic pull. A neighborAttraction
+  // of 0 turns the spring off for the control runs.
+  const baseCfg: ForceConfig = {
+    attraction: 0,
+    repulsion: 0,
+    damping: 0.85,
+    centering: 0,
+    ringRadius: 300,
+    anchorAttraction: 0,
+    anchorRepulsion: 0,
+    anchorDamping: 0.8,
+  };
+
+  it("two neighbor-linked nodes END CLOSER than the same pair without the edge", () => {
+    // A and B start apart with NO topic affinity. With a neighbor edge between
+    // them the spring should draw them together; without it nothing moves.
+    const start = (): ImageNode[] => [
+      { hash: "A", x: -100, y: 0, vx: 0, vy: 0, affinity: [] },
+      { hash: "B", x: 100, y: 0, vx: 0, vy: 0, affinity: [] },
+    ];
+    const sep = (ns: ImageNode[]) => Math.hypot(ns[0].x - ns[1].x, ns[0].y - ns[1].y);
+
+    // WITH a (symmetric) neighbor edge: A lists B and B lists A.
+    const linked = start();
+    linked[0].neighbors = [{ i: 1, w: 1 }];
+    linked[1].neighbors = [{ i: 0, w: 1 }];
+    for (let i = 0; i < 200; i++) step(linked, [], baseCfg);
+
+    // WITHOUT any edge (neighborAttraction explicitly 0 is moot, but be explicit).
+    const free = start();
+    for (let i = 0; i < 200; i++)
+      step(free, [], { ...baseCfg, neighborAttraction: 0 });
+
+    // The linked pair converged; the free pair did not move (no force at all).
+    expect(sep(linked)).toBeLessThan(sep(start())); // closer than the start
+    expect(sep(free)).toBeCloseTo(sep(start()), 6); // unchanged
+    expect(sep(linked)).toBeLessThan(sep(free)); // edge pulled them together
+  });
+
+  it("a one-directional edge still pulls the listing node toward its neighbor", () => {
+    // Only A lists B (no reverse edge). A should move toward B; B (no edge, no
+    // other force) stays put — we do NOT force-add the reverse edge.
+    const a: ImageNode = { hash: "A", x: -50, y: 0, vx: 0, vy: 0, affinity: [], neighbors: [{ i: 1, w: 1 }] };
+    const b: ImageNode = { hash: "B", x: 50, y: 0, vx: 0, vy: 0, affinity: [] };
+    const nodes = [a, b];
+    for (let i = 0; i < 100; i++) step(nodes, [], baseCfg);
+    expect(a.x).toBeGreaterThan(-50); // A moved toward B
+    expect(b.x).toBe(50); // B never moved (no edge, no force)
+  });
+
+  it("a higher similarity weight pulls harder over the same step budget", () => {
+    const run = (w: number): number => {
+      const a: ImageNode = { hash: "A", x: -100, y: 0, vx: 0, vy: 0, affinity: [], neighbors: [{ i: 1, w }] };
+      const b: ImageNode = { hash: "B", x: 100, y: 0, vx: 0, vy: 0, affinity: [] };
+      const nodes = [a, b];
+      for (let i = 0; i < 10; i++) step(nodes, [], baseCfg);
+      return a.x; // how far A travelled toward B (more positive = closer)
+    };
+    expect(run(1)).toBeGreaterThan(run(0.2));
+  });
+
+  it("respects a fixed (dragged) node: it holds while its neighbor is pulled to it", () => {
+    // A is fixed; B lists A. B converges on A; A never moves (the drag wins).
+    const a: ImageNode = { hash: "A", x: 80, y: -40, vx: 0, vy: 0, affinity: [], fixed: true };
+    const b: ImageNode = { hash: "B", x: -80, y: 40, vx: 0, vy: 0, affinity: [], neighbors: [{ i: 0, w: 1 }] };
+    const nodes = [a, b];
+    for (let i = 0; i < 200; i++) step(nodes, [], baseCfg);
+    expect(a.x).toBe(80); // fixed node held exactly
+    expect(a.y).toBe(-40);
+    // B drew NEAR the held A (the spring pulled it in).
+    expect(Math.hypot(b.x - a.x, b.y - a.y)).toBeLessThan(40);
+  });
+
+  it("the default neighborAttraction is applied when the knob is absent", () => {
+    // Same setup with the knob ABSENT (default) vs explicitly 0: the default must
+    // produce motion, the 0 must not — proving DEFAULT_NEIGHBOR_ATTRACTION wires in.
+    expect(DEFAULT_NEIGHBOR_ATTRACTION).toBeGreaterThan(0);
+    const mk = (): ImageNode[] => [
+      { hash: "A", x: -60, y: 0, vx: 0, vy: 0, affinity: [], neighbors: [{ i: 1, w: 1 }] },
+      { hash: "B", x: 60, y: 0, vx: 0, vy: 0, affinity: [] },
+    ];
+    const def = mk();
+    step(def, [], baseCfg); // neighborAttraction absent => default
+    const off = mk();
+    step(off, [], { ...baseCfg, neighborAttraction: 0 });
+    expect(def[0].x).toBeGreaterThan(-60); // default moved A
+    expect(off[0].x).toBe(-60); // disabled left A put
+  });
+
+  it("converges deterministically at small N with neighbor edges", () => {
+    // A small ring of 4 nodes each linked to the next: with the neighbor spring
+    // (plus topic anchors + repulsion to keep it honest) the layout must settle
+    // to the SAME positions every run and not blow up.
+    const cfg: ForceConfig = {
+      attraction: 0.05,
+      repulsion: 400,
+      damping: 0.85,
+      centering: 0.01,
+      ringRadius: 300,
+      anchorAttraction: 0,
+      anchorRepulsion: 0,
+      anchorDamping: 0.8,
+    };
+    const build = (): ImageNode[] => {
+      const ns = seedNodes(["a", "b", "c", "d"], new Map([
+        ["a", [1, 0]],
+        ["b", [1, 0]],
+        ["c", [0, 1]],
+        ["d", [0, 1]],
+      ]), 2);
+      // a~b and c~d are semantic neighbors (alike within their topic).
+      ns[0].neighbors = [{ i: 1, w: 0.9 }];
+      ns[1].neighbors = [{ i: 0, w: 0.9 }];
+      ns[2].neighbors = [{ i: 3, w: 0.9 }];
+      ns[3].neighbors = [{ i: 2, w: 0.9 }];
+      return ns;
+    };
+    const anchors = ringAnchors(2, cfg.ringRadius);
+    const run = () => {
+      const ns = build();
+      const steps = simulate(ns, ringAnchors(2, cfg.ringRadius), cfg, 2000, 1e-4);
+      return { ns, steps };
+    };
+    const first = run();
+    const second = run();
+    expect(first.steps).toBe(second.steps);
+    expect(first.steps).toBeLessThan(2000); // actually settled
+    for (let i = 0; i < 4; i++) {
+      expect(first.ns[i].x).toBeCloseTo(second.ns[i].x, 8);
+      expect(first.ns[i].y).toBeCloseTo(second.ns[i].y, 8);
+      expect(Number.isFinite(first.ns[i].x)).toBe(true);
+    }
+    // The neighbor pairs ended close together (the spring did its job).
+    expect(Math.hypot(first.ns[0].x - first.ns[1].x, first.ns[0].y - first.ns[1].y)).toBeLessThan(
+      Math.hypot(first.ns[0].x - first.ns[2].x, first.ns[0].y - first.ns[2].y),
+    );
+    void anchors;
+  });
+
+  it("ignores an out-of-range or self neighbor index (defensive)", () => {
+    // A stale edge (index past the array, or pointing at self) must be skipped,
+    // never throw or read undefined.
+    const a: ImageNode = {
+      hash: "A",
+      x: 10,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: [],
+      neighbors: [{ i: 99, w: 1 }, { i: 0, w: 1 }],
+    };
+    expect(() => {
+      for (let i = 0; i < 5; i++) step([a], [], baseCfg);
+    }).not.toThrow();
+    // No valid neighbor => no spring force => the node stays put.
+    expect(a.x).toBe(10);
   });
 });
 

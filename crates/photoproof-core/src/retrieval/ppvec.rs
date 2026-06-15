@@ -116,6 +116,12 @@ pub struct VecMeta {
     pub char_end: Option<u32>,
 }
 
+/// The sparse semantic k-NN graph [`PpvecStore::knn_within`] returns: per source
+/// image hash, its ordered `(neighbor_hash, similarity)` edges. Named so the
+/// nested shape reads clearly at the call sites (and clears clippy's
+/// type-complexity lint on the signature).
+pub type KnnGraph = Vec<(String, Vec<(String, f32)>)>;
+
 /// The PPVEC v2 store: SQLite metadata + one flat file per space.
 pub struct PpvecStore {
     db: Mutex<Connection>,
@@ -967,6 +973,80 @@ impl PpvecStore {
                 .map(|(i, &b)| dequantize(b as i8, i, &header))
                 .collect();
             out.push((hash, vector));
+        }
+        Ok(out)
+    }
+
+    /// Sparse semantic k-NN graph over an in-scope image set: for each image
+    /// that HAS a stored vector, its top-`k` most similar OTHER in-scope images
+    /// by cosine, descending. Returns `(image_hash, [(neighbor_hash, sim), ..])`.
+    ///
+    /// WHY this exists: the visualizer's force layout needs a "these photos are
+    /// alike" attraction so semantically similar images pull together. That is a
+    /// one-shot precompute over a known scope (not a per-frame query, and not a
+    /// global top-k like `search`), so a brute-force O(N^2) pass over exactly the
+    /// requested rows is the simple correct shape — at the scope sizes the lens
+    /// runs over, the cost is dominated by the read, not the dot products.
+    ///
+    /// Cosine == dot product here: every stored vector is already
+    /// MRL-truncated + L2-normalized at write time (§1.3), so the dequantized
+    /// rows are unit vectors and their dot product IS the cosine. Negative
+    /// similarities are clamped to 0 so a dissimilar pair becomes "no pull" for
+    /// the layout, never a repulsion edge (repulsion is the sim's global term).
+    ///
+    /// Deterministic: neighbors sort by similarity descending, ties broken by
+    /// neighbor hash ascending, so the same scope always yields the same graph
+    /// (reproducible layout + stable tests).
+    ///
+    /// Graceful by construction (DESIGN-SEMANTIC-GRAPH.md): empty hashes, an
+    /// empty/un-embedded space, or `k == 0` all yield an empty result, never an
+    /// error. An image with no stored vector is simply omitted (it gets no
+    /// semantic edges, which the layout treats as no pull).
+    pub fn knn_within(
+        &self,
+        space: VecSpace,
+        hashes: &[String],
+        k: usize,
+    ) -> VectorStoreResult<KnnGraph> {
+        if hashes.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        // Read exactly the in-scope rows once (one lock + mmap); absent hashes
+        // (no stored vector) simply do not come back, so they get no edges.
+        let present = self.read_image_vectors(space, hashes)?;
+        if present.len() < 2 {
+            // A single (or zero) embedded image has no OTHER image to pull
+            // toward: an honest empty graph, not a self-edge.
+            return Ok(Vec::new());
+        }
+
+        // Stable input order so the O(N^2) pass and its tie-breaks are
+        // reproducible regardless of how the DB returned the rows.
+        let mut present = present;
+        present.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut out: Vec<(String, Vec<(String, f32)>)> = Vec::with_capacity(present.len());
+        for (i, (hash_i, vec_i)) in present.iter().enumerate() {
+            let mut neighbors: Vec<(String, f32)> = Vec::with_capacity(present.len() - 1);
+            for (j, (hash_j, vec_j)) in present.iter().enumerate() {
+                if i == j {
+                    continue; // never an edge to self
+                }
+                // Both rows are unit-length (§1.3), so the dot IS the cosine.
+                let dot: f32 = vec_i.iter().zip(vec_j).map(|(a, b)| a * b).sum();
+                // Clamp negatives to 0: a dissimilar pair is "no pull" for the
+                // layout, never a (sim-driven) repulsion.
+                neighbors.push((hash_j.clone(), dot.max(0.0)));
+            }
+            // Most-similar first; equal similarities ordered by neighbor hash so
+            // the graph is deterministic (reproducible layout + tests).
+            neighbors.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            neighbors.truncate(k);
+            out.push((hash_i.clone(), neighbors));
         }
         Ok(out)
     }

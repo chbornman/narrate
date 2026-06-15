@@ -20,12 +20,13 @@ use std::time::Instant;
 use photoproof_connectors::OrtEmbedder;
 use photoproof_connectors::embedder::Embedder;
 use photoproof_connectors::vector_store::{VecKind, VecSpace};
+use photoproof_core::retrieval::KnnGraph;
 use photoproof_core::topic::{
     self, AffinityReport, ClusterTopic, LlmSuggestions, TopicLlm, TopicSuggestion,
 };
 use photoproof_core::tuning::{GraphTuning, tuning};
 use rusqlite::OpenFlags;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::S;
 use crate::error::{CmdError, CmdResult};
@@ -76,6 +77,24 @@ pub(crate) fn enumerate_scope(app: &App, scope: &GraphScope) -> CmdResult<Vec<St
             .collect(),
     };
     Ok(hashes)
+}
+
+/// One in-scope image and its top-k semantically-similar neighbors, the sparse
+/// graph the visualizer's force layout reads to pull alike photos together.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageNeighbors {
+    pub hash: String,
+    pub neighbors: Vec<Neighbor>,
+}
+
+/// A single semantic-attraction edge: a neighbor image and how strongly it
+/// should pull (cosine similarity in roughly [0,1]; 0 == no pull).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Neighbor {
+    pub hash: String,
+    pub weight: f32,
 }
 
 /// `topic_affinities(scope, topics, alpha)` (DESIGN-SEMANTIC-GRAPH.md): score
@@ -305,6 +324,159 @@ pub async fn cluster_topics(
     })
     .await
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// `graph_neighbors(scope, k?)`: the sparse semantic k-NN graph the visualizer's
+/// force layout reads so alike photos cluster (similar images attract). For each
+/// in-scope image with a stored vector, its top-`k` most-similar OTHER in-scope
+/// images and how strongly each should pull.
+///
+/// The primary signal is the CLIP image space (what it LOOKS like), resolved the
+/// SAME way `cluster_topics` resolves a space: prefer the loaded embedder's model
+/// id (matches the live write path), else any stored row's model so an
+/// embedded-but-models-unloaded library still graphs. We ALSO blend in the
+/// annotation/summary space (what you SAID) when it has rows: for a pair present
+/// in both, the weights are averaged; a pair in only one keeps its weight. The
+/// blend is defensive — `image_summary` is often empty, so we simply skip it and
+/// return the CLIP neighbors when it has no model id.
+///
+/// Runs on a blocking thread (the brute-force O(N^2) precompute can take real
+/// time on a large scope), mirroring `topic_affinities`. GRACEFUL: an
+/// un-embedded scope (no CLIP model id) returns an empty Vec — no edges, never an
+/// error.
+#[tauri::command]
+pub async fn graph_neighbors(
+    app: S<'_>,
+    scope: GraphScope,
+    k: Option<usize>,
+) -> CmdResult<Vec<ImageNeighbors>> {
+    let app = app.inner().clone();
+    let k = k.unwrap_or(6);
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        let started = Instant::now();
+        let hashes = enumerate_scope(&app, &scope)?;
+
+        // Resolve the CLIP image space's model id exactly like cluster_topics:
+        // the loaded embedder when present, else any stored row's model.
+        let clip_model = match app
+            .runtime
+            .embedders
+            .clip()
+            .map(|e| e.model_id().to_owned())
+        {
+            Some(m) => Some(m),
+            None => app
+                .vectors
+                .any_model_id(VecKind::ImageClip)
+                .map_err(|e| CmdError::Invalid(format!("clip model lookup: {e}")))?,
+        };
+        // No CLIP model id ⇒ the space is un-embedded ⇒ no semantic edges.
+        let Some(clip_model) = clip_model else {
+            return Ok(Vec::new());
+        };
+
+        let clip = app
+            .vectors
+            .knn_within(
+                VecSpace {
+                    vec_kind: VecKind::ImageClip,
+                    model_id: clip_model,
+                },
+                &hashes,
+                k,
+            )
+            .map_err(|e| CmdError::Invalid(format!("clip knn: {e}")))?;
+
+        // Blend in note similarity when the annotation/summary space is
+        // populated. It is often empty (no notes embedded yet), so resolving no
+        // model id just skips the blend and keeps the pure CLIP graph.
+        let summary_model = app
+            .vectors
+            .any_model_id(VecKind::ImageSummary)
+            .map_err(|e| CmdError::Invalid(format!("summary model lookup: {e}")))?;
+        let summary = match summary_model {
+            Some(model_id) => app
+                .vectors
+                .knn_within(
+                    VecSpace {
+                        vec_kind: VecKind::ImageSummary,
+                        model_id,
+                    },
+                    &hashes,
+                    k,
+                )
+                .map_err(|e| CmdError::Invalid(format!("summary knn: {e}")))?,
+            None => Vec::new(),
+        };
+
+        let merged = merge_neighbor_graphs(clip, summary, k);
+        tracing::info!(
+            scope = ?scope,
+            images = hashes.len(),
+            edged = merged.len(),
+            k,
+            neighbors_ms = started.elapsed().as_millis(),
+            "graph_neighbors computed"
+        );
+        Ok(merged)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
+/// Merge the CLIP and annotation k-NN graphs into the layout's edge set: for a
+/// pair present in BOTH spaces average the two weights (the photo looks AND
+/// reads alike — a stronger, agreed-on pull); a pair in only one keeps its
+/// weight. Re-trims to `k` and re-sorts (weight desc, neighbor hash asc) so the
+/// blended graph stays deterministic, exactly like `knn_within`.
+fn merge_neighbor_graphs(clip: KnnGraph, summary: KnnGraph, k: usize) -> Vec<ImageNeighbors> {
+    use std::collections::BTreeMap;
+
+    // neighbor_hash -> (clip_weight?, summary_weight?) for one source image.
+    type PairWeights = BTreeMap<String, (Option<f32>, Option<f32>)>;
+    // Per source image: its neighbor pair-weights. A BTreeMap keeps the outer
+    // iteration order stable (deterministic output).
+    let mut by_image: BTreeMap<String, PairWeights> = BTreeMap::new();
+    for (hash, neighbors) in clip {
+        let entry = by_image.entry(hash).or_default();
+        for (n, w) in neighbors {
+            entry.entry(n).or_default().0 = Some(w);
+        }
+    }
+    for (hash, neighbors) in summary {
+        let entry = by_image.entry(hash).or_default();
+        for (n, w) in neighbors {
+            entry.entry(n).or_default().1 = Some(w);
+        }
+    }
+
+    let mut out = Vec::with_capacity(by_image.len());
+    for (hash, neighbor_map) in by_image {
+        let mut neighbors: Vec<Neighbor> = neighbor_map
+            .into_iter()
+            .map(|(n, (c, s))| {
+                // Average when both spaces agree on the pair; otherwise take the
+                // single weight that exists.
+                let weight = match (c, s) {
+                    (Some(c), Some(s)) => (c + s) / 2.0,
+                    (Some(c), None) => c,
+                    (None, Some(s)) => s,
+                    (None, None) => 0.0,
+                };
+                Neighbor { hash: n, weight }
+            })
+            .collect();
+        neighbors.sort_by(|a, b| {
+            b.weight
+                .partial_cmp(&a.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.hash.cmp(&b.hash))
+        });
+        neighbors.truncate(k);
+        out.push(ImageNeighbors { hash, neighbors });
+    }
+    out
 }
 
 /// The concrete `TopicLlm` this build wires. v3 SEAM: the Gemma connector is

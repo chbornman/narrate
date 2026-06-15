@@ -796,6 +796,183 @@ fn reconcile_sweeps_orphan_file() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// knn_within — the visualizer's sparse semantic k-NN graph
+// ---------------------------------------------------------------------------
+
+/// Plant four image vectors at controlled angles in the e0/e1 plane so the
+/// nearest-neighbor of each is known by construction, then assert each image's
+/// top-1 neighbor is its planted-closest and weights are ordered descending.
+///
+/// Angles 0.0, 0.2, 0.5, 1.0 rad along axis 1: cosine between two of them is
+/// cos(|t_a - t_b|), which is monotonic in the angle gap, so the closest image
+/// is always the angularly-nearest one (a's neighbor is b, d's neighbor is c).
+#[test]
+fn knn_within_top1_is_planted_closest_and_ordered() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    let model = "clip-mock";
+    // (hash, angle) — distinct hashes; planted along the same axis so the
+    // gap in angle is the only thing that drives similarity.
+    let plants = [("a", 0.0f32), ("b", 0.2), ("c", 0.5), ("d", 1.0)];
+    for (h, t) in &plants {
+        let key = VecKey {
+            space: VecSpace {
+                vec_kind: VecKind::ImageClip,
+                model_id: model.into(),
+            },
+            unit: VecUnit::Image {
+                image_hash: (*h).into(),
+            },
+        };
+        let e = Embedding {
+            vector: planted(512, 1, *t),
+            model_id: model.into(),
+        };
+        store.upsert(key, &e).unwrap();
+    }
+
+    let space = VecSpace {
+        vec_kind: VecKind::ImageClip,
+        model_id: model.into(),
+    };
+    let hashes: Vec<String> = plants.iter().map(|(h, _)| (*h).to_owned()).collect();
+    let graph = store.knn_within(space, &hashes, 2).unwrap();
+
+    // Every embedded image appears, each capped at k=2 neighbors, never self.
+    assert_eq!(graph.len(), 4);
+    let by_hash: HashMap<String, Vec<(String, f32)>> = graph.into_iter().collect();
+    for (h, neighbors) in &by_hash {
+        assert!(neighbors.len() <= 2);
+        assert!(neighbors.iter().all(|(n, _)| n != h), "no self-edge");
+        // Descending weight order.
+        for w in neighbors.windows(2) {
+            assert!(w[0].1 >= w[1].1, "weights ordered descending");
+        }
+    }
+    // a (0.0) is closest to b (0.2); d (1.0) is closest to c (0.5).
+    assert_eq!(by_hash["a"][0].0, "b", "a's nearest is b");
+    assert_eq!(by_hash["d"][0].0, "c", "d's nearest is c");
+    // Similarity is roughly cos(angle gap) and stays in [0,1].
+    assert!((by_hash["a"][0].1 - 0.2f32.cos()).abs() < 0.02);
+    assert!(
+        by_hash
+            .values()
+            .flatten()
+            .all(|(_, w)| (0.0..=1.0).contains(w))
+    );
+}
+
+/// k larger than the available set returns every OTHER present image (clamped
+/// to N-1 neighbors), still ordered, still no self-edge.
+#[test]
+fn knn_within_k_larger_than_set_returns_all_others() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    let model = "clip-mock";
+    for (h, axis) in [("a", 1usize), ("b", 2), ("c", 3)] {
+        let key = VecKey {
+            space: VecSpace {
+                vec_kind: VecKind::ImageClip,
+                model_id: model.into(),
+            },
+            unit: VecUnit::Image {
+                image_hash: h.into(),
+            },
+        };
+        let e = Embedding {
+            vector: planted(512, axis, 0.4),
+            model_id: model.into(),
+        };
+        store.upsert(key, &e).unwrap();
+    }
+    let space = VecSpace {
+        vec_kind: VecKind::ImageClip,
+        model_id: model.into(),
+    };
+    let graph = store
+        .knn_within(space, &["a".into(), "b".into(), "c".into()], 99)
+        .unwrap();
+    assert_eq!(graph.len(), 3);
+    for (h, neighbors) in &graph {
+        assert_eq!(neighbors.len(), 2, "N-1 neighbors, capped at the set size");
+        assert!(neighbors.iter().all(|(n, _)| n != h));
+    }
+}
+
+/// Empty hashes, k == 0, an un-embedded space, and a single embedded image all
+/// yield an empty graph, never an error — the graceful pre-embed-pass posture.
+#[test]
+fn knn_within_empty_cases_yield_empty_graph() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    let model = "clip-mock";
+    let space = || VecSpace {
+        vec_kind: VecKind::ImageClip,
+        model_id: model.into(),
+    };
+
+    // Empty hash set.
+    assert!(store.knn_within(space(), &[], 5).unwrap().is_empty());
+
+    // Un-embedded space (no file at all): hashes present but no rows.
+    assert!(
+        store
+            .knn_within(space(), &["x".into(), "y".into()], 5)
+            .unwrap()
+            .is_empty()
+    );
+
+    // One embedded image: nothing else to pull toward.
+    let key = VecKey {
+        space: space(),
+        unit: VecUnit::Image {
+            image_hash: "solo".into(),
+        },
+    };
+    store
+        .upsert(
+            key,
+            &Embedding {
+                vector: planted(512, 1, 0.3),
+                model_id: model.into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .knn_within(space(), &["solo".into()], 5)
+            .unwrap()
+            .is_empty(),
+        "a lone embedded image has no neighbor"
+    );
+
+    // k == 0 over a populated, embeddable set is still empty (no edges asked
+    // for), never an error.
+    let key2 = VecKey {
+        space: space(),
+        unit: VecUnit::Image {
+            image_hash: "second".into(),
+        },
+    };
+    store
+        .upsert(
+            key2,
+            &Embedding {
+                vector: planted(512, 2, 0.3),
+                model_id: model.into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .knn_within(space(), &["solo".into(), "second".into()], 0)
+            .unwrap()
+            .is_empty(),
+        "k == 0 asks for no edges"
+    );
+}
+
 /// A healthy store, and a second run after a heal, both report nothing: the
 /// doctor is safe to run on every startup.
 #[test]

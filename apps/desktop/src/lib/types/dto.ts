@@ -399,6 +399,23 @@ export interface CollectionCandidateDto {
   score: number;
 }
 
+/** One semantic-attraction edge for the Visualizer's force layout (twin of the
+ * Rust `Neighbor`): a similar image and how strongly it should pull this one
+ * toward it (`weight` is a cosine similarity in roughly [0,1], higher = more
+ * alike; 0 = no pull). */
+export interface Neighbor {
+  hash: string;
+  weight: number;
+}
+
+/** One in-scope image plus its top-k semantically-similar neighbors (twin of the
+ * Rust `ImageNeighbors`) — the sparse k-NN graph the Visualizer's force sim reads
+ * so CLIP/note-similar photos attract each other into clusters. */
+export interface ImageNeighbors {
+  hash: string;
+  neighbors: Neighbor[];
+}
+
 /** image_abs_path result (D4: reveal / copy path / open-default). */
 export interface ImagePathsDto {
   /** Best online absolute path, null when every path is offline. */

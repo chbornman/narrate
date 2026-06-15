@@ -31,6 +31,13 @@ import type { ForceConfig } from "./forcegraph";
 export interface StaticNode {
   affinity: number[];
   mass?: number;
+  /** SEMANTIC-NEIGHBOR edges (CLIP/note similarity): the sparse top-k list of
+   * INDICES into the node array + similarity weight. STATIC (they change only
+   * when the node set is rebuilt, not per frame), so they ride this message, not
+   * the per-frame mutable buffer. The worker stores them on its mirror nodes so
+   * its `step` applies the same semantic spring as the inline path. Absent on a
+   * node with no neighbors (e.g. a LOD super-node). */
+  neighbors?: { i: number; w: number }[];
 }
 
 /** The static per-anchor input: just the topic index (the affinity-row column

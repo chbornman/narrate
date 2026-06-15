@@ -84,6 +84,17 @@ export interface ImageNode {
    * click/zoom can EXPAND it back into individual image nodes. Absent on a
    * single-image node. */
   members?: string[];
+  /** SEMANTIC NEIGHBORS (CLIP/note-similarity spring): the sparse top-k list of
+   * OTHER nodes this image is alike to, as INDICES into the SAME `nodes` array
+   * plus a similarity weight `w` (cosine, roughly [0,1], higher = more alike).
+   * `step` adds a directional spring pulling node `i` toward each neighbor `j`
+   * with force ~ `neighborAttraction · w · heat · (pos_j − pos_i)`, so alike
+   * photos converge into clusters. Index-based (not hashes) so the worker needs
+   * no hash lookup — it applies the same spring over its mirror nodes. Set only
+   * in FULL-DETAIL mode (a LOD super-node leaves this undefined: it already
+   * aggregates many images). Absent ⇒ no semantic spring (topic attraction
+   * alone), so an un-embedded scope still lays out. */
+  neighbors?: { i: number; w: number }[];
 }
 
 /** The physics knobs — sourced from the backend GraphTuning (file-overridable
@@ -93,6 +104,14 @@ export interface ForceConfig {
   attraction: number;
   /** Mutual image-image repulsion strength. */
   repulsion: number;
+  /** SEMANTIC-NEIGHBOR spring stiffness (CLIP/note similarity): the per-edge
+   * attraction a node feels toward each of its `ImageNode.neighbors`, scaled by
+   * that edge's similarity `w` and the reheat `heat`. A DIRECTIONAL pull only
+   * (no new repulsion) layered on top of the topic-anchor attraction, so alike
+   * photos draw together WITHIN their topic neighborhood. Modest by design so it
+   * does not overwhelm the anchor pull or collapse the layout. Absent ⇒
+   * [`DEFAULT_NEIGHBOR_ATTRACTION`]; 0 disables the spring entirely. */
+  neighborAttraction?: number;
   /** Per-step velocity retention (cooling): 1 = frictionless, 0 = frozen. */
   damping: number;
   /** Pull toward the origin (un-topic'd nodes settle at the center). */
@@ -169,6 +188,17 @@ const EPSILON = 1;
  * cluster settles where it previously exploded). A node simply takes a couple
  * more steps to cross a long gap instead of teleporting and destabilizing. */
 export const DEFAULT_MAX_STEP = 20;
+
+/** Default semantic-neighbor spring stiffness when `ForceConfig.neighborAttraction`
+ * is absent. ~0.06 sits just BELOW the topic anchor attraction's effective pull
+ * (a node feels several neighbor edges, each weighted by its similarity ≤ 1, so
+ * the summed neighbor force stays in the same order as the single anchor force):
+ * alike photos visibly draw together within their topic neighborhood without
+ * overwhelming the anchor placement or collapsing the cluster to a point. TUNABLE
+ * — it is a feel knob; raise it for tighter semantic clumping, lower it if the
+ * clusters pinch. Verified only against the unit fixtures (the live visual feel
+ * is the founder's to tune). */
+export const DEFAULT_NEIGHBOR_ATTRACTION = 0.06;
 
 /** Clamp a velocity/displacement vector to at most `max` magnitude, scaling both
  * components so direction is preserved. Returns the (possibly scaled) pair. */
@@ -285,6 +315,39 @@ export function step(
     // Centering — a spring to the origin so nothing flies off.
     fx[i] -= config.centering * node.x;
     fy[i] -= config.centering * node.y;
+  }
+
+  // SEMANTIC-NEIGHBOR spring (CLIP/note similarity): for each node that carries
+  // a sparse neighbor list, add a DIRECTIONAL linear spring pulling it toward
+  // each neighbor's CURRENT position, weighted by the edge similarity `w` and the
+  // reheat `heat`. f += k·w·heat·(pos_j − pos_i). This is attraction ONLY (no new
+  // repulsion), so alike photos converge into clusters within their topic
+  // neighborhood; the per-step clamp below still bounds the total displacement.
+  // It pulls only the listed node `i` toward `j` — if `j` also lists `i` the
+  // reverse edge pulls `j` toward `i` on ITS own iteration (naturally
+  // symmetric-ish), so we never force-add a reverse edge here. O(N·k), sparse and
+  // cheap. A `fixed` (dragged) node is still integrated normally below, which
+  // already zeroes its motion; we accumulate force here regardless so a held
+  // node's neighbors still feel its pull (the force on the held node itself is
+  // discarded at integrate time, matching the existing anchor/centering forces).
+  const neighborAttraction =
+    (config.neighborAttraction ?? DEFAULT_NEIGHBOR_ATTRACTION) * heat;
+  if (neighborAttraction !== 0) {
+    for (let i = 0; i < n; i++) {
+      const edges = nodes[i].neighbors;
+      if (edges === undefined) continue;
+      const xi = nodes[i].x;
+      const yi = nodes[i].y;
+      for (let e = 0; e < edges.length; e++) {
+        const { i: j, w } = edges[e];
+        // Guard a stale/out-of-range index (defensive: the builder drops
+        // neighbors not in the current node set, but never trust an edge blindly)
+        // and the self-edge a k-NN can emit.
+        if (j < 0 || j >= n || j === i || w === 0) continue;
+        fx[i] += neighborAttraction * w * (nodes[j].x - xi);
+        fy[i] += neighborAttraction * w * (nodes[j].y - yi);
+      }
+    }
   }
 
   // Anchor centroid attraction: pull each anchor toward the affinity-weighted

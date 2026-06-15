@@ -235,6 +235,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::graph::topic_affinities,
         commands::graph::suggest_topics,
         commands::graph::cluster_topics,
+        commands::graph::graph_neighbors,
         commands::graph::suggest_topics_llm,
         commands::graph::graph_tuning,
         // Topics + autosuggest + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md).
@@ -328,6 +329,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::graph::topic_affinities,
         commands::graph::suggest_topics,
         commands::graph::cluster_topics,
+        commands::graph::graph_neighbors,
         commands::graph::suggest_topics_llm,
         commands::graph::graph_tuning,
         // Topics + autosuggest + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md).

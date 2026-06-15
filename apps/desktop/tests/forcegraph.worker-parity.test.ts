@@ -74,16 +74,31 @@ describe("worker path matches the inline step loop", () => {
       ["f", [0, 0, 1]],
     ]);
 
+    // SEMANTIC-NEIGHBOR edges (CLIP/note similarity): each topic pair lists each
+    // other, so the parity check exercises the neighbor spring on BOTH paths
+    // (the worker carries these on its mirror nodes via the static message).
+    // Indices into the node array: a~b (0,1), c~d (2,3), e~f (4,5).
+    const setNeighbors = (ns: ImageNode[]) => {
+      ns[0].neighbors = [{ i: 1, w: 0.8 }];
+      ns[1].neighbors = [{ i: 0, w: 0.8 }];
+      ns[2].neighbors = [{ i: 3, w: 0.5 }];
+      ns[3].neighbors = [{ i: 2, w: 0.5 }];
+      ns[4].neighbors = [{ i: 5, w: 0.9 }];
+      ns[5].neighbors = [{ i: 4, w: 0.9 }];
+    };
+
     // INLINE reference: the v1 main-thread loop.
     const inlineNodes = seedNodes(hashes, aff, 3);
+    setNeighbors(inlineNodes);
     const inlineAnchors = ringAnchors(3, config.ringRadius);
 
     // WORKER path: the live state (what the component keeps) round-tripped
     // through the buffer each frame, integrated by the worker mirror.
     const liveNodes = seedNodes(hashes, aff, 3);
+    setNeighbors(liveNodes);
     const liveAnchors = ringAnchors(3, config.ringRadius);
     // The worker's mirror objects (rebuilt once from the static message; their
-    // x/y/vx/vy come from the buffer each frame). Same affinity/topic.
+    // x/y/vx/vy come from the buffer each frame). Same affinity/topic/neighbors.
     const mirrorNodes: ImageNode[] = liveNodes.map((n) => ({
       hash: "",
       x: 0,
@@ -92,6 +107,7 @@ describe("worker path matches the inline step loop", () => {
       vy: 0,
       affinity: n.affinity,
       mass: n.mass,
+      neighbors: n.neighbors,
     }));
     const mirrorAnchors: TopicAnchor[] = liveAnchors.map((a) => ({
       topic: a.topic,
