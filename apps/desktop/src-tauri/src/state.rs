@@ -375,6 +375,14 @@ impl App {
         if let Err(e) = self.collections.flush(UtcMillis::now()) {
             tracing::error!(error = %e, "collections flush failed at shutdown");
         }
+        // Redaction supremacy (EVENTS §7-step-8): truncate the WAL LAST, after
+        // every other subsystem has flushed and released the db, so scrubbed
+        // plaintext cannot linger in `-wal` past exit. A longer retry budget than
+        // idle maintenance (it is worth waiting out a slow reader at quit). If it
+        // still blocks, log loudly: the next launch's open() recovers it.
+        if let Err(e) = self.store.checkpoint_at_shutdown() {
+            tracing::error!(error = %e, "shutdown WAL checkpoint blocked; -wal retained until next open recovers it");
+        }
     }
 }
 

@@ -333,6 +333,15 @@ impl EventStore {
         let path = path.as_ref();
         let writer = schema::open_connection(path)?;
         let from_version = schema::migrate(&writer)?;
+        // Redaction-supremacy recovery (§7-step-8): a prior shutdown whose
+        // checkpoint was blocked may have left scrubbed plaintext in `-wal`.
+        // Truncate now — at open this is the FIRST connection to the db, so no
+        // reader can block it, reliably flushing the committed (already-scrubbed)
+        // state and dropping the pre-scrub frames. Best-effort: a rare
+        // cross-process blocker just defers to the idle/shutdown checkpoints.
+        if let Err(e) = checkpoint_truncate(&writer) {
+            tracing::warn!(error = %e, "startup WAL checkpoint deferred (a sibling reader holds the db)");
+        }
         let mut readers = Vec::with_capacity(READ_POOL_SIZE);
         for _ in 0..READ_POOL_SIZE {
             let mut conn = schema::open_connection(path)?;
@@ -1408,18 +1417,36 @@ impl EventStore {
         }
         Ok(())
     }
+
+    /// Explicit shutdown checkpoint (spec §7-step-8 redaction supremacy + §5.1):
+    /// truncate the WAL with a LONGER retry budget (~2 s) than idle maintenance,
+    /// so a reader still finishing at quit does not leave scrubbed plaintext
+    /// recoverable in `-wal`. The shell calls this from the quit path AFTER every
+    /// other subsystem has flushed and released the db (watchers stopped; the
+    /// session, sidecars, and collections all flushed), maximizing the chance no
+    /// reader blocks. Returns [`StoreError::CheckpointBlocked`] if it still could
+    /// not truncate after the budget; the caller logs loudly and the next `open`
+    /// recovers it.
+    pub fn checkpoint_at_shutdown(&self) -> Result<(), StoreError> {
+        let w = self.writer.lock().expect("writer mutex poisoned");
+        checkpoint_truncate_budget(&w, 20, 100)
+    }
 }
 
 impl Drop for EventStore {
     fn drop(&mut self) {
-        // §5.1: checkpoint at shutdown; PRAGMA optimize on connection close.
-        // Drop cannot return an error: a blocked checkpoint is retried
-        // (bounded, inside checkpoint_truncate) and then reported loudly.
+        // §5.1/§7-step-8: a LAST-RESORT checkpoint at close. The shell's quit
+        // path already calls `checkpoint_at_shutdown` (longer budget) after every
+        // other subsystem has released the db, so this is the backstop for drop
+        // paths that bypass it. A still-blocked checkpoint here means scrubbed
+        // plaintext lingers in `-wal`; the next `open` recovers it, so escalate
+        // to ERROR (not warn) rather than failing — Drop cannot return.
         if let Ok(w) = self.writer.lock() {
             if matches!(checkpoint_truncate(&w), Err(StoreError::CheckpointBlocked)) {
-                tracing::warn!(
-                    "wal_checkpoint(TRUNCATE) at shutdown blocked by a concurrent \
-                     reader; the WAL was not truncated (spec/EVENTS.md §5.1)"
+                tracing::error!(
+                    "wal_checkpoint(TRUNCATE) at close blocked by a concurrent reader; \
+                     scrubbed plaintext may remain in -wal until the next open recovers it \
+                     (spec/EVENTS.md §5.1, redaction supremacy §7)"
                 );
             }
             let _ = schema::run_pragma(&w, "PRAGMA optimize");
@@ -1436,18 +1463,30 @@ impl Drop for EventStore {
 /// bounded retries with a short per-attempt busy wait, then a hard
 /// [`StoreError::CheckpointBlocked`] so callers know the WAL still holds the
 /// pre-checkpoint bytes. The connection's §5.1 `busy_timeout` is restored
-/// afterwards regardless of outcome.
+/// afterwards regardless of outcome. The short default budget suits idle
+/// maintenance + the Drop backstop; the shutdown path uses a longer one.
 fn checkpoint_truncate(w: &Connection) -> Result<(), StoreError> {
-    const ATTEMPTS: usize = 4;
-    const RETRY_SLEEP_MS: u64 = 50;
+    checkpoint_truncate_budget(w, 4, 50)
+}
+
+/// [`checkpoint_truncate`] with a caller-chosen retry budget. The shutdown path
+/// passes a LONGER budget than idle maintenance: redaction supremacy (§7-step-8)
+/// requires scrubbed plaintext to leave the `-wal` before exit, so it is worth
+/// waiting out a reader that is still finishing at quit. Cost is paid only when
+/// actually blocked.
+fn checkpoint_truncate_budget(
+    w: &Connection,
+    attempts: usize,
+    retry_sleep_ms: u64,
+) -> Result<(), StoreError> {
     schema::run_pragma(w, "PRAGMA busy_timeout = 250").map_err(StoreError::from)?;
     let result = (|| {
-        for attempt in 0..ATTEMPTS {
+        for attempt in 0..attempts {
             if schema::checkpoint_truncate_once(w)? {
                 return Ok(true);
             }
-            if attempt + 1 < ATTEMPTS {
-                std::thread::sleep(std::time::Duration::from_millis(RETRY_SLEEP_MS));
+            if attempt + 1 < attempts {
+                std::thread::sleep(std::time::Duration::from_millis(retry_sleep_ms));
             }
         }
         Ok(false)

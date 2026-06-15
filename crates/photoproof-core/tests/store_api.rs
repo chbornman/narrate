@@ -670,6 +670,62 @@ fn blocked_wal_checkpoint_is_an_error_not_silent() {
     assert_eq!(wal_len, 0, "WAL truncated once unblocked");
 }
 
+/// Redaction-supremacy recovery (§7-step-8): if a checkpoint stays blocked all
+/// the way through shutdown (a reader never releases before drop), the scrubbed
+/// plaintext lingers in `-wal`. The NEXT `open` must recover it: at open this is
+/// the first connection, so its startup checkpoint truncates the leaked WAL.
+#[test]
+fn open_recovers_a_shutdown_blocked_wal_checkpoint() {
+    let ts = new_store();
+    let a = hash(2);
+    let v = ts
+        .store
+        .append(
+            &ts.session,
+            d_voice("secret shutdown words", vec![a], None),
+            None,
+        )
+        .unwrap();
+
+    // A reader holding a snapshot blocks the checkpoint at redact AND at drop.
+    let blocker = ts.raw_conn();
+    blocker.execute_batch("BEGIN").unwrap();
+    let _: i64 = blocker
+        .query_row("SELECT COUNT(*) FROM annotation_events", [], |r| r.get(0))
+        .unwrap();
+    assert!(matches!(
+        ts.store.redact(&v.id).unwrap_err(),
+        RedactError::Store(StoreError::CheckpointBlocked)
+    ));
+
+    // Drop the store WHILE the reader still blocks: the Drop checkpoint cannot
+    // truncate either, so the scrubbed plaintext lingers in -wal (the leak).
+    let common::TestStore { dir, store, .. } = ts;
+    drop(store);
+    let wal_path = dir.path().join("journal.db-wal");
+    let leaked = std::fs::read(&wal_path).unwrap_or_default();
+    assert!(
+        leaked
+            .windows(b"secret shutdown words".len())
+            .any(|w| w == b"secret shutdown words"),
+        "precondition: the blocked shutdown left scrubbed plaintext in -wal"
+    );
+
+    // Reader releases; the next open() runs the recovery checkpoint.
+    blocker.execute_batch("ROLLBACK").unwrap();
+    drop(blocker);
+    let reopened = photoproof_core::EventStore::open(dir.path().join("journal.db")).unwrap();
+    assert_eq!(
+        std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0),
+        0,
+        "open() recovers the leaked -wal by truncating it"
+    );
+    assert!(
+        reopened.raw_event(&v.id).unwrap().unwrap().scrubbed(),
+        "the recovered db still reflects the scrub"
+    );
+}
+
 // -- idempotent re-merge heals an interrupted merge (§8, P3) ---------------------
 
 fn payload_column(e: &Event) -> Option<String> {
