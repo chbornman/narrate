@@ -74,6 +74,8 @@
   import {
     aggregateToSuperNodes,
     coolHeat,
+    DEFAULT_NEIGHBOR_ATTRACTION,
+    DEFAULT_NEIGHBOR_REST_LENGTH,
     expandSuperNode,
     REHEAT_START,
     ringAnchors,
@@ -445,8 +447,13 @@
   function forceConfig(): ForceConfig {
     const t = tuning;
     return {
-      attraction: t?.attraction ?? 0.02,
+      attraction: t?.attraction ?? 0.08,
       repulsion: t?.repulsion ?? 800,
+      // Semantic-neighbor spring (CLIP/note similarity), file-tunable so the
+      // founder balances "congregate around topics" (attraction) vs "clump alike
+      // photos" (neighborAttraction) live in tuning.toml without a rebuild.
+      neighborAttraction: t?.neighbor_attraction ?? DEFAULT_NEIGHBOR_ATTRACTION,
+      neighborRestLength: t?.neighbor_rest_length ?? DEFAULT_NEIGHBOR_REST_LENGTH,
       damping: t?.damping ?? 0.85,
       centering: t?.centering ?? 0.01,
       ringRadius: t?.ring_radius ?? 320,

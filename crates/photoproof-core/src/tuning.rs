@@ -159,7 +159,22 @@ const HALF_LIFE_MAX_DAYS: f64 = 365.0;
 const GRAPH_ALPHA_DEFAULT: f64 = 0.5;
 /// Attraction stiffness: an image's pull toward a topic anchor scales with this
 /// times its blended affinity to that topic. Higher = tighter clusters.
-const GRAPH_ATTRACTION: f64 = 0.02;
+/// Raised 0.02 -> 0.08 (founder, June 2026: "attraction to topics needs to be
+/// stronger... images should mostly congregate around topics"): topic affinity
+/// (a CLIP/note cosine) is modest, so a small stiffness left images loose in the
+/// middle; this pulls a well-matched image decisively onto its topic while a
+/// weakly-matched one (small affinity) still drifts free to cluster by semantics.
+const GRAPH_ATTRACTION: f64 = 0.08;
+/// Semantic-neighbor spring stiffness (CLIP/note similarity): how hard alike
+/// photos draw together. Lowered relative to the topic `attraction` (founder:
+/// "attraction to other images needs to be lessened") so topics WIN for matched
+/// images and the neighbor pull only clumps the un-topic'd remainder. The
+/// frontend force sim reads this as `neighborAttraction`.
+const GRAPH_NEIGHBOR_ATTRACTION: f64 = 0.03;
+/// Rest length (px) of the semantic-neighbor spring: neighbors pull together only
+/// while farther apart than this, so a clump packs to a legible disc instead of
+/// collapsing. The frontend reads this as `neighborRestLength`.
+const GRAPH_NEIGHBOR_REST_LENGTH: f64 = 40.0;
 /// Mutual image-image repulsion strength (an inverse-square-ish spread force),
 /// so dense clusters don't collapse to a point.
 const GRAPH_REPULSION: f64 = 800.0;
@@ -455,6 +470,12 @@ pub struct GraphTuning {
     pub attraction: f64,
     /// Mutual image-image repulsion strength.
     pub repulsion: f64,
+    /// Semantic-neighbor spring stiffness (CLIP/note similarity) — how hard alike
+    /// photos draw together (the frontend's `neighborAttraction`).
+    pub neighbor_attraction: f64,
+    /// Rest length (px) of the semantic-neighbor spring (the frontend's
+    /// `neighborRestLength`).
+    pub neighbor_rest_length: f64,
     /// Per-step velocity damping (the sim's cooling).
     pub damping: f64,
     /// Centering pull toward the origin.
@@ -483,6 +504,8 @@ impl Default for GraphTuning {
             alpha_default: GRAPH_ALPHA_DEFAULT,
             attraction: GRAPH_ATTRACTION,
             repulsion: GRAPH_REPULSION,
+            neighbor_attraction: GRAPH_NEIGHBOR_ATTRACTION,
+            neighbor_rest_length: GRAPH_NEIGHBOR_REST_LENGTH,
             damping: GRAPH_DAMPING,
             centering: GRAPH_CENTERING,
             ring_radius: GRAPH_RING_RADIUS,
@@ -664,6 +687,20 @@ impl GraphTuning {
                 GRAPH_FORCE_MIN,
                 GRAPH_FORCE_MAX,
                 d.repulsion,
+            ),
+            neighbor_attraction: range_or_default(
+                "graph.neighbor_attraction",
+                self.neighbor_attraction,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.neighbor_attraction,
+            ),
+            neighbor_rest_length: range_or_default(
+                "graph.neighbor_rest_length",
+                self.neighbor_rest_length,
+                GRAPH_FORCE_MIN,
+                GRAPH_FORCE_MAX,
+                d.neighbor_rest_length,
             ),
             damping: range_or_default(
                 "graph.damping",
@@ -976,8 +1013,10 @@ mod tests {
         assert_eq!(t.preview.embedded_accept_edge, 2048);
         // Graph (DESIGN-SEMANTIC-GRAPH.md) — must match tuning.default.toml.
         assert_eq!(t.graph.alpha_default, 0.5);
-        assert_eq!(t.graph.attraction, 0.02);
+        assert_eq!(t.graph.attraction, 0.08);
         assert_eq!(t.graph.repulsion, 800.0);
+        assert_eq!(t.graph.neighbor_attraction, 0.03);
+        assert_eq!(t.graph.neighbor_rest_length, 40.0);
         assert_eq!(t.graph.damping, 0.85);
         assert_eq!(t.graph.centering, 0.01);
         assert_eq!(t.graph.ring_radius, 320.0);
@@ -1094,7 +1133,7 @@ mod tests {
         // The out-of-range cluster k (>64) snapped back to its default:
         assert_eq!(merged.graph.cluster_k_max, 12);
         // Untouched graph fields kept their defaults:
-        assert_eq!(merged.graph.attraction, 0.02);
+        assert_eq!(merged.graph.attraction, 0.08);
         assert_eq!(merged.graph.ring_radius, 320.0);
         assert_eq!(merged.graph.anchor_attraction, 0.08);
         assert_eq!(merged.graph.anchor_repulsion, 60_000.0);

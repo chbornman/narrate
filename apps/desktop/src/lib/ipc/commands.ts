@@ -199,6 +199,11 @@ export interface GraphTuning {
   alpha_default: number;
   attraction: number;
   repulsion: number;
+  /** Semantic-neighbor spring (CLIP/note similarity): how hard alike photos draw
+   * together, and the spring's rest length (px). The balance vs `attraction`
+   * decides "congregate around topics" vs "clump by similarity". */
+  neighbor_attraction: number;
+  neighbor_rest_length: number;
   damping: number;
   centering: number;
   ring_radius: number;
