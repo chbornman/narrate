@@ -125,6 +125,16 @@ export interface ForceConfig {
    * boosts this above 1 and the caller cools it toward 1, so the layout settles
    * fast then relaxes. Optional: absent ⇒ 1 (the un-reheated steady state). */
   heat?: number;
+  /** STABILITY CLAMP (visualizer audit, June 2026): the maximum distance a body
+   * may move in ONE step, in sim-space px. The explicit integrator has no
+   * intrinsic bound, so with inverse-square repulsion two affinity-clustered
+   * nodes at small separation feel forces of hundreds-to-thousands of px/step;
+   * damping only scales velocity, it cannot stop one huge force launching a node
+   * across the canvas, which seeds a new near-collision and DIVERGES (energy
+   * 1e7+, the "never settles, oozes forever" past ~400 nodes). Clamping each
+   * step's displacement keeps the system unconditionally bounded so it always
+   * reaches rest. Absent ⇒ [`DEFAULT_MAX_STEP`]. */
+  maxStep?: number;
 }
 
 /** Place `topicCount` anchors evenly around a ring of `radius`, starting at the
@@ -153,6 +163,24 @@ export function ringAnchors(topicCount: number, radius: number): TopicAnchor[] {
  * repulsion (and so the inverse-square stays numerically stable). */
 const EPSILON = 1;
 
+/** Default per-step displacement clamp (sim-space px) when `ForceConfig.maxStep`
+ * is absent. ~20px keeps legitimate reheat-driven motion fast while bounding the
+ * inverse-square divergence the audit found (verified: at this clamp an 800-node
+ * cluster settles where it previously exploded). A node simply takes a couple
+ * more steps to cross a long gap instead of teleporting and destabilizing. */
+export const DEFAULT_MAX_STEP = 20;
+
+/** Clamp a velocity/displacement vector to at most `max` magnitude, scaling both
+ * components so direction is preserved. Returns the (possibly scaled) pair. */
+function clampStep(vx: number, vy: number, max: number): [number, number] {
+  const speed = Math.sqrt(vx * vx + vy * vy);
+  if (speed > max) {
+    const s = max / speed;
+    return [vx * s, vy * s];
+  }
+  return [vx, vy];
+}
+
 /** The view transform (sim-space ↔ screen) for the canvas: centered on the
  * canvas, then panned and zoomed. Kept here (pure) so the round-trip is
  * unit-testable and the pan/zoom-to-cursor math has one source of truth. */
@@ -170,7 +198,10 @@ export function simToScreen(
   y: number,
   v: ViewTransform,
 ): [number, number] {
-  return [v.width / 2 + v.panX + x * v.zoom, v.height / 2 + v.panY + y * v.zoom];
+  return [
+    v.width / 2 + v.panX + x * v.zoom,
+    v.height / 2 + v.panY + y * v.zoom,
+  ];
 }
 
 /** Screen px → sim-space (the inverse of `simToScreen`); round-trips exactly. */
@@ -335,6 +366,7 @@ export function step(
   // accelerates LESS for the same force, so an aggregate of N images does not
   // lurch — it drifts to the cluster's home like a single weighty body. (A
   // single image has mass 1, so this is exactly the v1 unit-mass integrator.)
+  const maxStep = config.maxStep ?? DEFAULT_MAX_STEP;
   let energy = 0;
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
@@ -346,8 +378,13 @@ export function step(
       continue;
     }
     const mass = node.mass ?? 1;
-    node.vx = (node.vx + fx[i] / mass) * config.damping;
-    node.vy = (node.vy + fy[i] / mass) * config.damping;
+    // Clamp the per-step displacement so a single large force cannot launch the
+    // node across the canvas and diverge (audit fix); damping alone cannot.
+    [node.vx, node.vy] = clampStep(
+      (node.vx + fx[i] / mass) * config.damping,
+      (node.vy + fy[i] / mass) * config.damping,
+      maxStep,
+    );
     node.x += node.vx;
     node.y += node.vy;
     energy += node.vx * node.vx + node.vy * node.vy;
@@ -364,8 +401,11 @@ export function step(
       anchor.vy = 0;
       continue;
     }
-    anchor.vx = ((anchor.vx ?? 0) + afx[a]) * config.anchorDamping;
-    anchor.vy = ((anchor.vy ?? 0) + afy[a]) * config.anchorDamping;
+    [anchor.vx, anchor.vy] = clampStep(
+      ((anchor.vx ?? 0) + afx[a]) * config.anchorDamping,
+      ((anchor.vy ?? 0) + afy[a]) * config.anchorDamping,
+      maxStep,
+    );
     anchor.x += anchor.vx;
     anchor.y += anchor.vy;
     energy += anchor.vx * anchor.vx + anchor.vy * anchor.vy;
@@ -382,11 +422,16 @@ export function simulate(
   anchors: TopicAnchor[],
   config: ForceConfig,
   maxSteps = 600,
-  restEnergy = 1e-3,
+  restEnergy = 1e-4,
 ): number {
+  // PER-BODY rest test (audit fix): `step` returns total kinetic energy summed
+  // over all bodies, so a fixed threshold never trips at scale (hundreds of
+  // nodes of irreducible micro-jitter sum past it and the loop runs forever).
+  // Compare the MEAN per-body energy so "at rest" is scale-invariant.
+  const bodyCount = Math.max(1, nodes.length + anchors.length);
   for (let s = 1; s <= maxSteps; s++) {
     const energy = step(nodes, anchors, config);
-    if (energy < restEnergy) return s;
+    if (energy / bodyCount < restEnergy) return s;
   }
   return maxSteps;
 }

@@ -194,11 +194,14 @@ const GRAPH_CLUSTER_K_MIN: u32 = 2;
 const GRAPH_CLUSTER_K_MAX: u32 = 12;
 /// v2 full-library LOD — the node count past which the lens AGGREGATES images
 /// into super-nodes instead of rendering every one (DESIGN scale section).
-/// Default 1500: above the v1 scale-spike strain point (the v1 banner fired at
-/// ~1200 nodes) so the force sim runs over super-nodes within the budget the
-/// spike measured. FOUNDER-REVIEW: reconcile with the real spike numbers once
-/// the full-library profile lands.
-const GRAPH_LOD_THRESHOLD: u32 = 1500;
+/// Default 700 (visualizer audit, June 2026): the live force sim is only
+/// numerically comfortable in the low hundreds, so scopes past ~700 aggregate
+/// into super-nodes that settle quickly, keeping the un-aggregated O(N^2) sim
+/// inside its stable, cheap band. (Was 1500 — chosen vs the v1 banner strain
+/// point, but that left the 700-1500 "hundreds of images" band running the full
+/// sim, squarely where it diverged and repainted forever.) Pairs with the
+/// per-step displacement clamp + per-body settle test that bound the sim itself.
+const GRAPH_LOD_THRESHOLD: u32 = 700;
 
 // --- Voice endpoint/VAD feel dials (DESIGN-TUNING-LOOP.md "voice" arm) -------
 //
@@ -985,7 +988,7 @@ mod tests {
         // Graph v2 knobs (cluster k bounds + LOD threshold).
         assert_eq!(t.graph.cluster_k_min, 2);
         assert_eq!(t.graph.cluster_k_max, 12);
-        assert_eq!(t.graph.lod_threshold, 1500);
+        assert_eq!(t.graph.lod_threshold, 700);
         // Heatmap defaults (DESIGN-ATTENTION-HEATMAP.md): dwell leads, the
         // grid tier is a small fraction of Look, 60 s cap, 14-day half-life.
         assert_eq!(t.heatmap.w_dwell, 0.0001);

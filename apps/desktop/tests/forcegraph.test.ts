@@ -283,7 +283,15 @@ describe("force sim handles super-nodes (mass)", () => {
 
   it("a single-image node (no mass) behaves exactly as mass 1", () => {
     const a: ImageNode = { hash: "a", x: 10, y: 0, vx: 0, vy: 0, affinity: [] };
-    const b: ImageNode = { hash: "b", x: 10, y: 0, vx: 0, vy: 0, affinity: [], mass: 1 };
+    const b: ImageNode = {
+      hash: "b",
+      x: 10,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      affinity: [],
+      mass: 1,
+    };
     step([a], [], config);
     step([b], [], config);
     expect(a.x).toBeCloseTo(b.x, 10);
@@ -393,7 +401,11 @@ describe("force-placed anchors", () => {
     // Shared: both anchors' images overlap in space, so the centroid pull draws
     // the anchors together. Disjoint: each anchor's images sit far apart, so the
     // anchors stay apart. The shared pair ends up closer.
-    const cfg: ForceConfig = { ...anchorCfg, anchorAttraction: 0.1, anchorRepulsion: 2000 };
+    const cfg: ForceConfig = {
+      ...anchorCfg,
+      anchorAttraction: 0.1,
+      anchorRepulsion: 2000,
+    };
     const run = (imgs: ImageNode[]) => {
       const an = [
         { topic: 0, x: 0, y: -200, vx: 0, vy: 0 } as TopicAnchor,
@@ -409,7 +421,15 @@ describe("force-placed anchors", () => {
     ];
     // Disjoint: topic 0's images far left, topic 1's far right.
     const disjoint: ImageNode[] = [
-      { hash: "d1", x: -300, y: 0, vx: 0, vy: 0, affinity: [1, 0], fixed: true },
+      {
+        hash: "d1",
+        x: -300,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        affinity: [1, 0],
+        fixed: true,
+      },
       { hash: "d2", x: 300, y: 0, vx: 0, vy: 0, affinity: [0, 1], fixed: true },
     ];
     expect(run(shared)).toBeLessThan(run(disjoint));
@@ -435,7 +455,14 @@ describe("force-placed anchors", () => {
   });
 
   it("a FIXED (being-dragged) anchor also holds its position", () => {
-    const anchor: TopicAnchor = { topic: 0, x: 5, y: 5, vx: 0, vy: 0, fixed: true };
+    const anchor: TopicAnchor = {
+      topic: 0,
+      x: 5,
+      y: 5,
+      vx: 0,
+      vy: 0,
+      fixed: true,
+    };
     const imgs: ImageNode[] = [
       { hash: "a", x: 300, y: 0, vx: 0, vy: 0, affinity: [1] },
     ];
@@ -506,7 +533,13 @@ describe("view transform", () => {
   });
 
   it("panning shifts a sim point by exactly the pan delta in screen px", () => {
-    const base: ViewTransform = { width: 800, height: 600, zoom: 2, panX: 0, panY: 0 };
+    const base: ViewTransform = {
+      width: 800,
+      height: 600,
+      zoom: 2,
+      panX: 0,
+      panY: 0,
+    };
     const panned: ViewTransform = { ...base, panX: 30, panY: -15 };
     const [bx, by] = simToScreen(10, 10, base);
     const [px, py] = simToScreen(10, 10, panned);
@@ -634,4 +667,75 @@ describe("seedNearAnchors — snap relevant nodes to their topic (founder)", () 
     // few steps it is strictly nearer its anchor than the un-seeded spiral start.
     expect(distOfCAfter(true)).toBeLessThan(distOfCAfter(false));
   });
+});
+
+describe("stability at scale (visualizer audit: the never-settling fix)", () => {
+  // Shipped-ish graph defaults (the regime the audit found diverges): strong
+  // inverse-square repulsion over a tight cluster of hundreds of nodes.
+  const scaleCfg: ForceConfig = {
+    attraction: 0.02,
+    repulsion: 800,
+    damping: 0.85,
+    centering: 0.01,
+    ringRadius: 320,
+    anchorAttraction: 0.08,
+    anchorRepulsion: 60000,
+    anchorDamping: 0.8,
+    anchorCentering: 0.01,
+  };
+
+  // 800 image nodes in a deterministic TIGHT cluster near the origin, each
+  // holding to one of 3 topics. Small separations make the repulsion fierce,
+  // exactly what blew up the unclamped integrator past ~400 nodes.
+  function bigCluster(n: number, topics: number): ImageNode[] {
+    const nodes: ImageNode[] = [];
+    for (let i = 0; i < n; i++) {
+      const ang = i * 2.399963229; // golden angle: deterministic, well spread
+      const rad = (i % 25) * 0.6; // within ~15px of the origin
+      const aff = new Array(topics).fill(0);
+      aff[i % topics] = 1;
+      nodes.push({
+        hash: "n" + i,
+        x: Math.cos(ang) * rad,
+        y: Math.sin(ang) * rad,
+        vx: 0,
+        vy: 0,
+        affinity: aff,
+      });
+    }
+    return nodes;
+  }
+
+  it("a 500-node cluster SETTLES with the per-step clamp", () => {
+    const nodes = bigCluster(500, 3);
+    const anchors = ringAnchors(3, 320);
+    const steps = simulate(nodes, anchors, scaleCfg, 3000, 1e-4);
+    expect(steps).toBeLessThan(3000); // reached rest within the budget
+    for (const nd of nodes) {
+      expect(Number.isFinite(nd.x) && Number.isFinite(nd.y)).toBe(true);
+      // Bounded: a few ring radii, never flung to 1e7.
+      expect(Math.hypot(nd.x, nd.y)).toBeLessThan(scaleCfg.ringRadius * 8);
+    }
+  }, 30000);
+
+  it("the same cluster does NOT settle WITHOUT the clamp (regression proof)", () => {
+    const nodes = bigCluster(500, 3);
+    const anchors = ringAnchors(3, 320);
+    // maxStep Infinity reproduces the pre-fix unbounded integrator; the
+    // divergence is fast, so a short budget is enough to prove it never rests.
+    const steps = simulate(
+      nodes,
+      anchors,
+      { ...scaleCfg, maxStep: Infinity },
+      500,
+      1e-4,
+    );
+    expect(steps).toBe(500); // hit the cap: never reached rest
+    // And it diverged: at least one node is non-finite or flung absurdly far.
+    const diverged = nodes.some((nd) => {
+      const r = Math.hypot(nd.x, nd.y);
+      return !Number.isFinite(r) || r > scaleCfg.ringRadius * 20;
+    });
+    expect(diverged).toBe(true);
+  }, 30000);
 });

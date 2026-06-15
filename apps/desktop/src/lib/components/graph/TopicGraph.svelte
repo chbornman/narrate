@@ -419,6 +419,11 @@
   // mutual repulsion fling them off-canvas forever.
   const ANCHOR_CENTERING = 0.01;
 
+  // Per-body kinetic-energy threshold for "at rest" (see isSettled). Scale-
+  // invariant: total energy / body count, so the loop stops whether the scope is
+  // 6 nodes or 1,000. ~1e-3 ⇒ mean speed ~0.03 sim-px/step, visually still.
+  const REST_ENERGY_PER_BODY = 1e-3;
+
   function forceConfig(): ForceConfig {
     const t = tuning;
     return {
@@ -788,9 +793,17 @@
 
   /** Shared idle predicate: the layout is at rest, the reheat has fully cooled,
    * and a few settle frames have passed (guarding an early-zero opening frame).
-   * Identical threshold to the v1 loop so behavior is unchanged. */
+   *
+   * PER-BODY rest test (visualizer audit, June 2026): the sim returns TOTAL
+   * kinetic energy summed over all bodies, so the old fixed `energy < 1e-2`
+   * (tuned on a ~6-node fixture) never tripped at scale: hundreds of nodes of
+   * irreducible micro-jitter sum past it, so the loop ran forever and draw()
+   * repainted every frame indefinitely (the founder's "never settles" + the
+   * main-thread theft that compounded the slow load). Dividing by the body count
+   * makes "at rest" scale-invariant, matching `simulate`'s rest test. */
   function isSettled(energy: number): boolean {
-    return energy < 1e-2 && heat <= 1.0001 && settleCount > 30;
+    const bodies = Math.max(1, nodes.length + anchors.length);
+    return energy / bodies < REST_ENERGY_PER_BODY && heat <= 1.0001 && settleCount > 30;
   }
 
   /** What a settle does (both paths): stop ticking and recompute the influence
