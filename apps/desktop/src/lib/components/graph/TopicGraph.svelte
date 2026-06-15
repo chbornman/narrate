@@ -52,6 +52,7 @@
   import { onMount, untrack } from "svelte";
   import { ui } from "../../state/app.svelte";
   import * as ipc from "../../ipc/commands";
+  import type { RuntimeStatus } from "../../types/dto";
   import * as prefs from "../../state/prefs";
   import {
     computeTopicFields,
@@ -138,6 +139,14 @@
   let nodeCount = $state(0);
   let visualReady = $state(false);
   let annotationReady = $state(false);
+  /** True while we are waiting on an in-process embedder (CLIP and/or text ort
+   * sessions) that this view needs but that has not finished loading yet. The
+   * affinity ran but produced no signal for that half; we poll runtime_status
+   * and recompute the moment the embedder comes up (self-heal, founder: the
+   * graph "still feels stuck" because affinity was computed once at launch
+   * BEFORE the CLIP session finished loading and never recomputed). Surfaced in
+   * the banner so the wait is honest, not a silent dead graph. */
+  let embeddersLoading = $state(false);
   /** A visible note about the layout: past the LOD threshold it reads "LOD
    * active (showing N clusters of M images)"; below it is null (full detail). */
   let scaleNote = $state<string | null>(null);
@@ -434,6 +443,76 @@
     };
   }
 
+  // -- self-heal: recompute once the embedders this view needs come up ---------
+  /** Pending readiness poll, so we never stack timers or fire into a dead view. */
+  let readinessTimer: ReturnType<typeof setTimeout> | null = null;
+  /** How many readiness polls remain before we give up (the embedder is not
+   * coming, e.g. tier 0 / not installed): bounds the poll so it can't spin
+   * forever. ~40 * 1500ms = 60s, comfortably longer than a cold ort load. */
+  let readinessTries = 0;
+  const READINESS_MAX_TRIES = 40;
+  const READINESS_POLL_MS = 1500;
+
+  function clearReadinessRetry() {
+    if (readinessTimer !== null) {
+      clearTimeout(readinessTimer);
+      readinessTimer = null;
+    }
+  }
+
+  /** After a recompute that produced no signal for a half, find out WHY: an
+   * embedder still warming up (poll + recompute when it lands) versus a genuinely
+   * un-embedded space (nothing to wait for). Only the halves THIS view is missing
+   * matter, so an annotation-less library does not block on the text embedder. */
+  async function retryWhenEmbeddersReady() {
+    clearReadinessRetry();
+    const needVisual = !visualReady;
+    const needAnnotation = !annotationReady;
+    if (!needVisual && !needAnnotation) {
+      embeddersLoading = false;
+      return;
+    }
+    let status: RuntimeStatus;
+    try {
+      status = await ipc.runtimeStatus();
+    } catch {
+      // Status unreachable (degraded shell): stop polling; the next user-driven
+      // recompute will try again. Not an error worth surfacing under the user.
+      embeddersLoading = false;
+      return;
+    }
+    // An embedder this view was waiting on just came up ⇒ the cached degraded
+    // report is stale: evict that one entry and recompute against the live space.
+    const visualLanded = needVisual && status.clipReady;
+    const annotationLanded = needAnnotation && status.textEmbedderReady;
+    if (visualLanded || annotationLanded) {
+      embeddersLoading = false;
+      readinessTries = 0;
+      affinityCache.delete(topics, scope(), alpha);
+      void recompute();
+      return;
+    }
+    // Still loading. Keep waiting only while the embedder plausibly COULD load:
+    // a blocked half (will never flip) or an exhausted budget stops the poll so
+    // the banner stops lying about an arrival that is not coming.
+    const visualWaiting = needVisual && !status.clipReady;
+    const annotationWaiting = needAnnotation && !status.textEmbedderReady;
+    if (
+      (visualWaiting || annotationWaiting) &&
+      readinessTries < READINESS_MAX_TRIES
+    ) {
+      embeddersLoading = true;
+      readinessTries += 1;
+      readinessTimer = setTimeout(
+        () => void retryWhenEmbeddersReady(),
+        READINESS_POLL_MS,
+      );
+    } else {
+      // Nothing left to wait for: the missing half is genuinely un-embedded.
+      embeddersLoading = false;
+    }
+  }
+
   // -- affinity fetch + (re)seed ----------------------------------------------
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
@@ -486,6 +565,12 @@
     const elapsed = Math.round(performance.now() - t0);
     visualReady = report.visual_ready;
     annotationReady = report.annotation_ready;
+    // A fresh recompute resets the readiness-poll budget (this is a new wait,
+    // not a continuation of a prior one) and re-arms the self-heal: if a half
+    // this view needs is still warming up, poll runtime_status and recompute
+    // when it lands. A fully-ready view cancels any in-flight poll.
+    readinessTries = 0;
+    void retryWhenEmbeddersReady();
 
     affinity = new Map(report.images.map((i) => [i.image_hash, i.scores.map((s) => s.affinity)]));
     const hashes = report.images.map((i) => i.image_hash);
@@ -1854,6 +1939,11 @@
         draw();
         scheduleFieldRecompute();
         void loadSuggestions();
+        // A snapshot saved while an embedder was still loading restores a
+        // degraded (no-signal) layout; re-arm the self-heal so it fills in once
+        // the embedder lands instead of staying stuck across a reopen.
+        readinessTries = 0;
+        void retryWhenEmbeddersReady();
         return;
       }
       // Cold open (no snapshot, or scope/topics changed): the full path. Apply
@@ -1898,6 +1988,9 @@
         clearTimeout(lodZoomTimer);
         lodZoomTimer = null;
       }
+      // Stop the embedder-readiness poll so it can't recompute into a dead view
+      // (a reopen re-arms it from recompute()).
+      clearReadinessRetry();
       // NOTE: we do NOT dispose `thumbs` — it is the MODULE-LEVEL cache that must
       // survive this unmount so a reopen reuses the loaded thumbnails. Detaching
       // the repaint hook (above) already makes any in-flight load that completes
@@ -2170,6 +2263,11 @@
       {/if}
       {#if topics.length === 0}
         <span class="dim">add a topic to pull the images apart</span>
+      {:else if embeddersLoading}
+        <!-- Honest wait (founder: "still feels stuck"): the affinity ran before
+             the in-process embedder finished loading, so the map will fill in by
+             itself the moment it lands. Not a silent dead graph. -->
+        <span class="dim">loading embeddings, the map will fill in shortly</span>
       {:else}
         <span class="dim">
           {visualReady ? "visual ready" : "visual idle"} ·

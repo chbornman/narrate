@@ -12,7 +12,11 @@ import {
   type ScopeKeyInput,
 } from "../src/lib/logic/affinitycache";
 
-const folder: ScopeKeyInput = { kind: "folder", root_id: "r1", folder: "iceland" };
+const folder: ScopeKeyInput = {
+  kind: "folder",
+  root_id: "r1",
+  folder: "iceland",
+};
 const collection: ScopeKeyInput = { kind: "collection", id: "c1" };
 const library: ScopeKeyInput = { kind: "library" };
 
@@ -24,10 +28,12 @@ describe("scopeKey — stable, change-sensitive scope identity", () => {
   });
 
   it("a different folder/collection is a different key", () => {
-    expect(scopeKey({ kind: "folder", root_id: "r1", folder: "spain" })).not.toBe(
-      scopeKey(folder),
+    expect(
+      scopeKey({ kind: "folder", root_id: "r1", folder: "spain" }),
+    ).not.toBe(scopeKey(folder));
+    expect(scopeKey({ kind: "collection", id: "c2" })).not.toBe(
+      scopeKey(collection),
     );
-    expect(scopeKey({ kind: "collection", id: "c2" })).not.toBe(scopeKey(collection));
   });
 });
 
@@ -99,5 +105,24 @@ describe("AffinityCache — hit / miss / invalidation", () => {
     expect(cache.size).toBe(0);
     cache.set(["harbor"], folder, 0.5, "B");
     expect(cache.get(["harbor"], folder, 0.5)).toBe("B");
+  });
+
+  it("delete() evicts ONE entry, leaving the generation's others intact (self-heal)", () => {
+    const cache = new AffinityCache<string>();
+    cache.set(["harbor"], folder, 0.5, "DEGRADED");
+    cache.set(["harbor", "dusk"], folder, 0.5, "GOOD");
+    // The self-heal evicts only the stale (embedder-not-ready) report so the
+    // next recompute refetches it; the sibling entry must survive.
+    cache.delete(["harbor"], folder, 0.5);
+    expect(cache.get(["harbor"], folder, 0.5)).toBeUndefined();
+    expect(cache.get(["harbor", "dusk"], folder, 0.5)).toBe("GOOD");
+  });
+
+  it("delete() is a no-op on a missing key (idempotent)", () => {
+    const cache = new AffinityCache<string>();
+    cache.set(["harbor"], folder, 0.5, "A");
+    cache.delete(["nope"], folder, 0.5);
+    expect(cache.size).toBe(1);
+    expect(cache.get(["harbor"], folder, 0.5)).toBe("A");
   });
 });
