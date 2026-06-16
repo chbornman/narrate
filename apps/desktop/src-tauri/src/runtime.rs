@@ -436,9 +436,14 @@ impl RuntimeHost {
             // surfacing is exactly as fresh as the readiness flags above.
             asr_blocked: self.supervisors.asr_blocked(),
             llm_blocked: self.supervisors.llm_blocked(),
-            // P7.4 §3.3: in-process embedder readiness (sessions built).
+            // P7.4 §3.3: in-process embedder readiness (sessions built). The
+            // bools stay for the readiness-gate consumers; the `clip`/
+            // `text_embedder` slots carry the richer idle/building/failed
+            // state + error so the UI can distinguish loading from failed.
             clip_ready: self.embedders.clip_ready(),
             text_embedder_ready: self.embedders.text_ready(),
+            clip: self.embedders.clip_slot(),
+            text_embedder: self.embedders.text_slot(),
             tier_detected: state.tier.detected_tier,
             tier_effective: tier,
             tier_overridden_above: state.tier.overridden_above,

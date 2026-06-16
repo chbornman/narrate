@@ -36,6 +36,8 @@ use photoproof_connectors::model_specs::{
 };
 use photoproof_core::runtime::plan::{ProcessPlan, RuntimePlan};
 
+use crate::dto::{EmbedderSlot, EmbedderState};
+
 /// One role's lifecycle. `Building` carries the model id whose load is in
 /// flight so a config change mid-build can tell "still the right model"
 /// from "rebuild needed"; `Ready` holds the constructed connector.
@@ -63,6 +65,33 @@ impl Slot {
             Slot::Building { model_id }
             | Slot::Ready { model_id, .. }
             | Slot::Failed { model_id, .. } => Some(model_id),
+        }
+    }
+
+    /// Project this internal lifecycle onto the wire slot the runtime status
+    /// reports. The error rides ONLY on `Failed` (the native load message);
+    /// every other state carries `None`. WHY here and not in `runtime.rs`:
+    /// `embedders.rs` lives in the same desktop crate as `dto`, so it builds
+    /// the DTO directly — no core->dto dependency inversion, and the mapping
+    /// sits next to the `Slot` definition it must stay in lockstep with.
+    fn to_dto(&self) -> EmbedderSlot {
+        match self {
+            Slot::Idle => EmbedderSlot {
+                state: EmbedderState::Idle,
+                error: None,
+            },
+            Slot::Building { .. } => EmbedderSlot {
+                state: EmbedderState::Building,
+                error: None,
+            },
+            Slot::Ready { .. } => EmbedderSlot {
+                state: EmbedderState::Ready,
+                error: None,
+            },
+            Slot::Failed { msg, .. } => EmbedderSlot {
+                state: EmbedderState::Failed,
+                error: Some(msg.clone()),
+            },
         }
     }
 }
@@ -130,6 +159,19 @@ impl EmbedderHost {
     /// True once the CLIP sessions are constructed.
     pub fn clip_ready(&self) -> bool {
         matches!(&*self.clip.lock().expect("clip slot"), Slot::Ready { .. })
+    }
+
+    /// The text role's full slot for the runtime status: idle/building/ready/
+    /// failed plus the failure message. Richer than `text_ready()` (which
+    /// flattens everything but Ready to false) so the settings row can tell
+    /// "loading" from "failed" from "inactive".
+    pub fn text_slot(&self) -> EmbedderSlot {
+        self.text.lock().expect("text slot").to_dto()
+    }
+
+    /// The CLIP role's full slot for the runtime status (see `text_slot`).
+    pub fn clip_slot(&self) -> EmbedderSlot {
+        self.clip.lock().expect("clip slot").to_dto()
     }
 
     /// The constructed text embedder, when ready — the search rig and the
@@ -396,6 +438,62 @@ mod tests {
         assert!(lines.contains("clip-embedder: idle"));
     }
 
+    /// The `Slot -> EmbedderSlot` projection for all four states: the error
+    /// rides ONLY on Failed; every other state carries None. This is the wire
+    /// contract the settings rows read, so pin it directly off each variant.
+    #[test]
+    fn slot_to_dto_maps_all_four_states() {
+        assert_eq!(
+            Slot::Idle.to_dto(),
+            EmbedderSlot {
+                state: EmbedderState::Idle,
+                error: None,
+            }
+        );
+        assert_eq!(
+            Slot::Building {
+                model_id: "m".into(),
+            }
+            .to_dto(),
+            EmbedderSlot {
+                state: EmbedderState::Building,
+                error: None,
+            }
+        );
+        // Ready needs a real constructed connector; the fresh-host Ready path
+        // is exercised by the ignored end-to-end test. Here pin the three
+        // non-Ready projections plus the error-carrying Failed.
+        let failed = Slot::Failed {
+            model_id: "m".into(),
+            msg: "ort load failed: boom".into(),
+        }
+        .to_dto();
+        assert_eq!(failed.state, EmbedderState::Failed);
+        assert_eq!(failed.error.as_deref(), Some("ort load failed: boom"));
+    }
+
+    /// A fresh host reports both slots Idle with no error — the same posture
+    /// the bools report (false) but with the honest "inactive, not failed"
+    /// distinction the bool cannot carry.
+    #[test]
+    fn fresh_host_slots_are_idle_no_error() {
+        let host = EmbedderHost::new();
+        assert_eq!(
+            host.text_slot(),
+            EmbedderSlot {
+                state: EmbedderState::Idle,
+                error: None,
+            }
+        );
+        assert_eq!(
+            host.clip_slot(),
+            EmbedderSlot {
+                state: EmbedderState::Idle,
+                error: None,
+            }
+        );
+    }
+
     /// An unknown model id (no recipe) lands the slot in FAILED, not a
     /// panic — the synchronous resolve path is exercised without any model
     /// files. Both roles take the same firewall.
@@ -415,6 +513,21 @@ mod tests {
         let lines = host.debug_lines().join("\n");
         assert!(lines.contains("clip-embedder: FAILED"), "{lines}");
         assert!(lines.contains("text-embedder: FAILED"), "{lines}");
+        // The slots report Failed with the recipe-mismatch message in `error`
+        // (the host's synchronous "no ort recipe" landing) — so the UI shows a
+        // failed row, not an eternal spinner.
+        let clip = host.clip_slot();
+        assert_eq!(clip.state, EmbedderState::Failed);
+        assert_eq!(
+            clip.error.as_deref(),
+            Some("no ort clip recipe for not-a-clip")
+        );
+        let text = host.text_slot();
+        assert_eq!(text.state, EmbedderState::Failed);
+        assert_eq!(
+            text.error.as_deref(),
+            Some("no ort text recipe for not-a-text")
+        );
     }
 
     /// A dark plan (NotConfigured everywhere) keeps both slots Idle, and a

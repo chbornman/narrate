@@ -253,6 +253,32 @@ impl PartialEq for PassRemaining {
 }
 impl Eq for PassRemaining {}
 
+/// One embedder role's real load state on the wire (idle/building/ready/failed).
+/// WHY: the `clip_ready`/`text_embedder_ready` bools below collapse Idle,
+/// Building and Failed all into `false`, so the UI cannot tell "still loading"
+/// from "failed" from "inactive" — a failed text embedder looks like it loads
+/// forever. This mirrors the host's internal per-role `Slot` (embedders.rs) so
+/// the settings rows can show the honest state + the failure detail.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbedderState {
+    Idle,
+    Building,
+    Ready,
+    Failed,
+}
+
+/// A role's slot as the runtime status reports it: the coarse state plus the
+/// failure detail. `error` is `Some(msg)` ONLY when `state == Failed` (the
+/// native load message from the host's `Slot::Failed`); every other state
+/// carries `None`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedderSlot {
+    pub state: EmbedderState,
+    pub error: Option<String>,
+}
+
 /// RUNTIME contract seam (P6.2 fills this in; M1 is the degraded mode that
 /// is exactly the full journal product — DECISIONS K15).
 #[derive(Debug, Clone, Serialize)]
@@ -273,8 +299,21 @@ pub struct RuntimeStatus {
     /// P7.4 §3.3: the in-process embedder readiness — true once the ort
     /// sessions are constructed (additive; settings rows show running/idle
     /// state text). False keeps search keyword-only and the backfill dark.
+    ///
+    /// KEPT alongside the richer `clip`/`text_embedder` slots below: other
+    /// consumers (e.g. `active_vector_models`) gate on these bools, and they
+    /// are exactly `slot.state == Ready`. The slots add the missing
+    /// building/failed/idle distinction the bools cannot express.
     pub clip_ready: bool,
     pub text_embedder_ready: bool,
+    /// The CLIP embedder's real load state + failure detail (idle/building/
+    /// ready/failed). Lets the settings row show "loading" vs "failed" vs
+    /// "inactive" instead of one flat false.
+    pub clip: EmbedderSlot,
+    /// The text embedder's real load state + failure detail. A staged-but-slow
+    /// EmbeddingGemma reads `building`; a corrupt/missing-weight load reads
+    /// `failed` with the ort error in `error`.
+    pub text_embedder: EmbedderSlot,
     pub tier_detected: u8,
     /// After the `[runtime] tier` override — it always wins (§6.2).
     pub tier_effective: u8,
