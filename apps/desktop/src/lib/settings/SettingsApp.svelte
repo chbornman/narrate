@@ -585,7 +585,15 @@
     overflow-y: auto;
     height: 100%;
   }
+  /* Sticky so the header bar (the "Settings" title + the native traffic-light
+     strip on macOS) stays pinned at the top while the sections scroll beneath
+     it, instead of scrolling away. The --bg fill + z-index keep the scrolling
+     content from showing through or above it. */
   .drag {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
     display: flex;
     justify-content: space-between;
     align-items: center;
