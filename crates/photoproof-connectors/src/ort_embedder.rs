@@ -549,21 +549,24 @@ fn build_session_with_coreml(
 ) -> Result<ort::session::builder::SessionBuilder, String> {
     use ort::ep::CoreML;
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
-    // PHOTOPROOF_ORT_COREML_UNITS picks the CoreML compute units. WHY a knob:
-    // the fp16 DFN5B graph fragments into ~64 CoreML partitions (visual 36 +
-    // textual 28); on the ANE (CPUAndNeuralEngine, the default) Apple's per-
-    // partition model-prep is slow, so even a cache-warm load is minutes. The
-    // Metal GPU path (`gpu` -> CPUAndGPU) usually skips that ANE prep and loads
-    // far faster. Unset/anything-else keeps today's ANE behavior, so this is an
-    // opt-in escape hatch; once measured it can become the default.
+    // PHOTOPROOF_ORT_COREML_UNITS picks the CoreML compute units. DEFAULT is now
+    // CPUAndGPU (Metal): the fp16 DFN5B graph fragments into ~64 CoreML
+    // partitions (visual 36 + textual 28), and on the ANE
+    // (CPUAndNeuralEngine) Apple's per-partition model-prep is pathologically
+    // slow -- a MEASURED cache-warm load was 878s (~14.6 min) on an M1, which
+    // stalls the embed drain and the UI for a quarter hour every launch. Metal
+    // skips that ANE prep. `ane` remains a selectable escape hatch (e.g. to
+    // reclaim ANE's power efficiency once its load cost is understood -- see the
+    // "investigate ANE load" backlog item); `all` lets CoreML choose.
     let units = match std::env::var("PHOTOPROOF_ORT_COREML_UNITS")
         .unwrap_or_default()
         .to_ascii_lowercase()
         .as_str()
     {
-        "gpu" => ComputeUnits::CPUAndGPU,
+        "ane" => ComputeUnits::CPUAndNeuralEngine,
         "all" => ComputeUnits::All,
-        _ => ComputeUnits::CPUAndNeuralEngine,
+        // unset or "gpu" -> the Metal default.
+        _ => ComputeUnits::CPUAndGPU,
     };
     let mut ep = CoreML::default()
         .with_compute_units(units)

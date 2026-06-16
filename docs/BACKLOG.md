@@ -322,6 +322,25 @@ each lands, exact API, effort/risk/win/validation) is **docs/PLAN-PERF.md**.
 Ordered by the plan below. Validate the spikes; do not act on unverified
 magnitudes.
 
+- [ ] **Investigate the ANE CLIP-load tax (and reclaim ANE if possible)**
+  (founder, June 16 2026): the fp16 DFN5B CLIP fragments into ~64 CoreML
+  partitions (visual 36 + textual 28, ~100 of ~1500 nodes per tower fall off the
+  Neural Engine), and on `CPUAndNeuralEngine` Apple's per-partition model-prep is
+  pathological: a MEASURED cache-WARM load was **878s (~14.6 min)** on an M1, which
+  stalled the embed drain + the UI for a quarter hour every launch (it surfaced as
+  "embedder loading" that never finished; the slot stayed `Building`). FIX SHIPPED:
+  default macOS CoreML compute units flipped to **Metal (`CPUAndGPU`)** via
+  `PHOTOPROOF_ORT_COREML_UNITS` (`ort_embedder.rs build_session_with_coreml`; `ane`
+  is the escape hatch). REMAINING INVESTIGATION: (a) WHY does the graph fragment so
+  badly on ANE - which ops force the partition boundaries, and can the exported
+  ONNX avoid them (op substitution / a re-export) so the whole tower maps to ANE in
+  one piece; (b) measure ANE INFERENCE + power vs Metal once load is not the
+  bottleneck (ANE wins perf-per-watt - worth reclaiming on laptops if the load tax
+  is solved); (c) is the slow per-partition prep an `ort` rc.12 / onnxruntime
+  quirk vs raw CoreML; (d) does `ModelFormat`/cache tuning help. Pairs with the
+  CoreML EP item below + docs/SPIKE-COREML.md. New harness: `coreml_spike.rs
+  coreml_spike_fp16_gpu_load` times the Metal load (cold/warm).
+
 - [~] **CoreML EP spike (the embedding bottleneck)** - SPIKE DONE June 14, verdict
   **SHIP-WITH-FP16** (`docs/SPIKE-COREML.md` + `crates/photoproof-connectors/tests/
   coreml_spike.rs`, merged `17255f5`). The int8 tower could not load under CoreML (the

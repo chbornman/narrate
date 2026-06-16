@@ -528,3 +528,38 @@ fn coreml_spike_fp16_clip_image_cpu_vs_coreml() {
         "CoreML FP16 embeddings diverged from CPU (mean cosine {mean:.4}); see docs/SPIKE-COREML.md"
     );
 }
+
+/// GPU (Metal) load-time probe — the basis for the Metal-default decision (the
+/// ANE warm load measured 878s / ~14.6 min on an M1). Loads the fp16 CLIP under
+/// CPUAndGPU twice: the FIRST build compiles + caches the Metal model (cold),
+/// the SECOND reuses the cache (warm). Prints the seconds for each. No
+/// inference: this isolates LOAD time, the thing ANE made pathological.
+#[test]
+#[ignore = "spike measurement; run on macOS with --ignored --nocapture"]
+fn coreml_spike_fp16_gpu_load() {
+    let (vis, _, _) = clip_paths_fp16();
+    if !vis.exists() {
+        eprintln!(
+            "skipping: FP16 visual tower absent at {} (see docs/SPIKE-COREML.md)",
+            vis.display()
+        );
+        return;
+    }
+    // Force Metal compute units for this measurement (also the shipped default).
+    // SAFETY: single-threaded test setup; no other thread reads env here.
+    unsafe { std::env::set_var("PHOTOPROOF_ORT_COREML_UNITS", "gpu") };
+    for label in ["cold (compile)", "warm (cached)"] {
+        let t = Instant::now();
+        match build_clip_fp16_fallible(true) {
+            Ok(_) => println!(
+                "[coreml-spike gpu] {label} load: {:.1}s",
+                t.elapsed().as_secs_f64()
+            ),
+            Err(e) => {
+                println!("[coreml-spike gpu] {label} FAILED to load: {e}");
+                break;
+            }
+        }
+    }
+    unsafe { std::env::remove_var("PHOTOPROOF_ORT_COREML_UNITS") };
+}
