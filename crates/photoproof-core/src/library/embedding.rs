@@ -26,7 +26,7 @@ use std::path::Path;
 
 use photoproof_connectors::embedder::{DecodedImage, Embedder};
 use photoproof_connectors::vector_store::{VecKey, VecKind, VecSpace, VecUnit};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use super::preview::GENERATOR_VERSION;
 use super::{ArtifactKind, Library, LibraryError, QueueOptions, QueueReport, ingest};
@@ -420,8 +420,31 @@ impl Library {
             });
         let Some(path) = artifact else {
             let conn = self.db.lock().expect("poisoned");
-            ingest::defer(&conn, item, "preview-not-ready", self.now())?;
-            report.transient_retries += 1;
+            // No artifact. Distinguish a TRANSIENT not-ready (the preview pass
+            // simply has not run yet -> defer without burning attempts, like an
+            // offline volume) from a TERMINAL one (the preview pass was SKIPPED,
+            // e.g. `deferred-heic` until the HEIC/RAW decode worker lands, §9.5).
+            // A terminally-skipped preview NEVER produces an artifact, so a plain
+            // defer pins the image as eternal `pending` work and the library
+            // never settles (founder: stuck at 471/514 on 43 HEICs). Skip the
+            // embed to match; the future HEIC/RAW backfill re-pends both passes.
+            let preview_skipped = conn
+                .query_row(
+                    "SELECT state FROM ingest_passes
+                     WHERE image_hash = ?1 AND pass_name = ?2
+                     ORDER BY pass_version DESC LIMIT 1",
+                    params![item.image_hash.as_str(), ingest::PassName::Preview.as_str()],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .as_deref()
+                == Some("skipped");
+            if preview_skipped {
+                ingest::mark_skipped(&conn, item, "preview-deferred", self.now())?;
+            } else {
+                ingest::defer(&conn, item, "preview-not-ready", self.now())?;
+                report.transient_retries += 1;
+            }
             return Ok(());
         };
 
