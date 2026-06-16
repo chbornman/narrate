@@ -555,36 +555,38 @@
       embeddersLoading = false;
       return;
     }
-    // An embedder this view was waiting on just came up ⇒ the cached degraded
-    // report is stale: evict that one entry and recompute against the live space.
-    const visualLanded = needVisual && status.clipReady;
-    const annotationLanded = needAnnotation && status.textEmbedderReady;
-    if (visualLanded || annotationLanded) {
+    // For each missing half, is its signal still plausibly COMING -- the embedder
+    // is building, OR it is ready but the space is mid-embedding (clipReady yet
+    // visual_ready still false because the vectors are still being computed) --
+    // versus genuinely ABSENT (embedder idle/failed -> nothing will arrive)?
+    // The OLD code recomputed IMMEDIATELY whenever clipReady was true, so a
+    // ready-but-unembedded space looped ~45x/sec (founder). Instead we POLL the
+    // landing vectors on a bounded 1.5s cadence -- never a tight loop.
+    const visualComing =
+      needVisual && status.clip.state !== "idle" && status.clip.state !== "failed";
+    const annotationComing =
+      needAnnotation &&
+      status.textEmbedder.state !== "idle" &&
+      status.textEmbedder.state !== "failed";
+
+    if ((!visualComing && !annotationComing) || readinessTries >= READINESS_MAX_TRIES) {
+      // Nothing plausibly arriving (the half is genuinely un-embedded / failed)
+      // or the budget is spent: stop. The banner stops lying about an arrival
+      // that is not coming, and we never spin.
       embeddersLoading = false;
-      readinessTries = 0;
-      affinityCache.delete(topics, scope(), alpha);
-      void recompute();
       return;
     }
-    // Still loading. Keep waiting only while the embedder plausibly COULD load:
-    // a blocked half (will never flip) or an exhausted budget stops the poll so
-    // the banner stops lying about an arrival that is not coming.
-    const visualWaiting = needVisual && !status.clipReady;
-    const annotationWaiting = needAnnotation && !status.textEmbedderReady;
-    if (
-      (visualWaiting || annotationWaiting) &&
-      readinessTries < READINESS_MAX_TRIES
-    ) {
-      embeddersLoading = true;
-      readinessTries += 1;
-      readinessTimer = setTimeout(
-        () => void retryWhenEmbeddersReady(),
-        READINESS_POLL_MS,
-      );
-    } else {
-      // Nothing left to wait for: the missing half is genuinely un-embedded.
-      embeddersLoading = false;
-    }
+
+    // Plausibly arriving: re-fetch affinities ONCE per 1.5s (bounded), so the
+    // graph fills in as vectors land. `recompute(true)` is a self-heal
+    // CONTINUATION (it does not reset the budget), so a space that never finishes
+    // embedding still stops after READINESS_MAX_TRIES rather than polling forever.
+    embeddersLoading = true;
+    readinessTries += 1;
+    readinessTimer = setTimeout(() => {
+      affinityCache.delete(topics, scope(), alpha);
+      void recompute(true);
+    }, READINESS_POLL_MS);
   }
 
   /** Fetch (or reuse the scope-cached) semantic-neighbor graph and SET each
@@ -645,7 +647,7 @@
   // -- affinity fetch + (re)seed ----------------------------------------------
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
-  async function recompute() {
+  async function recompute(selfHeal = false) {
     loading = true;
     scaleNote = null;
     const sc = scope();
@@ -694,11 +696,15 @@
     const elapsed = Math.round(performance.now() - t0);
     visualReady = report.visual_ready;
     annotationReady = report.annotation_ready;
-    // A fresh recompute resets the readiness-poll budget (this is a new wait,
-    // not a continuation of a prior one) and re-arms the self-heal: if a half
-    // this view needs is still warming up, poll runtime_status and recompute
-    // when it lands. A fully-ready view cancels any in-flight poll.
-    readinessTries = 0;
+    // A USER-driven recompute resets the readiness-poll budget (this is a new
+    // wait); a SELF-HEAL recompute (the 1.5s poll below) is a CONTINUATION, so it
+    // must NOT reset -- else the budget never exhausts and a forever-embedding
+    // space polls forever. Either way re-arm the self-heal: if a half this view
+    // needs is still warming up (or its vectors are mid-embed), keep checking on
+    // a bounded cadence; a fully-ready view cancels any in-flight poll.
+    if (!selfHeal) {
+      readinessTries = 0;
+    }
     void retryWhenEmbeddersReady();
 
     affinity = new Map(report.images.map((i) => [i.image_hash, i.scores.map((s) => s.affinity)]));
