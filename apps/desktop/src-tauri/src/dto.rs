@@ -219,13 +219,39 @@ pub struct OfflineVolume {
     pub images: u64,
 }
 
-/// One still-digesting pass kind: `remaining` = pending + running rows.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// One still-digesting pass kind. `remaining` = pending + running rows;
+/// `done`/`total` mirror the aggregate counters (done = done + skipped) so the
+/// digest UI can draw a per-pass progress bar, and `rate_per_sec` is a SMOOTHED
+/// items/sec throughput for that pass (0.0 when unknown or paused). The wire/TS
+/// sees `name, remaining, done, total, ratePerSec` via the camelCase rename.
+///
+/// `rate_per_sec` is intentionally LEFT OUT of `PartialEq`/`Eq`: it is a float
+/// EMA that drifts every sample, so including it in the pump's `prev != status`
+/// change-detection would force a 400 ms emit forever on a tiny 2.5/s vs
+/// 2.50001/s wobble. The pump quantizes the rate separately for emit gating
+/// (see pump.rs), so the structural fields here drive change detection cleanly.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PassRemaining {
     pub name: String,
     pub remaining: u64,
+    pub done: u64,
+    pub total: u64,
+    pub rate_per_sec: f32,
 }
+
+// Hand-written eq excludes the drifting `rate_per_sec` float (see the doc
+// comment): structural progress (name/remaining/done/total) is what should
+// gate an emit, not EMA jitter.
+impl PartialEq for PassRemaining {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.remaining == other.remaining
+            && self.done == other.done
+            && self.total == other.total
+    }
+}
+impl Eq for PassRemaining {}
 
 /// RUNTIME contract seam (P6.2 fills this in; M1 is the degraded mode that
 /// is exactly the full journal product — DECISIONS K15).

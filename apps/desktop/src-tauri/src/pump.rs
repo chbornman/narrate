@@ -7,6 +7,7 @@
 //! `PROGRESS_INTERVAL` and only when counters changed; payloads are four
 //! integers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -42,6 +43,127 @@ const SIDECAR_TICK: Duration = Duration::from_millis(500);
 /// timeout exists to re-check `app.shutdown`, not to pace events —
 /// events wake the loop immediately; this only bounds quit latency.
 const RUNTIME_PUMP_TICK: Duration = Duration::from_millis(500);
+
+/// EMA smoothing factor for the per-pass throughput. 0.3 weights the newest
+/// instantaneous sample at 30% and the running average at 70%: responsive
+/// enough that the rate climbs/falls within a few 400 ms emits when ingest
+/// speed genuinely shifts, smooth enough that one fat or thin batch does not
+/// jerk the ETA around. (Chosen to match the human-perceived "settling in a
+/// second or two" feel; not load-bearing, easy to retune.)
+const RATE_ALPHA: f32 = 0.3;
+
+/// Quantum (items/sec) for emit-gating the otherwise-continuous rate. A change
+/// smaller than this does not, on its own, force a progress emit — without it a
+/// 2.5/s vs 2.50001/s EMA wobble would re-trigger a 400 ms emit forever even
+/// when no structural progress (done/total/remaining) changed. 0.5/s is below
+/// what a human reads off a moving throughput number.
+const RATE_QUANTUM: f32 = 0.5;
+
+/// Per-pass throughput tracker: the smoothed rate plus the last sample we
+/// folded (done count + wall-clock instant), so the next tick can form a
+/// done-delta / secs instantaneous rate. Lives in the pump loop across
+/// iterations, keyed by pass name.
+struct RateEma {
+    /// Smoothed items/sec; 0.0 until the first real (unpaused, positive-delta)
+    /// sample folds in.
+    ema: f32,
+    /// `done` count at the last sample — the baseline for the next delta.
+    last_done: u64,
+    /// Wall-clock instant of the last sample — the baseline for the next secs.
+    last_at: Instant,
+}
+
+/// Pure EMA fold, factored out so it is testable without a clock or an `App`.
+/// Returns the next smoothed rate given the previous EMA, the done-delta and
+/// elapsed seconds since the last sample, and whether the pass is paused.
+///
+/// FREEZE-ON-PAUSE: a paused sample returns the previous EMA unchanged (the
+/// caller must NOT advance `last_done`/`last_at` either), so a long mic-armed
+/// or offline-volume window holds the rate steady and the ETA stays meaningful.
+/// A non-positive delta or a non-positive interval is treated as "no
+/// information" and also returns the previous EMA — this is what clamps the
+/// resume sample: even if the caller did advance the baseline across a pause,
+/// the very next fold sees done_delta==0 (no work happened while frozen) and
+/// cannot register a giant spurious burst.
+fn fold_rate_ema(prev_ema: f32, done_delta: u64, secs: f32, paused: bool) -> f32 {
+    if paused || done_delta == 0 || secs <= 0.0 {
+        return prev_ema;
+    }
+    let instant = done_delta as f32 / secs;
+    RATE_ALPHA * instant + (1.0 - RATE_ALPHA) * prev_ema
+}
+
+/// Fold this tick's per-pass `done` counts into the rate trackers and write the
+/// resulting smoothed rate back onto each `PassRemaining`. `now` and `paused`
+/// are injected (production passes `Instant::now()` + the live pause signal;
+/// tests pass a fake clock) so the timing is the caller's, not buried here.
+///
+/// PAUSE handling: while `paused`, EMAs are frozen (not decayed) AND the
+/// baselines (`last_done`/`last_at`) are NOT advanced — so on resume the first
+/// unpaused tick measures the delta from BEFORE the pause over the real elapsed
+/// time, which `fold_rate_ema` further guards (a zero work-delta across the
+/// freeze cannot spike). PRUNE: trackers for passes no longer in the status
+/// (finished kinds dropped out of the breakdown) are removed so the map cannot
+/// grow unbounded across a long session of many one-shot passes.
+fn apply_pass_rates(
+    trackers: &mut HashMap<String, RateEma>,
+    status: &mut IngestStatus,
+    now: Instant,
+    paused: bool,
+) {
+    for pass in &mut status.passes {
+        match trackers.get_mut(&pass.name) {
+            Some(t) => {
+                if !paused {
+                    // Wall-clock delta + work delta since the last fold. The
+                    // done count is monotonic per kind, but guard the subtract
+                    // anyway (a version reset could lower it) so we never form
+                    // a bogus huge delta.
+                    let secs = now.duration_since(t.last_at).as_secs_f32();
+                    let done_delta = pass.done.saturating_sub(t.last_done);
+                    t.ema = fold_rate_ema(t.ema, done_delta, secs, false);
+                    // Advance the baseline ONLY when not paused, so a paused
+                    // span never becomes a single giant delta on resume.
+                    t.last_done = pass.done;
+                    t.last_at = now;
+                }
+                pass.rate_per_sec = t.ema;
+            }
+            None => {
+                // First sighting of this pass: seed the baseline, no rate yet
+                // (need two samples to measure throughput). 0.0 = unknown.
+                trackers.insert(
+                    pass.name.clone(),
+                    RateEma {
+                        ema: 0.0,
+                        last_done: pass.done,
+                        last_at: now,
+                    },
+                );
+                pass.rate_per_sec = 0.0;
+            }
+        }
+    }
+    // Prune trackers whose pass disappeared (finished) this tick.
+    let live: std::collections::HashSet<&str> =
+        status.passes.iter().map(|p| p.name.as_str()).collect();
+    trackers.retain(|name, _| live.contains(name.as_str()));
+}
+
+/// True when any pass's throughput moved by at least `RATE_QUANTUM` between two
+/// statuses (matched by name). Used only for emit-gating — it lets a real rate
+/// shift surface on the wire while the sub-quantum EMA jitter (excluded from the
+/// DTO's `PartialEq`) does NOT keep re-arming the 400 ms emit.
+fn rate_quantum_changed(prev: &IngestStatus, next: &IngestStatus) -> bool {
+    next.passes.iter().any(|p| {
+        let before = prev
+            .passes
+            .iter()
+            .find(|q| q.name == p.name)
+            .map_or(0.0, |q| q.rate_per_sec);
+        (p.rate_per_sec - before).abs() >= RATE_QUANTUM
+    })
+}
 
 pub fn ingest_status(app: &App) -> IngestStatus {
     let queue = match app.library.pass_counters() {
@@ -87,26 +209,44 @@ fn status_from_counters(
     counters: &std::collections::BTreeMap<(String, i64), photoproof_core::library::PassCounters>,
 ) -> IngestStatus {
     let mut s = IngestStatus::default();
-    // Per-KIND remaining work, versions summed (the header pill names
-    // kinds; a version bump re-running a pass is the same kind of work).
-    // BTreeMap keeps the breakdown order deterministic for `!=` below.
-    let mut remaining = std::collections::BTreeMap::<&str, u64>::new();
+    // Per-KIND breakdown, versions summed (the header pill names kinds; a
+    // version bump re-running a pass is the same kind of work). We carry
+    // remaining AND done/total per kind so the digest UI can draw a per-pass
+    // bar — same summing rule as the aggregate fields below. BTreeMap keeps
+    // the breakdown order deterministic for `!=` change detection.
+    //
+    // (done, total, remaining) per kind. `done` = done + skipped (matches the
+    // aggregate `done`); `total` = every known unit for the kind; `remaining`
+    // = pending + running (errored rows are NOT remaining work, or the
+    // "digesting" pill would stay lit forever on a library with failed passes).
+    let mut per_pass = std::collections::BTreeMap::<&str, (u64, u64, u64)>::new();
     for ((name, _version), c) in counters {
-        s.done += c.done + c.skipped;
-        s.total += c.pending + c.running + c.done + c.error + c.skipped;
-        s.errors += c.error;
-        // Errored rows are NOT remaining work: counting them would keep
-        // the "digesting" pill lit forever on a library with failed passes.
+        let done = c.done + c.skipped;
+        let total = c.pending + c.running + c.done + c.error + c.skipped;
         let queued = c.pending + c.running;
+        s.done += done;
+        s.total += total;
+        s.errors += c.error;
+        // Only kinds with queued work appear in the breakdown (the pill lists
+        // still-digesting kinds). A finished kind drops out — which is also
+        // what prunes its rate tracker in the pump.
         if queued > 0 {
-            *remaining.entry(name.as_str()).or_default() += queued;
+            let e = per_pass.entry(name.as_str()).or_default();
+            e.0 += done;
+            e.1 += total;
+            e.2 += queued;
         }
     }
-    s.passes = remaining
+    s.passes = per_pass
         .into_iter()
-        .map(|(name, remaining)| PassRemaining {
+        .map(|(name, (done, total, remaining))| PassRemaining {
             name: name.to_owned(),
             remaining,
+            done,
+            total,
+            // The pump fills the real EMA in before emit; the pure fold has no
+            // clock/prev-state, so it cannot compute a rate. 0.0 = unknown.
+            rate_per_sec: 0.0,
         })
         .collect();
     s.running = s.total > s.done + s.errors;
@@ -120,6 +260,10 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
         .name("pp-ingest-pump".into())
         .spawn(move || {
             let mut last_emit: Option<(Instant, IngestStatus)> = None;
+            // Per-pass throughput trackers, persisted across loop iterations
+            // (the loop owns the clock + prev state the rate needs). Pruned
+            // inside `apply_pass_rates` when a pass finishes.
+            let mut rate_trackers: HashMap<String, RateEma> = HashMap::new();
             let mut last_probe = Instant::now();
             let mut last_maintenance = Instant::now();
             loop {
@@ -192,10 +336,28 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     );
                 }
 
-                let status = ingest_status(&app);
+                let mut status = ingest_status(&app);
+                // PAUSE signal for the rate EMAs: the mic owns the machine
+                // (`capture_live`) OR an offline volume is holding back work
+                // (no pass can drain bytes off a disconnected drive). Either
+                // way `done` cannot advance for the right reasons, so we freeze
+                // the rate rather than let it decay toward 0 — the ETA the user
+                // reads must survive the pause.
+                let paused = app.runtime.capture_live.load(Ordering::Relaxed)
+                    || !status.offline_volumes.is_empty();
+                apply_pass_rates(&mut rate_trackers, &mut status, Instant::now(), paused);
                 let due = match &last_emit {
                     None => true,
-                    Some((at, prev)) => *prev != status && at.elapsed() >= PROGRESS_INTERVAL,
+                    // `prev != status` already ignores `rate_per_sec` (the DTO's
+                    // hand-written eq excludes the drifting float). To still let
+                    // a MEANINGFUL rate move surface, also emit when the
+                    // quantized rate of any pass changed — quantizing kills the
+                    // 2.5/s vs 2.50001/s wobble that would otherwise pin the
+                    // channel at one emit per PROGRESS_INTERVAL forever.
+                    Some((at, prev)) => {
+                        (*prev != status || rate_quantum_changed(prev, &status))
+                            && at.elapsed() >= PROGRESS_INTERVAL
+                    }
                 };
                 if due {
                     // `passes` made the status non-Copy: clone for the
@@ -573,6 +735,9 @@ mod status_tests {
             vec![PassRemaining {
                 name: "preview".into(),
                 remaining: 12,
+                done: 5,   // preview: done 5 + skipped 0
+                total: 19, // 11 + 1 + 5 + 2 + 0
+                rate_per_sec: 0.0,
             }],
             "hash finished (errors included): only preview is still queued"
         );
@@ -603,9 +768,25 @@ mod status_tests {
             s.passes,
             vec![PassRemaining {
                 name: "preview".into(),
-                remaining: 9,
+                remaining: 9, // (3+0) + (5+1)
+                done: 10,     // 10 + 0 across versions (done + skipped)
+                total: 19,    // 13 + 6 across versions
+                rate_per_sec: 0.0,
             }]
         );
+    }
+
+    /// done/total are summed across versions just like remaining, and `done`
+    /// folds skipped in (matching the aggregate `done`). A pure fold leaves
+    /// `rate_per_sec` at 0.0 (no clock here) — the pump fills it.
+    #[test]
+    fn done_and_total_carry_per_pass_with_skipped_folded() {
+        let s = status_from_counters(&counters(&[("preview", 1, c(2, 1, 4, 0, 3))]));
+        let p = &s.passes[0];
+        assert_eq!(p.remaining, 3); // pending 2 + running 1
+        assert_eq!(p.done, 7); // done 4 + skipped 3
+        assert_eq!(p.total, 10); // 2 + 1 + 4 + 0 + 3
+        assert_eq!(p.rate_per_sec, 0.0);
     }
 
     /// A walk with ZERO pass rows is still pending work: `running` must
@@ -635,6 +816,59 @@ mod status_tests {
         ]));
         let names: Vec<&str> = s.passes.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["exif", "hash", "preview"]);
+    }
+}
+
+#[cfg(test)]
+mod rate_ema_tests {
+    use super::{RATE_ALPHA, fold_rate_ema};
+
+    /// Two samples with a known time + done delta fold to the expected
+    /// smoothed rate: alpha * instant + (1 - alpha) * prev_ema. From a 0.0
+    /// seed, the first fold of 10 items over 2 s (instant = 5/s) is
+    /// alpha * 5 = 1.5/s.
+    #[test]
+    fn two_samples_fold_to_expected_smoothed_rate() {
+        let after_first = fold_rate_ema(0.0, 10, 2.0, false);
+        assert!(
+            (after_first - RATE_ALPHA * 5.0).abs() < 1e-6,
+            "first fold = alpha * instant from a 0 seed; got {after_first}"
+        );
+        // A second sample at the same 5/s instant pulls the EMA further toward
+        // 5: 0.3*5 + 0.7*1.5 = 2.55/s.
+        let after_second = fold_rate_ema(after_first, 5, 1.0, false);
+        let expected = RATE_ALPHA * 5.0 + (1.0 - RATE_ALPHA) * after_first;
+        assert!(
+            (after_second - expected).abs() < 1e-6,
+            "second fold compounds toward the instant rate; got {after_second}"
+        );
+    }
+
+    /// A PAUSED sample does not move the EMA, no matter the apparent delta —
+    /// the rate freezes so the ETA the user reads survives the pause.
+    #[test]
+    fn a_paused_sample_freezes_the_ema() {
+        let warm = fold_rate_ema(0.0, 10, 2.0, false); // 1.5/s
+        let frozen = fold_rate_ema(warm, 999, 0.001, true);
+        assert_eq!(frozen, warm, "paused fold must not change the EMA");
+    }
+
+    /// A post-pause sample with a ZERO work-delta (nothing drained while
+    /// frozen) cannot spike: no work happened, so the instantaneous rate is
+    /// undefined and the EMA holds. This is the resume guard — a long pause
+    /// over which `done` did not move never registers as a giant burst.
+    #[test]
+    fn a_post_pause_zero_delta_sample_does_not_spike() {
+        let warm = fold_rate_ema(0.0, 10, 2.0, false); // 1.5/s
+        // Huge elapsed (the pause), but done_delta == 0 because work was
+        // frozen: the fold returns prev unchanged, no spike.
+        let resumed = fold_rate_ema(warm, 0, 600.0, false);
+        assert_eq!(
+            resumed, warm,
+            "zero work over the pause cannot spike the rate"
+        );
+        // And a non-positive interval is likewise ignored (defensive).
+        assert_eq!(fold_rate_ema(warm, 5, 0.0, false), warm);
     }
 }
 
