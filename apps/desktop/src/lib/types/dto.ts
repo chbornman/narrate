@@ -112,9 +112,23 @@ export interface IngestStatus {
   total: number;
   errors: number;
   /** Pass kinds with work still queued (pending + running), queue-spelled
-   * names, deterministic order — the header jobs pill's hover breakdown
-   * (BACKLOG "Header shows background jobs"). */
-  passes: { name: string; remaining: number }[];
+   * names, deterministic order — the Library-status header indicator's
+   * per-stage breakdown (BACKLOG "digest visibility"). Each pass now carries
+   * its own progress + a smoothed rate so the header can show per-stage
+   * fractions and ETAs:
+   *   · done / total — completed vs known units for THIS pass.
+   *   · remaining — total - done (the backend ships it explicitly so the
+   *     frontend never has to recompute from a possibly-stale total).
+   *   · ratePerSec — smoothed items/sec; 0 when unknown OR paused (the
+   *     backend FREEZES it during capture/offline so a paused stage shows
+   *     no misleading ETA). */
+  passes: {
+    name: string;
+    remaining: number;
+    done: number;
+    total: number;
+    ratePerSec: number;
+  }[];
   /** A filesystem walk (add-root initial scan / rescan) is in flight. Pass
    * counters lag the walk — rows only appear at hash time — so this is
    * what keeps `running` true through the walk's dark window (founder,

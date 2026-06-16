@@ -117,15 +117,18 @@ describe("Titlebar platform chrome", () => {
     expect(linux.container.querySelector(".drag.mac")).toBeNull();
   });
 
-  it("background-jobs pill: hidden when idle, one quiet word with the kind breakdown on hover", () => {
-    // BACKLOG "Header shows background jobs": the register is the word
-    // appearing; count + kind live in the hover title, never a progress
-    // bar. Everything queued in ingest_passes (ingest, rebuilds, doctor
-    // re-pends, model backfills) flows through the same passes list.
+  it("Library-status indicator (digest visibility): settled when idle, working when a pass has queued units", () => {
+    // The header-center indicator REPLACES the old "digesting" text. Settled
+    // shows the calm "Library settled"; a still-draining pass shows the
+    // working register (stage label + counts). The offline warning that used
+    // to sit beside the text now lives inside this indicator's panel.
     stubNavigator("MacIntel", MAC_UA);
     ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
     const idle = render(Titlebar, { title: "shoots" });
+    // The indicator is always present (a status region); the OLD jobs text is gone.
     expect(idle.container.querySelector(".jobs")).toBeNull();
+    expect(idle.container.querySelector(".libstatus")).not.toBeNull();
+    expect(idle.getByText("Library settled")).not.toBeNull();
 
     document.body.innerHTML = "";
     ui.shell.ingest = {
@@ -134,18 +137,17 @@ describe("Titlebar platform chrome", () => {
       total: 500,
       errors: 0,
       passes: [
-        { name: "hash", remaining: 12 },
-        { name: "image-embedding", remaining: 485 },
+        { name: "hash", remaining: 12, done: 488, total: 500, ratePerSec: 4 },
+        { name: "image-embedding", remaining: 485, done: 15, total: 500, ratePerSec: 0 },
       ],
       scanning: false,
       discovered: 0, offlineVolumes: []
     };
     const busy = render(Titlebar, { title: "shoots" });
-    const pill = busy.container.querySelector(".jobs");
-    expect(pill?.textContent).toBe("digesting");
-    expect(pill?.getAttribute("title")).toBe(
-      "Still digesting - hashing 12 · embedding images 485",
-    );
+    // Working register: the current (first working) stage's label shows. hash
+    // has a positive rate -> it is the working stage the collapsed pill names.
+    expect(busy.getByText("Hashing")).not.toBeNull();
+    expect(busy.container.querySelector(".pill.working")).not.toBeNull();
     ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
   });
 

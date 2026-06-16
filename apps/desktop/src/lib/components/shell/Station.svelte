@@ -1,21 +1,22 @@
 <script lang="ts">
   /**
-   * The What's-Happening Station (UI §7 evolved; founder-confirmed June
-   * 2026) — the capture indicator grown into the app-wide status organ.
-   * Same bottom-right corner, two states:
+   * The Capture Station (UI §7 evolved; founder June 2026, digest-visibility
+   * split) — CAPTURE-ONLY now. The digest/ingest/embed/download/offline/
+   * settled signaling moved to the header Library-status indicator
+   * (LibraryStatus.svelte); this corner is the capture organ alone. Same
+   * bottom-right corner, two states:
    *
    *   COLLAPSED — a quiet icon row (mic · magnifier · info dot · note
-   *   pencil, plus the visible-mode segments), breathing gently while
-   *   anything is happening (logic/station.ts `pulsing`). The ingest
-   *   hairline lives on the capsule edge.
+   *   pencil, plus the visible-mode segments), breathing gently while CAPTURE
+   *   is happening (logic/station.ts `pulsing` — streaming speech / speech
+   *   detected; background digest work no longer breathes it).
    *
-   *   HOVER — the capsule expands with real read-only context: the scope
+   *   HOVER — the capsule expands with read-only CAPTURE context: the scope
    *   row (STILL the indicator↔inspector bridge — click opens the Journal
-   *   tab via the registry's open-inspector row), the §5.4 streaming
-   *   tether, micro-thumbnails, n-of-m in Look, and the activity rows
-   *   (indexing/digest counts, download progress + retry hints,
-   *   listening). Shrinks back on pointer leave; the info seat PINS it
-   *   open (registry row toggle-station-detail) until Esc/outside-click.
+   *   tab via the registry's open-inspector row), the §5.4 streaming tether,
+   *   micro-thumbnails, n-of-m in Look, and the capture activity rows
+   *   (listening / arming / capturing). Shrinks back on pointer leave; the
+   *   info seat PINS it open (toggle-station-detail) until Esc/outside-click.
    *
    * Founder ruling on status-vs-launcher: ICONS are the click targets —
    * each seat dispatches its registry row via resolveAction (one action
@@ -32,12 +33,6 @@
   import MicOff from "@lucide/svelte/icons/mic-off";
   import Pencil from "@lucide/svelte/icons/pencil";
   import Search from "@lucide/svelte/icons/search";
-  // Station 2.0 transient icons (DESIGN-STATION.md): work · embed · download
-  // · missing-model warning. Fade in + pulse only while live, then retire.
-  import Loader from "@lucide/svelte/icons/loader";
-  import Sparkles from "@lucide/svelte/icons/sparkles";
-  import Download from "@lucide/svelte/icons/download";
-  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import { ui } from "../../state/app.svelte";
   import { segments } from "../../logic/segments";
   import { stationModel } from "../../logic/station";
@@ -65,7 +60,6 @@
       ctx: ui.actionContext(),
     }),
   );
-  const hairline = $derived(segs.find((s) => s.id === "ingest"));
   const scopeSeg = $derived(segs.find((s) => s.id === "scope"));
   const positionSeg = $derived(segs.find((s) => s.id === "position"));
   // Visible modes stay on the COLLAPSED chrome (featureset §0 — a mode
@@ -77,8 +71,6 @@
 
   const model = $derived(
     stationModel({
-      ingest: ui.shell.ingest,
-      runtime: ui.shell.runtime,
       micState: ui.shell.mic,
       asrReady: ui.shell.asrReady,
       streaming:
@@ -181,31 +173,6 @@
   {#if expanded && capsuleEl !== undefined}
     <Popover anchor={capsuleEl} placement="top-end" ondismiss={() => ui.shell.closeStation()}>
       <div class="body">
-        {#if model.missingModels.length > 0}
-          <!-- Missing-model prompts, FIRST-CLASS (DESIGN-STATION.md): a model
-               a feature needs is absent, so the feature is silently dark. The
-               Station is where that surfaces AND resolves — the fix is inline
-               (Accept license first when gated, then Download), wired to the
-               same runtime_* path Settings → Models drives. No faked progress;
-               the row flips to the download transient on the next status. -->
-          {#each model.missingModels as mm (mm.id)}
-            <div class="missing">
-              <span class="missing-icon"><TriangleAlert size={13} aria-hidden="true" /></span>
-              <div class="missing-text">
-                <span class="missing-feature">{mm.feature}</span>
-                {#if mm.needsLicense}
-                  <button class="missing-action" onclick={() => void ui.acceptModelLicense(mm.id)}>
-                    Accept license
-                  </button>
-                {:else}
-                  <button class="missing-action" onclick={() => void ui.downloadMissingModel(mm.id)}>
-                    Download{mm.sizeLabel !== undefined ? ` (${mm.sizeLabel})` : ""}
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        {/if}
         {#if scopeSeg !== undefined}
           <!-- the one clickable element in the body: the indicator↔inspector
                bridge, kept exactly (everything else is read-only context) -->
@@ -231,17 +198,10 @@
           <div class="row dim" title={positionSeg.title}>{positionSeg.text}</div>
         {/if}
         {#each model.activities as a (a.id)}
-          <div
-            class="activity"
-            class:warn={a.kind === "offline" || a.kind === "download-failed"}
-          >
+          <!-- capture activity rows only (mic / streaming utterance); the
+               digest rows moved to the header Library-status indicator. -->
+          <div class="activity">
             <span class="text">{a.text}</span>
-            {#if a.hint !== undefined}<span class="hint">{a.hint}</span>{/if}
-            {#if a.fraction !== undefined}
-              <span class="bar">
-                <span class="fill" style:width="{Math.round(a.fraction * 100)}%"></span>
-              </span>
-            {/if}
           </div>
         {:else}
           <div class="row dim">Nothing happening - the library is settled.</div>
@@ -257,14 +217,6 @@
     class:pulsing
     data-border={model.border}
   >
-    {#if hairline !== undefined}
-      <span class="hairline" title={hairline.title}>
-        <span
-          class="hairline-fill"
-          style:width="{Math.round((hairline.fraction ?? 0) * 100)}%"
-        ></span>
-      </span>
-    {/if}
     {#each model.seats as seat (seat.id)}
       <!-- each seat is a clickable verb: its registry row, nothing else -->
       <button
@@ -292,44 +244,6 @@
         </span>
       </button>
     {/each}
-    {#each model.transients as t (t.id)}
-      <!-- transient icons (DESIGN-STATION.md): fade in + gently pulse only
-           while their thing is live, then retire. Founder, June 13 2026:
-           every transient is ALSO an individual click target — its registry
-           verb (toggle-station-detail) pins the detail panel open, where its
-           progress row or the missing-model download prompt resolves. A count
-           badge + a progress arc ride the ingest/digest "work" icon. -->
-      <button
-        class="transient"
-        class:warn={t.warn}
-        aria-label={t.title}
-        onclick={() => seatClick(t.actionId)}
-        {@attach tooltip({ actionId: t.actionId, text: t.title })}
-      >
-        {#if t.fraction !== undefined}
-          <!-- progress arc: a conic ring whose swept angle is the fraction,
-               sitting behind the glyph (no SVG, token-colored). -->
-          <span
-            class="arc"
-            style:--arc="{Math.round((t.fraction ?? 0) * 360)}deg"
-          ></span>
-        {/if}
-        <span class="t-glyph">
-          {#if t.icon === "loader"}
-            <Loader size={13} aria-hidden="true" />
-          {:else if t.icon === "sparkles"}
-            <Sparkles size={13} aria-hidden="true" />
-          {:else if t.icon === "download"}
-            <Download size={13} aria-hidden="true" />
-          {:else}
-            <TriangleAlert size={13} aria-hidden="true" />
-          {/if}
-        </span>
-        {#if t.count !== undefined}
-          <span class="badge">{t.count > 999 ? "999+" : t.count.toLocaleString()}</span>
-        {/if}
-      </button>
-    {/each}
     {#each modeSegs as seg (seg.id)}
       <!-- visible modes (auto-advance, pencil) — status text, not seats;
            rendered as TEXT so the note seat keeps the only pencil glyph -->
@@ -351,27 +265,22 @@
     position: relative;
     display: flex;
     align-items: center;
-    /* Station 2.0: a larger collapsed footprint so the status border +
-     * transient icons read at a glance (DESIGN-STATION.md). */
+    /* A comfortable collapsed footprint so the capture seats + the mic
+     * recording border read at a glance. */
     height: 30px;
     padding: 0 6px;
     border-radius: 15px;
     background: var(--bg-overlay);
-    /* A 2px ring so the status color (data-border) reads at a glance. */
+    /* A 2px ring so the mic recording state (data-border) reads at a glance. */
     border: 2px solid var(--chrome);
     overflow: hidden;
     transition: border-color 160ms ease-out;
   }
-  /* The collapsed pill's border = the most salient active state, by priority
-   * resolved in logic/station.ts (borderState). Token-driven, theme-aware. */
+  /* The collapsed pill's border, now capture-only: mic recording red when
+   * armed (the error/working edges left with the digest signaling — the
+   * header Library-status indicator owns those now). */
   .capsule[data-border="mic"] {
     border-color: var(--station-mic);
-  }
-  .capsule[data-border="error"] {
-    border-color: var(--station-error);
-  }
-  .capsule[data-border="working"] {
-    border-color: var(--station-working);
   }
   /* The §7.4 commit pulse, relocated from the scope text to the capsule
    * edge (the scope dot lives in the hover now): one short brighten. It only
@@ -435,114 +344,6 @@
       opacity: 0.45;
     }
   }
-  .hairline {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    height: 2px;
-    background: var(--chrome);
-  }
-  .hairline-fill {
-    display: block;
-    height: 2px;
-    background: var(--text-dim);
-    transition: width 300ms linear;
-  }
-
-  /* ---- transient icons (Station 2.0) ------------------------------------ */
-  /* Fade in on mount and gently pulse while live; Svelte retires the node
-   * when the source state clears (the {#each} key drops it). Quiet,
-   * photography-app restrained — opacity only, nothing slides. */
-  .transient {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    margin: 0 1px;
-    /* now a button (each transient is its own click target): strip the chrome
-     * but keep the icon look. A click pins the detail panel open. */
-    padding: 0;
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    color: var(--text-dim);
-    animation:
-      transient-in 240ms ease-out,
-      transient-pulse 2.6s ease-in-out 240ms infinite;
-  }
-  /* hover brightens the glyph (the seats do the same) so the affordance reads */
-  .transient:hover {
-    color: var(--text);
-  }
-  .transient.warn:hover {
-    color: var(--station-error);
-  }
-  /* The missing-model warning reads in the error/amber hue, not the cool
-   * working gray — it is a call to act, not just "work in progress". */
-  .transient.warn {
-    color: var(--station-error);
-  }
-  @keyframes transient-in {
-    from {
-      opacity: 0;
-      transform: scale(0.7);
-    }
-    to {
-      opacity: 1;
-      transform: scale(1);
-    }
-  }
-  @keyframes transient-pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.5;
-    }
-  }
-  .t-glyph {
-    display: inline-flex;
-    align-items: center;
-    position: relative;
-    z-index: 1;
-  }
-  /* The progress arc: a conic ring swept to the fraction, behind the glyph.
-   * --arc (set inline) is the swept angle; the cool working hue draws it. */
-  .arc {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    background: conic-gradient(
-      var(--station-working) var(--arc, 0deg),
-      var(--chrome) 0
-    );
-    /* punch out the centre so it reads as a thin ring, not a pie */
-    -webkit-mask: radial-gradient(circle, transparent 7px, #000 7px);
-    mask: radial-gradient(circle, transparent 7px, #000 7px);
-    opacity: 0.9;
-  }
-  /* The count badge: a small numeric chip clinging to the icon's corner. */
-  .badge {
-    position: absolute;
-    bottom: -2px;
-    right: -3px;
-    min-width: 12px;
-    height: 12px;
-    padding: 0 2px;
-    box-sizing: border-box;
-    font-size: 9px;
-    line-height: 12px;
-    text-align: center;
-    color: var(--text);
-    background: var(--bg-raised);
-    border: 1px solid var(--chrome);
-    border-radius: 6px;
-    z-index: 2;
-  }
 
   /* ---- the expansion body (read-only context) --------------------------- */
   .body {
@@ -552,44 +353,6 @@
     min-width: 240px;
     max-width: 360px;
     padding: 8px 10px;
-  }
-  /* Missing-model prompt (first-class): the amber warning + the inline fix. */
-  .missing {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 6px 8px;
-    background: var(--bg-raised);
-    border: 1px solid var(--chrome);
-    border-radius: 6px;
-  }
-  .missing-icon {
-    display: inline-flex;
-    color: var(--station-error);
-    margin-top: 1px;
-  }
-  .missing-text {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .missing-feature {
-    font-size: 12px;
-    color: var(--text);
-  }
-  .missing-action {
-    align-self: flex-start;
-    font-size: 11px;
-    color: var(--text);
-    background: var(--bg-overlay);
-    border: 1px solid var(--chrome-strong);
-    border-radius: 5px;
-    padding: 2px 8px;
-    cursor: pointer;
-  }
-  .missing-action:hover {
-    border-color: var(--station-error);
-    color: var(--station-error);
   }
   .scope-btn {
     display: flex;
@@ -628,30 +391,6 @@
     gap: 8px;
     font-size: 12px;
     color: var(--text-dim);
-  }
-  /* Offline / failed rows read as a problem, not routine background work:
-     the station error color, so a paused-because-offline cause stands out. */
-  .activity.warn .text {
-    color: var(--station-error);
-  }
-  .activity .hint {
-    color: var(--text-faint);
-    font-size: 11px;
-  }
-  .activity .bar {
-    flex: 1;
-    min-width: 40px;
-    height: 2px;
-    align-self: center;
-    background: var(--chrome);
-    border-radius: 1px;
-    overflow: hidden;
-  }
-  .activity .fill {
-    display: block;
-    height: 2px;
-    background: var(--text-dim);
-    transition: width 300ms linear;
   }
   .pop-thumbs {
     display: flex;

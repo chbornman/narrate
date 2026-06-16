@@ -35,7 +35,12 @@
   import { resolveAction } from "../../actions/registry";
   import { tooltip } from "../../primitives/tooltip";
   import { isMac } from "../../logic/platform";
-  import { jobsRemaining, jobsTitle, offlineWarningTitle } from "../../logic/jobs";
+  // The Library-status indicator (digest visibility): the header-center
+  // readout of whether the catalog is still being built. It REPLACES the old
+  // "digesting" text and ABSORBS the offline-drive warning that used to sit
+  // here (now a "Waiting on" row inside the indicator); the Station is
+  // capture-only now.
+  import LibraryStatus from "./LibraryStatus.svelte";
   import type { Action } from "../../logic/keymap";
 
   let { title }: { title: string } = $props();
@@ -74,23 +79,13 @@
     >
   </div>
   <span class="title" data-tauri-drag-region>{title}</span>
+  <!-- Header-center: the Library-status indicator (digest visibility). It
+       carries the digest signaling that used to live as the "digesting" text
+       AND the offline-drive warning right here; the Station no longer does. -->
+  <div class="center">
+    <LibraryStatus />
+  </div>
   <div class="cluster">
-    {#if ui.shell.ingest.offlineVolumes.length > 0}
-      <!-- Offline-volume warning (founder: warn + pause): a drive holding
-           library photos is disconnected, so its files cannot be read and that
-           ingest work is PAUSED (not churning). Say so plainly instead of
-           stalling silently; the per-drive detail waits on hover. -->
-      <span class="warn" role="status" title={offlineWarningTitle(ui.shell.ingest.offlineVolumes)}>
-        {ui.shell.ingest.offlineVolumes.length === 1 ? "drive offline" : "drives offline"}
-      </span>
-    {/if}
-    {#if jobsRemaining(ui.shell.ingest) > 0}
-      <!-- Background jobs (BACKLOG "Header shows background jobs"): one
-           quiet word while ANY pass kind has queued work — ingest, preview
-           rebuilds, doctor re-pends, model backfills. Count + kind stay on
-           hover; the hairline on the indicator keeps the §7.5 fraction. -->
-      <span class="jobs" role="status" title={jobsTitle(ui.shell.ingest)}>digesting</span>
-    {/if}
     <button
       class="chrome"
       aria-label="Search"
@@ -127,6 +122,7 @@
 
 <style>
   .titlebar {
+    position: relative;
     height: 28px;
     display: flex;
     align-items: center;
@@ -144,27 +140,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* The Library-status indicator sits visually CENTERED in the bar regardless
+   * of the title's length: absolutely centered over the drag strip, with the
+   * pill itself re-enabling pointer events (the bar around it stays draggable).
+   * pointer-events:none on the wrapper keeps the centered band draggable
+   * everywhere the pill is not. */
+  .center {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    max-width: 50%;
+    pointer-events: none;
+  }
+  .center :global(.pill) {
+    pointer-events: auto;
+  }
   .cluster {
     display: flex;
     align-items: center;
     gap: 2px;
-  }
-  /* The background-jobs register: faint text, no motion — the word
-   * appearing IS the signal; detail waits on hover. */
-  .jobs {
-    color: var(--text-faint);
-    font-size: 11px;
-    padding: 0 6px;
-    white-space: nowrap;
-  }
-  /* The offline-volume warning: same quiet register as .jobs but in the
-   * station's error color so a disconnected drive reads as a problem, not
-   * routine background work. Detail (which drive, how many photos) on hover. */
-  .warn {
-    color: var(--station-error);
-    font-size: 11px;
-    padding: 0 6px;
-    white-space: nowrap;
   }
   /* macOS only: the three 12px lights sit at the default Overlay
      position (x≈12, vertically centered in a 28px bar — exactly this
