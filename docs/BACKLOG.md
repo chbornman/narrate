@@ -367,11 +367,6 @@ magnitudes.
   `ort` CPU-only; enable ONNX Runtime's CoreML EP (MLProgram, NOT legacy
   NeuralNetwork which casts FP16 and can flip predictions). Immich shipped this in
   v2.2.0 (PR #17718).
-- [ ] **fast_image_resize + PPG demosaic** - cheapest certain win. Swap the
-  `image`-crate CatmullRom resize for **`fast_image_resize`** (NEON SIMD, Lanczos3
-  ~7x: 62ms vs 434ms, beats libvips) in the preview tiers; switch
-  `raw_develop.rs::demosaic_bilinear_rggb` to rawler 0.7.2's PPG demosaic. Verified
-  3-0 (benchmark is Neoverse-N1; direction holds on Apple Silicon).
 - [ ] **WKWebView capability check** - GATES the two below. Verify our Tauri macOS
   webview supports OffscreenCanvas, Web Workers + createImageBitmap, WebGL/WebGPU
   before building on them (WebGL broad; OffscreenCanvas Safari 16.4+; WebGPU

@@ -117,7 +117,9 @@ their original wording.
   Apple-Silicon figure (the plan's ~7x was a Neoverse-N1 number). NOTE (corrected
   by P5): the two CatmullRom libs diverge up to ~17/255 on edges, not +-1 LSB -
   fine for display previews, but it is why the same swap was REJECTED for the
-  correctness-locked CLIP preprocess (P5).
+  correctness-locked CLIP preprocess (P5). RE-VERIFIED June 16 on M1 (throwaway
+  6000x4000 -> 2560 micro-bench, 10 runs): image-crate CatmullRom 212.81 ms vs
+  fast_image_resize CatmullRom 59.80 ms = 3.56x, matching the original 3.66x.
 - [~] **P5 CLIP-preprocess resize - REJECTED (parity)** - not pursued. The
   parity-gated swap of the CLIP 378x378 resize failed: on 80 real images the
   embeddings shifted (mean cosine 0.99935, min 0.99689, 10/80 below 0.999) because
