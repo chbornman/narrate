@@ -6,6 +6,46 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 16 2026 - Removed-folder reconciliation + self-heal + soft-topic v2
+
+- [x] **Removed-folder reconciliation** (founder, June 15 2026 - confirmed bug) -
+  `acc74c8`. Removing a root orphaned its images (non-destructive, for relink) but
+  they (1) still showed in the LIBRARY scope and (2) kept consuming ingest work
+  (founder saw ~414 ghost images re-embedding mid-session). FIX: `image_hashes()`
+  (`library/mod.rs`) now filters to images with an active path; `remove_root()`
+  skips pending/error ingest passes for images left with NO active path (safe
+  multi-root variant); new `Library::heal_orphaned_passes()` + a startup-doctor
+  step clean up images orphaned before the fix; frontend `invalidateScopedGraphs`
+  is wired into `onRootsChanged` so a removed root drops its stale cached graph
+  (no more view-swap workaround). Images themselves stay (relink). Tests: orphaned
+  passes skipped + image dropped from `image_hashes()` (with multi-root survival),
+  `invalidateScopedGraphs` prefix-collision guard. ORIGINAL: "i removed some
+  folders and added some.... but images are still there from the old folders... it
+  still shows indexing thousands."
+
+- [x] **Self-heal refinements (verify-before-retire + skip-already-correct)**
+  (founder, June 15 2026) - `acc74c8`. (a) VERIFY BEFORE RETIRE -
+  `active_vector_models` (`runtime.rs`) now lists a model only once its embedder is
+  actually LOADED (`clip_ready`/`text_ready`), so `reconcile_spaces` no longer
+  retires a live space because config named an unloadable model (it once dropped
+  the live dfn5b space because config said fp16 while fp16 was not loadable). (b)
+  SKIP ALREADY-CORRECT - image staleness hash is now
+  `image_inputs_hash(image_hash, model_id, GENERATOR_VERSION)` instead of preview
+  bytes, so regenerated previews no longer trigger a full library re-embed (founder
+  hit a 414-image re-embed after "rebuild all previews"); a generator-version bump
+  still re-embeds. Tests: reconcile keeps superseded when active model not ready,
+  preview-regen-does-not-reembed-same-image+model.
+
+- [x] **Soft-topic v2: ghost anchors + promote-to-topic** (founder, June 15 2026) -
+  `acc74c8`. Overlooked mode now renders a faint GHOST ANCHOR at each unnamed-
+  cluster centroid; a click PROMOTES it to a real topic via `ui.addTopic`.
+  Labeling (founder decision): NOTES FIRST via `matchClusterLabel` against
+  `cluster_topics` (size-distance match with a separation guard, defaults to
+  unlabeled rather than mislabeling), unlabeled dot otherwise; an unlabeled promote
+  prompts for a name. Tests: `matchClusterLabel` match/too-far/near-tie/blank.
+  NOTE STILL OPEN: dogfood the force balance (slider + `tuning.toml`) and tune the
+  defaults - tracked in BACKLOG.
+
 ## June 14 2026 - Best-per-platform defaults + NVIDIA/MTP app staging
 
 - [x] **Best validated ML as the committed default per platform** - `fe7c8e4`. CLIP

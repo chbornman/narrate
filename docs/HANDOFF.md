@@ -48,6 +48,12 @@ embedder finishes loading). Audit doc: `docs/STATE-INTEGRITY-AUDIT.md`.
 
 ## Tasks ahead (prioritized)
 
+> **Update (June 16 2026, `acc74c8`):** Tasks #2 (removed-folder
+> reconciliation) and #3 (self-heal refinements) LANDED, and the soft-topic v2
+> **code** (ghost anchors + promote-to-topic) landed in the same commit. See
+> LANDED.md. What remains from task #1 is the **dogfood + tuning** numbers pass
+> (still in BACKLOG). Task #4 (fp16 hosting) is untouched.
+
 ### 1. Visualizer: dogfood the balance, then soft-topic v2
 - **Dogfood first.** The founder should restart `tauri dev`, use the topic-
   strength slider + `tuning.toml` (`[graph] attraction / neighbor_attraction /
