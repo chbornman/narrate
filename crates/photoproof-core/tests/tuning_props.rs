@@ -186,11 +186,12 @@ proptest! {
         prop_assert_eq!(t.graph.cluster_k_max, expected);
     }
 
-    /// `lod_threshold` (u32) is accepted iff in [50, 1_000_000]; else 1500.
+    /// `lod_threshold` (u32) is accepted iff in [50, 1_000_000]; else 700
+    /// (the GRAPH_LOD_THRESHOLD default; was 1500 before the 1500->700 change).
     #[test]
     fn graph_lod_threshold_accepts_iff_in_bound(v in any::<u32>()) {
         let t = load_toml(&format!("[graph]\nlod_threshold = {v}\n"));
-        let expected = if (GRAPH_LOD_MIN..=GRAPH_LOD_MAX).contains(&v) { v } else { 1500 };
+        let expected = if (GRAPH_LOD_MIN..=GRAPH_LOD_MAX).contains(&v) { v } else { 700 };
         prop_assert_eq!(t.graph.lod_threshold, expected);
     }
 
