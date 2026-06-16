@@ -6,6 +6,28 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 16 2026 - Ingest pass pipelining
+
+- [x] **Ingest pass pipelining** (backend perf, no webview dep) - `d3e1f36`. The
+  ingest drain was a WAVE loop: claim `pool_width` rows, run them all in parallel,
+  then a BARRIER - the next wave could not be claimed until the SLOWEST item of the
+  current one finished, so one big-RAW preview drained the pool to a single busy
+  worker while the rest idled, and decode/encode sat idle between waves while later
+  items were still being claimed/hashed. Replaced with a bounded-channel pipeline
+  (`run_pipeline` in `library/mod.rs`): a CLAIMER feeds a `std::sync::mpsc::
+  sync_channel` (capacity = pool width, so peak in-flight decoded frames stay at
+  ~2*width = the old wave's worst case = no memory regression) that `pool_width`
+  workers pull from CONTINUOUSLY, so a slow item only occupies its own worker. DB
+  stays the source of truth (`claim_next` flips pending->running durably; the
+  channel is in-memory scheduling only); cancel/max_items honored per item; a full
+  channel blocks the claimer = backpressure. No new crate (`sync_channel` is the
+  codebase's existing bounded-channel idiom). Tests: workers-run-concurrently
+  (barrier-sized-to-pool deadlocks a serialized drain), every-item-exactly-once
+  under backpressure (500 items), cancel-winds-down-without-stuck-running,
+  claim-error-aborts-after-inflight-finish; the interrupted-ingest acceptance
+  suite (cancel/no-loss/recovery, offline-skip) now exercises the pipelined path
+  unchanged.
+
 ## June 16 2026 - Removed-folder reconciliation + self-heal + soft-topic v2
 
 - [x] **Removed-folder reconciliation** (founder, June 15 2026 - confirmed bug) -

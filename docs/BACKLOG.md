@@ -371,10 +371,6 @@ magnitudes.
   webview supports OffscreenCanvas, Web Workers + createImageBitmap, WebGL/WebGPU
   before building on them (WebGL broad; OffscreenCanvas Safari 16.4+; WebGPU
   newer/partial).
-- [ ] **Ingest pass pipelining** - backend, no webview dep. Passes run sequentially
-  between stages (hash->exif->preview->embed); overlap them with bounded channels
-  (crossbeam/flume) for backpressure so preview/embed run while later items scan.
-  BLAKE3 hashing is already SOTA - the win is overlap.
 - [ ] **Visualizer off main thread, then WebGL** (gated by WKWebView check). The
   graph sim is all-pairs O(N^2) Canvas-2D on the MAIN THREAD (sustains ~5k nodes).
   Interim: move the existing sim into a Web Worker so it stops blocking. Full:
