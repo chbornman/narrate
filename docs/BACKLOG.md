@@ -214,16 +214,6 @@ of them posture changes the founder made deliberately.
   opt-in tag EXPORT, not general in-app metadata management. Needs a design round
   (what writes, where, how warned, reversibility). (Founder, June 14 2026.)
 
-- [ ] **Relax the capture-pause for GPU embedders** (founder, June 14 2026: "Once we
-  do have the ML model set up on GPU then we won't want to pause them while we're
-  doing ASR."). The scheduler currently pauses ALL background model work while the
-  mic is armed. That is correct TODAY because the embedders run on CPU and share
-  silicon with the CPU ASR. Once the embedders move to a GPU execution provider
-  (CoreML/CUDA, see RUNTIME-MATRIX), a GPU embed pass no longer contends with CPU
-  ASR, so the pause should be RELAXED per-model: keep pausing the GPU LLM during
-  capture (memory-bandwidth + thermal headroom), but let GPU embed passes continue.
-  A per-model pause policy instead of "pause all background." Gated on the GPU EP
-  landing. (Founder, June 14 2026.)
 
 - [~] **CUDA execution provider for the `ort` embedders (Ryzen 9900X + RTX 5080
   desktop)** - VALIDATED June 14 2026: the FP16 CLIP runs on the 5080 at **54.47x**
@@ -367,20 +357,19 @@ magnitudes.
   `ort` CPU-only; enable ONNX Runtime's CoreML EP (MLProgram, NOT legacy
   NeuralNetwork which casts FP16 and can flip predictions). Immich shipped this in
   v2.2.0 (PR #17718).
-- [ ] **WKWebView capability check** - GATES the two below. Verify our Tauri macOS
-  webview supports OffscreenCanvas, Web Workers + createImageBitmap, WebGL/WebGPU
-  before building on them (WebGL broad; OffscreenCanvas Safari 16.4+; WebGPU
-  newer/partial).
-- [ ] **Visualizer off main thread, then WebGL** (gated by WKWebView check). The
-  graph sim is all-pairs O(N^2) Canvas-2D on the MAIN THREAD (sustains ~5k nodes).
-  Interim: move the existing sim into a Web Worker so it stops blocking. Full:
-  WebGL render (Sigma.js) + GPU/Barnes-Hut O(N log N) layout (cosmos.gl scales to
-  1M+). Pairs with the existing graph-perf work.
-- [ ] **Off-main-thread thumbnail decode** (small/optional, gated). CORRECTION from
-  the recon: the grid is ALREADY virtualized (`gridlayout.ts` visible-window + DOM
-  pool) and `Thumb.svelte` already uses `<img decoding="async">`, so this is a
-  control upgrade, not a fix. Optional: `createImageBitmap` in a Worker. Do only if
-  scroll-decode jank is actually measured. (See P7 in PLAN-PERF.md.)
+- [ ] **Visualizer off main thread, then WebGL** (WKWebView check: GO - the probe
+  + `docs/SPIKE-WKWEBVIEW.md` landed; Workers/WebGL2 universal, OffscreenCanvas on
+  Sonoma 14+; confirm via the startup `webviewcaps` console line on the target Mac).
+  The graph sim is all-pairs O(N^2) Canvas-2D on the MAIN THREAD (sustains ~5k
+  nodes). Interim: move the existing sim into a Web Worker so it stops blocking.
+  Full: WebGL render (Sigma.js) + GPU/Barnes-Hut O(N log N) layout (cosmos.gl scales
+  to 1M+). Pairs with the existing graph-perf work.
+- [ ] **Off-main-thread thumbnail decode** (small/optional; WKWebView check GO -
+  Workers + createImageBitmap universal). CORRECTION from the recon: the grid is
+  ALREADY virtualized (`gridlayout.ts` visible-window + DOM pool) and `Thumb.svelte`
+  already uses `<img decoding="async">`, so this is a control upgrade, not a fix.
+  Optional: `createImageBitmap` in a Worker. Do only if scroll-decode jank is
+  actually measured. (See P7 in PLAN-PERF.md.)
 - [ ] **USearch HNSW at scale** - DEFERRED, scale-triggered. Brute-force int8
   MRL-512 is CORRECT now (negligible vs HNSW under ~100k per arXiv 2409.06464).
   Trigger: when a library crosses ~tens of thousands of images, benchmark the

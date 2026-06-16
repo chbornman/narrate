@@ -6,6 +6,39 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 16 2026 - Per-model capture pause + WKWebView capability spike
+
+- [x] **Relax the capture-pause for GPU embedders** (founder, June 14 2026: "Once we
+  do have the ML model set up on GPU then we won't want to pause them while we're
+  doing ASR.") - `9dbf420`. The scheduler paused ALL background model work while the
+  mic was armed for ASR - correct when the embedders ran on CPU and shared silicon
+  with the CPU ASR, but wrong now that the CLIP image embed runs on a GPU/ANE EP
+  (CoreML on macOS, CUDA/TensorRT on the NVIDIA build) where it no longer contends.
+  Now a PER-MODEL policy keyed on each embedder's EXECUTION PROVIDER, not its kind:
+  `should_pause_during_capture(runs_on_accelerator) = !runs_on_accelerator` (pump.rs).
+  While armed, `drain_embeddings` builds a CLIP-only rig (text=None) and runs it ONLY
+  when the CLIP EP is an accelerator - and deliberately does NOT wire `capture_live`
+  as the cancel (it is true for the whole armed window; the bounded `EMBED_BATCH`
+  keeps the turn short). The text embed (CPU per SPIKE-COREML-TEXT.md) and the GPU
+  LLM (request-driven, no background drain) stay paused. `OrtEmbedder` now records
+  its effective EP via a factored `resolve_effective_accel(base)` shared with
+  `build_session` (so `runs_on_accelerator()` reports exactly what loaded, env
+  overrides included) and exposes it. Behavior is IDENTICAL on a pure-CPU machine
+  (no GPU EP -> every embedder reports CPU -> everything still pauses). Tests:
+  policy gpu-keeps-running/cpu-pauses, select_clip_accel fp16-suffix gate,
+  resolve_effective_accel passthrough.
+
+- [x] **WKWebView capability check** (spike, gates the off-main-thread perf work) -
+  `9cee205`. Runtime feature-probe (`logic/webviewcaps.ts`) for OffscreenCanvas
+  (2d/webgl), Web Workers, createImageBitmap, WebGL/WebGL2, and WebGPU presence +
+  async adapter check, logged once at startup (`main.ts` console.info) so a live
+  `tauri dev` run pins the verdicts for the host WebKit. Findings in
+  `docs/SPIKE-WKWEBVIEW.md`. GO/NO-GO: Workers/WebGL2/createImageBitmap universal;
+  OffscreenCanvas on Sonoma 14+ (Safari 16.4+); WebGPU flagged-off through Safari 18
+  (HOLD, off critical path). => visualizer-sim-into-a-Worker GO, WebGL render GO,
+  off-main-thread thumbnail decode GO-but-optional. Definitive confirmation = the
+  startup `webviewcaps` console line on the founder's target macOS. 13 vitest cases.
+
 ## June 16 2026 - Ingest pass pipelining
 
 - [x] **Ingest pass pipelining** (backend perf, no webview dep) - `d3e1f36`. The
