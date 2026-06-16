@@ -6,6 +6,41 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 16 2026 - Digest visibility (Library-status header indicator) + journal chips
+
+- [x] **Digest visibility: "what is my library doing?"** (founder, June 12 2026) -
+  `c65e467` (backend) + `1ea6ea2` (frontend). The only signal used to be the word
+  "digesting" in the header. Now a **Library-status indicator** lives in the
+  TITLEBAR CENTER (replacing that text + absorbing the offline-drive warning):
+  COLLAPSED it reads settled (calm dot + "Library settled") / working (activity
+  glyph + current stage + done/total + a thin sliver + overall "~6m") / blocked
+  (amber + the top waiting-on reason); on hover/focus it drops a panel with the full
+  STAGE list (discover -> hash -> meta -> preview -> embed, each label / "240 /
+  5,000" / a bar / "~6m . 12/s"), a "Waiting on" section (offline volumes,
+  downloading models, embedder loading), and an errors row. The bottom-right Station
+  is now CAPTURE-ONLY (mic/search/pencil/scope/thumbnails kept; all digest rows,
+  transients, the ingest hairline, and the missing-model prompt moved out). Backend:
+  `PassRemaining` gained `done`/`total`/`ratePerSec`; the pump keeps a per-pass EMA
+  (alpha 0.3) FROZEN during capture/offline (no post-pause spike), `ratePerSec`
+  excluded from emit-equality with a 0.5/s quantum gate so float drift cannot spam
+  the channel; ETA = remaining / ratePerSec (frontend). Old `jobs.ts`/`jobs.test.ts`
+  deleted (fully replaced). Stage mapping puts any unknown pass in a trailing
+  "Finishing up" stage, never dropped. Tests: rate-EMA fold + pause-freeze +
+  no-spike (Rust), done/total carry (Rust), librarystatus model/stages/waitingOn/
+  ETA/formatters + rewritten station + titlebar (vitest). REVIEW FLAGS (safe choices
+  shipped): discover stage driven off `scanning`/`discovered` (no pass name);
+  embedder-loading derived from `clipReady`/`textEmbedderReady` false while installed;
+  `acceptModelLicense`/`downloadMissingModel` now unused (left for a later cleanup).
+
+- [x] **Journal entry type/source chips** (founder, June 14 2026) - `90568d6`. Each
+  journal entry shows a compact source chip in its byline so a drawing, voice note,
+  typed note, and system Summary read distinctly. Pure `sourceChip(entry)` helper +
+  chip in `JournalEntry.svelte`, reusing the grid filter-chip pill idiom. Research
+  finding: the frontend `source` DTO is only `voice|typed|system` (no `pencil`); a
+  drawing is `kind === "stroke"`, so the chip derives "Pencil" from kind (precedence
+  over source). `system` -> the "Summary" tag (tinted `--station-working`), lights up
+  when summary generation lands. Tests: one per variant + an em-dash guard.
+
 ## June 16 2026 - Per-model capture pause + WKWebView capability spike
 
 - [x] **Relax the capture-pause for GPU embedders** (founder, June 14 2026: "Once we

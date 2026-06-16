@@ -189,14 +189,6 @@ of them posture changes the founder made deliberately.
   summary stays searchable - confirmed that is the existing design, just not yet
   generating. (Founder, June 14 2026.)
 
-- [ ] **Journal entry type/source chips** (founder, June 14 2026): each journal
-  entry should show a small TYPE CHIP for its source/kind so a drawing vs a voice
-  annotation vs a written note vs an LLM "Summary" are distinct at a glance. Today
-  `source` (voice/typed/pencil/system) is only a hover-title on the timestamp
-  (`JournalEntry.svelte:85`) and kinds (remark/rating/stroke/revision/retraction/
-  redaction) are distinguished by content STRUCTURE only - no visible badge. Add
-  explicit chips: source (voice - typed - pencil - system) plus the system/"Summary"
-  tag from the item above. (Founder, June 14 2026.)
 
 - [ ] **Generate tags from our data and EXPORT them INTO the image files (writes
   real file metadata)** (founder, June 14 2026: "a feature which is to generate tags
@@ -509,24 +501,6 @@ magnitudes.
   shimmer, low-res tier) remain open. The whole shebang remains the
   goal: add folder → instant "scanning" → live count → cards appear →
   previews fill in.
-- [ ] **Digest visibility: a design round for "what is my library
-  doing?"** (founder, fresh-instance dogfood, June 12, 2026): while a
-  new folder digests, the only signal is the word "digest" in the
-  header bar. A new folder kicks off a whole pipeline of background
-  work — discovery walk, hashing, sidecar adoption, preview builds,
-  embedding passes (CLIP + text once M3 lights up), and any model
-  downloads those need — and the user has no way to see where the
-  library IS in that pipeline, what remains, or what the app is waiting
-  on. Needs a deliberate UX round, not another one-word status: a
-  per-stage progress surface (counts done/total per pass), an
-  at-a-glance "library is settled / library is working" state, and an
-  answer for where it lives — LEADING CANDIDATE: the What's-Happening
-  Station above (founder, June 12: hover-expanded task detail there,
-  not always-on counts). Subsumes the header word as the COLLAPSED form of something
-  expandable. Related: the progressive-import item above (the grid's
-  half of the same story) and the model-download progress item below
-  (same disease: real work invisible or misreported). (Founder, June
-  2026.)
 - [ ] **Stronger storage story beyond the welcome card** — the residue of
   the welcome-card item: hash-keyed sidecar recovery sweep,
   case-insensitive-filesystem rename semantics (APFS: a case-only rename
