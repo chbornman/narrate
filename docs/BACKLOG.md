@@ -539,6 +539,24 @@ magnitudes.
 
 - [ ] Full RAW decode backfill pass (rawler/libheif worker; queue already
   knows the pass kind) — unlocks HEIC previews + RAW 1:1 zoom.
+- [ ] **HEIC preview support — DEFERRED (founder, June 16 2026: "worry about
+  compatibility later")**. Today HEIC is INGESTED but not decoded: the preview
+  pass enqueues `Skipped`/"deferred-heic" (`library/mod.rs:1640`, §9.5), and the
+  embed pass now skips to match ("preview-deferred", `f467860`) so the library
+  SETTLES (no eternal "working" — the stuck-at-471 bug). HEICs simply have no
+  thumbnail/embedding until this lands. RESEARCH (so it's not re-litigated): HEIC =
+  HEVC-in-HEIF; there is **no production pure-Rust HEVC decoder** (patent-
+  encumbered), so the options are (a) **macOS-native Image I/O** (`CGImageSource`
+  via objc bindings) — ZERO bundled libs, hardware-accelerated, Apple owns HEVC
+  licensing, but macOS-only; (b) **bundle libheif + libde265** — cross-platform
+  but a C build matrix per OS/arch, app-size weight, and LGPL/HEVC-patent
+  considerations; (c) Windows **WIC** (needs the user's HEVC Video Extension).
+  RECOMMENDED when built: a `decode_heic(bytes) -> RGB8` SEAM feeding the existing
+  preview tiers; macOS Image I/O behind it, libheif as the Linux/Windows backend
+  later. WIRING: flip the `mod.rs:1640` Heic arm to `Pending` + decode in the
+  preview pass; bump `GENERATOR_VERSION`; doctor re-pends the existing
+  `deferred-heic` previews AND `preview-deferred` embeds. Fixtures already in repo:
+  `test-corpora/heic-sample/*.HEIC` (43 files).
 - [ ] Preview-policy settings (which previews to build/keep; LrC-style
   "build 1:1 on demand, discard after N days" knobs) — founder asked for
   exposure of these as toggles eventually.
