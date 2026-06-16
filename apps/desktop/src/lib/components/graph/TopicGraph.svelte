@@ -555,19 +555,19 @@
       embeddersLoading = false;
       return;
     }
-    // For each missing half, is its signal still plausibly COMING -- the embedder
-    // is building, OR it is ready but the space is mid-embedding (clipReady yet
-    // visual_ready still false because the vectors are still being computed) --
-    // versus genuinely ABSENT (embedder idle/failed -> nothing will arrive)?
-    // The OLD code recomputed IMMEDIATELY whenever clipReady was true, so a
-    // ready-but-unembedded space looped ~45x/sec (founder). Instead we POLL the
-    // landing vectors on a bounded 1.5s cadence -- never a tight loop.
-    const visualComing =
-      needVisual && status.clip.state !== "idle" && status.clip.state !== "failed";
-    const annotationComing =
-      needAnnotation &&
-      status.textEmbedder.state !== "idle" &&
-      status.textEmbedder.state !== "failed";
+    // Poll ONLY while the embedder is genuinely BUILDING (still loading its ort
+    // sessions). A READY embedder whose scope simply has no vectors -- the empty
+    // scope x stored-hash JOIN (STATE-MACHINE.md 6a), e.g. a folder of HEICs or
+    // images not yet embedded into the active space -- is NOT "coming": polling
+    // runtime status cannot conjure vectors, so beating recompute() on a 1.5s
+    // timer just thrashes (founder: "freaks out on a beat ... again and again").
+    // Vectors that land later surface on the next user-driven recompute, and
+    // will surface PROPERLY once the library->view data-version seam lands
+    // (ARCHITECTURE-CONTRACTS.md Seam 1), which retires this poll entirely.
+    // Earlier this treated `ready` as coming too (a ready-but-unembedded space
+    // polled its full 40-try / 60s budget); before that it tight-looped ~45x/sec.
+    const visualComing = needVisual && status.clip.state === "building";
+    const annotationComing = needAnnotation && status.textEmbedder.state === "building";
 
     if ((!visualComing && !annotationComing) || readinessTries >= READINESS_MAX_TRIES) {
       // Nothing plausibly arriving (the half is genuinely un-embedded / failed)
