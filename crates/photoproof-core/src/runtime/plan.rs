@@ -113,8 +113,8 @@ pub fn stale_installed_models(
     stale
 }
 
-/// Embedder slot resolution WITH a bypass (STATE-INTEGRITY-AUDIT; founder: the
-/// fp16 CLIP default is locally-converted and not hosted, so a fresh/unstaged
+/// Embedder slot resolution WITH a bypass (STATE-INTEGRITY-AUDIT; founder: a
+/// configured CLIP may be locally-converted/unhosted, so a fresh/unstaged
 /// machine cannot download it). When the CONFIGURED embedder model is not
 /// installed, fall back to ANY installed model of the same manifest `role`
 /// offered at this tier, so the app uses a real embedder instead of going dark
@@ -344,8 +344,9 @@ mod tests {
     #[test]
     fn installed_embedders_run_in_process_without_spawning_a_child() {
         let cfg = from_toml_str("").unwrap().config;
-        // The default CLIP id is the fp16 single-file export (CoreML/CUDA-ready).
-        let clip_id = "ViT-H-14-378-quickgelu__dfn5b-fp16";
+        // Default CLIP id: the int8 base on a non-cuda (test/CI) build; a cuda
+        // build defaults to the fp16 single-file export instead.
+        let clip_id = "ViT-H-14-378-quickgelu__dfn5b";
         let p = plan(
             &cfg,
             1,
@@ -394,26 +395,29 @@ mod tests {
         assert!(matches!(&p.asr, ProcessPlan::NotConfigured { .. }));
     }
 
-    /// The embedder bypass (founder: the fp16 CLIP default is not hosted, so an
-    /// unstaged machine cannot download it). The DEFAULT config names the fp16
-    /// CLIP; if only the base dfn5b (same "embedder" role) is installed, the
-    /// clip slot falls back to it instead of going dark on a 404 download.
+    /// The embedder bypass: when the configured CLIP is not installed but
+    /// another same-role ("embedder") model is, the clip slot falls back to it
+    /// instead of going dark. (Test/CI default is the int8 base; here it is
+    /// absent and only the fp16 is installed, so the bypass picks fp16.)
     #[test]
     fn embedder_bypass_falls_back_to_installed_same_role_model() {
-        let cfg = from_toml_str("").unwrap().config; // default CLIP = fp16
+        let cfg = from_toml_str("").unwrap().config; // default CLIP = int8 base (non-cuda)
         let p = plan(
             &cfg,
             1,
             &compiled_manifest(),
-            // fp16 NOT installed; the base dfn5b + the text embedder ARE.
-            &installed(&["ViT-H-14-378-quickgelu__dfn5b", "embeddinggemma-300m-q8"]),
+            // The default (int8 base) NOT installed; fp16 (same role) + text ARE.
+            &installed(&[
+                "ViT-H-14-378-quickgelu__dfn5b-fp16",
+                "embeddinggemma-300m-q8",
+            ]),
         );
         assert_eq!(
             p.clip_embedder,
             ProcessPlan::Run {
-                model_id: "ViT-H-14-378-quickgelu__dfn5b".into()
+                model_id: "ViT-H-14-378-quickgelu__dfn5b-fp16".into()
             },
-            "bypass to the installed base dfn5b when the fp16 default is absent"
+            "bypass to the installed fp16 when the int8 base default is absent"
         );
         assert_eq!(
             p.text_embedder,

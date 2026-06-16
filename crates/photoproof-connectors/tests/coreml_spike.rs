@@ -49,6 +49,11 @@ fn models_dir() -> PathBuf {
 /// (no external-data fan-out), which is the form that clears the CoreML load
 /// blocker. int8 stays the CPU default; this dir is the CoreML candidate.
 fn models_dir_fp16() -> PathBuf {
+    // PP_FP16_MODEL_DIR override lets a measurement point at an alternate fp16
+    // export (e.g. the Sqrt-FOLDED tower) without disturbing the staged one.
+    if let Ok(p) = std::env::var("PP_FP16_MODEL_DIR") {
+        return PathBuf::from(p);
+    }
     let home = std::env::var("HOME").expect("HOME");
     PathBuf::from(home)
         .join("Library/Application Support/com.photoproof.desktop/models")
