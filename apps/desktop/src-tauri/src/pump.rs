@@ -214,53 +214,118 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
         .expect("spawn ingest pump");
 }
 
-/// P7.4 decision 5: drain a bounded batch of the embedding backfill when
-/// the embedders are ready and the mic is not armed. Returns the number of
-/// pass rows processed (0 = nothing to do / paused / degraded).
+/// The per-model capture-pause policy (the GPU-embedder relax).
 ///
-/// PAUSE while `capture_live`: embedding batches hold while the mic owns the
-/// machine (RUNTIME §9 — "while the mic is armed … embedding batches" pause;
-/// same posture as downloads). Two layers enforce it, matching the downloads
-/// posture (per-chunk, not per-batch — download.rs's SleepPacer consults the
-/// SAME flag inside its transfer loop):
-///   1. No new batch starts while armed (the early return below).
-///   2. `cancel` is wired to `capture_live`, and the core drain checks it
-///      before every item claim AND before the unbounded session-level
-///      remark sweep — so a mic armed MID-batch (or mid-sweep) preempts at
-///      the next item rather than running the whole `EMBED_BATCH` (~24 s of
-///      DFN5B inference) or an arbitrarily long first sweep of stale remarks.
-///      Cancelling leaves the in-flight rows pending; the next idle turn
-///      resumes them.
+/// Today the scheduler reserves the machine for the CPU ASR while the mic is
+/// armed by pausing background model work. The RIGHT discriminator is the
+/// pass's EXECUTION PROVIDER, not the pass kind:
+///
+/// - A CPU embed pass (the int8/CPU EmbeddingGemma text embed per
+///   docs/SPIKE-COREML-TEXT.md, or a CLIP fp32 CPU fallback) CONTENDS for the
+///   same silicon as the CPU ASR -> it MUST pause (returns true).
+/// - A GPU/ANE embed pass (the CoreML / CUDA / TensorRT CLIP image embed) does
+///   NOT contend with the CPU ASR -> it must KEEP RUNNING (returns false).
+///   (Founder, June 14 2026: "Once we do have the ML model set up on GPU then
+///   we won't want to pause them while we're doing ASR.")
+///
+/// The GPU LLM stays paused during capture regardless — it contends for GPU
+/// memory bandwidth + thermal headroom — but there is no background LLM drain in
+/// the pump today (the LLM is request-driven), so this policy governs the
+/// embedders, the only background model work the pump schedules.
+///
+/// Behavior is IDENTICAL on a pure-CPU machine: with no GPU/ANE EP available
+/// `runs_on_accelerator` is false for every embedder, so everything still
+/// pauses, exactly as before this relax.
+fn should_pause_during_capture(runs_on_accelerator: bool) -> bool {
+    !runs_on_accelerator
+}
+
+/// P7.4 decision 5: drain a bounded batch of the embedding backfill when the
+/// embedders are ready. Returns the number of pass rows processed (0 = nothing
+/// to do / paused / degraded).
+///
+/// CAPTURE PAUSE (per-model, RUNTIME §9): while `capture_live` the mic owns the
+/// machine, so background model work that CONTENDS WITH THE CPU ASR pauses. Which
+/// passes contend is decided by `should_pause_during_capture` on each embedder's
+/// EXECUTION PROVIDER (not its kind):
+///
+/// - The TEXT embed (CPU per SPIKE-COREML-TEXT.md) pauses while armed.
+/// - The CLIP IMAGE embed continues while armed IFF it is on a GPU/ANE EP
+///   (CoreML/CUDA/TensorRT) — it no longer shares silicon with the CPU ASR.
+///   On a CPU build the CLIP fallback is CPU too, so it pauses like today.
+///
+/// Two enforcement layers mirror the downloads posture (per-item, not per-batch):
+///
+/// 1. While armed we build a CLIP-ONLY rig (text = None) and only when the CLIP
+///    EP is an accelerator; otherwise nothing starts (the all-CPU path is the
+///    pre-relax behavior).
+/// 2. `cancel` is wired to `capture_live` ONLY for the paused (not-armed) drain.
+///    The armed GPU drain deliberately does NOT cancel on `capture_live` — that
+///    flag is true for its whole duration, so wiring it would cancel the very
+///    work we want to keep running. The batch bound (`EMBED_BATCH`) keeps each
+///    armed turn short instead.
 ///
 /// DEGRADED: with no embedder ready this returns 0 and the rows sit pending
 /// — the journal is whole, the backfill is simply dark (RETRIEVAL §3 /
 /// embedding.rs degraded contract).
 fn drain_embeddings(app: &App) -> usize {
-    // The mic owns the machine: no embedding batch starts while armed.
-    if app.runtime.capture_live.load(Ordering::Relaxed) {
-        return 0;
-    }
+    let armed = app.runtime.capture_live.load(Ordering::Relaxed);
     let text = app.runtime.embedders.text();
     let clip = app.runtime.embedders.clip();
     // Nothing ready ⇒ degraded; leave the rows pending, no claim, no error.
     if text.is_none() && clip.is_none() {
         return 0;
     }
-    // `EmbeddingRig` borrows the embedders; the `Arc`s keep them alive for
-    // the call. TE == CE == OrtEmbedder (one connector type, two roles).
+
+    if armed {
+        // While the mic is armed, run ONLY the passes that do not contend with
+        // the CPU ASR: the GPU/ANE CLIP image embed. The text embed (CPU) and
+        // the session-level text sweep stay paused (they are skipped because the
+        // rig's `text` is None). If the CLIP embedder is on CPU (no GPU EP, or a
+        // non-fp16 model), `should_pause_during_capture` is true and we start
+        // nothing — the exact pre-relax behavior on a CPU machine.
+        let Some(clip) = clip else { return 0 };
+        if should_pause_during_capture(clip.runs_on_accelerator()) {
+            return 0;
+        }
+        // CLIP-only rig: `process_embedding_queue` then claims only
+        // ImageEmbedding passes and skips the text session-level sweep.
+        let rig = photoproof_core::library::EmbeddingRig::<photoproof_connectors::OrtEmbedder> {
+            text: None,
+            clip: Some(clip.as_ref()),
+            vectors: &app.vectors,
+        };
+        return run_embedding_drain(
+            app, &rig,
+            // No `capture_live` cancel here: it is true for the whole armed
+            // window, so it would cancel the GPU work we WANT to keep draining.
+            // The bounded batch keeps the armed turn short on its own.
+            None,
+        );
+    }
+
+    // Not armed: full rig, both passes, with the capture cancel wired so that
+    // arming the mic MID-drain preempts the CPU work at the next item.
     let rig = photoproof_core::library::EmbeddingRig {
         text: text.as_deref(),
         clip: clip.as_deref(),
         vectors: &app.vectors,
     };
+    run_embedding_drain(app, &rig, Some(app.runtime.capture_live.clone()))
+}
+
+/// Run one bounded embedding-queue drain with the given cancel flag, logging and
+/// swallowing drain-level errors (never crashes the pump). Shared by the armed
+/// (GPU-only, no cancel) and not-armed (full rig, capture cancel) paths.
+fn run_embedding_drain<TE: photoproof_connectors::Embedder, CE: photoproof_connectors::Embedder>(
+    app: &App,
+    rig: &photoproof_core::library::EmbeddingRig<'_, TE, CE>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> usize {
     match app.library.process_embedding_queue(
-        &rig,
+        rig,
         &QueueOptions {
-            // Per-item pause: capture_live is already an Arc<AtomicBool>, and
-            // the core drain checks it before each claim and before the
-            // session-level sweep, so arming the mic mid-drain preempts the
-            // backfill instead of letting a long turn compete with capture.
-            cancel: Some(app.runtime.capture_live.clone()),
+            cancel,
             max_items: Some(EMBED_BATCH),
         },
     ) {
@@ -432,6 +497,33 @@ pub fn drain_capture_at_quit<C: photoproof_core::capture::Clock>(
         minted += engine.pump(store).len();
     }
     minted
+}
+
+#[cfg(test)]
+mod capture_pause_policy_tests {
+    use super::should_pause_during_capture;
+
+    /// The per-model capture-pause policy keyed on a pass's execution provider.
+    /// These cases pin the founder's rule (June 14 2026) so a future refactor
+    /// cannot silently re-pause GPU embedders or un-pause CPU work.
+    #[test]
+    fn gpu_ane_embed_keeps_running_cpu_work_pauses() {
+        // GPU/ANE CLIP image embed (CoreML / CUDA / TensorRT): does NOT contend
+        // with the CPU ASR -> must KEEP RUNNING during capture.
+        assert!(
+            !should_pause_during_capture(true),
+            "a GPU/ANE embed pass must keep draining while the mic is armed"
+        );
+
+        // CPU text embed (EmbeddingGemma int8/CPU) AND the all-CPU CLIP fallback:
+        // contend with the CPU ASR -> must PAUSE during capture. This is also the
+        // exact pre-relax behavior on a pure-CPU machine (no GPU EP), which keeps
+        // the relax behavior-identical when no accelerator is present.
+        assert!(
+            should_pause_during_capture(false),
+            "a CPU embed pass must still pause while the mic is armed"
+        );
+    }
 }
 
 #[cfg(test)]

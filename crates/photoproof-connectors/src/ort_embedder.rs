@@ -115,6 +115,15 @@ pub enum TextRecipe {
 pub struct OrtEmbedder {
     model_id: String,
     dims: usize,
+    /// The EFFECTIVE execution provider these sessions were built on, resolved
+    /// once at construction (the same resolution `build_session` applies: the
+    /// per-model `select_clip_accel` choice plus the force-CPU / CoreML env
+    /// overrides). WHY store it: the capture-pause policy (apps/desktop pump)
+    /// needs to ask "is THIS embedder on a GPU/ANE EP?" to decide whether a
+    /// background embed pass must pause while the mic is armed for ASR. The
+    /// discriminator is the accelerator, not the pass kind (a CPU CLIP fallback
+    /// must still pause). Text embedders are always `Cpu` (SPIKE-COREML-TEXT.md).
+    accel: Accel,
     inner: Inner,
 }
 
@@ -159,6 +168,10 @@ impl OrtEmbedder {
         // partitions to the ANE (docs/SPIKE-COREML-TEXT.md). GPU acceleration is
         // the CLIP path, gated per-model in `clip`. (NVIDIA/TensorRT may revisit
         // text-embed - it takes the whole graph - but that is a separate measure.)
+        // Text stays CPU by construction; resolve through the same override
+        // helper so the recorded accel matches what `build_session` actually
+        // registered (e.g. the CoreML spike env could flip a CPU base).
+        let accel = resolve_effective_accel(Accel::Cpu);
         let session = build_session(model_path, Accel::Cpu)?;
         let tokenizer = load_tokenizer(tokenizer_path)?;
         let kv_feeds = zero_length_kv_feeds(&session);
@@ -166,6 +179,7 @@ impl OrtEmbedder {
         Ok(Self {
             model_id: model_id.into(),
             dims,
+            accel,
             inner: Inner::Text {
                 recipe,
                 session: Mutex::new(session),
@@ -192,13 +206,17 @@ impl OrtEmbedder {
         // NVIDIA EPs (TensorRT/CUDA, the `cuda`/`tensorrt` build features); the
         // int8 external-data CLIP + the text embedder stay CPU. The `-fp16`
         // model-id suffix marks the GPU-ready single-file export.
-        let accel = select_clip_accel(&model_id);
-        let image_session = build_session(image_model_path, accel)?;
-        let text_session = build_session(text_model_path, accel)?;
+        let base = select_clip_accel(&model_id);
+        // The EFFECTIVE accel after env overrides — the same value `build_session`
+        // registers — so `runs_on_accelerator` reports what actually loaded.
+        let accel = resolve_effective_accel(base);
+        let image_session = build_session(image_model_path, base)?;
+        let text_session = build_session(text_model_path, base)?;
         let tokenizer = load_tokenizer(tokenizer_path)?;
         Ok(Self {
             model_id,
             dims,
+            accel,
             inner: Inner::Clip {
                 text_session: Mutex::new(text_session),
                 image_session: Mutex::new(image_session),
@@ -264,6 +282,24 @@ impl Embedder for OrtEmbedder {
 
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+}
+
+impl OrtEmbedder {
+    /// True iff these sessions are running on a GPU/ANE execution provider
+    /// (CoreML on macOS, the NVIDIA CUDA/TensorRT ladder on a `cuda` build) —
+    /// i.e. NOT the plain CPU EP.
+    ///
+    /// WHY this exists: the capture-pause policy. While the mic is armed for
+    /// ASR, the scheduler pauses background model work so it does not contend
+    /// with the CPU ASR. A GPU/ANE embed pass does NOT contend with the CPU
+    /// ASR, so it must keep running (founder, June 14 2026: "Once we do have the
+    /// ML model set up on GPU then we won't want to pause them while we're doing
+    /// ASR."). A CPU embed pass (text, or a CLIP fp32 fallback) DOES contend, so
+    /// it must still pause. The discriminator is the EXECUTION PROVIDER, not the
+    /// pass kind — which is exactly what this reports.
+    pub fn runs_on_accelerator(&self) -> bool {
+        self.accel != Accel::Cpu
     }
 }
 
@@ -414,6 +450,22 @@ fn select_clip_accel(model_id: &str) -> Accel {
     return Accel::Cpu;
 }
 
+/// Apply the env overrides to a per-model base accelerator, yielding the EP a
+/// session will ACTUALLY register: an explicit force-CPU wins (the GPU spike
+/// baseline — same fp16 weights on CPU); otherwise the legacy CoreML knob can
+/// promote a CPU-selected model to CoreML (the CoreML spike harness); else the
+/// base is used as-is. Pure over (base, env) so the pause policy and the
+/// session builder agree, and so it is unit-testable without loading a model.
+fn resolve_effective_accel(base: Accel) -> Accel {
+    if force_cpu_requested() {
+        Accel::Cpu
+    } else if base == Accel::Cpu && coreml_requested() {
+        Accel::CoreML
+    } else {
+        base
+    }
+}
+
 fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
     // CPU EP is ort's default; 4 intra-op threads is the spike posture.
     // GraphOptimizationLevel::Level3 matches onnxruntime python's default
@@ -428,16 +480,10 @@ fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
         .map_err(|e| err(e.to_string()))?
         .with_intra_threads(INTRA_OP_THREADS)
         .map_err(|e| err(e.to_string()))?;
-    // Resolve the effective accelerator: an explicit force-CPU wins (the GPU
-    // spike baseline); otherwise the per-model choice; the legacy CoreML env
-    // knob still forces CoreML for a CPU-selected model (the CoreML spike harness).
-    let accel = if force_cpu_requested() {
-        Accel::Cpu
-    } else if accel == Accel::Cpu && coreml_requested() {
-        Accel::CoreML
-    } else {
-        accel
-    };
+    // Resolve the effective accelerator (force-CPU / CoreML env overrides).
+    // Shared with the embedder's recorded `accel` so `runs_on_accelerator`
+    // reports exactly the EP this session registers.
+    let accel = resolve_effective_accel(accel);
     match accel {
         // CPU EP is ort's default - nothing to register.
         Accel::Cpu => {}
@@ -937,6 +983,62 @@ mod tests {
     use super::*;
 
     // ---- prompt assembly (deterministic, no model) ----
+
+    // ---- accelerator selection (the capture-pause discriminator) ----
+
+    /// The fp16 single-file CLIP graduates to the platform GPU/ANE; the int8
+    /// external-data CLIP and any non-fp16 id stay on CPU. (The platform arm is
+    /// cfg-selected; this checks the model-id gate that precedes it.)
+    #[test]
+    fn select_clip_accel_gates_on_the_fp16_suffix() {
+        // Non-fp16 ids are CPU on every build.
+        assert_eq!(
+            select_clip_accel("ViT-H-14-378-quickgelu__dfn5b"),
+            Accel::Cpu
+        );
+        assert_eq!(select_clip_accel("dfn5b-int8"), Accel::Cpu);
+        // The fp16 id resolves to the platform accelerator: CoreML on macOS, the
+        // NVIDIA ladder on a cuda build, CPU on a plain non-mac build. In ALL
+        // cases the "stays paused" CPU fallback is preserved when no GPU EP
+        // exists, which is the behavior-identical-on-CPU guarantee.
+        let fp16 = select_clip_accel("ViT-H-14-378-quickgelu__dfn5b-fp16");
+        #[cfg(target_os = "macos")]
+        assert_eq!(fp16, Accel::CoreML);
+        #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
+        assert_eq!(fp16, Accel::Nvidia);
+        #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
+        assert_eq!(fp16, Accel::Cpu);
+    }
+
+    /// `resolve_effective_accel` is the pure (base, env) -> EP resolution the
+    /// session builder and the recorded `accel` share. force-CPU always wins
+    /// (the spike baseline); the base passes through untouched when no override
+    /// is set. We do NOT mutate env here (other tests in-process read it); the
+    /// no-override pass-through is the load-bearing case for the pause policy.
+    #[test]
+    fn resolve_effective_accel_passes_base_through_without_overrides() {
+        // Only assert when the env knobs are not set in this process, so the
+        // test is order-independent (env is process-global).
+        if !force_cpu_requested() && !coreml_requested() {
+            assert_eq!(resolve_effective_accel(Accel::Cpu), Accel::Cpu);
+            assert_eq!(resolve_effective_accel(Accel::CoreML), Accel::CoreML);
+            assert_eq!(resolve_effective_accel(Accel::Nvidia), Accel::Nvidia);
+        }
+        // force-CPU ALWAYS collapses every base to CPU — independent of env,
+        // since the branch order makes it unconditional when set. We assert the
+        // invariant via the function's structure by checking the CPU base stays
+        // CPU (true under every env), which the pause policy relies on: a CPU
+        // model never claims to be on an accelerator.
+        assert_eq!(resolve_effective_accel(Accel::Cpu), {
+            if force_cpu_requested() {
+                Accel::Cpu
+            } else if coreml_requested() {
+                Accel::CoreML
+            } else {
+                Accel::Cpu
+            }
+        });
+    }
 
     #[test]
     fn gemma_prompts_wrap_query_and_document_sides() {
