@@ -549,8 +549,24 @@ fn build_session_with_coreml(
 ) -> Result<ort::session::builder::SessionBuilder, String> {
     use ort::ep::CoreML;
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
+    // PHOTOPROOF_ORT_COREML_UNITS picks the CoreML compute units. WHY a knob:
+    // the fp16 DFN5B graph fragments into ~64 CoreML partitions (visual 36 +
+    // textual 28); on the ANE (CPUAndNeuralEngine, the default) Apple's per-
+    // partition model-prep is slow, so even a cache-warm load is minutes. The
+    // Metal GPU path (`gpu` -> CPUAndGPU) usually skips that ANE prep and loads
+    // far faster. Unset/anything-else keeps today's ANE behavior, so this is an
+    // opt-in escape hatch; once measured it can become the default.
+    let units = match std::env::var("PHOTOPROOF_ORT_COREML_UNITS")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "gpu" => ComputeUnits::CPUAndGPU,
+        "all" => ComputeUnits::All,
+        _ => ComputeUnits::CPUAndNeuralEngine,
+    };
     let mut ep = CoreML::default()
-        .with_compute_units(ComputeUnits::CPUAndNeuralEngine)
+        .with_compute_units(units)
         .with_model_format(ModelFormat::MLProgram)
         .with_subgraphs(true);
     if let Some(dir) = cache_dir {
