@@ -287,6 +287,7 @@ impl EmbedderHost {
         let generation = self.text_gen.clone();
         let target_slot = self.text.clone();
         let build_lock = self.build_lock.clone();
+        tracing::info!(role = "text", model = %model_id, gen = dispatch, "embedder dispatching build");
         // Build OFF the converge thread (load is seconds). The result lands
         // back in the slot only if no newer build superseded it. The
         // build_lock serializes the heavy ort load against the other role.
@@ -331,6 +332,7 @@ impl EmbedderHost {
         let generation = self.clip_gen.clone();
         let target_slot = self.clip.clone();
         let build_lock = self.build_lock.clone();
+        tracing::info!(role = "clip", model = %model_id, gen = dispatch, "embedder dispatching build");
         let _ = std::thread::Builder::new()
             .name("pp-embed-build-clip".into())
             .spawn(move || {
@@ -370,25 +372,43 @@ fn land_build(
     built: photoproof_connectors::ConnectorResult<OrtEmbedder>,
 ) {
     if generation.load(Ordering::SeqCst) != my_gen {
-        return; // superseded — discard quietly
+        // Superseded by a newer converge while this (often multi-minute) build
+        // was in flight. Traced, not silent: a repeated discard here is the
+        // signature of a rebuild LOOP that keeps a slot from ever landing Ready
+        // (the embedder never goes live, the embed drain stays dark).
+        tracing::info!(
+            model = %model_id, my_gen,
+            "embedder build superseded before land (discarded)"
+        );
+        return;
     }
     let mut slot = slot.lock().expect("embedder slot");
     // Re-check under the lock: a shutdown between the load above and here
     // must win (the slot would be Idle / a different model).
     if generation.load(Ordering::SeqCst) != my_gen {
+        tracing::info!(
+            model = %model_id, my_gen,
+            "embedder build superseded under lock (discarded)"
+        );
         return;
     }
     *slot = match built {
-        Ok(embedder) => Slot::Ready {
-            model_id,
-            embedder: Arc::new(embedder),
-        },
-        Err(e) => Slot::Failed {
+        Ok(embedder) => {
+            tracing::info!(model = %model_id, "embedder build landed READY");
+            Slot::Ready {
+                model_id,
+                embedder: Arc::new(embedder),
+            }
+        }
+        Err(e) => {
             // The honest degraded-with-error landing (RUNTIME §3.3): a load
             // failure is data for the debug panel, never a crash.
-            msg: format!("ort load failed: {e}"),
-            model_id,
-        },
+            tracing::warn!(model = %model_id, error = %e, "embedder build landed FAILED");
+            Slot::Failed {
+                msg: format!("ort load failed: {e}"),
+                model_id,
+            }
+        }
     };
 }
 

@@ -595,10 +595,36 @@ pub fn spawn_sidecar_pump(handle: AppHandle) {
         .expect("spawn sidecar pump");
 }
 
+/// Readiness fingerprint for the runtime pump's idle-tick re-emit gate: the
+/// fields that can transition WITHOUT a bus event. The embedder host lands a
+/// slot Ready/Failed on a background build thread and publishes nothing, so the
+/// timeout path must notice the change itself. Download byte-progress is NOT
+/// here — it rides real bus events and never needs the timeout refresh.
+type ReadyFp = (
+    crate::dto::EmbedderState, // clip slot state (covers clip_ready == Ready)
+    crate::dto::EmbedderState, // text embedder slot state
+    bool,                      // asr_ready
+    bool,                      // llm_ready
+    bool,                      // asr_blocked present
+    bool,                      // llm_blocked present
+);
+
+fn readiness_fp(s: &crate::dto::RuntimeStatus) -> ReadyFp {
+    (
+        s.clip.state,
+        s.text_embedder.state,
+        s.asr_ready,
+        s.llm_ready,
+        s.asr_blocked.is_some(),
+        s.llm_blocked.is_some(),
+    )
+}
+
 /// The runtime pump (RUNTIME §8.3): forwards core-bus events to the
 /// webview as coalesced `runtime-status` snapshots — readiness changes,
 /// state transitions, download progress. Payloads stay snapshot-shaped
-/// and low-rate (UI §7.4 wire discipline / tauri #852).
+/// and low-rate (UI §7.4 wire discipline / tauri #852). An idle-tick refresh
+/// (gated on `readiness_fp`) catches the embedder's no-bus-event slot landing.
 pub fn spawn_runtime_pump(handle: AppHandle) {
     std::thread::Builder::new()
         .name("pp-runtime-pump".into())
@@ -609,6 +635,13 @@ pub fn spawn_runtime_pump(handle: AppHandle) {
                 }
                 std::thread::sleep(IDLE_SLEEP);
             };
+            // Last-emitted READINESS fingerprint. The embedder host lands a slot
+            // Ready/Failed on a background build thread and publishes NO bus
+            // event, so without a timeout-side refresh the webview freezes on the
+            // last 'building' snapshot forever (the embedder-loading-that-never-
+            // finishes bug). We re-emit on the idle tick ONLY when this changed,
+            // so an idle runtime still stays quiet (no 2/s snapshot spam).
+            let mut last_ready: Option<ReadyFp> = None;
             loop {
                 let Some(app) = handle.try_state::<Arc<App>>() else {
                     return;
@@ -618,25 +651,40 @@ pub fn spawn_runtime_pump(handle: AppHandle) {
                     return;
                 }
                 // Block for one event, then drain the burst (coalesce).
-                let Ok(first) = rx.recv_timeout(RUNTIME_PUMP_TICK) else {
-                    continue;
-                };
-                let mut events = vec![first];
-                while let Ok(e) = rx.try_recv() {
-                    events.push(e);
-                }
-                for e in &events {
-                    if let photoproof_core::runtime::RuntimeEvent::DownloadProgress {
-                        model_id,
-                        downloaded_bytes,
-                        total_bytes,
-                    } = e
-                    {
-                        app.runtime
-                            .note_progress(model_id, *downloaded_bytes, *total_bytes);
+                match rx.recv_timeout(RUNTIME_PUMP_TICK) {
+                    Ok(first) => {
+                        let mut events = vec![first];
+                        while let Ok(e) = rx.try_recv() {
+                            events.push(e);
+                        }
+                        for e in &events {
+                            if let photoproof_core::runtime::RuntimeEvent::DownloadProgress {
+                                model_id,
+                                downloaded_bytes,
+                                total_bytes,
+                            } = e
+                            {
+                                app.runtime
+                                    .note_progress(model_id, *downloaded_bytes, *total_bytes);
+                            }
+                        }
+                        let status = app.runtime.status();
+                        last_ready = Some(readiness_fp(&status));
+                        let _ = handle.emit("runtime-status", status);
+                    }
+                    // Timeout (or a disconnect, handled by the top-of-loop
+                    // shutdown/try_state checks): no bus event fired, but a
+                    // silent slot transition may have. Re-emit only on a
+                    // readiness change so the UI self-corrects within one tick.
+                    Err(_) => {
+                        let status = app.runtime.status();
+                        let fp = readiness_fp(&status);
+                        if last_ready.as_ref() != Some(&fp) {
+                            last_ready = Some(fp);
+                            let _ = handle.emit("runtime-status", status);
+                        }
                     }
                 }
-                let _ = handle.emit("runtime-status", app.runtime.status());
             }
         })
         .expect("spawn runtime pump");
