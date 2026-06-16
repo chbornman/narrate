@@ -644,8 +644,13 @@ impl PpvecStore {
 
     /// Startup-doctor disk-vs-DB reconciliation of the vector spaces
     /// (STATE-INTEGRITY-AUDIT.md; founder: "fully robust"). `active` maps each
-    /// `vec_kind` to the model id the live embedder writes today (from config /
-    /// the loaded embedder). Three silent-failure classes are healed:
+    /// `vec_kind` to the model id the live embedder writes today. An "active
+    /// model" here means active AND actually LOADED: the caller
+    /// (`active_vector_models`) only enters a kind when its embedder is ready,
+    /// so a model merely NAMED active by config but unloadable contributes no
+    /// entry and its kind is left untouched. WHY this matters: retiring a
+    /// populated space as "superseded" by a model that cannot write would drop
+    /// the library's only vectors. Three silent-failure classes are healed:
     ///
     /// 1. ACTIVE model, file MISSING ⇒ the rows are dangling pointers; delete
     ///    them and ask the shell to re-pend so the space rebuilds dense (a

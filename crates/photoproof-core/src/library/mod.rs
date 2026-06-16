@@ -1039,7 +1039,52 @@ impl Library {
              WHERE root_id = ?1 AND state = 'active'",
             params![root_id, now],
         )?;
+        // Skip the still-pending/error ingest passes of images this root just
+        // orphaned. WHY: a pending pass with no live file on disk can never
+        // complete — it would defer forever, churning the drain. We use the
+        // SAFE filter: an image may be linked from several roots, so only skip
+        // when NO active path remains for it after the stale-marking above (an
+        // image still reachable from another root keeps its passes). Mirrors
+        // `ingest::mark_skipped`: state→'skipped', error code recorded, and
+        // not_before/attempts cleared so it never re-enters the queue.
+        conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'skipped', error = 'root-removed', completed_at = ?2,
+                 not_before = NULL, attempts = 0
+             WHERE image_hash IN (
+                   SELECT DISTINCT p.image_hash FROM paths p
+                   WHERE p.root_id = ?1
+                     AND NOT EXISTS (
+                       SELECT 1 FROM paths a
+                       WHERE a.image_hash = p.image_hash AND a.state = 'active'))
+               AND state IN ('pending', 'error')",
+            params![root_id, now],
+        )?;
         Ok(())
+    }
+
+    /// Startup-doctor heal: skip every pending/error ingest pass whose image has
+    /// NO remaining active path. WHY: images orphaned BEFORE the `remove_root`
+    /// skip-on-removal fix (or by a file-deletion path that never went through
+    /// `remove_root`) still carry live passes that can never complete — they
+    /// defer forever, churning the drain. This catch-all sweep, run once at
+    /// startup, retires them. Same shape as `ingest::mark_skipped`
+    /// (state→'skipped', error code, not_before/attempts cleared). Idempotent:
+    /// a second run finds nothing pending for an orphan and returns 0. Returns
+    /// the number of passes skipped.
+    pub fn heal_orphaned_passes(&self) -> Result<usize, LibraryError> {
+        let now = self.now().to_rfc3339();
+        let conn = self.db.lock().expect("poisoned");
+        let n = conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'skipped', error = 'root-removed', completed_at = ?1,
+                 not_before = NULL, attempts = 0
+             WHERE state IN ('pending', 'error')
+               AND image_hash NOT IN (
+                   SELECT DISTINCT image_hash FROM paths WHERE state = 'active')",
+            params![now],
+        )?;
+        Ok(n)
     }
 
     /// Archive a root (folder-tree improvements): a NON-DESTRUCTIVE lifecycle
@@ -2363,7 +2408,16 @@ impl Library {
 
     pub fn image_hashes(&self) -> Result<Vec<ContentHash>, LibraryError> {
         let conn = self.db.lock().expect("poisoned");
-        let mut stmt = conn.prepare("SELECT image_hash FROM images ORDER BY image_hash")?;
+        // WHY: only surface images that still have at least one ACTIVE path.
+        // An image whose every path went stale (file deleted, root removed) is
+        // orphaned: it must drop out of this enumeration so callers (embedding
+        // re-pend sweeps, the lens) stop treating it as live work. Mirrors the
+        // `state = 'active'` filter `list_folder()` already applies.
+        let mut stmt = conn.prepare(
+            "SELECT image_hash FROM images
+             WHERE image_hash IN (SELECT DISTINCT image_hash FROM paths WHERE state = 'active')
+             ORDER BY image_hash",
+        )?;
         let rows = stmt.query_map([], |r| {
             let h: String = r.get(0)?;
             ContentHash::from_hex(&h).map_err(|_| rusqlite::Error::InvalidQuery)

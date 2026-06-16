@@ -8,7 +8,11 @@
  * stand-in payload to test the box.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { graphState, graphStateKey } from "../src/lib/logic/graphstore";
+import {
+  graphState,
+  graphStateKey,
+  invalidateScopedGraphs,
+} from "../src/lib/logic/graphstore";
 import type { ScopeKeyInput } from "../src/lib/logic/affinitycache";
 
 const folder: ScopeKeyInput = { kind: "folder", root_id: "r1", folder: "iceland" };
@@ -94,5 +98,44 @@ describe("graphState — restore the SAME view, recompute a CHANGED one", () => 
     graphState.clear();
     expect(graphState.has(key)).toBe(false);
     expect(graphState.get(key)).toBeNull();
+  });
+});
+
+describe("invalidateScopedGraphs — drop a removed root's cached graph", () => {
+  it("drops the snapshot for a folder scope under the removed root", () => {
+    // The stored key embeds folder:r1/iceland; removing root r1 must drop it so
+    // a reopen recomputes instead of restoring a layout over vanished images.
+    const key = graphStateKey(folder, ["harbor"]);
+    graphState.set(key, { v: 1 });
+    invalidateScopedGraphs("r1");
+    expect(graphState.has(key)).toBe(false);
+    expect(graphState.get(key)).toBeNull();
+  });
+
+  it("leaves a DIFFERENT root's snapshot intact (targeted, not a blanket clear)", () => {
+    const other: ScopeKeyInput = {
+      kind: "folder",
+      root_id: "r2",
+      folder: "alps",
+    };
+    const key = graphStateKey(other, ["snow"]);
+    graphState.set(key, { v: 2 });
+    invalidateScopedGraphs("r1"); // removing r1 must not touch r2's view
+    expect(graphState.has(key)).toBe(true);
+    expect(graphState.get(key)).toEqual({ v: 2 });
+  });
+
+  it("does not drop a root whose id is merely a prefix of the removed id", () => {
+    // The trailing slash in folder:${root_id}/ prevents removing "r1" from
+    // matching a snapshot under "r10" (a prefix collision without the slash).
+    const r10: ScopeKeyInput = {
+      kind: "folder",
+      root_id: "r10",
+      folder: "x",
+    };
+    const key = graphStateKey(r10, ["t"]);
+    graphState.set(key, { v: 3 });
+    invalidateScopedGraphs("r1");
+    expect(graphState.has(key)).toBe(true);
   });
 });

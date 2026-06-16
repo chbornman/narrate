@@ -28,8 +28,11 @@ use photoproof_connectors::embedder::{DecodedImage, Embedder};
 use photoproof_connectors::vector_store::{VecKey, VecKind, VecSpace, VecUnit};
 use rusqlite::{Connection, params};
 
+use super::preview::GENERATOR_VERSION;
 use super::{ArtifactKind, Library, LibraryError, QueueOptions, QueueReport, ingest};
-use crate::retrieval::{ChunkContext, PpvecStore, VecMeta, chunk_folded_text, inputs_hash};
+use crate::retrieval::{
+    ChunkContext, PpvecStore, VecMeta, chunk_folded_text, image_inputs_hash, inputs_hash,
+};
 
 /// The embedding drain's collaborators. `None` embedders leave their pass
 /// rows untouched (idle); the PPVEC store is always required — it also
@@ -422,8 +425,18 @@ impl Library {
             return Ok(());
         };
 
-        let bytes = std::fs::read(&path)?;
-        let hash = inputs_hash(&bytes);
+        // Staleness over (image identity, embedder model, preview-generator
+        // version) — NOT the raw preview bytes. WHY: a preview regen produces
+        // different bytes for the same picture, so a byte hash re-embedded the
+        // whole library on every regen (self-heal 3B). This recipe skips when
+        // the same image is already embedded under the same model + the same
+        // preview-pipeline version, and only re-embeds when the generator
+        // version bumps (the pixels genuinely changed).
+        let hash = image_inputs_hash(
+            item.image_hash.as_str(),
+            embedder.model_id(),
+            GENERATOR_VERSION,
+        );
         let space = VecSpace {
             vec_kind: VecKind::ImageClip,
             model_id: embedder.model_id().to_string(),
@@ -446,6 +459,8 @@ impl Library {
             return Ok(());
         }
 
+        // Read + decode the preview pixels only now that we know we must embed.
+        let bytes = std::fs::read(&path)?;
         let decoded = match image::load_from_memory(&bytes) {
             Ok(img) => {
                 let rgb = img.to_rgb8();

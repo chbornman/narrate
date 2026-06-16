@@ -104,6 +104,7 @@
   } from "../../logic/forcegraph.protocol";
   import {
     engagedTopics,
+    matchClusterLabel,
     nodeOverlay,
     overlookedTopics,
     unnamedClusters,
@@ -234,6 +235,26 @@
    * in the draw loop (the same per-node glow mechanism the named overlooked
    * members use). Empty outside Overlooked / in LOD. */
   let unnamedMemberSet = $state<Set<string>>(new Set());
+
+  /** Soft-topic v2 GHOST ANCHORS: one provisional marker per detected unnamed
+   * cluster, drawn at the cluster centroid so the user can SEE the clump's home
+   * and PROMOTE it to a real topic with a click. Each carries an optional
+   * note-phrase `label` derived from the backend's `cluster_topics` (matched by
+   * size; null = render unlabeled). Derived from the detector output + the
+   * cluster labels, so it tracks the live Overlooked pass with no extra state. */
+  interface GhostAnchor {
+    cluster: UnnamedCluster;
+    /** Note-phrase label if one matched unambiguously, else null (unlabeled). */
+    label: string | null;
+  }
+  let ghostAnchors = $derived<GhostAnchor[]>(
+    unnamedClusterList.map((cluster) => ({
+      cluster,
+      // "Notes first, unlabeled otherwise": try the backend cluster labels by
+      // size match; matchClusterLabel returns null when no label is trustworthy.
+      label: matchClusterLabel(cluster.size, clusterSuggestions),
+    })),
+  );
 
   // -- the slider-to-collection bake (the signature gesture) ------------------
   // Clicking a topic anchor SELECTS it for baking: a threshold slider (0..1)
@@ -890,6 +911,35 @@
     const p = phrase.trim();
     if (p === "" || topics.includes(p)) return;
     void ui.addTopic(p);
+  }
+
+  // -- soft-topic PROMOTE (ghost anchor -> real topic) ------------------------
+  // Promote a discovered unnamed cluster to a real, persisted topic. If a
+  // note-phrase label was derived, promote straight to it ("notes first"). If
+  // the clump is unlabeled, open a minimal inline name prompt anchored at the
+  // ghost's screen position and promote with what the user types. After promote,
+  // ui.addTopic re-derives `topics`, the layout effect re-seeds an anchor, and
+  // the Overlooked pass re-runs (the clump is now named, so its ghost vanishes).
+  /** The pending unlabeled-ghost name prompt: its screen position (where the dot
+   * was clicked) + the in-progress name, or null when no prompt is open. */
+  let ghostPrompt = $state<{ x: number; y: number; name: string } | null>(null);
+  async function promoteGhost(ghost: GhostAnchor) {
+    if (ghost.label !== null) {
+      // Labeled: promote directly with the derived note phrase.
+      addTopic(ghost.label);
+      return;
+    }
+    // Unlabeled: ask the user for a name (Tauri webview disables window.prompt,
+    // so we use a small inline input, mirroring the bake-name affordance).
+    const [sx, sy] = toScreen(ghost.cluster.centroidX, ghost.cluster.centroidY);
+    ghostPrompt = { x: sx, y: sy, name: "" };
+  }
+  /** Commit the inline ghost-name prompt: add the typed topic, then close. A
+   * blank name is a no-op cancel (addTopic guards the empty/duplicate case). */
+  function commitGhostPrompt() {
+    if (ghostPrompt === null) return;
+    addTopic(ghostPrompt.name);
+    ghostPrompt = null;
   }
   /** Remove the topic at graph-order index `i` (oldest-first). Maps the index
    * back to its persisted TopicDto id and removes it from the store. */
@@ -1584,6 +1634,36 @@
         drawCountBadge(ctx, sx + halfW - 2, sy - halfH + 2, n.members!.length, c);
       }
     }
+    // Soft-topic v2 GHOST ANCHORS (drawn BENEATH the real anchors so a real
+    // anchor wins on overlap): a provisional marker at each unnamed cluster's
+    // centroid. Smaller + dimmer + dashed so it reads as "not yet a topic" — a
+    // candidate the user can click to promote. Only non-empty in Overlooked out
+    // of LOD (ghostAnchors derives from unnamedClusterList, empty otherwise).
+    for (const g of ghostAnchors) {
+      const [sx, sy] = toScreen(g.cluster.centroidX, g.cluster.centroidY);
+      ctx.save();
+      // Dimmer than a real anchor: a hollow dashed ring tinted with the
+      // overlooked glow accent, smaller radius (5 vs 8) so it clearly reads as
+      // provisional next to a committed topic anchor.
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = c.anchorFill;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = c.glow;
+      ctx.lineWidth = 1.5;
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Only label a ghost when a note-phrase label matched (else leave it a bare
+      // dot — "unlabeled otherwise"). The label sits below the dot like a real
+      // anchor's, but dimmed so it does not compete with committed topics.
+      if (g.label !== null) {
+        ctx.fillStyle = c.text;
+        ctx.fillText(g.label, sx, sy - 14);
+      }
+      ctx.restore();
+    }
     // topic anchors (drawn on top, with labels). In an overlay mode an anchor
     // glows by its ranked attention score, so the readout and the ring agree.
     for (const a of anchors) {
@@ -1642,6 +1722,11 @@
   // drags (and on release PINS) that anchor; on EMPTY canvas it PANS the view.
   let dragging: ImageNode | null = null;
   let draggingAnchor: TopicAnchor | null = null;
+  /** A ghost (soft-topic) anchor pressed at pointer-down. A ghost is CLICK-only
+   * (press-release, no drag): a click PROMOTES the clump to a real topic. We hold
+   * it from down to up so the promote fires only on a genuine click on the same
+   * marker, never mid-drag. */
+  let pressedGhost: GhostAnchor | null = null;
   /** Background pan in progress: the screen point and the pan offset at the
    * moment of pointer-down, so move() can apply the raw delta to panX/panY. */
   let panning: { startX: number; startY: number; panX0: number; panY0: number } | null = null;
@@ -1696,6 +1781,18 @@
     }
     return null;
   }
+  /** Hit-test the soft-topic GHOST anchors (the dashed provisional markers at
+   * unnamed-cluster centroids). Same generous click radius as a real anchor so
+   * the small dot is easy to hit. Empty list (no Overlooked / LOD) never matches.
+   * Topmost-drawn-ish: ghosts do not overlap each other in practice, so first
+   * match wins. */
+  function pickGhost(sx: number, sy: number): GhostAnchor | null {
+    for (const g of ghostAnchors) {
+      const [px, py] = toScreen(g.cluster.centroidX, g.cluster.centroidY);
+      if ((px - sx) ** 2 + (py - sy) ** 2 < 14 * 14) return g;
+    }
+    return null;
+  }
 
   function localXY(e: MouseEvent): [number, number] {
     const r = canvasEl!.getBoundingClientRect();
@@ -1713,6 +1810,15 @@
       anchor.fixed = true; // hold it under the pointer during the drag
       canvasEl?.setPointerCapture(e.pointerId);
       restartLoop();
+      return;
+    }
+    // Then GHOST anchors (soft topics), below real anchors but above nodes: a
+    // press arms a possible PROMOTE; the actual promote fires on a no-move
+    // release (onPointerUp). Capture the pointer so the release lands on us.
+    const ghost = pickGhost(sx, sy);
+    if (ghost) {
+      pressedGhost = ghost;
+      canvasEl?.setPointerCapture(e.pointerId);
       return;
     }
     // Then image nodes: a press on a node drags that node.
@@ -1747,6 +1853,16 @@
 
   function onPointerMove(e: PointerEvent) {
     const [sx, sy] = localXY(e);
+    if (pressedGhost) {
+      // A ghost is click-only: any real movement cancels the pending promote
+      // (the release branch checks `moved`). Nothing physical moves here.
+      if (
+        Math.abs(e.movementX) > MOVE_THRESHOLD ||
+        Math.abs(e.movementY) > MOVE_THRESHOLD
+      )
+        moved = true;
+      return;
+    }
     if (panning) {
       // A PAN moves only the VIEW transform, not the layout: nothing physical
       // changed, so we must NOT re-run the force sim, reheat, or recompute the
@@ -1785,6 +1901,17 @@
   let lastClickAt = 0;
   const DBLCLICK_MS = 350;
   function onPointerUp(e: PointerEvent) {
+    if (pressedGhost) {
+      const ghost = pressedGhost;
+      const wasMove = moved;
+      pressedGhost = null;
+      canvasEl?.releasePointerCapture(e.pointerId);
+      // A no-move press-release on a ghost PROMOTES the clump to a real topic. A
+      // press that moved is treated as a cancelled gesture (the user dragged off
+      // the marker), leaving the layout untouched.
+      if (!wasMove) void promoteGhost(ghost);
+      return;
+    }
     if (panning) {
       // End the pan; a no-move press-release on EMPTY canvas is a click that
       // DESELECTS any selected node (clicking the background clears the scope
@@ -2612,6 +2739,36 @@
         </div>
       </div>
     {/if}
+
+    <!-- Soft-topic PROMOTE prompt: appears when the user clicks an UNLABELED
+         ghost anchor (a labeled one promotes immediately). A minimal inline name
+         input floated at the clicked spot, so the founder names the new topic
+         without leaving the canvas. Labeled ghosts never reach here. -->
+    {#if ghostPrompt !== null}
+      <form
+        class="ghost-prompt"
+        style="left: {ghostPrompt.x}px; top: {ghostPrompt.y}px;"
+        onsubmit={(e) => {
+          e.preventDefault();
+          commitGhostPrompt();
+        }}
+      >
+        <input
+          bind:value={ghostPrompt.name}
+          placeholder="Name this topic"
+          aria-label="Name the promoted topic"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <button type="submit">Promote</button>
+        <button
+          type="button"
+          class="ghost-cancel"
+          aria-label="Cancel promote"
+          onclick={() => (ghostPrompt = null)}>x</button
+        >
+      </form>
+    {/if}
   </div>
 </div>
 
@@ -2914,5 +3071,52 @@
   .bake-go:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  /* Soft-topic promote prompt: a small inline name input floated at the clicked
+     ghost dot. translate(-50%, ...) centers it over the dot; the negative Y
+     lifts it so it does not cover the marker it names. */
+  .ghost-prompt {
+    position: absolute;
+    transform: translate(-50%, calc(-100% - 10px));
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome-strong);
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+    font-size: 12px;
+    color: var(--text);
+    z-index: 50;
+  }
+  .ghost-prompt input {
+    background: var(--bg);
+    border: 1px solid var(--chrome);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 12px;
+    width: 140px;
+  }
+  .ghost-prompt button[type="submit"] {
+    background: var(--bg);
+    border: 1px solid var(--chrome-strong);
+    color: var(--text);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .ghost-prompt button[type="submit"]:hover {
+    border-color: var(--focus);
+  }
+  .ghost-cancel {
+    all: unset;
+    cursor: pointer;
+    color: var(--text-faint);
+    padding: 0 4px;
+  }
+  .ghost-cancel:hover {
+    color: var(--text);
   }
 </style>

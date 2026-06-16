@@ -77,7 +77,20 @@ pub fn run_startup_doctor(app: &Arc<App>) {
         Err(e) => tracing::error!(error = %e, "startup doctor: vector reconcile failed"),
     }
 
-    // 2. Preview artifacts (disk vs DB) + stranded temp sweep. The library doctor
+    // 2. Orphaned ingest passes: an image whose every path went stale (root
+    //    removed, file deleted) can never complete its pending/error passes —
+    //    they would defer forever and churn the drain. Catch images orphaned
+    //    before the remove-root skip fix and retire their dead passes.
+    match app.library.heal_orphaned_passes() {
+        Ok(0) => tracing::info!("startup integrity report: no orphaned ingest passes"),
+        Ok(n) => tracing::warn!(
+            skipped = n,
+            "startup doctor: skipped orphaned ingest passes (no active path)"
+        ),
+        Err(e) => tracing::error!(error = %e, "startup doctor: orphaned-pass heal failed"),
+    }
+
+    // 3. Preview artifacts (disk vs DB) + stranded temp sweep. The library doctor
     //    previously ran only on the maintenance tick; running it at startup heals
     //    a mangled preview cache immediately (audit: "run the existence walk at
     //    open, not only on the 6h tick").

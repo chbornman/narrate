@@ -43,6 +43,7 @@ import {
   type SignalToggles,
 } from "../logic/ranking";
 import { afterCommit } from "../logic/advance";
+import { invalidateScopedGraphs } from "../logic/graphstore";
 import {
   collectionRows,
   filterTree,
@@ -654,6 +655,15 @@ export class Ui {
    * just arrived — the first remaining root opens (the init() rule), so
    * the grid never sits on a dead folder. */
   async onRootsChanged(roots: RootDto[]) {
+    // Drop any cached Visualizer graph for a root that just disappeared from the
+    // snapshot. The module-level graphState snapshot survives the lens
+    // close→reopen by design, so a removed root would otherwise restore a stale
+    // layout pointing at vanished images (the "view-swap workaround"). Diff the
+    // prior roots against the incoming set BEFORE applyRootsSnapshot overwrites
+    // this.roots, and invalidate each removed root's scoped graphs.
+    const incoming = new Set(roots.map((r) => r.rootId));
+    for (const prior of this.roots)
+      if (!incoming.has(prior.rootId)) invalidateScopedGraphs(prior.rootId);
     this.applyRootsSnapshot(roots);
     // A collection or query view has rootId null BY DESIGN — never yank it
     // to a folder just because a roots snapshot landed. Only an empty

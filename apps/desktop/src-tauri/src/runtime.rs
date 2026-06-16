@@ -349,12 +349,24 @@ impl RuntimeHost {
         // spaces against the model that actually WRITES them, or it would drop
         // the live fallback's space as "superseded". A NotConfigured slot
         // contributes nothing, so the doctor leaves that kind's spaces alone.
+        // VERIFY-BEFORE-RETIRE (self-heal 3A): only count a model as "active"
+        // when its embedder is actually LOADED, not merely NAMED active by the
+        // resolved plan. WHY: the plan can name fp16 active while fp16 fails to
+        // load (unhostable on this host); reporting it as active made the doctor
+        // treat the live dfn5b space as "superseded by fp16" and retire the only
+        // copy of the library's vectors. A named-but-unloaded model contributes
+        // nothing, so the doctor leaves that kind's spaces untouched until the
+        // real write path comes up.
         let plan = self.plan();
         let mut models = std::collections::HashMap::new();
-        if let ProcessPlan::Run { model_id } = &plan.clip_embedder {
+        if let ProcessPlan::Run { model_id } = &plan.clip_embedder
+            && self.embedders.clip_ready()
+        {
             models.insert(VecKind::ImageClip, model_id.clone());
         }
-        if let ProcessPlan::Run { model_id } = &plan.text_embedder {
+        if let ProcessPlan::Run { model_id } = &plan.text_embedder
+            && self.embedders.text_ready()
+        {
             models.insert(VecKind::AnnotationChunk, model_id.clone());
             models.insert(VecKind::ImageSummary, model_id.clone());
         }

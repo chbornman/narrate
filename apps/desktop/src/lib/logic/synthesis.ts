@@ -480,3 +480,87 @@ export function unnamedClusters(
   out.sort((a, b) => b.size - a.size || (a.members[0] < b.members[0] ? -1 : 1));
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Soft-topic v2: derive a note-phrase LABEL for a discovered unnamed cluster.
+//
+// Founder decision: "notes first, unlabeled otherwise." Images do NOT carry note
+// text in the frontend DTO, but the backend already mines a representative
+// note-phrase label per k-means cluster via `cluster_topics` (the rail's v2
+// auto-topics), returning {label, size} pairs. We REUSE those labels here.
+//
+// The ONLY signal the two passes share is the cluster SIZE: `cluster_topics`
+// returns no member hashes, no positions, and no affinity vectors we could line
+// up against an UnnamedCluster, so spatial proximity and membership overlap are
+// not available on the frontend. We therefore match purely by size, and only
+// when the match is UNAMBIGUOUS — otherwise we fall back to UNLABELED rather than
+// risk pinning the wrong note phrase on a clump (the founder's "default to
+// unlabeled rather than mislabeling" rule).
+// ---------------------------------------------------------------------------
+
+/** The minimal shape we need from a backend cluster-topic label. Kept structural
+ * (not importing the IPC `ClusterTopic`) so this module stays pure + dependency-
+ * free and unit-tests without the IPC layer. */
+export interface ClusterLabel {
+  label: string;
+  size: number;
+}
+
+/**
+ * Best note-phrase label for an unnamed cluster of `clusterSize` images, drawn
+ * from the backend's `cluster_topics` labels, or `null` to render it UNLABELED.
+ *
+ * Heuristic (size-match, ambiguity-guarded):
+ *   - Score each candidate by relative size distance |size - clusterSize| /
+ *     max(size, clusterSize), so a 9-vs-10 match scores far better than 2-vs-10
+ *     regardless of absolute scale.
+ *   - Accept the closest candidate ONLY when its relative distance is within
+ *     `tolerance` (default 0.25 — sizes within ~25% of each other) AND it is
+ *     clearly the best (the runner-up's distance is meaningfully larger, by
+ *     `separation`, default 0.1). A near-tie means two clusters are equally
+ *     plausible, so we cannot trust the label and return null (unlabeled).
+ *   - An empty/blank label is treated as no label.
+ *
+ * Determinism: candidates are scanned in array order; on an exact distance tie
+ * the earlier candidate wins, but the separation guard rejects exactly that case
+ * anyway, so the outcome does not depend on candidate ordering.
+ */
+export function matchClusterLabel(
+  clusterSize: number,
+  candidates: readonly ClusterLabel[],
+  opts?: { tolerance?: number; separation?: number },
+): string | null {
+  const tolerance = opts?.tolerance ?? 0.25;
+  const separation = opts?.separation ?? 0.1;
+  if (clusterSize <= 0 || candidates.length === 0) return null;
+
+  // Relative size distance in [0,1]: 0 == identical size, 1 == maximally apart.
+  const dist = (size: number): number => {
+    if (size <= 0) return 1;
+    const denom = Math.max(size, clusterSize);
+    return Math.abs(size - clusterSize) / denom;
+  };
+
+  let bestI = -1;
+  let bestD = Infinity;
+  let secondD = Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const label = candidates[i].label.trim();
+    if (label === "") continue; // a blank label is no label
+    const d = dist(candidates[i].size);
+    if (d < bestD) {
+      secondD = bestD;
+      bestD = d;
+      bestI = i;
+    } else if (d < secondD) {
+      secondD = d;
+    }
+  }
+
+  if (bestI < 0) return null; // no usable (non-blank) candidate
+  if (bestD > tolerance) return null; // closest is still too far off in size
+  // Ambiguity guard: if a runner-up is nearly as close, we cannot tell which
+  // label belongs to this clump — prefer unlabeled over a coin-flip mislabel.
+  if (secondD - bestD < separation) return null;
+  return candidates[bestI].label.trim();
+}

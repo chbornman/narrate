@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import type { ImageNode } from "../src/lib/logic/forcegraph";
 import {
   engagedTopics,
+  matchClusterLabel,
   nodeIntensity,
   nodeOverlay,
   overlookedTopics,
@@ -319,5 +320,61 @@ describe("unnamedClusters — coherent clumps with no named topic (soft topics)"
       { hash: "c", x: 0, y: 0, vx: 0, vy: 0, affinity: [1], neighbors: [{ i: 0, w: W }, { i: 1, w: W }] },
     ];
     expect(unnamedClusters(allNamed, 1)).toEqual([]);
+  });
+});
+
+describe("matchClusterLabel — note-phrase label for a soft topic (size match)", () => {
+  it("matches the closest-size candidate when it is clear and within tolerance", () => {
+    // A clump of 10; the "sunset" candidate (size 9) is a near-perfect size match
+    // and far from the next-closest (size 3), so it wins unambiguously.
+    const label = matchClusterLabel(10, [
+      { label: "sunset over the bay", size: 9 },
+      { label: "studio portraits", size: 3 },
+    ]);
+    expect(label).toBe("sunset over the bay");
+  });
+
+  it("returns null when the closest candidate is too far off in size", () => {
+    // A clump of 10 vs candidates of 2 and 3: both are >25% away in relative
+    // size, so nothing is trustworthy — unlabeled rather than mislabel.
+    expect(
+      matchClusterLabel(10, [
+        { label: "a", size: 2 },
+        { label: "b", size: 3 },
+      ]),
+    ).toBeNull();
+  });
+
+  it("returns null on a near-tie (two candidates equally plausible)", () => {
+    // Two candidates of size 99 and 98 against a clump of 100: their relative
+    // distances (0.01, 0.02) are within the 0.1 separation, so we cannot tell
+    // which label belongs to the clump — default to unlabeled.
+    expect(
+      matchClusterLabel(100, [
+        { label: "a", size: 99 },
+        { label: "b", size: 98 },
+      ]),
+    ).toBeNull();
+  });
+
+  it("ignores blank labels and matches the next usable candidate", () => {
+    // The exact-size candidate has a blank label (no note phrase derived); the
+    // size-9 candidate is the best USABLE one and is unambiguous (next is far).
+    const label = matchClusterLabel(10, [
+      { label: "   ", size: 10 },
+      { label: "harvest fields", size: 9 },
+      { label: "macro insects", size: 2 },
+    ]);
+    expect(label).toBe("harvest fields");
+  });
+
+  it("returns null for empty candidates or a non-positive cluster size", () => {
+    expect(matchClusterLabel(10, [])).toBeNull();
+    expect(matchClusterLabel(0, [{ label: "x", size: 0 }])).toBeNull();
+  });
+
+  it("trims the returned label", () => {
+    const label = matchClusterLabel(5, [{ label: "  beach day  ", size: 5 }]);
+    expect(label).toBe("beach day");
   });
 });

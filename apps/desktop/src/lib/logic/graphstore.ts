@@ -90,6 +90,17 @@ class GraphStateStore {
     this.storedKey = null;
     this.payload = null;
   }
+
+  /** Drop the snapshot IFF its stored key contains `substr`. Used to invalidate
+   * the cached graph for a scope whose backing data has gone away (a removed
+   * root): the stored key embeds the scopeKey, so a substring match on the
+   * folder prefix targets exactly the affected view without a blanket clear. */
+  clearIfKeyContains(substr: string): void {
+    if (this.storedKey !== null && this.storedKey.includes(substr)) {
+      this.storedKey = null;
+      this.payload = null;
+    }
+  }
 }
 
 /**
@@ -100,3 +111,18 @@ class GraphStateStore {
  * mount.
  */
 export const graphState = new GraphStateStore();
+
+/**
+ * Invalidate any cached Visualizer graph belonging to a now-removed root. When a
+ * root is removed, every folder scope under it is dead, but the module-level
+ * snapshot for that scope persists (the close→reopen "view-swap workaround")
+ * and would restore a stale layout pointing at vanished images. We key on the
+ * folder scopeKey shape `folder:${root_id}/${folder}` (see affinitycache
+ * `scopeKey`): the stored graphStateKey embeds that scopeKey, so a substring
+ * match on the `folder:${root_id}/` prefix drops exactly the affected snapshot.
+ * WHY the trailing slash: it scopes the match to THIS root's folders and avoids
+ * a prefix collision with a different root whose id merely starts the same.
+ */
+export function invalidateScopedGraphs(root_id: string): void {
+  graphState.clearIfKeyContains(`folder:${root_id}/`);
+}

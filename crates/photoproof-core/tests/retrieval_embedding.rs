@@ -376,6 +376,82 @@ fn a_clip_model_swap_repends_and_reembeds_the_library() {
     assert_eq!(report.done, 0, "no re-pend once the model matches");
 }
 
+/// SKIP-ALREADY-CORRECT EMBEDDINGS (self-heal 3B): regenerating the preview
+/// FILE with DIFFERENT bytes for the SAME image + model + preview-generator
+/// version must NOT re-embed. The old recipe hashed the raw preview bytes, so a
+/// regen looked stale and re-embedded the whole library (the ~414-image churn).
+/// The new recipe folds (image_hash, model_id, generator_version) instead — the
+/// bytes can differ freely and the pass stays a no-op.
+#[test]
+fn regenerating_preview_bytes_does_not_reembed_same_image_and_model() {
+    use photoproof_core::library::{ArtifactKind, PassName};
+
+    let rig = Rig::new();
+    // First drain: every image embedded once under the CLIP model.
+    let report = rig.drain_embeddings();
+    assert_eq!(report.done, 6, "3 text + 3 clip on first drain");
+    let clip_vectors = || {
+        rig.count(&format!(
+            "SELECT COUNT(*) FROM vectors WHERE vec_kind = 'image_clip' \
+             AND model_id = '{CLIP_MODEL}' AND deleted = 0"
+        ))
+    };
+    assert_eq!(clip_vectors(), 3);
+    // Capture the stored staleness hashes so we can prove they don't change.
+    let stored_hashes = || -> Vec<String> {
+        let conn = rig.env.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT inputs_hash FROM vectors WHERE vec_kind = 'image_clip' \
+                 AND deleted = 0 ORDER BY inputs_hash",
+            )
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+        rows.collect::<Result<_, _>>().unwrap()
+    };
+    let before = stored_hashes();
+
+    // Rewrite each preview artifact file with DIFFERENT but still-decodable
+    // bytes — simulating a preview regen that produced new pixels-on-disk for
+    // the same picture (e.g. a re-develop that did NOT bump the generator
+    // version). The embed pass reads whichever of Display/Thumb exists.
+    for (i, hash) in rig.hashes.iter().enumerate() {
+        let mut rewrote = false;
+        for kind in [ArtifactKind::Display, ArtifactKind::Thumb] {
+            if let Some(rec) = rig.env.lib.preview_artifact(hash, kind).unwrap()
+                && rec.file.exists()
+            {
+                // A fresh, byte-different JPEG (different seed) for the SAME image.
+                std::fs::write(&rec.file, unique_jpeg(1000 + i as u32)).unwrap();
+                rewrote = true;
+            }
+        }
+        assert!(
+            rewrote,
+            "fixture: image {i} had a preview artifact to rewrite"
+        );
+    }
+
+    // Re-pend the image-embedding pass so the drain actually re-examines each
+    // image (otherwise the rows are already `done` and never reconsidered).
+    rig.env.lib.repend_pass(PassName::ImageEmbedding).unwrap();
+
+    // Drain again: the staleness hash is computed over (image, model, generator
+    // version) — all unchanged — so each pass short-circuits to done WITHOUT a
+    // new embedding. The drain still counts them done (no-op completion).
+    let report = rig.drain_embeddings();
+    assert_eq!(report.done, 3, "3 clip passes re-examined and completed");
+
+    // No NEW vectors, and the stored staleness hashes are byte-identical: the
+    // regen did not churn the embeddings.
+    assert_eq!(clip_vectors(), 3, "still exactly one vector per image");
+    assert_eq!(
+        stored_hashes(),
+        before,
+        "staleness hash is independent of the preview file bytes"
+    );
+}
+
 /// The end-to-end happy path: chunks + clip vectors with §1.2 metadata,
 /// multi-target events stored once, searches resolving back to events.
 #[test]

@@ -1117,6 +1117,129 @@ fn l13_09_root_removal() {
     assert_eq!(store.folded_journal(&hash).unwrap().len(), 1);
 }
 
+/// Removed-folder reconciliation: removing a root must RETIRE the pending
+/// ingest passes of the images it FULLY orphans (no active path left), so the
+/// drain stops churning on files that no longer exist — and those images must
+/// drop out of `image_hashes()`. The SAFE filter: an image still reachable
+/// from ANOTHER active root keeps its passes and stays enumerated.
+#[test]
+fn remove_root_skips_orphaned_passes_and_drops_them_from_image_hashes() {
+    let _g = guard();
+    let env = Env::new();
+    // root A (its own folder) — these images become fully orphaned on removal.
+    let root_a = env.register("a");
+    env.write("a/only.jpg", &unique_jpeg(5101));
+    // The shared image is the SAME content in two NON-overlapping roots (B/C):
+    // identical bytes hash to one image with an active path under each root, so
+    // removing one root leaves the other active path and its passes must
+    // SURVIVE. (Overlapping/nested roots are refused, so duplicate content is
+    // how an image legitimately ends up multi-rooted.)
+    let dup_bytes = unique_jpeg(5102);
+    let root_b = env.register("b");
+    let root_c = env.register("c");
+    env.write("b/keep.jpg", &dup_bytes);
+    env.write("c/keep.jpg", &dup_bytes);
+
+    env.scan(&root_a);
+    env.scan(&root_b);
+    env.scan(&root_c);
+    // Deliberately do NOT drain: passes stay `pending`, the state remove_root
+    // must reconcile.
+
+    let conn = env.conn();
+    let pending_for = |rel: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM ingest_passes ip
+             JOIN paths p ON p.image_hash = ip.image_hash
+             WHERE p.rel_path = ?1 AND ip.state = 'pending'",
+            [rel],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        pending_for("a/only.jpg") > 0,
+        "fixture: only.jpg has passes"
+    );
+    assert!(
+        pending_for("b/keep.jpg") > 0,
+        "fixture: keep.jpg has passes"
+    );
+
+    let only_hash: ContentHash = {
+        let h: String = conn
+            .query_row(
+                "SELECT image_hash FROM paths WHERE rel_path = 'a/only.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        ContentHash::from_hex(&h).unwrap()
+    };
+
+    // Remove root A: only.jpg loses its only path → fully orphaned.
+    env.lib.remove_root(&root_a).unwrap();
+
+    // Its pending passes are now 'skipped' with the root-removed code, and none
+    // remain pending.
+    let (skipped, code_ok): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    COUNT(CASE WHEN ip.error = 'root-removed' THEN 1 END)
+             FROM ingest_passes ip
+             JOIN images i ON i.image_hash = ip.image_hash
+             WHERE ip.image_hash = ?1 AND ip.state = 'skipped'",
+            [only_hash.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(skipped > 0, "orphaned passes became skipped");
+    assert_eq!(skipped, code_ok, "all carry the root-removed code");
+    assert_eq!(pending_for("a/only.jpg"), 0, "no pending passes survive");
+
+    // image_hashes() now excludes the fully-orphaned image.
+    let hashes = env.lib.image_hashes().unwrap();
+    assert!(
+        !hashes.contains(&only_hash),
+        "fully-orphaned image dropped from image_hashes()"
+    );
+
+    // SAFE filter: removing ONE of keep.jpg's two roots leaves the other active
+    // path, so its passes stay pending and it stays enumerated.
+    env.lib.remove_root(&root_b).unwrap();
+    assert!(
+        pending_for("c/keep.jpg") > 0,
+        "multi-root image keeps its passes while another root is active"
+    );
+    let keep_hash: ContentHash = {
+        let h: String = conn
+            .query_row(
+                "SELECT image_hash FROM paths WHERE rel_path = 'c/keep.jpg'
+                 AND state = 'active' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        ContentHash::from_hex(&h).unwrap()
+    };
+    assert!(
+        env.lib.image_hashes().unwrap().contains(&keep_hash),
+        "image with a surviving active path stays enumerated"
+    );
+
+    // heal_orphaned_passes is idempotent here (only.jpg already skipped) and the
+    // multi-root image is untouched because it still has an active path.
+    let healed = env.lib.heal_orphaned_passes().unwrap();
+    assert_eq!(
+        healed, 0,
+        "nothing left to heal after remove_root reconciled"
+    );
+    assert!(
+        pending_for("c/keep.jpg") > 0,
+        "heal leaves the still-reachable image alone"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 9b. Root archive lifecycle + overlapping-root refusal (folder-tree work)
 // ---------------------------------------------------------------------------

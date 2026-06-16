@@ -199,6 +199,11 @@ fn w03_rename_into_excluded_name_is_a_remove() {
         .watch_pipeline(&env.root, DebounceConfig::default())
         .unwrap();
     let base = UtcMillis::now().epoch_ms();
+    // Capture the hash while the image still has an active path: after the
+    // rename-to-excluded its only path goes stale, and `image_hashes()` now
+    // filters to images with at least one ACTIVE path (removed-folder
+    // reconciliation), so it would no longer enumerate this orphaned image.
+    let hash = env.lib.image_hashes().unwrap()[0].clone();
 
     let hidden = env.mount.join("photos/.temp.jpg.partial");
     std::fs::rename(&abs, &hidden).unwrap();
@@ -217,7 +222,12 @@ fn w03_rename_into_excluded_name_is_a_remove() {
             rel_path: "photos/temp.jpg".into()
         }]
     );
-    let hash = env.lib.image_hashes().unwrap()[0].clone();
+    // The image is now orphaned (path stale): availability is Missing and it
+    // has dropped out of `image_hashes()`.
+    assert!(
+        env.lib.image_hashes().unwrap().is_empty(),
+        "the orphaned image is no longer enumerated"
+    );
     assert_eq!(
         env.lib.availability(&hash).unwrap(),
         photoproof_core::library::Availability::Missing

@@ -48,3 +48,27 @@ pub fn inputs_hash(payload: &[u8]) -> String {
     hasher.update(&INSTRUCT_TEMPLATE_VERSION.to_le_bytes());
     hasher.finalize().to_hex().to_string()
 }
+
+/// The IMAGE-embedding staleness recipe (self-heal 3B). Unlike text chunks —
+/// whose embed-text IS the stable payload — the image pass embeds preview
+/// PIXELS, and regenerating a preview yields different file bytes for the
+/// SAME picture. Hashing those raw bytes (the old `inputs_hash(&bytes)`) made
+/// every preview regen look stale and re-embedded the whole library (the
+/// ~414-image churn). WHY this recipe instead: the embedding is fully
+/// determined by (image identity, embedder model, preview-generator
+/// algorithm). So fold those three — `image_hash` + `model_id` +
+/// `generator_version` — and skip when they all match. A preview-generator
+/// version bump (the DEVELOP algorithm / encode params changed, so the pixels
+/// genuinely differ) flips the hash and DOES re-embed, exactly as intended.
+pub fn image_inputs_hash(image_hash: &str, model_id: &str, generator_version: i64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(image_hash.as_bytes());
+    hasher.update(b"\x00"); // domain separator so concatenation is unambiguous
+    hasher.update(model_id.as_bytes());
+    hasher.update(&generator_version.to_le_bytes());
+    // Keep the same scheme/template versions in the mix as `inputs_hash`, so a
+    // recipe-wide bump still invalidates image vectors alongside text ones.
+    hasher.update(&PREFIX_SCHEME_VERSION.to_le_bytes());
+    hasher.update(&INSTRUCT_TEMPLATE_VERSION.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}

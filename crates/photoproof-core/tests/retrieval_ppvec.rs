@@ -742,6 +742,38 @@ fn reconcile_keeps_superseded_when_active_space_is_empty() {
     assert_eq!(live, 1);
 }
 
+/// VERIFY-BEFORE-RETIRE (self-heal 3A): config NAMES a model active (fp16) but
+/// its embedder is not yet LOADED, so `active_vector_models` omits the kind
+/// entirely (it only enters loaded models). With no active entry for ImageClip,
+/// `reconcile_spaces` must leave the populated dfn5b space ALONE — the very bug
+/// that once dropped the only copy of the founder's vectors because fp16 was
+/// named active while it could not load. The empty active map stands in for the
+/// "embedder not ready" condition the caller enforces.
+#[test]
+fn reconcile_keeps_superseded_when_active_model_not_yet_ready() {
+    let fx = Fixture::new();
+    let store = fx.open();
+    // The library is embedded under dfn5b; fp16 is config-named but unloadable.
+    upsert_clip(&store, "dfn5b", "a", 1);
+    upsert_clip(&store, "dfn5b", "b", 2);
+    assert!(store.file_path(&clip_space("dfn5b")).exists());
+
+    // Embedder not ready ⇒ no active entry for this kind at all.
+    let active: HashMap<VecKind, String> = HashMap::new();
+    let report = store.reconcile_spaces(&active).unwrap();
+
+    assert!(
+        report.is_empty(),
+        "no active+loaded model for the kind ⇒ nothing retired: {report:?}"
+    );
+    assert!(
+        store.file_path(&clip_space("dfn5b")).exists(),
+        "the only populated space survives a not-yet-ready active model"
+    );
+    let (live, _) = store.space_stats(&clip_space("dfn5b")).unwrap();
+    assert_eq!(live, 2, "dfn5b rows intact");
+}
+
 /// An ACTIVE space whose `.ppvec` file vanished (vectors dir mangled): the rows
 /// are dangling pointers, so they are deleted and the embedding pass is flagged
 /// for a re-pend rather than left to corrupt a re-embed at stale offsets.
