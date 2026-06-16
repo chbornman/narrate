@@ -12,6 +12,7 @@ import {
   nodeIntensity,
   nodeOverlay,
   overlookedTopics,
+  unnamedClusters,
 } from "../src/lib/logic/synthesis";
 
 /** A bare single-image node with a given affinity row (position/velocity are
@@ -215,5 +216,108 @@ describe("nodeOverlay — per-node tint/size mapping", () => {
     const o = nodeOverlay(sup, intensity, "engaged");
     expect(o.intensity).toBeCloseTo(1);
     expect(o.glow).toBeCloseTo(1);
+  });
+});
+
+describe("unnamedClusters — coherent clumps with no named topic (soft topics)", () => {
+  /** A node positioned at (x,y) with an affinity row + sparse k-NN neighbors. */
+  function pn(
+    hash: string,
+    x: number,
+    y: number,
+    affinity: number[],
+    neighbors: { i: number; w: number }[],
+  ): ImageNode {
+    return { hash, x, y, vx: 0, vy: 0, affinity, neighbors };
+  }
+
+  it("finds two separate unnamed clusters, excludes named nodes, drops tiny groups", () => {
+    // One named topic (index 0). Group A (g0,g1,g2) and group B (g3,g4,g5) are
+    // UN-topic'd (affinity 0) and densely linked WITHIN each group, NOT across.
+    // A named node (n) holds strongly to topic 0 even though it links to group A
+    // — it must be excluded and must not bridge anything. A loose pair (p0,p1)
+    // is below minSize (2) and must be dropped.
+    const W = 0.8; // above the 0.5 minWeight bar
+    const nodes: ImageNode[] = [
+      pn("g0", 0, 0, [0], [{ i: 1, w: W }, { i: 2, w: W }]),
+      pn("g1", 1, 0, [0], [{ i: 0, w: W }, { i: 2, w: W }]),
+      pn("g2", 0, 1, [0], [{ i: 0, w: W }, { i: 1, w: W }]),
+      pn("g3", 10, 10, [0], [{ i: 4, w: W }, { i: 5, w: W }]),
+      pn("g4", 11, 10, [0], [{ i: 3, w: W }, { i: 5, w: W }]),
+      pn("g5", 10, 11, [0], [{ i: 3, w: W }, { i: 4, w: W }]),
+      // Named node: high affinity to topic 0, linked to group A — excluded.
+      pn("n", 0, 0, [0.9], [{ i: 0, w: W }]),
+      // A two-node clump (below minSize), kept apart from both groups.
+      pn("p0", -10, -10, [0], [{ i: 9, w: W }]),
+      pn("p1", -11, -10, [0], [{ i: 8, w: W }]),
+    ];
+    const clusters = unnamedClusters(nodes, 1);
+    expect(clusters).toHaveLength(2);
+    // Both groups are size 3; tie-break is the smallest member hash, so the
+    // "g0..g2" group sorts before "g3..g5".
+    expect(clusters[0].members).toEqual(["g0", "g1", "g2"]);
+    expect(clusters[0].size).toBe(3);
+    expect(clusters[1].members).toEqual(["g3", "g4", "g5"]);
+    expect(clusters[1].size).toBe(3);
+    // The named node never appears in any cluster.
+    const all = clusters.flatMap((c) => c.members);
+    expect(all).not.toContain("n");
+    // The two-node clump is dropped (< minSize).
+    expect(all).not.toContain("p0");
+    expect(all).not.toContain("p1");
+  });
+
+  it("computes the centroid and coherence (mean intra-cluster edge weight)", () => {
+    // A single triangle clump at known positions with uniform edge weight 0.6.
+    const nodes: ImageNode[] = [
+      pn("a", 0, 0, [0], [{ i: 1, w: 0.6 }, { i: 2, w: 0.6 }]),
+      pn("b", 3, 0, [0], [{ i: 0, w: 0.6 }, { i: 2, w: 0.6 }]),
+      pn("c", 0, 3, [0], [{ i: 0, w: 0.6 }, { i: 1, w: 0.6 }]),
+    ];
+    const [cl] = unnamedClusters(nodes, 1);
+    expect(cl.centroidX).toBeCloseTo(1); // mean(0,3,0)
+    expect(cl.centroidY).toBeCloseTo(1); // mean(0,0,3)
+    expect(cl.coherence).toBeCloseTo(0.6);
+  });
+
+  it("ignores edges below minWeight (a weak link does not join a clump)", () => {
+    // Three unnamed nodes, but the edges are below the 0.5 floor: no cluster.
+    const nodes: ImageNode[] = [
+      pn("a", 0, 0, [0], [{ i: 1, w: 0.3 }, { i: 2, w: 0.3 }]),
+      pn("b", 1, 0, [0], [{ i: 0, w: 0.3 }, { i: 2, w: 0.3 }]),
+      pn("c", 0, 1, [0], [{ i: 0, w: 0.3 }, { i: 1, w: 0.3 }]),
+    ];
+    expect(unnamedClusters(nodes, 1)).toEqual([]);
+  });
+
+  it("is deterministic: same input yields identical output across runs", () => {
+    const W = 0.7;
+    const make = (): ImageNode[] => [
+      pn("a", 0, 0, [0], [{ i: 1, w: W }, { i: 2, w: W }]),
+      pn("b", 1, 0, [0], [{ i: 0, w: W }, { i: 2, w: W }]),
+      pn("c", 0, 1, [0], [{ i: 0, w: W }, { i: 1, w: W }]),
+    ];
+    const first = unnamedClusters(make(), 1);
+    const second = unnamedClusters(make(), 1);
+    expect(second).toEqual(first);
+  });
+
+  it("degenerate inputs yield [] (no nodes / no neighbors / nothing unnamed)", () => {
+    expect(unnamedClusters([], 1)).toEqual([]);
+    // No neighbors at all → nothing to connect.
+    const noEdges = [
+      node("a", [0]),
+      node("b", [0]),
+      node("c", [0]),
+    ];
+    expect(unnamedClusters(noEdges, 1)).toEqual([]);
+    // Everything named (high affinity), even though they are linked.
+    const W = 0.9;
+    const allNamed: ImageNode[] = [
+      { hash: "a", x: 0, y: 0, vx: 0, vy: 0, affinity: [1], neighbors: [{ i: 1, w: W }, { i: 2, w: W }] },
+      { hash: "b", x: 0, y: 0, vx: 0, vy: 0, affinity: [1], neighbors: [{ i: 0, w: W }, { i: 2, w: W }] },
+      { hash: "c", x: 0, y: 0, vx: 0, vy: 0, affinity: [1], neighbors: [{ i: 0, w: W }, { i: 1, w: W }] },
+    ];
+    expect(unnamedClusters(allNamed, 1)).toEqual([]);
   });
 });

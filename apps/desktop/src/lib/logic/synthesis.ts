@@ -69,8 +69,10 @@ export interface NodeOverlay {
 /** A strictly-positive affinity floor: an image only "belongs to" a topic it is
  * actually pulled toward, so attention bleeds along the real semantic edges, not
  * across every (often near-zero) topic. Mirrors the force sim's reading that a
- * 0/negative affinity is "unrelated". */
-const AFFINITY_FLOOR = 1e-4;
+ * 0/negative affinity is "unrelated". Exported so the unnamed-cluster detector
+ * reuses the SAME "does this image belong to any named topic" bar (an unnamed
+ * node is one whose max affinity sits at/below this floor). */
+export const AFFINITY_FLOOR = 1e-4;
 
 /**
  * The intensity of ONE node, composing with v2 LOD (DESIGN): a single image's
@@ -289,4 +291,192 @@ function dominantAffinity(affinity: number[]): { topic: number; value: number } 
 
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+// ---------------------------------------------------------------------------
+// UNNAMED clusters — the second source of OVERLOOKED (founder's "soft topics").
+//
+// Overlooked already ranks the user's NAMED topics that are coherent but cold.
+// The SAME lens should also reveal coherent CLUMPS of images that have NO named
+// topic at all — discovered groupings the user has never named. Same intent
+// ("coherent structure I'm not engaging with"), a second source: instead of the
+// topic anchors, we read the sparse k-NN SEMANTIC graph (ImageNode.neighbors)
+// and find connected components made entirely of un-topic'd images. This stays
+// PURE + dependency-free so it is unit-testable exactly like the topic math.
+// ---------------------------------------------------------------------------
+
+/** One discovered unnamed cluster: a connected clump of images that hold to NO
+ * named topic yet are alike to each other (the k-NN edges). Surfaced in the same
+ * Overlooked readout + glow as the named overlooked topics. */
+export interface UnnamedCluster {
+  /** Member node hashes, sorted ascending for deterministic output. */
+  members: string[];
+  /** Member count (== members.length); kept explicit for the readout. */
+  size: number;
+  /** Mean x of the members' sim positions (so the renderer/caller can point at
+   * where the clump sits, even though this pass only glows the members). */
+  centroidX: number;
+  /** Mean y of the members' sim positions. */
+  centroidY: number;
+  /** Mean weight of the in-component k-NN edges, in [0, 1] — how tightly the
+   * clump holds together (its coherence). Higher = a more convincing soft topic. */
+  coherence: number;
+}
+
+/** Is this node "unnamed" — i.e. it holds to NO named topic? A node is unnamed
+ * when its MAX affinity over the `topicCount` named topics is at/below the floor
+ * (the same bar the rest of the synthesis uses for "belongs to a topic"). A node
+ * with no affinity row, or an empty one, is trivially unnamed. We bound the scan
+ * to `topicCount` so extra trailing affinity slots (defensive padding) never
+ * count a node as named for a topic that no longer exists. */
+function isUnnamed(node: ImageNode, topicCount: number, floor: number): boolean {
+  const aff = node.affinity;
+  if (aff === undefined) return true;
+  const upTo = Math.min(topicCount, aff.length);
+  let max = 0;
+  for (let t = 0; t < upTo; t++) if (aff[t] > max) max = aff[t];
+  return max <= floor;
+}
+
+/**
+ * Detect UNNAMED coherent clusters in the current full-detail node set (the
+ * second source for Overlooked). PURE + deterministic so it unit-tests in
+ * isolation, mirroring the topic math.
+ *
+ * Algorithm:
+ *   - Mark each node "unnamed" if its max named-topic affinity is at/below
+ *     `affinityFloor` (default AFFINITY_FLOOR). A node with no neighbors or no
+ *     affinity is unnamed but joins nothing if it has no edges.
+ *   - Union-find over the k-NN edges (ImageNode.neighbors, indices into `nodes`),
+ *     joining a pair ONLY when BOTH endpoints are unnamed AND the edge weight is
+ *     >= `minWeight` (default 0.5). Out-of-range / self edges are guarded out —
+ *     never trust an edge index blindly (it can dangle after a scope change).
+ *   - Each connected component with size >= `minSize` (default 3) becomes a
+ *     cluster: centroid = mean member x/y; coherence = mean weight of the edges
+ *     WITHIN that component (the same qualifying edges, counted once per edge).
+ *
+ * Determinism: clusters are sorted by size DESC then by their smallest member
+ * hash; each cluster's members are sorted ascending by hash. Degenerate inputs
+ * (no nodes, nothing unnamed, no neighbors, everything below minSize) yield [].
+ *
+ * Why union-find over the edges (not a topic aggregation): an unnamed clump has
+ * no anchor to aggregate toward — its only structure is the similarity graph, so
+ * we read the connectivity directly. Coherence is the mean intra-clump edge
+ * weight, the natural analogue of a named topic's affinity-weighted coherence.
+ */
+export function unnamedClusters(
+  nodes: ImageNode[],
+  topicCount: number,
+  opts?: { affinityFloor?: number; minWeight?: number; minSize?: number },
+): UnnamedCluster[] {
+  const floor = opts?.affinityFloor ?? AFFINITY_FLOOR;
+  const minWeight = opts?.minWeight ?? 0.5;
+  const minSize = opts?.minSize ?? 3;
+  const n = nodes.length;
+  if (n === 0) return [];
+
+  // Which nodes are unnamed (eligible to join a cluster). Precompute once so the
+  // edge pass is a cheap lookup, not a re-scan of each affinity row per edge.
+  const unnamed = new Array<boolean>(n);
+  for (let i = 0; i < n; i++) unnamed[i] = isUnnamed(nodes[i], topicCount, floor);
+
+  // Union-find (path-compressed) over node indices. Only qualifying edges union.
+  const parent = new Array<number>(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+  const find = (x: number): number => {
+    let r = x;
+    while (parent[r] !== r) r = parent[r];
+    // Path-compress so repeated finds stay near-flat (cheap, deterministic).
+    while (parent[x] !== r) {
+      const next = parent[x];
+      parent[x] = r;
+      x = next;
+    }
+    return r;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+
+  // Collect the QUALIFYING edges once (both endpoints unnamed, weight >= floor,
+  // valid distinct indices), de-duplicated so a symmetric k-NN (i lists j AND j
+  // lists i) counts each undirected edge a single time for the coherence mean.
+  // Key the pair by ordered (min,max) indices.
+  const seen = new Set<number>();
+  const edges: { a: number; b: number; w: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    if (!unnamed[i]) continue; // a named endpoint disqualifies all its edges
+    const list = nodes[i].neighbors;
+    if (list === undefined) continue;
+    for (const { i: j, w } of list) {
+      // Guard a stale/out-of-range index and the self-edge a k-NN can emit; only
+      // join unnamed-unnamed pairs that are alike enough (weight >= minWeight).
+      if (j < 0 || j >= n || j === i) continue;
+      if (!unnamed[j]) continue;
+      if (w < minWeight) continue;
+      const lo = i < j ? i : j;
+      const hi = i < j ? j : i;
+      const key = lo * n + hi; // unique per undirected pair within this node set
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ a: lo, b: hi, w });
+      union(lo, hi);
+    }
+  }
+
+  // Group node indices by their component root.
+  const components = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    if (!unnamed[i]) continue;
+    const root = find(i);
+    let bucket = components.get(root);
+    if (bucket === undefined) {
+      bucket = [];
+      components.set(root, bucket);
+    }
+    bucket.push(i);
+  }
+
+  // Per-component edge-weight accumulator (for the coherence mean): every
+  // qualifying edge lives entirely inside one component (its endpoints are
+  // unioned), so attribute each to its root.
+  const wSum = new Map<number, number>();
+  const wCount = new Map<number, number>();
+  for (const e of edges) {
+    const root = find(e.a);
+    wSum.set(root, (wSum.get(root) ?? 0) + e.w);
+    wCount.set(root, (wCount.get(root) ?? 0) + 1);
+  }
+
+  const out: UnnamedCluster[] = [];
+  for (const [root, idxs] of components) {
+    if (idxs.length < minSize) continue; // a clump of one or two is just noise
+    let cx = 0;
+    let cy = 0;
+    const members: string[] = [];
+    for (const i of idxs) {
+      cx += nodes[i].x;
+      cy += nodes[i].y;
+      members.push(nodes[i].hash);
+    }
+    members.sort(); // deterministic member order (ascending hash)
+    const count = wCount.get(root) ?? 0;
+    out.push({
+      members,
+      size: idxs.length,
+      centroidX: cx / idxs.length,
+      centroidY: cy / idxs.length,
+      // Mean intra-cluster edge weight already lives in [0,1] (cosine weights);
+      // a single-image component would have no edges, but minSize>=3 with the
+      // connectivity that built it guarantees at least one qualifying edge.
+      coherence: count > 0 ? clamp01(wSum.get(root)! / count) : 0,
+    });
+  }
+
+  // Deterministic ordering: largest clumps first (strongest soft topics), with
+  // the smallest member hash as a stable tie-break.
+  out.sort((a, b) => b.size - a.size || (a.members[0] < b.members[0] ? -1 : 1));
+  return out;
 }

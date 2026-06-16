@@ -106,8 +106,10 @@
     engagedTopics,
     nodeOverlay,
     overlookedTopics,
+    unnamedClusters,
     type OverlayMode,
     type TopicAttention,
+    type UnnamedCluster,
   } from "../../logic/synthesis";
   import {
     nodeBaseSizePx,
@@ -221,6 +223,17 @@
    * inherit its dominant topic's overlooked score for a cluster-level glow that
    * agrees with the readout. Empty outside Overlooked mode. */
   let overlookedByTopic: number[] = [];
+  /** UNNAMED coherent clusters — the SECOND source of Overlooked (founder's
+   * "soft topics"): coherent clumps of images that hold to no named topic.
+   * Detected over the full-detail node set (the k-NN semantic graph) only in
+   * Overlooked mode and only OUT of LOD (super-nodes carry no per-image
+   * neighbors). Surfaced in the SAME readout + glow as the named overlooked
+   * topics. Empty otherwise. */
+  let unnamedClusterList = $state<UnnamedCluster[]>([]);
+  /** Member hash -> 1 for every node in an unnamed cluster, for O(1) glow lookup
+   * in the draw loop (the same per-node glow mechanism the named overlooked
+   * members use). Empty outside Overlooked / in LOD. */
+  let unnamedMemberSet = $state<Set<string>>(new Set());
 
   // -- the slider-to-collection bake (the signature gesture) ------------------
   // Clicking a topic anchor SELECTS it for baking: a threshold slider (0..1)
@@ -766,6 +779,8 @@
       intensity = new Map();
       attentionRanked = [];
       overlookedByTopic = [];
+      unnamedClusterList = [];
+      unnamedMemberSet = new Set();
       draw();
       return;
     }
@@ -799,6 +814,8 @@
     if (mode === "off") {
       attentionRanked = [];
       overlookedByTopic = [];
+      unnamedClusterList = [];
+      unnamedMemberSet = new Set();
       return;
     }
     // Aggregate over every image (the full detail set), so the readout reflects
@@ -815,6 +832,8 @@
     if (mode === "engaged") {
       attentionRanked = engagedTopics(detail, intensity, topics.length);
       overlookedByTopic = [];
+      unnamedClusterList = [];
+      unnamedMemberSet = new Set();
     } else {
       const ranked = overlookedTopics(detail, intensity, topics.length);
       attentionRanked = ranked;
@@ -822,6 +841,23 @@
       const byTopic = new Array(topics.length).fill(0);
       for (const r of ranked) byTopic[r.topic] = r.score;
       overlookedByTopic = byTopic;
+      // SECOND source of Overlooked (founder's "soft topics"): coherent clumps
+      // of UN-topic'd images, read from the live `nodes` (they carry the resolved
+      // k-NN neighbors + sim positions the detector needs). Skip in LOD — a
+      // super-node has no per-image neighbors, so there is no clump structure to
+      // find there; the named overlooked behavior is unchanged in that case.
+      if (lodActive) {
+        unnamedClusterList = [];
+        unnamedMemberSet = new Set();
+      } else {
+        unnamedClusterList = unnamedClusters(nodes, topics.length);
+        // Flatten the members into a Set for the per-node glow lookup in draw().
+        const members = new Set<string>();
+        for (const cl of unnamedClusterList) {
+          for (const h of cl.members) members.add(h);
+        }
+        unnamedMemberSet = members;
+      }
     }
   }
 
@@ -1403,7 +1439,22 @@
           ? n.members.some((h) => glowSet.has(h))
           : glowSet.has(n.hash)
         : false;
-      const effGlow = bakeActive ? (inGlow ? 1 : 0) : ov.glow;
+      // UNNAMED-cluster glow (the second source of Overlooked): a node that is a
+      // member of a detected unnamed clump lights up with the SAME overlooked
+      // glow treatment as a named-overlooked member, so the clump reads as a soft
+      // topic. Only meaningful out of LOD (the set is empty in LOD / Engaged /
+      // Off), and the bake selection still takes visual priority below. We glow
+      // it FULL: an unnamed clump has no per-topic overlooked score to scale by,
+      // and the detector already gated it on coherence + size.
+      const inUnnamed =
+        unnamedMemberSet.size > 0 && unnamedMemberSet.has(n.hash);
+      const effGlow = bakeActive
+        ? inGlow
+          ? 1
+          : 0
+        : inUnnamed
+          ? Math.max(ov.glow, 1)
+          : ov.glow;
       // The drawn side SCALES WITH ZOOM (founder: "zoom must grow the
       // thumbnails"), clamped to [min, max] so zooming in enlarges previews to a
       // readable size and zooming out keeps them legible. The hit-test below
@@ -1580,6 +1631,10 @@
   let rankedNonzero = $derived(
     attentionRanked.filter((r) => r.score > 1e-6).slice(0, READOUT_MAX),
   );
+  /** The unnamed coherent clumps to list in the Overlooked readout, strongest
+   * (largest) first — the detector already sorts by size desc. Capped like the
+   * named rows so a noisy scope does not flood the header. */
+  let unnamedReadout = $derived(unnamedClusterList.slice(0, READOUT_MAX));
 
   // -- pointer interaction ----------------------------------------------------
   // A pointer-drag is one of THREE gestures, decided at pointer-down by the hit
@@ -1918,6 +1973,8 @@
     intensity: Map<string, number>;
     attentionRanked: TopicAttention[];
     overlookedByTopic: number[];
+    unnamedClusterList: UnnamedCluster[];
+    unnamedMemberSet: Set<string>;
   }
 
   // The last (alpha, fullLibrary) a recompute / restore actually laid out, so
@@ -1958,6 +2015,8 @@
       intensity,
       attentionRanked,
       overlookedByTopic,
+      unnamedClusterList,
+      unnamedMemberSet,
     };
     graphState.set(currentStateKey(), snap);
   }
@@ -1992,6 +2051,8 @@
     intensity = snap.intensity;
     attentionRanked = snap.attentionRanked;
     overlookedByTopic = snap.overlookedByTopic;
+    unnamedClusterList = snap.unnamedClusterList;
+    unnamedMemberSet = snap.unnamedMemberSet;
     // The reactive watchers' keys must reflect the restored view so a spurious
     // topic / alpha / fullLibrary $effect does not fire a needless recompute
     // right after the restore (which would re-ooze a view already in place).
@@ -2452,10 +2513,23 @@
       <span class="readout-label">
         {ui.graphAttention === "engaged" ? "Engaged" : "Overlooked"}:
       </span>
-      {#if rankedNonzero.length > 0}
+      {#if rankedNonzero.length > 0 || unnamedReadout.length > 0}
         {#each rankedNonzero as r, i (r.topic)}
           <span class="readout-topic">
-            {topics[r.topic]}{i < rankedNonzero.length - 1 ? " ·" : ""}
+            {topics[r.topic]}{i < rankedNonzero.length - 1 ||
+            unnamedReadout.length > 0
+              ? " ·"
+              : ""}
+          </span>
+        {/each}
+        <!-- The SECOND source of Overlooked: unnamed coherent clumps, listed
+             after the named topics, strongest (largest) first. No em-dashes:
+             "N photos" plainly. -->
+        {#each unnamedReadout as cl, i (cl.members[0])}
+          <span class="readout-topic dim">
+            unnamed cluster - {cl.size} photos{i < unnamedReadout.length - 1
+              ? " ·"
+              : ""}
           </span>
         {/each}
       {:else}
