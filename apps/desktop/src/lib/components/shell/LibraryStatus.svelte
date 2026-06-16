@@ -11,7 +11,8 @@
    *     · working  -> a quiet activity glyph + the current stage + "done /
    *       total" + a thin progress sliver + the overall "~6m".
    *     · blocked  -> amber + the top waiting-on reason (a drive offline,
-   *       a model downloading, the embedder loading).
+   *       a model downloading, an embedder lane loading, or a failed embedder
+   *       lane: image/text search unavailable).
    *
    *   EXPANDED (hover, also keyboard-focusable) — a panel that drops from the
    *   header with the full stage list (label · "240 / 5,000" · a bar · "~6m ·
@@ -125,7 +126,11 @@
           <div class="waiting">
             <span class="section-label">Waiting on</span>
             {#each model.waitingOn as w (w.id)}
-              <div class="waiting-row">{w.text}</div>
+              <!-- failed embedder lanes are DEGRADED: the error register (a
+                   stronger weight) and the full error on a title attr. -->
+              <div class="waiting-row" class:degraded={w.degraded === true} title={w.detail ?? w.text}>
+                {w.text}
+              </div>
             {/each}
           </div>
         {/if}
@@ -152,9 +157,11 @@
     aria-expanded={open}
     aria-label="Library status - {model.headline}"
     onkeydown={onPillKeydown}
-    title={model.headline}
+    title={blocked ? (model.waitingOn[0].detail ?? model.waitingOn[0].text) : model.headline}
   >
     {#if blocked}
+      <!-- A failed embedder lane is degraded: same amber error register as the
+           other blockers; the full error rides the pill's title attr above. -->
       <span class="glyph amber"><TriangleAlert size={11} aria-hidden="true" /></span>
       <span class="label amber">{model.waitingOn[0].text}</span>
     {:else if model.settled}
@@ -350,6 +357,11 @@
   .waiting-row {
     font-size: 12px;
     color: var(--station-error);
+  }
+  /* a degraded row (a failed embedder lane) carries more weight than a
+     transient wait — same error token, a touch bolder so it reads as a fault */
+  .waiting-row.degraded {
+    font-weight: 600;
   }
   .errors {
     font-size: 11px;

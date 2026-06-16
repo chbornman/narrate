@@ -67,6 +67,8 @@ const runtime = (over: Partial<RuntimeStatus> = {}): RuntimeStatus => ({
   llmBlocked: null,
   clipReady: true,
   textEmbedderReady: true,
+  clip: { state: "ready", error: null },
+  textEmbedder: { state: "ready", error: null },
   tierDetected: 1,
   tierEffective: 1,
   tierOverriddenAbove: false,
@@ -276,27 +278,102 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     expect(m.settled).toBe(false); // a download keeps the library working
   });
 
-  it("a degraded embedder (installed but not ready) -> 'embedder loading'", () => {
+  it("a CLIP lane building -> 'image embedder loading' (transient, not degraded)", () => {
+    const m = libraryStatusModel(
+      input({ runtime: runtime({ clip: { state: "building", error: null } }) }),
+    );
+    expect(m.waitingOn.map((w) => w.text)).toEqual(["image embedder loading"]);
+    expect(m.waitingOn[0].degraded).not.toBe(true);
+    expect(m.degraded).toBe(false);
+  });
+
+  it("a text lane building -> 'text embedder loading' (transient, not degraded)", () => {
+    const m = libraryStatusModel(
+      input({ runtime: runtime({ textEmbedder: { state: "building", error: null } }) }),
+    );
+    expect(m.waitingOn.map((w) => w.text)).toEqual(["text embedder loading"]);
+    expect(m.waitingOn[0].degraded).not.toBe(true);
+    expect(m.degraded).toBe(false);
+  });
+
+  it("a CLIP lane failed -> 'image search unavailable', degraded, error surfaced", () => {
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clipReady: false,
-          models: [model({ role: "embedder", state: "installed" })],
+          clip: { state: "failed", error: "ort session create failed: bad graph" },
         }),
       }),
     );
-    expect(m.waitingOn.map((w) => w.text)).toEqual(["embedder loading"]);
+    expect(m.waitingOn[0].text).toBe(
+      "image search unavailable: ort session create failed: bad graph",
+    );
+    expect(m.waitingOn[0].degraded).toBe(true);
+    expect(m.waitingOn[0].detail).toBe(
+      "image search unavailable: ort session create failed: bad graph",
+    );
+    expect(m.degraded).toBe(true);
   });
 
-  it("all three together, ordered offline -> downloading -> degraded", () => {
+  it("a text lane failed -> 'text search unavailable', degraded, error surfaced", () => {
+    const m = libraryStatusModel(
+      input({
+        runtime: runtime({
+          textEmbedder: { state: "failed", error: "model not found" },
+        }),
+      }),
+    );
+    expect(m.waitingOn[0].text).toBe("text search unavailable: model not found");
+    expect(m.waitingOn[0].degraded).toBe(true);
+    expect(m.degraded).toBe(true);
+  });
+
+  it("a failed lane clamps a long error short for the row, full error on detail", () => {
+    const long =
+      "session construction failed because the execution provider could not be initialized on this device";
+    const m = libraryStatusModel(
+      input({ runtime: runtime({ clip: { state: "failed", error: long } }) }),
+    );
+    // text stays glanceable (clamped, ASCII ellipsis); detail carries the whole.
+    expect(m.waitingOn[0].text.length).toBeLessThanOrEqual(
+      "image search unavailable: ".length + 60,
+    );
+    expect(m.waitingOn[0].text.endsWith("...")).toBe(true);
+    expect(m.waitingOn[0].detail).toBe(`image search unavailable: ${long}`);
+  });
+
+  it("a failed lane with no error -> just the headline, no colon", () => {
+    const m = libraryStatusModel(
+      input({ runtime: runtime({ clip: { state: "failed", error: null } }) }),
+    );
+    expect(m.waitingOn[0].text).toBe("image search unavailable");
+    expect(m.waitingOn[0].detail).toBeUndefined();
+    expect(m.waitingOn[0].degraded).toBe(true);
+  });
+
+  it("failed sorts ABOVE building when both lanes have rows", () => {
+    const m = libraryStatusModel(
+      input({
+        runtime: runtime({
+          clip: { state: "building", error: null },
+          textEmbedder: { state: "failed", error: "boom" },
+        }),
+      }),
+    );
+    // failed (degraded) first, then the building row.
+    expect(m.waitingOn.map((w) => w.text)).toEqual([
+      "text search unavailable: boom",
+      "image embedder loading",
+    ]);
+  });
+
+  it("offline + downloading + a failed lane, ordered offline -> downloading -> failed", () => {
     const m = libraryStatusModel(
       input({
         ingest: ingest({ offlineVolumes: [{ label: "HomeNAS", images: 10 }] }),
         runtime: runtime({
-          clipReady: false,
+          clip: { state: "failed", error: "boom" },
           models: [
             model({ id: "txt", role: "text-embedder", state: "downloading", totalBytes: 100, downloadedBytes: 50 }),
-            model({ id: "clip", role: "embedder", state: "installed" }),
           ],
         }),
       }),
@@ -304,37 +381,37 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     expect(m.waitingOn.map((w) => w.text)).toEqual([
       "Paused - HomeNAS offline (10 photos)",
       "txt downloading (50%)",
-      "embedder loading",
+      "image search unavailable: boom",
     ]);
   });
 
-  it("a ready embedder is not 'loading'; no waiting-on row", () => {
+  it("both lanes ready -> no embedder row, not degraded", () => {
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clipReady: true,
-          textEmbedderReady: true,
-          models: [model({ role: "embedder", state: "installed" })],
+          clip: { state: "ready", error: null },
+          textEmbedder: { state: "ready", error: null },
         }),
       }),
     );
     expect(m.waitingOn).toEqual([]);
+    expect(m.degraded).toBe(false);
   });
 
-  it("CLIP ready but the text lane never ready is NOT 'loading' (no perpetual nag)", () => {
-    // The M1 reality: CLIP loads on CoreML (clipReady), but EmbeddingGemma's
-    // text lane can stay inactive (textEmbedderReady false) - that must not
-    // read as a forever-loading embedder.
+  it("an idle text lane is NOT a row (idle = unlit, no perpetual nag)", () => {
+    // The M1 reality: CLIP loads (ready) while EmbeddingGemma's text lane sits
+    // idle (unlit on this build) - idle must NOT read as a forever-loading
+    // embedder, which the old clipReady/textEmbedderReady booleans collapsed.
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clipReady: true,
-          textEmbedderReady: false,
-          models: [model({ role: "embedder", state: "installed" })],
+          clip: { state: "ready", error: null },
+          textEmbedder: { state: "idle", error: null },
         }),
       }),
     );
     expect(m.waitingOn).toEqual([]);
+    expect(m.degraded).toBe(false);
   });
 });
 

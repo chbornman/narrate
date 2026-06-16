@@ -13,7 +13,7 @@
  * the waiting-on assembly, the ETA derivation, and the human formatters are
  * all unit-testable with no DOM. LibraryStatus.svelte renders it verbatim.
  */
-import type { IngestStatus, RuntimeStatus } from "../types/dto";
+import type { EmbedderSlot, IngestStatus, RuntimeStatus } from "../types/dto";
 
 // ---------------------------------------------------------------------------
 // Canonical stages (founder order): discover -> hash -> meta -> preview ->
@@ -71,11 +71,21 @@ export interface LibraryStage {
 }
 
 /** One reason the library is held up (offline drive, a downloading model, a
- * degraded embedder). Rendered in the "Waiting on" section, top-most first. */
+ * loading-or-failed embedder). Rendered in the "Waiting on" section,
+ * top-most first. */
 export interface WaitingReason {
   /** Stable key for the {#each} so a reason can fade in/out cleanly. */
   id: string;
   text: string;
+  /** True for a DEGRADED reason (a failed embedder lane): a real fault, not a
+   * transient wait. The component styles these as the error register and the
+   * top one flips the collapsed pill to amber-blocked. Absent/false = an
+   * ordinary transient wait (offline/downloading/building). */
+  degraded?: boolean;
+  /** Full, untruncated detail (a failed lane's error) for a `title` attr; the
+   * `text` itself is clamped short for the pill/row. Absent when there is no
+   * extra detail beyond `text`. */
+  detail?: string;
 }
 
 export interface LibraryStatusModel {
@@ -88,8 +98,13 @@ export interface LibraryStatusModel {
   /** The single stage the collapsed pill foregrounds (the first one still
    * working, else the first pending) — null when settled. */
   current: LibraryStage | null;
-  /** Blocking reasons (offline / downloading / degraded), top-most first. */
+  /** Blocking reasons (offline / downloading / loading / failed embedder),
+   * top-most first. A failed embedder lane is `degraded: true`. */
   waitingOn: WaitingReason[];
+  /** True when any waiting-on reason is degraded (a failed embedder lane):
+   * the library is in a real DEGRADED state worth the amber register, not
+   * merely waiting. The collapsed pill folds this into its blocked register. */
+  degraded: boolean;
   /** Total ingest error count (the expanded panel's errors row). */
   errors: number;
   /** Overall ETA across working+pending stages; null when nothing is sized
@@ -205,21 +220,59 @@ function rollPasses(
   };
 }
 
-/** The degraded-embedder signal: the IMAGE embedder (CLIP) is installed but its
- * ort sessions are still constructing. We gate ONLY on `clipReady`, not the
- * text lane: EmbeddingGemma (`textEmbedderReady`) can be intentionally inactive
- * on this build (the M3 text-embed lane is not lit), so a permanently-not-ready
- * text embedder must NOT read as "loading forever" (it did, and never finished).
- * CLIP is the active embedder that gates the embed stage here; while it builds
- * we show "loading", and the row clears the moment its sessions are ready.
- * Distinct from "not downloaded" (a download waiting-on row owns that). */
-function embedderLoading(runtime: RuntimeStatus | null): boolean {
-  if (runtime === null) return false;
-  // The CLIP image embedder is installed but its sessions are still building.
-  const clipInstalled = runtime.models.some(
-    (m) => m.role === "embedder" && m.state === "installed",
-  );
-  return clipInstalled && !runtime.clipReady;
+/** Max chars of a failed lane's error to inline into the pill/row text. The
+ * full error rides a `title` attr (WaitingReason.detail); this keeps the
+ * visible copy glanceable instead of wrapping a stack trace into the header. */
+const EMBEDDER_ERROR_CLAMP = 60;
+
+/** Clamp an embedder error for the pill/row: first line only, trimmed, capped
+ * at ~60 chars with an ASCII ellipsis (no em-dash). Empty/blank -> "". */
+function clampEmbedderError(error: string | null): string {
+  if (error === null) return "";
+  const firstLine = error.split("\n")[0].trim();
+  if (firstLine === "") return "";
+  if (firstLine.length <= EMBEDDER_ERROR_CLAMP) return firstLine;
+  return `${firstLine.slice(0, EMBEDDER_ERROR_CLAMP - 3).trimEnd()}...`;
+}
+
+/** The HONEST per-role embedder signal (replaces the interim CLIP-only
+ * `embedderLoading` boolean): turn one lane's slot state into a waiting-on
+ * reason, or null when the lane needs no row.
+ *   · building -> a transient "loading" row (e.g. "image embedder loading").
+ *   · failed   -> a DEGRADED row ("image search unavailable") with the clamped
+ *     error inlined and the full error on `detail`; this lane is broken, not
+ *     warming up.
+ *   · ready/idle -> null. idle means the lane is simply not configured/active
+ *     (the M1 text lane sits idle when unlit) — we do NOT nag, which is exactly
+ *     what the old CLIP-only hack worked around the wrong way. */
+function embedderReason(
+  role: "clip" | "text",
+  slot: EmbedderSlot,
+): WaitingReason | null {
+  const loadingText =
+    role === "clip" ? "image embedder loading" : "text embedder loading";
+  const failedText =
+    role === "clip" ? "image search unavailable" : "text search unavailable";
+  if (slot.state === "building") {
+    return { id: `embedder-loading:${role}`, text: loadingText };
+  }
+  if (slot.state === "failed") {
+    const short = clampEmbedderError(slot.error);
+    // Inline the clamped error after the headline when present; the full,
+    // untruncated error rides `detail` for the component's title attr.
+    const text = short === "" ? failedText : `${failedText}: ${short}`;
+    const reason: WaitingReason = {
+      id: `embedder-failed:${role}`,
+      text,
+      degraded: true,
+    };
+    if (slot.error !== null && slot.error.trim() !== "") {
+      reason.detail = `${failedText}: ${slot.error.trim()}`;
+    }
+    return reason;
+  }
+  // ready / idle -> no row.
+  return null;
 }
 
 export function libraryStatusModel(
@@ -253,7 +306,8 @@ export function libraryStatusModel(
   if (other !== null) stages.push(other);
 
   // Waiting-on assembly, top-most first: offline drives (the hard stop),
-  // then downloading models, then a degraded/loading embedder.
+  // then downloading models, then the per-role embedder rows (failed before
+  // building).
   const waitingOn: WaitingReason[] = [];
   for (const v of ing.offlineVolumes) {
     waitingOn.push({
@@ -271,15 +325,32 @@ export function libraryStatusModel(
         : 0;
     waitingOn.push({ id: `download:${m.id}`, text: `${m.id} downloading (${pct}%)` });
   }
-  if (embedderLoading(input.runtime)) {
-    waitingOn.push({ id: "embedder-loading", text: "embedder loading" });
+  // Per-role embedder rows, FAILED before BUILDING (a degraded lane is more
+  // urgent than one still warming up). Each role contributes at most one row;
+  // a null runtime (backend dark) contributes none.
+  if (input.runtime !== null) {
+    const rt = input.runtime;
+    const embedderReasons = [
+      embedderReason("clip", rt.clip),
+      embedderReason("text", rt.textEmbedder),
+    ].filter((r): r is WaitingReason => r !== null);
+    // failed (degraded) first, then building, stable within each group.
+    const failed = embedderReasons.filter((r) => r.degraded === true);
+    const building = embedderReasons.filter((r) => r.degraded !== true);
+    waitingOn.push(...failed, ...building);
   }
+
+  // Degraded = any waiting-on reason is a failed embedder lane (a real fault,
+  // not a transient wait): the collapsed pill folds this into the amber
+  // blocked register and the panel styles it as an error row.
+  const degraded = waitingOn.some((w) => w.degraded === true);
 
   // Settled = nothing running, nothing scanning, nothing downloading, no
   // un-done stage, AND nothing blocking. A blocking reason (an offline drive
   // holding library photos, a model still downloading, the embedder loading)
-  // means work is PAUSED, not absent — the headline reads "working" while a
-  // drive is out, even when no pass row is queued yet.
+  // means work is PAUSED or DEGRADED, not absent — the headline reads
+  // "working" while a drive is out or an embedder lane is loading/failed,
+  // even when no pass row is queued yet.
   const anyWork = stages.some((s) => s.state !== "done");
   const settled =
     !ing.running &&
@@ -311,6 +382,7 @@ export function libraryStatusModel(
     stages,
     current,
     waitingOn,
+    degraded,
     errors: ing.errors,
     etaSecs: overall,
   };

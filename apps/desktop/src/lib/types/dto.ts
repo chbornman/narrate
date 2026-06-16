@@ -144,6 +144,24 @@ export interface IngestStatus {
   offlineVolumes: { label: string; images: number }[];
 }
 
+/** Per-role embedder slot state (twin of `dto.rs`): the HONEST lifecycle of
+ * one embedder lane (CLIP image / EmbeddingGemma text), so a FAILED lane can
+ * be told apart from one still warming up or one simply not configured:
+ *   · idle     — not configured/active on this build; do NOT nag (the M1
+ *     text lane sits here when unlit).
+ *   · building — sessions constructing; a transient "loading" state.
+ *   · ready    — sessions constructed; the lane serves search.
+ *   · failed   — construction errored; the lane is DEGRADED (a real,
+ *     surfaced fault, not a forever-loading lie). */
+export type EmbedderState = "idle" | "building" | "ready" | "failed";
+
+/** One embedder lane's state + an optional human error. `error` is non-null
+ * ONLY when `state === "failed"` (the construction fault to surface). */
+export interface EmbedderSlot {
+  state: EmbedderState;
+  error: string | null;
+}
+
 /** RUNTIME (P6.2): tier + consent + per-model license/progress rows.
  * `asrReady`/`llmReady` are the §8.3 readiness gates — false until a
  * supervised child reports Ready (never true before P6.3 vendors real
@@ -163,6 +181,12 @@ export interface RuntimeStatus {
    * the semantic-search backfill, never blocking the journal. */
   clipReady: boolean;
   textEmbedderReady: boolean;
+  /** Per-role embedder slot state — the HONEST lifecycle the Library-status
+   * indicator reads (idle/building/ready/failed), distinct from the coarse
+   * `clipReady`/`textEmbedderReady` bools (kept for other consumers). A failed
+   * lane reads as DEGRADED here where the bool collapsed it to "never ready". */
+  clip: EmbedderSlot;
+  textEmbedder: EmbedderSlot;
   tierDetected: number;
   /** After the always-winning user override (§6.2). */
   tierEffective: number;

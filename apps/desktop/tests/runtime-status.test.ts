@@ -30,6 +30,8 @@ const status = (over: Partial<RuntimeStatus> = {}): RuntimeStatus => ({
   llmBlocked: null,
   clipReady: false,
   textEmbedderReady: false,
+  clip: { state: "idle", error: null },
+  textEmbedder: { state: "idle", error: null },
   tierDetected: 1,
   tierEffective: 1,
   tierOverriddenAbove: false,
