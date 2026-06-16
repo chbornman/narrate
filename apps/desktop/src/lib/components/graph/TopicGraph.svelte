@@ -1000,6 +1000,14 @@
    * clamp is derived inside step() from heat, which the worker already receives,
    * so no new worker plumbing is needed. */
   function isSettled(energy: number): boolean {
+    // A drag in progress is NEVER "at rest": keep ticking + redrawing so the
+    // graph (and the node under the cursor) does not freeze mid-drag. Without
+    // this, heat cools to <=1.0001, isSettled trips, the rAF loop stops, and the
+    // canvas stops repainting -- the pointer keeps writing x/y but nothing draws
+    // (founder: "click and drag -> stops updating -> freezes a bit later"). The
+    // loop resumes settling once the pointer is released. (Standard force-graph
+    // drag behavior; mirrors d3-force holding alphaTarget>0 while dragging.)
+    if (dragging !== null || draggingAnchor !== null) return false;
     const bodies = Math.max(1, nodes.length + anchors.length);
     return (
       energy / bodies < REST_ENERGY_PER_BODY && heat <= 1.0001 && settleCount > 30
@@ -1889,12 +1897,16 @@
       draggingAnchor.x = x;
       draggingAnchor.y = y;
       moved = true;
+      // Keep the sim HOT while dragging so neighbours follow the moved anchor
+      // (at cooled heat the anneal clamp pins them to sub-pixel = sluggish).
+      reheat();
       return;
     }
     if (dragging) {
       dragging.x = x;
       dragging.y = y;
       moved = true;
+      reheat();
     }
   }
   let downAt = 0;
