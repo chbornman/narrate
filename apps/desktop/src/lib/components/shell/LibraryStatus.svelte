@@ -157,11 +157,13 @@
     aria-expanded={open}
     aria-label="Library status - {model.headline}"
     onkeydown={onPillKeydown}
-    title={blocked ? (model.waitingOn[0].detail ?? model.waitingOn[0].text) : model.headline}
   >
     {#if blocked}
       <!-- A failed embedder lane is degraded: same amber error register as the
-           other blockers; the full error rides the pill's title attr above. -->
+           other blockers; the full error rides the panel's waiting-row title.
+           No `title` on the pill itself: hovering opens the panel, so a native
+           tooltip here would just shadow it (the duplicate the founder saw). -->
+
       <span class="glyph amber"><TriangleAlert size={11} aria-hidden="true" /></span>
       <span class="label amber">{model.waitingOn[0].text}</span>
     {:else if model.settled}
