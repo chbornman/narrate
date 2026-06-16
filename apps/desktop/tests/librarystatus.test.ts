@@ -320,6 +320,22 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     );
     expect(m.waitingOn).toEqual([]);
   });
+
+  it("CLIP ready but the text lane never ready is NOT 'loading' (no perpetual nag)", () => {
+    // The M1 reality: CLIP loads on CoreML (clipReady), but EmbeddingGemma's
+    // text lane can stay inactive (textEmbedderReady false) - that must not
+    // read as a forever-loading embedder.
+    const m = libraryStatusModel(
+      input({
+        runtime: runtime({
+          clipReady: true,
+          textEmbedderReady: false,
+          models: [model({ role: "embedder", state: "installed" })],
+        }),
+      }),
+    );
+    expect(m.waitingOn).toEqual([]);
+  });
 });
 
 describe("errors row", () => {

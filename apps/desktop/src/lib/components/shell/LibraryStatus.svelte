@@ -86,7 +86,7 @@
   onfocusout={scheduleClose}
 >
   {#if open && anchorEl !== undefined}
-    <Popover anchor={anchorEl} placement="bottom-start" ondismiss={() => (open = false)}>
+    <Popover anchor={anchorEl} placement="bottom-center" ondismiss={() => (open = false)}>
       <!-- keep the hover alive while the pointer is over the dropped panel -->
       <div class="panel" onpointerenter={openNow} onpointerleave={scheduleClose} role="presentation">
         <div class="panel-head">

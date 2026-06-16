@@ -145,12 +145,20 @@
    * pill itself re-enabling pointer events (the bar around it stays draggable).
    * pointer-events:none on the wrapper keeps the centered band draggable
    * everywhere the pill is not. */
+  /* Centered WITHOUT a transform on purpose: a `transform` here would make this
+   * wrapper a containing block + stacking context, which traps the indicator's
+   * position:fixed hover panel (it would anchor to this box, and its z-index
+   * could not rise above the page). `left/right:0 + margin-inline:auto` centers
+   * a max-content box with no transform, so the panel stays viewport-fixed and
+   * paints on top. */
   .center {
     position: absolute;
-    left: 50%;
+    left: 0;
+    right: 0;
+    margin-inline: auto;
     top: 0;
     bottom: 0;
-    transform: translateX(-50%);
+    width: max-content;
     display: flex;
     align-items: center;
     max-width: 50%;

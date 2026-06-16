@@ -205,21 +205,21 @@ function rollPasses(
   };
 }
 
-/** The needed-but-missing / degraded embedder signal: the embedder model's
- * role is present in the runtime registry but not yet ready. We surface the
- * runtime `clipReady`/`textEmbedderReady` flags being false WHILE the model
- * is installed (it is loading), distinct from "not downloaded" (a download
- * waiting-on row owns that). Returns true when the embedder is loading. */
+/** The degraded-embedder signal: the IMAGE embedder (CLIP) is installed but its
+ * ort sessions are still constructing. We gate ONLY on `clipReady`, not the
+ * text lane: EmbeddingGemma (`textEmbedderReady`) can be intentionally inactive
+ * on this build (the M3 text-embed lane is not lit), so a permanently-not-ready
+ * text embedder must NOT read as "loading forever" (it did, and never finished).
+ * CLIP is the active embedder that gates the embed stage here; while it builds
+ * we show "loading", and the row clears the moment its sessions are ready.
+ * Distinct from "not downloaded" (a download waiting-on row owns that). */
 function embedderLoading(runtime: RuntimeStatus | null): boolean {
   if (runtime === null) return false;
-  // Installed but not yet ready = the ort sessions are still constructing.
-  const installedEmbedder = runtime.models.some(
-    (m) =>
-      (m.role === "embedder" || m.role === "text-embedder") &&
-      m.state === "installed",
+  // The CLIP image embedder is installed but its sessions are still building.
+  const clipInstalled = runtime.models.some(
+    (m) => m.role === "embedder" && m.state === "installed",
   );
-  if (!installedEmbedder) return false;
-  return !runtime.clipReady || !runtime.textEmbedderReady;
+  return clipInstalled && !runtime.clipReady;
 }
 
 export function libraryStatusModel(

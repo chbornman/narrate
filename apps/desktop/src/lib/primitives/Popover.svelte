@@ -25,7 +25,7 @@
     children,
   }: {
     anchor: { x: number; y: number } | HTMLElement | null;
-    placement?: "bottom-start" | "top-end";
+    placement?: "bottom-start" | "top-end" | "bottom-center";
     ondismiss: () => void;
     children: Snippet;
   } = $props();
@@ -33,15 +33,20 @@
   let el: HTMLDivElement | undefined = $state();
 
   // "top-end" opens upward: the panel's RIGHT edge tracks the anchor's right
-  // edge and its body floats above the top edge (transform below). Other
-  // placements drop down from the anchor's bottom-left.
+  // edge and its body floats above the top edge (transform below).
+  // "bottom-center" drops DOWN with the panel horizontally CENTERED on the
+  // anchor (the header-center indicator: the panel sits centered beneath it).
+  // Default "bottom-start" drops down from the anchor's bottom-left.
   const up = $derived(placement === "top-end");
+  const centered = $derived(placement === "bottom-center");
 
   const point = $derived.by(() => {
     if (anchor === null) return null;
     if (anchor instanceof HTMLElement) {
       const r = anchor.getBoundingClientRect();
-      return up ? { x: r.right, y: r.top } : { x: r.left, y: r.bottom };
+      if (up) return { x: r.right, y: r.top };
+      if (centered) return { x: r.left + r.width / 2, y: r.bottom };
+      return { x: r.left, y: r.bottom };
     }
     return anchor;
   });
@@ -54,6 +59,7 @@
   $effect(() => {
     void point;
     void up;
+    void centered;
     dx = 0;
     dy = 0;
     const box = el?.getBoundingClientRect();
@@ -86,7 +92,11 @@
         // (right-align to point.x) and up by its full height + an 8px gap, so
         // the body never overlaps the anchor's top edge (the icon row).
         "translate(-100%, calc(-100% - 8px))"
-      : undefined}
+      : centered
+        ? // anchor at the bottom-center: pull the box left by half its width so
+          // its horizontal center sits under the anchor's center, opening down.
+          "translateX(-50%)"
+        : undefined}
   role="presentation"
 >
   {@render children()}
