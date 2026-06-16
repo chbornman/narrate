@@ -302,6 +302,64 @@ of them posture changes the founder made deliberately.
   first impression + the place the hardware intelligence becomes legible. Pairs with the
   Station / progressive-import / digest-visibility items. (Founder, June 14 2026.)
 
+## Visualizer + state-integrity follow-ups (founder, June 15 2026)
+
+Context: this session reworked the semantic visualizer end to end and landed a
+batch of state-integrity / self-heal fixes. Full session narrative + file
+pointers in `docs/HANDOFF.md`; audit in `docs/STATE-INTEGRITY-AUDIT.md`. LANDED
+this session (see git, `Visualizer:` + state-integrity commits): bounded/annealed
+force sim that always settles; semantic CLIP+note k-NN spring attraction (alike
+photos draw together); rebalance + live-tunable knobs (`graph.attraction`,
+`graph.neighbor_attraction`, `graph.neighbor_rest_length`); a live topic-strength
+slider; "soft topics" unified INTO the Overlooked lens (detect unnamed coherent
+clusters via `synthesis.ts unnamedClusters`, list + glow them). Open items below.
+
+- [ ] **Soft-topic v2: ghost anchors + promote-to-topic** (founder, June 15 2026):
+  Overlooked now DETECTS unnamed coherent clusters and lists/glows them
+  (`synthesis.ts:367 unnamedClusters`). Remaining: render a faint GHOST ANCHOR at
+  each cluster centroid in the visualizer and let a click PROMOTE it to a real
+  topic. Labeling decision (founder): NOTES FIRST, unlabeled otherwise — label a
+  cluster by its most representative member note phrase when notes exist, else an
+  unlabeled dot; promote needs a name (note phrase or a new-topic input). Then
+  dogfood the force balance (slider + `tuning.toml`) and tune the defaults.
+
+- [ ] **Removed-folder reconciliation** (founder, June 15 2026 — confirmed bug):
+  removing a root orphans its images (non-destructive, for relink) but they (1)
+  still appear in the LIBRARY scope — `Library::image_hashes()`
+  (`library/mod.rs:2364`) selects all images with NO active-path filter; and (2)
+  keep CONSUMING ingest work — `remove_root` (`library/mod.rs:1026`) marks paths
+  stale but never cancels pending passes, so the app re-embeds + re-previews
+  deleted folders (founder saw ~414 ghost images doing exactly this, mid-session).
+  FIX: filter the Library scope to images with an active path; cancel/skip
+  orphaned images' pending passes on `remove_root`; have the startup doctor heal
+  already-orphaned images; invalidate the visualizer affinity cache on a root
+  change (the founder hit a stale graph that only fixed on a view-swap). Images
+  themselves stay (relink). ORIGINAL: "i removed some folders and added some....
+  but images are still there from the old folders... it still shows indexing
+  thousands."
+
+- [ ] **Self-heal refinements (verify-before-retire + skip-already-correct)**
+  (founder, June 15 2026): two ways the startup doctor over-acted. (a) VERIFY
+  BEFORE RETIRE — `RuntimeHost::active_vector_models` (`runtime.rs:342`) feeds
+  `PpvecStore::reconcile_spaces` (`ppvec.rs:663`) the CONFIG-named active model,
+  so the doctor once dropped the live dfn5b vector space because config said fp16
+  while fp16 was not actually loadable; retire a superseded space only once its
+  replacement is LOADED and producing vectors. (b) SKIP ALREADY-CORRECT — the
+  embedding drain re-embeds on re-pend even when a valid vector already exists;
+  skip when `inputs_hash` matches, to avoid the redundant full re-embed (founder
+  hit a 414-image re-embed after "rebuild all previews").
+
+- [ ] **Host the fp16 CLIP + re-pin the manifest** (founder, June 15 2026 — ops):
+  the fp16 single-file CLIP is a NOMINAL/unhostable manifest entry (the immich-app
+  `local-fp16-convert` revision 404s). It was regenerated on margo, staged
+  locally, and registered in `installed.json`; the embedder-bypass (fp16 ->
+  installed compatible model) covers fresh machines for now. TO MAKE IT
+  DOWNLOADABLE: host the 3 files (on margo at `~/fp16-convert/dfn5b-fp16/`) then
+  re-pin the fp16 entry in `crates/photoproof-core/src/runtime/manifest.rs` with
+  the real repo + revision + SHAs. SHAs already computed: visual `06554df3…`,
+  textual `8617a89a…`, tokenizer `6d9109cc…`. margo scratch (~6 GB at
+  `~/fp16-convert/`) can be cleaned once hosted.
+
 ## Performance / SOTA (audit June 13 2026)
 
 Cited gap analysis (our stack vs 2025-2026 SOTA, adversarially verified). The
