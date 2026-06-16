@@ -15,12 +15,21 @@
   // the accessible name stays the word "edited" — tests query by it.
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  // Source-chip icons (BACKLOG "Journal entry type/source chips"): one per
+  // variant so a drawing / voice note / typed note / system Summary read
+  // distinctly at a glance. Achromatic line icons, matching the app's quiet
+  // visual register (the saturated red stays the pencil tool's alone).
+  import Mic from "@lucide/svelte/icons/mic";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Sparkles from "@lucide/svelte/icons/sparkles";
+  import Type from "@lucide/svelte/icons/type";
   import type { Action } from "../../logic/keymap";
   import {
     formatTime,
     ratingLine,
     rowActions,
     siblingTargetsLabel,
+    sourceChip,
   } from "../../logic/journal";
   import type { JournalEntryDto } from "../../types/dto";
   import StrokePreview from "./StrokePreview.svelte";
@@ -51,6 +60,7 @@
   } = $props();
 
   const time = $derived(formatTime(entry.ts));
+  const chip = $derived(sourceChip(entry));
   const actions = $derived(rowActions(entry));
   const siblings = $derived(
     siblingTargetsLabel(entry.targets, inspectedHash, pairMateHash),
@@ -82,7 +92,19 @@
 </script>
 
 <div class="row" class:retracted={entry.retracted} oncontextmenu={onContextMenu} role="presentation">
-  <span class="time" title={entry.source}>{time}</span>
+  <span class="time">{time}</span>
+
+  <!-- Source/kind chip (BACKLOG "Journal entry type/source chips"): folds the
+       old timestamp hover-title into a visible, named badge so source is legible
+       at a glance, not on hover. `title` carries the spelled-out meaning. -->
+  <span class="chip chip-{chip.variant}" title={chip.title} aria-label={chip.title}>
+    {#if chip.variant === "pencil"}<Pencil
+        size={11}
+      />{:else if chip.variant === "voice"}<Mic size={11} />{:else if chip.variant === "summary"}<Sparkles
+        size={11}
+      />{:else}<Type size={11} />{/if}
+    <span class="chip-label">{chip.label}</span>
+  </span>
 
   {#if entry.kind === "redacted"}
     <!-- content gone, continuity preserved (EVENTS §3.6, Q2) -->
@@ -213,6 +235,36 @@
     color: var(--text-faint);
     font-size: 11px;
     flex: 0 0 auto;
+  }
+  /* Source chip (BACKLOG "Journal entry type/source chips"): the quiet pill
+   * idiom already used by the grid's filter chips - rounded, raised surface,
+   * hairline border - so it matches the app's visual language. Compact for
+   * the dense timeline; icon + short label, achromatic by default. */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: 0 0 auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--chrome);
+    border-radius: 9px;
+    padding: 0 6px 0 5px;
+    font-size: 10px;
+    line-height: 16px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .chip-label {
+    /* Slight tracking keeps the tiny label legible at 10px in both themes. */
+    letter-spacing: 0.02em;
+  }
+  /* Summary (system/LLM-authored) is the one variant that earns a tint: it
+   * marks machine-written rows apart from the user's own words. The station
+   * "working" slate is reused (a sanctioned, narrow non-achromatic accent),
+   * theme-tuned already, so it reads in light and dark alike. */
+  .chip-summary {
+    color: var(--station-working);
+    border-color: var(--station-working);
   }
   .body {
     display: flex;
