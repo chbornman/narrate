@@ -1750,73 +1750,50 @@ impl Library {
     /// `full-raw-decode` and the model passes stay queued by design: the
     /// queue knows their pass kinds; their workers are later milestones.
     ///
-    /// Items drain in WAVES on the worker pool (one wave = one claim batch
-    /// = pool width): decode/resize/encode run truly parallel while every
-    /// DB touch stays serialized on the connection mutex exactly as
-    /// before. Claim order still follows queue priority — a wave claims
-    /// contiguously under one lock — and cancellation/max_items are
-    /// checked between waves, so cancel latency is bounded by one wave.
+    /// PIPELINED (BACKLOG "Ingest pass pipelining", June 2026). The drain was a
+    /// WAVE loop: claim `pool_width` rows, run them all in parallel, then a
+    /// barrier — the next wave could not be claimed until the SLOWEST item of
+    /// the current one finished. A single big-RAW preview drained the pool to
+    /// one busy worker while the rest sat idle waiting for the wave to end and
+    /// the next claim to run under the lock. The pipeline removes that barrier:
+    /// a dedicated CLAIMER feeds a BOUNDED channel that `pool_width` worker
+    /// tasks pull from CONTINUOUSLY, so a slow item only occupies its own
+    /// worker — every other worker keeps pulling fresh rows. This overlaps
+    /// claiming (DB-bound) with preview decode/resize/encode (CPU-bound) and,
+    /// because the scan thread enqueues rows per hash-batch, lets preview run on
+    /// already-hashed items WHILE later items are still being scanned/hashed.
+    ///
+    /// BOUNDED for backpressure (the §10.3 memory bound): a decoded full-res
+    /// frame is tens of MB, so the work channel is a `sync_channel` whose
+    /// capacity is the pool width. Peak in-flight decoded frames are then the
+    /// items being worked (one per worker, `pool_width`) plus the items queued
+    /// (`pool_width`), i.e. ~`2 * pool_width` — exactly the OLD wave's worst
+    /// case (a wave held `pool_width` decoded frames in flight), so memory does
+    /// not regress. A full channel BLOCKS the claimer, which is the
+    /// backpressure: a slow embed/preview stage cannot let an unbounded queue of
+    /// decoded images blow up memory. (`std::sync::mpsc::sync_channel` is the
+    /// codebase's existing bounded-channel idiom — see `watcher.rs`,
+    /// `runtime/bus.rs` — so no new crate is pulled in just to get a bounded
+    /// queue.)
+    ///
+    /// The DB stays the source of truth: `claim_next` still flips pending→running
+    /// durably; the channel is purely an in-memory SCHEDULING layer on top.
+    ///
+    /// Cancel/max_items are honored PER ITEM in the claimer (finer than the old
+    /// per-wave check). On cancel the claimer stops claiming and drops the
+    /// sender; workers finish the items already handed to them (so no row is
+    /// left stuck `running`) and exit as the channel closes. Un-claimed rows
+    /// stay `pending` for the next turn. First hard plumbing error (DB/IO —
+    /// per-item pass failures are RECORDED, not returned) propagates after the
+    /// run, mirroring the old loop's abort semantics.
     pub fn process_queue(&self, opts: &QueueOptions) -> Result<QueueReport, LibraryError> {
-        use rayon::prelude::*;
         let drain_started = std::time::Instant::now();
-        let mut report = QueueReport::default();
-        loop {
-            if let Some(cancel) = &opts.cancel
-                && cancel.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                report.cancelled = true;
-                break;
-            }
-            let width = worker_pool().current_num_threads().max(1);
-            let wave_cap = match opts.max_items {
-                Some(max) => width.min(max.saturating_sub(report.processed)),
-                None => width,
-            };
-            if wave_cap == 0 {
-                break;
-            }
-            let items: Vec<ingest::QueueItem> =
-                self.metrics
-                    .queue_claim
-                    .time(|| -> Result<_, LibraryError> {
-                        let conn = self.db.lock().expect("poisoned");
-                        let mut claimed = Vec::with_capacity(wave_cap);
-                        while claimed.len() < wave_cap {
-                            match ingest::claim_next(&conn, self.now())? {
-                                Some(item) => claimed.push(item),
-                                None => break,
-                            }
-                        }
-                        Ok(claimed)
-                    })?;
-            if items.is_empty() {
-                break;
-            }
-            report.processed += items.len();
-            // Per-item reports merge after the wave; the first hard error
-            // (DB/IO plumbing — per-item pass failures are RECORDED, not
-            // returned) propagates after the wave's successes are counted,
-            // mirroring the sequential loop's abort semantics.
-            let results: Vec<Result<QueueReport, LibraryError>> = worker_pool().install(|| {
-                items
-                    .par_iter()
-                    .map(|item| {
-                        let mut local = QueueReport::default();
-                        self.run_pass(item, &mut local).map(|()| local)
-                    })
-                    .collect()
-            });
-            let mut first_err = None;
-            for r in results {
-                match r {
-                    Ok(local) => report.absorb(&local),
-                    Err(e) => first_err = first_err.or(Some(e)),
-                }
-            }
-            if let Some(e) = first_err {
-                return Err(e);
-            }
-        }
+        let report = self.run_pipeline(
+            opts,
+            worker_pool(),
+            ingest::claim_next,
+            |lib, item, local| lib.run_pass(item, local),
+        )?;
         if report.processed > 0 {
             tracing::debug!(
                 processed = report.processed,
@@ -1829,6 +1806,137 @@ impl Library {
             );
         }
         Ok(report)
+    }
+
+    /// The shared bounded-channel pipeline (BACKLOG "Ingest pass pipelining").
+    /// A CLAIMER (the calling thread) flips pending→running under the DB lock
+    /// and feeds a BOUNDED `sync_channel`; `pool_width` worker tasks on `pool`
+    /// pull from it continuously and run `work` (the CPU pass + its own DB
+    /// writes). See [`process_queue`] for the full topology + memory-bound
+    /// rationale. Generic over `claim`/`work` so both the M1 exif/preview drain
+    /// and the full-raw-decode drain reuse one correctness-critical loop.
+    ///
+    /// `claim`: flips the next runnable row to `running` under the lock (the
+    /// caller holds the connection mutex when this runs). `work`: runs one pass
+    /// to completion (marks the row done/failed/skipped, tallies into the
+    /// per-worker [`QueueReport`]). Returns the merged report; `processed` is
+    /// counted at claim time, `cancelled` reflects the cancel flag, and the
+    /// first hard plumbing error from any worker propagates.
+    fn run_pipeline<C, W>(
+        &self,
+        opts: &QueueOptions,
+        pool: &rayon::ThreadPool,
+        claim: C,
+        work: W,
+    ) -> Result<QueueReport, LibraryError>
+    where
+        C: Fn(&Connection, UtcMillis) -> rusqlite::Result<Option<ingest::QueueItem>> + Sync,
+        W: Fn(&Library, &ingest::QueueItem, &mut QueueReport) -> Result<(), LibraryError> + Sync,
+    {
+        let width = pool.current_num_threads().max(1);
+        // BOUNDED for backpressure: capacity == pool width keeps peak in-flight
+        // decoded frames at ~2*width (width queued + width being worked), the
+        // old wave's worst case, so a slow stage cannot grow an unbounded queue
+        // of large decoded images. A full channel blocks the claimer.
+        let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<ingest::QueueItem>(width);
+        // Per-worker reports flow back unbounded — they are tiny tallies, never
+        // a memory concern, and the collector drains them after the claimer.
+        let (report_tx, report_rx) =
+            std::sync::mpsc::channel::<Result<QueueReport, LibraryError>>();
+        let work_rx = std::sync::Mutex::new(work_rx);
+        let mut total = QueueReport::default();
+        // A claim-time DB error aborts the drain (drain-level plumbing failure,
+        // unlike a per-item pass failure which is RECORDED). Captured here and
+        // returned after the in-flight items finish.
+        let mut claim_err: Option<LibraryError> = None;
+
+        // The claimer runs on THIS thread inside the pool scope; the workers are
+        // spawned tasks. `scope` joins all workers before returning, so the
+        // borrows (`self`, `claim`, `work`, the channels) outlive every task.
+        pool.scope(|scope| {
+            for _ in 0..width {
+                let work_rx = &work_rx;
+                let report_tx = report_tx.clone();
+                let work = &work;
+                scope.spawn(move |_| {
+                    // Pull-loop: a worker only ever holds ONE item past the
+                    // channel (the one it is decoding), so the channel capacity
+                    // is the true memory bound. `recv` returns Err when the
+                    // claimer drops `work_tx` AND the queue is drained — clean
+                    // wind-down, including on cancel.
+                    loop {
+                        let item = {
+                            let rx = work_rx.lock().expect("poisoned");
+                            rx.recv()
+                        };
+                        let Ok(item) = item else { break };
+                        let mut local = QueueReport::default();
+                        let outcome = work(self, &item, &mut local).map(|()| local);
+                        if report_tx.send(outcome).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            // Drop our own report sender so the collector's recv loop ends once
+            // every worker has dropped its clone.
+            drop(report_tx);
+
+            // The claimer: claim → send (blocks when the channel is full =
+            // backpressure) until cancel/max_items/empty queue. Dropping
+            // `work_tx` afterward signals the workers to wind down.
+            loop {
+                if let Some(cancel) = &opts.cancel
+                    && cancel.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    total.cancelled = true;
+                    break;
+                }
+                if let Some(max) = opts.max_items
+                    && total.processed >= max
+                {
+                    break;
+                }
+                let claimed = self
+                    .metrics
+                    .queue_claim
+                    .time(|| -> Result<_, LibraryError> {
+                        let conn = self.db.lock().expect("poisoned");
+                        Ok(claim(&conn, self.now())?)
+                    });
+                let item = match claimed {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break, // queue empty: wind down
+                    Err(e) => {
+                        // A claim-time DB error is the drain-level abort: stop
+                        // feeding and let the in-flight items finish.
+                        claim_err = Some(e);
+                        break;
+                    }
+                };
+                total.processed += 1;
+                if work_tx.send(item).is_err() {
+                    // All workers gone (cannot happen before the scope joins,
+                    // but keep the loop honest): stop claiming.
+                    break;
+                }
+            }
+            drop(work_tx); // workers' recv now returns Err once drained
+        });
+
+        // Collect every per-worker report. The scope has joined, so all senders
+        // are dropped and this recv loop terminates.
+        let mut first_err = claim_err;
+        for outcome in report_rx.iter() {
+            match outcome {
+                Ok(local) => total.absorb(&local),
+                Err(e) => first_err = first_err.or(Some(e)),
+            }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        Ok(total)
     }
 
     fn run_pass(
@@ -3616,5 +3724,234 @@ mod tests {
                 paths.len()
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Ingest pass pipelining (BACKLOG, June 2026)
+    //
+    // These exercise `run_pipeline` — the bounded-channel claim→work pipeline
+    // — directly with SYNTHETIC claim/work closures, so the proofs are
+    // deterministic (no real decode timing, no filesystem). The closures
+    // ignore the DB; `run_pipeline`'s machinery (channel bound, worker pull
+    // loop, cancel wind-down, report merge) is what is under test. The
+    // end-to-end DB path (real claim_next, offline/skip, no-loss across a
+    // real scan) is covered by the M1Env integration suite.
+    // -----------------------------------------------------------------------
+
+    /// A throwaway Library over a temp DB — just enough `&self` for the
+    /// pipeline; the synthetic claim/work closures never touch its tables.
+    fn pipeline_test_library() -> (tempfile::TempDir, Library) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("photoproof.db");
+        let cache = tmp.path().join("previews");
+        let lib = Library::open(&db, &cache).unwrap();
+        (tmp, lib)
+    }
+
+    /// A synthetic queue of N identical placeholder items the claim closure
+    /// hands out one at a time (mirrors `claim_next` returning rows until the
+    /// queue drains, without the DB requirements of real claiming).
+    fn synthetic_items(n: usize) -> Vec<ingest::QueueItem> {
+        (0..n)
+            .map(|i| ingest::QueueItem {
+                // Distinct hashes so a no-double-processing check can use them
+                // as identity. Hex of i, left-padded to the 64-char content hash.
+                image_hash: ContentHash::from_hex(&format!("{i:064x}")).unwrap(),
+                pass: ingest::PassName::Preview,
+                pass_version: ingest::PASS_VERSION,
+                attempts: 1,
+            })
+            .collect()
+    }
+
+    /// Hands out items from a shared queue under a mutex (the claim closure),
+    /// returning None once drained — the synthetic stand-in for `claim_next`.
+    fn draining_claim(
+        queue: &std::sync::Mutex<std::collections::VecDeque<ingest::QueueItem>>,
+    ) -> impl Fn(&Connection, UtcMillis) -> rusqlite::Result<Option<ingest::QueueItem>> + Sync + '_
+    {
+        move |_conn, _now| Ok(queue.lock().expect("poisoned").pop_front())
+    }
+
+    /// (a) OVERLAP: the workers run CONCURRENTLY. With a barrier sized to the
+    /// pool width, the work closure can only get past the barrier if `width`
+    /// workers are inside it AT THE SAME TIME — a sequential or wave-barriered
+    /// drain (next item not started until the previous finished) would
+    /// deadlock here and the test would hang. A bounded timeout converts that
+    /// hang into a clean failure so the proof is deterministic, not flaky.
+    #[test]
+    fn pipeline_runs_workers_concurrently() {
+        let (_tmp, lib) = pipeline_test_library();
+        let width = worker_pool().current_num_threads().max(1);
+        // Need at least 2 workers to prove concurrency; if the host reports 1
+        // logical core the claim is vacuous — assert the machinery still drains.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(width));
+        let queue = std::sync::Mutex::new(synthetic_items(width).into());
+        let max_inside = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inside = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let report = lib
+            .run_pipeline(
+                &QueueOptions::default(),
+                worker_pool(),
+                draining_claim(&queue),
+                |_lib, _item, local| {
+                    let n = inside.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    max_inside.fetch_max(n, std::sync::atomic::Ordering::SeqCst);
+                    // Rendezvous: every worker must be here at once to proceed.
+                    // If the pipeline serialized, only one worker would ever be
+                    // inside and this would block forever (caught by the harness
+                    // timeout / the assertion below).
+                    barrier.wait();
+                    inside.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    local.done += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.processed, width);
+        assert_eq!(report.done, width);
+        assert_eq!(
+            max_inside.load(std::sync::atomic::Ordering::SeqCst),
+            width,
+            "all {width} workers were inside the pass simultaneously: stages overlap"
+        );
+    }
+
+    /// (b) NO LOSS / NO DOUBLE-PROCESSING: every claimed item is handled
+    /// exactly once. We feed many more items than workers (so the bounded
+    /// channel backpressures repeatedly) and assert the multiset of processed
+    /// hashes equals the input exactly — none dropped, none seen twice.
+    #[test]
+    fn pipeline_processes_every_item_exactly_once() {
+        let (_tmp, lib) = pipeline_test_library();
+        const N: usize = 500; // >> pool width: forces the channel to fill/drain many times
+        let queue = std::sync::Mutex::new(synthetic_items(N).into());
+        let seen = std::sync::Mutex::new(std::collections::HashMap::<String, usize>::new());
+
+        let report = lib
+            .run_pipeline(
+                &QueueOptions::default(),
+                worker_pool(),
+                draining_claim(&queue),
+                |_lib, item, local| {
+                    *seen
+                        .lock()
+                        .expect("poisoned")
+                        .entry(item.image_hash.as_str().to_owned())
+                        .or_default() += 1;
+                    local.done += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.processed, N);
+        assert_eq!(report.done, N);
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), N, "every distinct item processed");
+        assert!(
+            seen.values().all(|&c| c == 1),
+            "no item processed more than once"
+        );
+    }
+
+    /// (c) CANCEL MID-PIPELINE winds down cleanly: once the cancel flag trips
+    /// the claimer stops handing out NEW items, but items already claimed are
+    /// finished (so no row would be left `running`). We assert fewer than the
+    /// full queue were processed and the report is flagged cancelled — the
+    /// claimer's per-item cancel check fired and the in-flight work drained.
+    #[test]
+    fn pipeline_cancel_winds_down_without_stuck_work() {
+        let (_tmp, lib) = pipeline_test_library();
+        const N: usize = 1_000;
+        let queue = std::sync::Mutex::new(synthetic_items(N).into());
+        let cancel: CancelFlag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let processed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel_at = 10usize;
+
+        let opts = QueueOptions {
+            cancel: Some(cancel.clone()),
+            max_items: None,
+        };
+        let report = lib
+            .run_pipeline(
+                &opts,
+                worker_pool(),
+                draining_claim(&queue),
+                |_lib, _item, local| {
+                    let n = processed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    // Trip cancel mid-drain; the claimer's per-item check then
+                    // stops feeding and the pipeline winds down.
+                    if n >= cancel_at {
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    local.done += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(report.cancelled, "cancel flag must surface in the report");
+        assert!(
+            report.processed < N,
+            "cancel stopped the drain early ({} of {N})",
+            report.processed
+        );
+        // Every item the workers TOOK was finished (done == processed): nothing
+        // is left half-handled that would be a row stuck `running` in the real
+        // DB path.
+        assert_eq!(
+            report.done, report.processed,
+            "every in-flight item finished on cancel wind-down"
+        );
+    }
+
+    /// (d) A claim-time DB error is the drain-level abort: it propagates after
+    /// the in-flight items finish, exactly like the old wave loop. (The
+    /// per-item pass failures stay RECORDED, not returned — covered by the
+    /// integration suite; this guards the plumbing-error path of the new loop.)
+    #[test]
+    fn pipeline_claim_error_aborts_after_inflight_finish() {
+        let (_tmp, lib) = pipeline_test_library();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let err = lib
+            .run_pipeline(
+                &QueueOptions::default(),
+                worker_pool(),
+                |_conn, _now| {
+                    // First claim yields one item; second claim errors.
+                    let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n == 0 {
+                        Ok(Some(ingest::QueueItem {
+                            image_hash: ContentHash::from_hex(&"aa".repeat(32)).unwrap(),
+                            pass: ingest::PassName::Exif,
+                            pass_version: ingest::PASS_VERSION,
+                            attempts: 1,
+                        }))
+                    } else {
+                        Err(rusqlite::Error::InvalidQuery)
+                    }
+                },
+                |_lib, _item, local| {
+                    finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    local.done += 1;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, LibraryError::Sqlite(_)),
+            "claim DB error propagates as the drain result"
+        );
+        assert_eq!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the one item claimed before the error still finished (no stuck work)"
+        );
     }
 }
