@@ -664,8 +664,11 @@ pub fn spawn_runtime_pump(handle: AppHandle) {
                                 total_bytes,
                             } = e
                             {
-                                app.runtime
-                                    .note_progress(model_id, *downloaded_bytes, *total_bytes);
+                                app.runtime.note_progress(
+                                    model_id,
+                                    *downloaded_bytes,
+                                    *total_bytes,
+                                );
                             }
                         }
                         let status = app.runtime.status();
