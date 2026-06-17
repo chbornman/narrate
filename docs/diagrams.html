@@ -62,7 +62,7 @@
 <main>
 
 <h1>Photoproof <span class="pencil">/</span> diagrams</h1>
-<p class="subtitle">Seven Mermaid diagrams for understanding the system: processes, models, capture, ingest, search, scheduling, and fallbacks.</p>
+<p class="subtitle">Eight Mermaid diagrams for understanding the system: processes, models, capture, ingest, search, scheduling, fallbacks, and the user-journey state machine.</p>
 <p class="stamp">generated June 14, 2026 - sources: docs/RUNTIME-MATRIX.md, docs/architecture.html, spec/, docs/STATUS.md - complements architecture.html</p>
 
 <p class="lede">
@@ -344,6 +344,60 @@ flowchart TB
   class E1 planned;
   classDef accent stroke:#c0392b,stroke-width:2px;
   class FLOOR accent;
+</pre>
+</div>
+
+<h2><span class="no">8</span>User-journey state machine (viewMode &times; scope)</h2>
+<p class="lede">
+The front-of-house twin of the back-end diagrams above: what the user is looking
+at and how every gesture moves between views. <b>viewMode</b> is the spine
+(grid &rlarr; visualizer &rlarr; look, with <b>compare</b> a planned member); one
+shared <span style="font-family:var(--mono);font-size:13px">activeHash</span>
+carries the same photo across every switch. The <b>search lane</b> and
+<b>capture</b> are ORTHOGONAL axes: typing drives the grid SCOPE (not the view),
+and capture (note / rating / pencil / mic) is scope-targeted, never a view change.
+Source: <span style="font-family:var(--mono);font-size:13px">docs/DESIGN-VIEW-MODES.md</span>
+transition table + <span style="font-family:var(--mono);font-size:13px">docs/STATE-MACHINE.md</span> &sect;1.
+</p>
+<div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> Grid: app open / openFolder(first)
+
+  Grid --> Visualizer: l (toggle-graph)
+  Visualizer --> Grid: l / Esc (no selection)
+  Grid --> Look: Enter / dbl-click cell
+  Look --> Grid: Esc (leave-look)
+  Visualizer --> Look: Enter / dbl-click node
+  Look --> Visualizer: l (toggle-graph)
+  Visualizer --> Grid: anchor click (scopeToTopic)
+
+  Grid --> Grid: g goHome / rail / find-similar / query commit
+  Visualizer --> Visualizer: click node = select - Esc = deselect - sliders
+  Look --> Look: rate / note / pencil / mic (scope-targeted)
+
+  Visualizer --> Compare: enterCompare (planned)
+  Compare --> Visualizer: leaveCompare (planned)
+
+  note right of Grid
+    activeHash carries the SAME photo across every switch.
+    Capture is scope-targeted, never a view change.
+  end note
+
+  state "Search lane - ORTHOGONAL - drives the Grid scope, not viewMode" as Search {
+    [*] --> None
+    None --> Lexical: type a char (under 100ms)
+    Lexical --> Semantic: Enter (hybrid)
+    Semantic --> Lexical: edit query
+    Lexical --> None: Esc (clearQueryScope)
+    Semantic --> None: Esc
+  }
+
+  classDef planned stroke:#c0392b,stroke-dasharray:5 3,color:#9a968e;
+  class Compare planned;
+  classDef accent stroke:#c0392b,stroke-width:2px;
+  class Grid accent;
 </pre>
 </div>
 

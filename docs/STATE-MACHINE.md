@@ -79,6 +79,10 @@ bugs are two axes interacting:
 
 ## 1. Frontend: action → effect
 
+> **Diagram:** the user-journey state machine (viewMode × scope × search-lane,
+> with capture/escape) is drawn as `diagrams.html` #8 — the visual companion to
+> the action→effect tables below. Source for both: `DESIGN-VIEW-MODES.md`.
+
 The dispatch spine is uniform: **every** input path (keystroke, native menu,
 chrome click, context-menu row) funnels through `resolveAction(id, ctx, arg?)`
 → `ui.perform(action)`. One sink, zero per-surface verbs.
