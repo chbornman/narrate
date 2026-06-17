@@ -143,7 +143,8 @@ ctx-menu  ─┘        (registry.ts)                 │ gates
 |---|---|---|
 | Single-click image node | `selectGraphNode(hash)` → `viewSelection=hash` (SELECTS, not opens) | TopicGraph.svelte:1983 |
 | Dbl-click image node | `openFromGraph(hash)` → openLook, `viewSelection=null` | TopicGraph.svelte |
-| Click super-node (LOD) | **`expandSuper()` → see §6b — the click-jitter bug** | TopicGraph.svelte:1848-1854 |
+| Click super-node (LOD) | **`expandSuper()` → see §6b mech 2 — the click-jitter bug (OPEN)** | TopicGraph.svelte:1856-1863 |
+| Drag node / anchor | `pointermove` writes x/y + **`reheat()`**; drag holds sim awake (§6b) | TopicGraph.svelte:1897-1910 |
 | `alpha` slider | `$effect` → **recompute()** (refetch affinities, reheat, restart) | TopicGraph.svelte:2333 |
 | `topicStrength` slider | `$effect` → reheat + restartLoop, **NO refetch** (force balance only) | TopicGraph.svelte:2347 |
 | Topic anchor click | `selectTopicForBake(idx)` → glow set | TopicGraph.svelte:2296 |
@@ -423,30 +424,51 @@ total vector count. (embedders map; topic.rs:161-213; ppvec.rs:816-899.)
 
 ### 6b. ⭐ Visualizer self-heal poll + the "click → everything moves → freezes" bug
 
-**Two coupled mechanisms.**
+> **STATUS (updated June 16 2026).** Two of the three mechanisms in this section
+> have since been fixed; one remains open. This surface is the
+> interaction/refresh state machine the whole doc was written to systematize, so
+> the fixes are tracked here, not smoothed away:
+> - ✅ **Self-heal poll thrash — FIXED** (`260eeb0` then `9f6de6c`). Was: ~45
+>   recomputes/sec, then a 1.5s "beat" on a ready-but-empty scope. Now the poll
+>   fires **only while the embedder state is `building`**; a Ready embedder over
+>   an empty scope-join stops immediately. The poll is interim — Seam 1
+>   (`ARCHITECTURE-CONTRACTS.md`) retires it entirely.
+> - ✅ **Drag freeze — FIXED** (`c8087d9`). Was: heat cooled mid-drag, `isSettled`
+>   tripped, the rAF loop stopped, the canvas stopped repainting while the
+>   pointer kept writing x/y. Now a drag in progress is never "at rest" and
+>   `pointermove` reheats so neighbors follow the moved node.
+> - ❌ **`expandSuper` re-seed jitter — STILL OPEN** (mechanism 2 below). The
+>   re-seed-without-reheat invariant violation is unfixed; this is the next item
+>   of the same class. Tracked in `docs/BACKLOG.md`.
+
+**Three coupled mechanisms** (two fixed, one open).
 
 **(1) Affinity self-heal poll** (`retryWhenEmbeddersReady`,
-TopicGraph.svelte:541-590). When `recompute()` lands with `visualReady` or
-`annotationReady` false **and** the embedder is still building, it arms a
-1.5s poll, up to `READINESS_MAX_TRIES=40` (~60s). Each poll checks
-`runtimeStatus()`; if embedders landed → `recompute(true)` self-heal
-continuation. `readinessTries` resets to 0 on a **user-driven** recompute
-(line 706) but increments only on self-heal continuation (line 585) — so a
-new topic *extends* the per-flow budget rather than sharing a global timeout.
-Combined with 6a: if affinities are empty because of the **scope-join**
-(not a building embedder), the poll can spin its full 40 tries fetching empty
-reports while the embedder is already Ready — wasted polling that *looks* like
-"the graph is loading forever."
+TopicGraph.svelte:553-592). **[FIXED — `260eeb0`, `9f6de6c`.]** When `recompute()`
+lands with `visualReady` or `annotationReady` false, it now re-fetches affinities
+on a bounded 1.5s cadence **only while the missing half's slot state is
+`building`** (genuinely loading), up to `READINESS_MAX_TRIES=40` (~60s). A
+self-heal continuation passes `recompute(true)` which does **not** reset the
+budget, so a never-finishing space stops after the budget. `readinessTries`
+resets to 0 only on a **user-driven** recompute. The historical failure modes
+(documented for the post-mortem): the original code recomputed *immediately*
+whenever `clipReady` was true → ~45/sec tight loop over a mid-embedding space
+(`260eeb0`); the interim fix then treated any non-idle/non-failed state as
+"coming", so a Ready embedder over an empty **scope-join** (§6a — a HEIC folder,
+images not in the active space) beat `recompute()` on the 1.5s timer for its full
+budget every visit (`9f6de6c`). Both are gone; vectors that land for an empty
+scope now surface on the next user-driven recompute (and will surface *properly*
+once Seam 1 lands).
 
-**(2) The click-jitter / re-seed bug.** Clicking a **LOD super-node** calls
-`expandSuper()` (TopicGraph.svelte:1848-1854):
+**(2) The click-jitter / re-seed bug. [STILL OPEN.]** Clicking a **LOD super-node**
+calls `expandSuper()` (TopicGraph.svelte:1856-1863):
 
 ```
 expandSuper(node):
   expandSuperNode()   // rebuild nodes[] : members spiral-seeded around
-                      // the super-node's CURRENT (x,y); vx/vy zeroed (line 849)
+                      // the super-node's CURRENT (x,y); vx/vy zeroed
   staticDirty = true
-  restartLoop()       // ← NO reheat() here
+  restartLoop()       // ← STILL NO reheat() here (the open bug)
 ```
 
 At this moment **heat is still ≈1.0** (steady state from the prior settled
@@ -458,20 +480,22 @@ damps it to sub-pixel steps — producing visible *jitter* over ~10-30 frames as
 heat cools toward 1 and the layout settles. User sees: **"click an image →
 everything moves a bit → freezes."**
 
-**Fix (either):** (a) call `reheat()` in `expandSuper()` **before**
-`restartLoop()` so the new positions settle under hot forces, or (b) carry the
-prior layout's (still-cooling) heat into the continuation. Re-seed **must** be
-paired with `reheat()` — that is the invariant the rest of the recompute path
-honors and this one path violates.
+**The fix** is the same invariant the drag-freeze fix (`c8087d9`) just proved on
+the neighboring path: **a re-seed must be paired with `reheat()`**. Call
+`reheat()` in `expandSuper()` **before** `restartLoop()` so the new positions
+settle under hot forces (mirrors lines 761/765, where the *other* re-seed path
+already reheats before restarting). This is the invariant the rest of the
+recompute path honors and this one path violates.
 
-> **⚠ CONTRADICTION (jitter mechanism).** Map 6 footgun #2 says the jitter
-> comes from *clamp-frozen* repulsion (heat≈1 → floor clamp → sub-perceptual
-> but visible). Map 6's stateMachine summary instead says it restarts "with
-> ACTIVE heat" leaving "large velocity vectors." These are *opposite* causes
-> (too-cold vs too-hot). The code anchors (no `reheat()` at line 1853;
-> heat-tied clamp at forcegraph.ts:494; vx/vy zeroed at line 849) support the
-> **clamp-frozen / too-cold** reading. Flagged so a fixer verifies the actual
-> heat value at the first post-expand frame before choosing fix (a) vs (b).
+> **✅ CONTRADICTION RESOLVED (jitter mechanism).** Two earlier source maps
+> disagreed on the cause: *clamp-frozen* repulsion (heat≈1 → floor clamp →
+> sub-perceptual but visible jitter, **too-cold**) vs restart "with ACTIVE heat"
+> leaving "large velocity vectors" (**too-hot**). The **too-cold / clamp-frozen**
+> reading is now confirmed: the `c8087d9` drag-freeze fix demonstrated the exact
+> same heat-cooling dynamic on `isSettled` (heat falls to ≈1, motion clamps to
+> the floor, the loop quiesces). `vx/vy` are zeroed on re-seed (no inherited
+> velocity), so "too-hot" was never possible. Fix is unambiguous: `reheat()`
+> before `restartLoop()`.
 
 **Related visualizer footguns:**
 
@@ -569,8 +593,9 @@ honors and this one path violates.
 | Symptom | Most likely state | Start here |
 |---|---|---|
 | Graph "no signal" but vectors exist | scope × stored-hash empty join (§6a) | topic.rs:181, ppvec.rs:816 |
-| Visualizer stuck "loading" | embedder slot building OR self-heal poll on empty join | embedders.rs:367, TopicGraph.svelte:541 |
-| Click image → jitter → freeze | expandSuper re-seed without reheat (§6b) | TopicGraph.svelte:1848, forcegraph.ts:494 |
+| Visualizer stuck "loading" | embedder slot `building` (real wait); empty scope-join no longer polls (§6a, fixed `9f6de6c`) | embedders.rs:367, TopicGraph.svelte:553 |
+| Click super-node → jitter (OPEN) | expandSuper re-seed without reheat (§6b mech 2) | TopicGraph.svelte:1856, forcegraph.ts:494 |
+| Click+drag node → freeze (FIXED `c8087d9`) | was: `isSettled` cooled mid-drag, loop stopped | TopicGraph.svelte:1010, 1902 |
 | Grid stuck "Indexing" | `ingestExpecting` stranded on silent rescan failure | app.svelte.ts:501; pump.rs:258 |
 | UI dark, no models | runtime never emitted (silent-dark) | pump.rs:628; supervisors.rs:53 |
 | Thumbs stale after cache clear | missing `previews-changed` emit | app.rs (clear_preview_cache) |

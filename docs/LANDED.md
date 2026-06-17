@@ -6,6 +6,43 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 16 2026 - Visualizer interaction/refresh state-machine fixes (3 of a class)
+
+Not backlog-sourced - these surfaced live during dogfooding, all the same class:
+the visualizer's interaction/refresh state machine (heat <-> settle <-> poll <->
+recompute) tripping over implicit invariants. Recorded here because they are
+shipped + pushed; the map is `docs/STATE-MACHINE.md §6b`, the principled fix that
+ends the class is `docs/ARCHITECTURE-CONTRACTS.md` Seam 1 (data-version) + a
+sim-interaction state-machine pass (now open in BACKLOG).
+
+- [x] **Affinity recompute tight-loop (~45/sec) stopped** - `260eeb0`. A loaded
+  CLIP embedder over a mid-embedding space returns `visual_ready=false` (no
+  vectors yet), and the self-heal recomputed IMMEDIATELY whenever `clipReady`
+  was true -> recompute -> still false -> recompute, ~45 `topic_affinities`/sec
+  (founder saw it after the int8 CLIP switch re-embeds the library). Now self-heal
+  distinguishes a signal still COMING from genuinely ABSENT via the per-role slot
+  state and POLLS on a bounded 1.5s cadence; `recompute(selfHeal)` does not reset
+  the poll budget, so a never-finishing space stops after `READINESS_MAX_TRIES`.
+
+- [x] **Self-heal poll thrash on ready-but-empty scope stopped** - `9f6de6c`. The
+  interim fix above still treated a READY embedder as "vectors coming", so a scope
+  with an empty vector join (`STATE-MACHINE.md §6a` - a HEIC folder, or images not
+  in the active space) beat `recompute()` on a 1.5s timer for its full 60s budget
+  every visit (founder: "freaks out on a beat ... again and again"). Now polls ONLY
+  while `clip/text state == "building"`; a ready-but-empty scope stops immediately.
+  Interim until the library->view data-version seam retires the poll (Seam 1).
+
+- [x] **Drag holds the sim awake + warm (no mid-drag freeze)** - `c8087d9`.
+  `isSettled()` had no drag awareness: mid-drag the heat cooled to <=1.0001, the
+  loop declared rest and STOPPED, so the canvas stopped repainting while the pointer
+  kept writing x/y -> "click and drag -> stops updating -> freezes" (founder). Now a
+  drag in progress is never "at rest" (loop keeps ticking/drawing) and `pointermove`
+  reheats so neighbours follow the moved node instead of being clamped to sub-pixel.
+  Standard force-graph drag behavior (d3-force holds alphaTarget>0 while dragging);
+  settling resumes on release. This fix confirmed the "too-cold/clamp-frozen" reading
+  of the still-open `expandSuper` jitter bug (`STATE-MACHINE.md §6b` contradiction
+  callout, now resolved).
+
 ## June 16 2026 - Digest visibility (Library-status header indicator) + journal chips
 
 - [x] **Digest visibility: "what is my library doing?"** (founder, June 12 2026) -

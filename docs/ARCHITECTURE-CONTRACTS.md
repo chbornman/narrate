@@ -37,11 +37,19 @@ Three principles:
 The library emits `ingest-progress` / `previews-changed` / `roots-changed`; the
 **grid** subscribes. The **visualizer does NOT** (`STATE-MACHINE.md §3`). It
 refreshes on its own triggers (mount, scope/topic/alpha change) **plus a 1.5s
-self-heal poll** that re-fetches affinities and re-runs the layout — so a new
-photo doesn't reach the graph cleanly, and during embedding the poll thrashes.
-There is no "the data for scope X changed → refresh" signal. Each view invents
-its own staleness story (the grid's 2s relist, the visualizer's poll, the coarse
+self-heal poll** that re-fetches affinities and re-runs the layout. There is no
+"the data for scope X changed → refresh" signal. Each view invents its own
+staleness story (the grid's 2s relist, the visualizer's poll, the coarse
 `invalidateScopedGraphs` cache-drop).
+
+> **Interim narrowing landed (`260eeb0`, `9f6de6c`).** The poll's two worst
+> failure modes have been patched at the symptom: it no longer tight-loops
+> (~45/sec) on a mid-embedding space, and it no longer thrashes a 1.5s beat on a
+> Ready-but-empty-scope join — it now polls **only while the embedder state is
+> `building`**. This is a band-aid, not the contract: a new photo still doesn't
+> reach the graph cleanly (it waits for the next user-driven recompute), and the
+> poll still exists. **Seam 1 below retires the poll entirely** and is the
+> principled fix. See `STATE-MACHINE.md §6b` for the full post-mortem.
 
 ### The contract
 A single, typed, **versioned** change notification the library owns and every
