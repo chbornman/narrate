@@ -302,7 +302,10 @@ clusters via `synthesis.ts unnamedClusters`, list + glow them). Open items below
   interaction/refresh state machine (heat <-> settle <-> poll <-> recompute) with
   implicit invariants we keep discovering by tripping them (`260eeb0`, `9f6de6c`,
   `c8087d9`; see `docs/LANDED.md` + `docs/STATE-MACHINE.md §6b`). Stop patching
-  symptoms; systematize the surface. TWO parts, each independently shippable:
+  symptoms; systematize the surface. **Scoped packet:
+  `docs/PLAN-SEAM1-SIMSTATE.md`** (code-grounded: counter chokepoint, event
+  carrier, poll-deletion list, sim invariant + tests). TWO parts, each
+  independently shippable:
   (1) **Seam 1 - library->view data-version** (`docs/ARCHITECTURE-CONTRACTS.md`):
   the visualizer refreshes when its scope's `vectors[activeSpace]` version
   advances, **retiring the self-heal poll entirely** (kills the beat-class bugs at
