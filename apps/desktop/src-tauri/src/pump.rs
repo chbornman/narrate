@@ -183,6 +183,10 @@ pub fn ingest_status(app: &App) -> IngestStatus {
         .into_iter()
         .map(|(label, images)| crate::dto::OfflineVolume { label, images })
         .collect();
+    // Seam 1: carry the vector-store version so the pump's `prev != status`
+    // emit-gate fires when a committed vector write advances it, refreshing
+    // views over the existing channel instead of polling.
+    status.vectors_version = app.vectors.vectors_version();
     status
 }
 

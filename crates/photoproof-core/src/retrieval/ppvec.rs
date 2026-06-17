@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use photoproof_connectors::embedder::Embedding;
@@ -126,6 +127,12 @@ pub type KnnGraph = Vec<(String, Vec<(String, f32)>)>;
 pub struct PpvecStore {
     db: Mutex<Connection>,
     dir: PathBuf,
+    /// Monotonic, in-memory vector-store version (Seam 1). Bumped on every
+    /// committed vector write so library->view consumers can refresh on
+    /// change instead of polling. In-memory only: no schema column, no
+    /// migration, no persistence — views re-fetch on mount, so a counter that
+    /// resets to 0 at process start is correct.
+    version: AtomicU64,
 }
 
 /// Why the startup doctor acted on one vector space (STATE-INTEGRITY-AUDIT).
@@ -196,6 +203,7 @@ impl PpvecStore {
         Ok(Self {
             db: Mutex::new(conn),
             dir,
+            version: AtomicU64::new(0),
         })
     }
 
@@ -449,7 +457,19 @@ impl PpvecStore {
                 .map_err(db_err)?;
             }
         }
+        // Library->view data-version (Seam 1): a vector write has committed, so
+        // advance the counter. Views compare against the last value they
+        // rendered and re-fetch on change instead of polling. Only this single
+        // success exit bumps; the `?` early returns above are errors.
+        self.version.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Monotonic per-process vector-store version (Seam 1). Views compare it
+    /// against the last value they rendered to detect committed writes; no
+    /// persistence is needed since views re-fetch on mount.
+    pub fn vectors_version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
     }
 
     /// Physically zero + drop every `deleted = 1` metadata row, across all

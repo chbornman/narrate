@@ -207,6 +207,12 @@ pub struct IngestStatus {
     /// say "drive X disconnected, N photos unavailable" instead of leaving the
     /// user to wonder why ingest stalled. Empty in the normal all-online case.
     pub offline_volumes: Vec<OfflineVolume>,
+    /// Monotonic vector-store version (Seam 1). The pump's `prev != status`
+    /// emit-gate fires when this advances, so a committed vector write notifies
+    /// views over the existing `ingest-progress` channel — no extra channel
+    /// needed. Serializes as `vectorsVersion`. `u64` defaults to 0, so
+    /// `IngestStatus::default()` stays valid.
+    pub vectors_version: u64,
 }
 
 /// One offline volume the library has photos on (the warn surface).
