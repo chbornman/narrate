@@ -372,29 +372,91 @@ pub fn mark_done_with_model(
     Ok(())
 }
 
-/// Re-pend the `done` rows of a MODEL pass whose recorded `model_id` differs
-/// from the embedder now configured (a NULL legacy row — written before
-/// [`mark_done_with_model`] existed — counts as "different" and re-pends once).
-/// This is how a model swap re-embeds the library: pass completion alone is
-/// model-blind, so without this a changed model scores against a vector space it
-/// never wrote. Only `done` rows are touched — a `skipped` row (e.g. an
-/// annotation-less image's text pass, or an undecodable preview) produced no
-/// vector by design and must not churn, and `error`/`pending` rows have their
-/// own paths. Idempotent: after the re-pended pass re-runs it records the
-/// current model, so the next call is a no-op. Returns the rows re-pended.
+/// Skip `error` codes whose `skipped` row is TRANSIENT — the input does not
+/// exist YET, but the image is real and SHOULD embed into the active space once
+/// the input lands. Distinguished from PERMANENT skips (`root-removed`: the
+/// image has no active path at all — nothing to embed; force-pending it would
+/// only re-defer/churn the drain forever, which is exactly what that skip was
+/// created to stop). Only these transient skips are revived on a model swap
+/// (Seam 2 re-embed contract). Currently just preview-deferred HEIC/RAW: the
+/// preview pass deferred until the decode worker lands, so the image-embedding
+/// pass skipped with no preview to read (`embedding.rs::run_image_embedding_pass`).
+const TRANSIENT_SKIP_CODES: &[&str] = &["preview-deferred"];
+
+/// Re-pend a MODEL pass for re-embedding into the active model's space — the
+/// Seam 2 "re-embed contract" (`docs/ARCHITECTURE-CONTRACTS.md`): on a model
+/// swap, EVERY image that legitimately needs a vector in the new space is
+/// re-pended, so none is silently left in the old space showing partial signal
+/// forever.
+///
+/// Two cohorts are revived:
+/// 1. **`done` rows whose recorded `model_id` differs** from the embedder now
+///    configured (a NULL legacy row — written before [`mark_done_with_model`]
+///    existed — counts as "different" and re-pends once). Pass completion is
+///    otherwise model-blind, so without this a changed model scores against a
+///    vector space it never wrote. This is what DETECTS a real swap, and is
+///    naturally idempotent: the re-run records the current model, so the next
+///    call is a no-op.
+/// 2. **Transiently-`skipped` rows** ([`TRANSIENT_SKIP_CODES`]) AND
+///    fewer-than-lifetime-cap **`error` rows** — but ONLY when cohort 1 found a
+///    real swap. These rows carry no `model_id` (they never produced a vector),
+///    so they can't self-gate on a model-change predicate; gating them on "a
+///    `done` row actually changed model this call" keeps them from flipping
+///    skipped→pending→skipped on every drain (churn) while still giving them a
+///    fresh attempt at the NEW model when the space genuinely changes. A
+///    PERMANENT skip (`root-removed` — no active path, nothing to embed) is left
+///    alone by the code allow-list, and `pending` rows already point at the
+///    active model. `running` rows are never touched (an events-engine mid-run
+///    re-pend must win — see [`mark_done`]).
+///
+/// Returns the total rows re-pended across both cohorts.
 pub fn repend_passes_for_model(
     conn: &Connection,
     pass: PassName,
     current_model_id: &str,
 ) -> rusqlite::Result<usize> {
-    conn.execute(
+    // Cohort 1: stale `done` rows. This count IS the "a real swap happened"
+    // signal that gates cohort 2 below. Priority is left untouched so a watcher
+    // P0 row keeps its lane (Seam 2: "WITHOUT demoting watcher P0 priority").
+    let done_repended = conn.execute(
         "UPDATE ingest_passes
          SET state = 'pending', started_at = NULL, completed_at = NULL,
              not_before = NULL, error = NULL, attempts = 0
          WHERE pass_name = ?1 AND pass_version = ?2 AND state = 'done'
            AND (model_id IS NULL OR model_id <> ?3)",
         params![pass.as_str(), PASS_VERSION, current_model_id],
-    )
+    )?;
+
+    // Cohort 2: only react to a GENUINE swap (a done row changed model). With no
+    // stale done rows there is nothing already embedded in an old space, so a
+    // transient-skipped/error row is just normal not-yet-embeddable work the
+    // pending path covers — reviving it here would only churn skipped↔pending.
+    if done_repended == 0 {
+        return Ok(0);
+    }
+
+    // The transient-skip allow-list is a small static set of registry strings,
+    // never user input; the IN list is assembled from quoted constants.
+    let transient_in = TRANSIENT_SKIP_CODES
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let revived = conn.execute(
+        &format!(
+            "UPDATE ingest_passes
+             SET state = 'pending', started_at = NULL, completed_at = NULL,
+                 not_before = NULL, error = NULL, attempts = 0
+             WHERE pass_name = ?1 AND pass_version = ?2
+               AND (
+                 (state = 'skipped' AND error IN ({transient_in}))
+                 OR (state = 'error' AND attempts < ?3)
+               )"
+        ),
+        params![pass.as_str(), PASS_VERSION, MAX_LIFETIME_ATTEMPTS],
+    )?;
+
+    Ok(done_repended + revived)
 }
 
 pub fn mark_skipped(
@@ -700,5 +762,135 @@ mod tests {
             .unwrap()
             .expect("file pass claimable once the volume is online");
         assert_eq!(item.pass, PassName::Preview);
+    }
+
+    /// Seam 2 re-embed contract (`docs/ARCHITECTURE-CONTRACTS.md`): a model swap
+    /// must re-pend EVERY image that legitimately needs a vector in the new
+    /// space — not just `done` rows. A TRANSIENTLY-`skipped` image-embedding pass
+    /// (`preview-deferred` HEIC whose preview will land later) was silently left
+    /// in the old space forever; it must be revived on the swap. A PERMANENT skip
+    /// (`root-removed` — no file to embed) must be left alone, and a RUNNING row
+    /// must never be disturbed.
+    #[test]
+    fn model_swap_repends_transient_skip_not_permanent_skip() {
+        let (_tmp, conn) = setup();
+        let now = UtcMillis::now();
+        let ts = now.to_rfc3339();
+        let pass = PassName::ImageEmbedding;
+
+        // A `done` row recorded under the OLD model — this is what makes the call
+        // recognize a genuine swap (cohort 1).
+        let done_hash = ContentHash::from_hex(&"11".repeat(32)).unwrap();
+        enqueue(
+            &conn,
+            &done_hash,
+            pass,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        let done_item = claim_next_of(&conn, now, &[pass], false).unwrap().unwrap();
+        mark_done_with_model(&conn, &done_item, "old-model", now).unwrap();
+
+        // A TRANSIENTLY-skipped row: real image, preview deferred until HEIC decode.
+        let skip_hash = ContentHash::from_hex(&"22".repeat(32)).unwrap();
+        enqueue(
+            &conn,
+            &skip_hash,
+            pass,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        let skip_item = claim_next_of(&conn, now, &[pass], false).unwrap().unwrap();
+        mark_skipped(&conn, &skip_item, "preview-deferred", now).unwrap();
+
+        // A PERMANENTLY-skipped row: orphaned image, no active path — nothing to
+        // embed. Reviving it would only re-defer/churn the drain.
+        let orphan_hash = ContentHash::from_hex(&"33".repeat(32)).unwrap();
+        conn.execute(
+            "INSERT INTO ingest_passes
+               (image_hash, pass_name, pass_version, model_id, state, priority,
+                attempts, error, enqueued_at, started_at, completed_at, not_before)
+             VALUES (?1, ?2, ?3, NULL, 'skipped', ?4, 0, 'root-removed', ?5, NULL, ?5, NULL)",
+            params![
+                orphan_hash.as_str(),
+                pass.as_str(),
+                PASS_VERSION,
+                PRIORITY_GPU,
+                ts
+            ],
+        )
+        .unwrap();
+
+        // A RUNNING row must never be disturbed by the swap.
+        let running_hash = ContentHash::from_hex(&"44".repeat(32)).unwrap();
+        enqueue(
+            &conn,
+            &running_hash,
+            pass,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        claim_next_of(&conn, now, &[pass], false).unwrap().unwrap(); // -> running
+
+        // Swap to a NEW model.
+        let repended = repend_passes_for_model(&conn, pass, "new-model").unwrap();
+
+        let state_of = |hash: &ContentHash| -> String {
+            conn.query_row(
+                "SELECT state FROM ingest_passes WHERE image_hash = ?1 AND pass_name = ?2",
+                params![hash.as_str(), pass.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // done (old model) + transient skip are revived; permanent skip + running are NOT.
+        assert_eq!(
+            state_of(&done_hash),
+            "pending",
+            "stale-model done must re-pend"
+        );
+        assert_eq!(
+            state_of(&skip_hash),
+            "pending",
+            "transiently-skipped (preview-deferred) must re-pend on swap"
+        );
+        assert_eq!(
+            state_of(&orphan_hash),
+            "skipped",
+            "permanently-skipped (root-removed) must be left alone"
+        );
+        assert_eq!(
+            state_of(&running_hash),
+            "running",
+            "a running row must never be disturbed by a swap"
+        );
+        assert_eq!(
+            repended, 2,
+            "exactly the done + transient-skip rows re-pended"
+        );
+
+        // Idempotent: drain every now-pending embed row to `done` under the NEW
+        // model (as the real drain would), then a second swap call to the SAME
+        // model is a no-op — the transient skip does NOT churn skipped<->pending
+        // every drain, because cohort 2 only fires when a `done` row's model
+        // genuinely changed.
+        while let Some(item) = claim_next_of(&conn, now, &[pass], false).unwrap() {
+            mark_done_with_model(&conn, &item, "new-model", now).unwrap();
+        }
+        let noop = repend_passes_for_model(&conn, pass, "new-model").unwrap();
+        assert_eq!(
+            noop, 0,
+            "no genuine swap -> no re-pend (no skipped<->pending churn)"
+        );
     }
 }
