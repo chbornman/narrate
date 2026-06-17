@@ -123,7 +123,7 @@ describe("Titlebar platform chrome", () => {
     // working register (stage label + counts). The offline warning that used
     // to sit beside the text now lives inside this indicator's panel.
     stubNavigator("MacIntel", MAC_UA);
-    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
+    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 };
     const idle = render(Titlebar, { title: "shoots" });
     // The indicator is always present (a status region); the OLD jobs text is gone.
     expect(idle.container.querySelector(".jobs")).toBeNull();
@@ -141,14 +141,14 @@ describe("Titlebar platform chrome", () => {
         { name: "image-embedding", remaining: 485, done: 15, total: 500, ratePerSec: 0 },
       ],
       scanning: false,
-      discovered: 0, offlineVolumes: []
+      discovered: 0, offlineVolumes: [], vectorsVersion: 0
     };
     const busy = render(Titlebar, { title: "shoots" });
     // Working register: the current (first working) stage's label shows. hash
     // has a positive rate -> it is the working stage the collapsed pill names.
     expect(busy.getByText("Hashing")).not.toBeNull();
     expect(busy.container.querySelector(".pill.working")).not.toBeNull();
-    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [] };
+    ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 };
   });
 
   it("the bar itself stays a drag region on both platforms", () => {

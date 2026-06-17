@@ -219,6 +219,51 @@ function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
 
+/** The heat-tied per-step displacement clamp (extracted pure so the re-seed/
+ * reheat invariant is testable; STATE-MACHINE.md 6b). Hot heat (REHEAT_START)
+ * permits the full `maxStep`; as heat cools toward 1 the clamp shrinks to
+ * ANNEAL_FLOOR, freezing residual motion. THIS is why a re-seed MUST reheat: at
+ * cooled heat (≈1) the clamp is pinned at the floor, so freshly-displaced nodes
+ * only crawl sub-pixel and the layout visibly jitters instead of settling. An
+ * unbounded clamp (maxStep Infinity — the divergence regression) stays unbounded
+ * at every heat (interpolating Infinity would hit Infinity·0 = NaN at rest). */
+export function annealedMaxStep(heat: number, maxStep: number): number {
+  if (!Number.isFinite(maxStep)) return maxStep;
+  const anneal = clamp01((heat - 1) / (REHEAT_START - 1));
+  return ANNEAL_FLOOR + (maxStep - ANNEAL_FLOOR) * anneal;
+}
+
+/** Per-body residual kinetic energy below which the layout counts as "at rest".
+ * Scale-invariant (energy is divided by body count) so a 5-node and a 5000-node
+ * graph use the same bar. The visualizer audit's bounded-settle threshold. */
+export const REST_ENERGY_PER_BODY = 1.0;
+/** Consecutive quiet frames required before declaring rest — debounces a lucky
+ * single low-energy frame mid-churn into a real settle. */
+export const SETTLE_FRAMES = 30;
+/** Heat at/below which cooling is effectively complete (the ~1 steady state);
+ * the small epsilon absorbs float drift in the cooling multiply. */
+export const SETTLED_HEAT = 1.0001;
+
+/** Is the sim at rest? Pure predicate (testable; encodes two STATE-MACHINE.md 6b
+ * invariants): a DRAG in progress is NEVER at rest — keep ticking + redrawing so
+ * the node under the cursor cannot freeze mid-drag (the c8087d9 fix) — and
+ * otherwise rest = low per-body energy AND cooled heat AND enough quiet frames. */
+export function isAtRest(p: {
+  energy: number;
+  bodies: number;
+  heat: number;
+  settleCount: number;
+  dragging: boolean;
+}): boolean {
+  if (p.dragging) return false;
+  const bodies = Math.max(1, p.bodies);
+  return (
+    p.energy / bodies < REST_ENERGY_PER_BODY &&
+    p.heat <= SETTLED_HEAT &&
+    p.settleCount > SETTLE_FRAMES
+  );
+}
+
 /** Default semantic-neighbor spring stiffness when `ForceConfig.neighborAttraction`
  * is absent. ~0.06 sits just BELOW the topic anchor attraction's effective pull
  * (a node feels several neighbor edges, each weighted by its similarity ≤ 1, so
@@ -491,14 +536,10 @@ export function step(
   // proof. With heat absent/1, `t` is 0 so `effMax` is the floor — callers MUST
   // cool heat down for the sim to move (see `simulate`).
   const maxStep = config.maxStep ?? DEFAULT_MAX_STEP;
-  const anneal = clamp01((heat - 1) / (REHEAT_START - 1));
-  // An unbounded clamp (maxStep Infinity, the divergence regression) stays
-  // unbounded at every heat — interpolating Infinity would hit Infinity·0 = NaN
-  // at the steady state, so short-circuit it. Otherwise interpolate from the full
-  // clamp (hot) down to ANNEAL_FLOOR (cooled), so motion freezes as heat -> 1.
-  const effMax = Number.isFinite(maxStep)
-    ? ANNEAL_FLOOR + (maxStep - ANNEAL_FLOOR) * anneal
-    : maxStep;
+  // Heat-tied clamp (pure, shared with the rest test): full `maxStep` while hot,
+  // shrinking to ANNEAL_FLOOR as heat cools to 1 so motion freezes; Infinity
+  // stays unbounded (the divergence-proof short-circuit lives in the helper).
+  const effMax = annealedMaxStep(heat, maxStep);
   let energy = 0;
   for (let i = 0; i < n; i++) {
     const node = nodes[i];

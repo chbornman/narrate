@@ -142,6 +142,12 @@ export interface IngestStatus {
    * "drive disconnected, N photos unavailable" instead of stalling silently.
    * Empty in the normal all-online case. */
   offlineVolumes: { label: string; images: number }[];
+  /** Monotonic vector-store version (Seam 1, ARCHITECTURE-CONTRACTS.md): bumped
+   * once per committed vector write, riding this event so views refresh when
+   * their data advances instead of polling. The visualizer compares it against
+   * the version it last rendered against and re-fetches only on an advance —
+   * this retires the old self-heal poll. Serialized as `vectorsVersion`. */
+  vectorsVersion: number;
 }
 
 /** Per-role embedder slot state (twin of `dto.rs`): the HONEST lifecycle of

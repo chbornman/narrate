@@ -63,7 +63,6 @@
   import { onMount, untrack } from "svelte";
   import { ui } from "../../state/app.svelte";
   import * as ipc from "../../ipc/commands";
-  import type { RuntimeStatus } from "../../types/dto";
   import * as prefs from "../../state/prefs";
   import {
     computeTopicFields,
@@ -77,6 +76,7 @@
     DEFAULT_NEIGHBOR_ATTRACTION,
     DEFAULT_NEIGHBOR_REST_LENGTH,
     expandSuperNode,
+    isAtRest,
     REHEAT_START,
     ringAnchors,
     screenToSim,
@@ -164,14 +164,17 @@
   let nodeCount = $state(0);
   let visualReady = $state(false);
   let annotationReady = $state(false);
-  /** True while we are waiting on an in-process embedder (CLIP and/or text ort
-   * sessions) that this view needs but that has not finished loading yet. The
-   * affinity ran but produced no signal for that half; we poll runtime_status
-   * and recompute the moment the embedder comes up (self-heal, founder: the
-   * graph "still feels stuck" because affinity was computed once at launch
-   * BEFORE the CLIP session finished loading and never recomputed). Surfaced in
-   * the banner so the wait is honest, not a silent dead graph. */
-  let embeddersLoading = $state(false);
+  /** True while a half THIS view needs is missing AND its in-process embedder is
+   * still BUILDING its ort sessions — so the map will fill in by itself once the
+   * embedder lands and writes vectors (the `vectorsVersion` effect does that
+   * refresh; Seam 1). Derived straight from the reactive runtime slot state, so
+   * there is NO poll behind this banner: a ready-but-empty scope reads honest
+   * "idle", not a perpetual "loading". (founder: affinity computed once at launch
+   * BEFORE the CLIP session finished must not present as a silent dead graph.) */
+  const embeddersLoading = $derived(
+    (!visualReady && ui.shell.runtime?.clip.state === "building") ||
+      (!annotationReady && ui.shell.runtime?.textEmbedder.state === "building"),
+  );
   /** A visible note about the layout: past the LOD threshold it reads "LOD
    * active (showing N clusters of M images)"; below it is null (full detail). */
   let scaleNote = $state<string | null>(null);
@@ -479,14 +482,6 @@
   // mutual repulsion fling them off-canvas forever.
   const ANCHOR_CENTERING = 0.01;
 
-  // LENIENT per-body kinetic-energy GUARD for "at rest" (see isSettled). With the
-  // annealing clamp the heat schedule drives termination; this only guards us from
-  // declaring rest mid-snap. Scale-invariant (total energy / body count). 1.0 ⇒
-  // mean speed ~1 sim-px/step, the ceiling once the cooled clamp has frozen a
-  // frustrated graph's residual jitter; the strict gate never tripped on such a
-  // graph, so we relax it and lean on heat always cooling to 1.
-  const REST_ENERGY_PER_BODY = 1.0;
-
   function forceConfig(): ForceConfig {
     const t = tuning;
     return {
@@ -517,76 +512,56 @@
     };
   }
 
-  // -- self-heal: recompute once the embedders this view needs come up ---------
-  /** Pending readiness poll, so we never stack timers or fire into a dead view. */
-  let readinessTimer: ReturnType<typeof setTimeout> | null = null;
-  /** How many readiness polls remain before we give up (the embedder is not
-   * coming, e.g. tier 0 / not installed): bounds the poll so it can't spin
-   * forever. ~40 * 1500ms = 60s, comfortably longer than a cold ort load. */
-  let readinessTries = 0;
-  const READINESS_MAX_TRIES = 40;
-  const READINESS_POLL_MS = 1500;
+  // -- Seam 1: data-version refresh (replaces the old self-heal poll) ----------
+  // The vector store bumps a monotonic version on every committed write; it rides
+  // `ingest-progress` -> `ui.shell.ingest.vectorsVersion`. When it advances while
+  // THIS view is still missing a half it needs, vectors for our scope may have
+  // just landed, so we re-fetch affinities -- driven by REAL data change, never a
+  // blind timer. This retires `retryWhenEmbeddersReady` and its 45/sec -> 1.5s
+  // beat failure modes (STATE-MACHINE.md 6b): no advance, no work.
+  //
+  // Throttled (leading + trailing) so a burst of writes during an embed coalesces
+  // into ~1 refresh per interval instead of one re-seed per 400ms ingest tick.
+  // COARSE-COUNTER CAVEAT: the version is library-wide, so a write for an
+  // UNRELATED scope can trigger ONE wasted empty refetch on an empty-join scope
+  // (STATE-MACHINE.md 6a) -- bounded to the throttle, transient (only while the
+  // library is actively embedding), and far cheaper than the old 60s poll. The
+  // per-(scope x space) refine in PLAN-SEAM1-SIMSTATE.md removes even that.
+  const VECTOR_REFRESH_THROTTLE_MS = 1000;
+  /** The `vectorsVersion` this view last rendered against (recompute records it);
+   * the effect re-fetches only when the live version moves past this. -1 = never
+   * rendered, so the first advance (or a degraded restore) always refreshes. */
+  let lastVectorsVersion = -1;
+  let vectorRefreshAt = 0;
+  let vectorRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function clearReadinessRetry() {
-    if (readinessTimer !== null) {
-      clearTimeout(readinessTimer);
-      readinessTimer = null;
+  function clearVectorRefresh() {
+    if (vectorRefreshTimer !== null) {
+      clearTimeout(vectorRefreshTimer);
+      vectorRefreshTimer = null;
     }
   }
 
-  /** After a recompute that produced no signal for a half, find out WHY: an
-   * embedder still warming up (poll + recompute when it lands) versus a genuinely
-   * un-embedded space (nothing to wait for). Only the halves THIS view is missing
-   * matter, so an annotation-less library does not block on the text embedder. */
-  async function retryWhenEmbeddersReady() {
-    clearReadinessRetry();
-    const needVisual = !visualReady;
-    const needAnnotation = !annotationReady;
-    if (!needVisual && !needAnnotation) {
-      embeddersLoading = false;
-      return;
-    }
-    let status: RuntimeStatus;
-    try {
-      status = await ipc.runtimeStatus();
-    } catch {
-      // Status unreachable (degraded shell): stop polling; the next user-driven
-      // recompute will try again. Not an error worth surfacing under the user.
-      embeddersLoading = false;
-      return;
-    }
-    // Poll ONLY while the embedder is genuinely BUILDING (still loading its ort
-    // sessions). A READY embedder whose scope simply has no vectors -- the empty
-    // scope x stored-hash JOIN (STATE-MACHINE.md 6a), e.g. a folder of HEICs or
-    // images not yet embedded into the active space -- is NOT "coming": polling
-    // runtime status cannot conjure vectors, so beating recompute() on a 1.5s
-    // timer just thrashes (founder: "freaks out on a beat ... again and again").
-    // Vectors that land later surface on the next user-driven recompute, and
-    // will surface PROPERLY once the library->view data-version seam lands
-    // (ARCHITECTURE-CONTRACTS.md Seam 1), which retires this poll entirely.
-    // Earlier this treated `ready` as coming too (a ready-but-unembedded space
-    // polled its full 40-try / 60s budget); before that it tight-looped ~45x/sec.
-    const visualComing = needVisual && status.clip.state === "building";
-    const annotationComing = needAnnotation && status.textEmbedder.state === "building";
+  function refetchForLandedVectors() {
+    vectorRefreshAt = performance.now();
+    affinityCache.delete(topics, scope(), alpha);
+    void recompute();
+  }
 
-    if ((!visualComing && !annotationComing) || readinessTries >= READINESS_MAX_TRIES) {
-      // Nothing plausibly arriving (the half is genuinely un-embedded / failed)
-      // or the budget is spent: stop. The banner stops lying about an arrival
-      // that is not coming, and we never spin.
-      embeddersLoading = false;
-      return;
+  /** Throttle the refetch: fire immediately if we are outside the window, else
+   * arm a single trailing timer for the remainder, so continuous embedding fills
+   * the graph in at ~1/interval and an isolated write refreshes at once. */
+  function scheduleVectorRefresh() {
+    const since = performance.now() - vectorRefreshAt;
+    if (since >= VECTOR_REFRESH_THROTTLE_MS) {
+      clearVectorRefresh();
+      refetchForLandedVectors();
+    } else if (vectorRefreshTimer === null) {
+      vectorRefreshTimer = setTimeout(() => {
+        vectorRefreshTimer = null;
+        refetchForLandedVectors();
+      }, VECTOR_REFRESH_THROTTLE_MS - since);
     }
-
-    // Plausibly arriving: re-fetch affinities ONCE per 1.5s (bounded), so the
-    // graph fills in as vectors land. `recompute(true)` is a self-heal
-    // CONTINUATION (it does not reset the budget), so a space that never finishes
-    // embedding still stops after READINESS_MAX_TRIES rather than polling forever.
-    embeddersLoading = true;
-    readinessTries += 1;
-    readinessTimer = setTimeout(() => {
-      affinityCache.delete(topics, scope(), alpha);
-      void recompute(true);
-    }, READINESS_POLL_MS);
   }
 
   /** Fetch (or reuse the scope-cached) semantic-neighbor graph and SET each
@@ -647,7 +622,7 @@
   // -- affinity fetch + (re)seed ----------------------------------------------
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
-  async function recompute(selfHeal = false) {
+  async function recompute() {
     loading = true;
     scaleNote = null;
     const sc = scope();
@@ -696,16 +671,12 @@
     const elapsed = Math.round(performance.now() - t0);
     visualReady = report.visual_ready;
     annotationReady = report.annotation_ready;
-    // A USER-driven recompute resets the readiness-poll budget (this is a new
-    // wait); a SELF-HEAL recompute (the 1.5s poll below) is a CONTINUATION, so it
-    // must NOT reset -- else the budget never exhausts and a forever-embedding
-    // space polls forever. Either way re-arm the self-heal: if a half this view
-    // needs is still warming up (or its vectors are mid-embed), keep checking on
-    // a bounded cadence; a fully-ready view cancels any in-flight poll.
-    if (!selfHeal) {
-      readinessTries = 0;
-    }
-    void retryWhenEmbeddersReady();
+    // Seam 1: record the vector-store version this layout was computed against, so
+    // the `vectorsVersion` effect re-fetches only when NEW vectors land past this
+    // point (not on every ingest tick). A still-missing half fills in on the next
+    // advance; a fully-ready view simply stops moving the marker forward.
+    lastVectorsVersion = ui.shell.ingest.vectorsVersion;
+    clearVectorRefresh();
 
     affinity = new Map(report.images.map((i) => [i.image_hash, i.scores.map((s) => s.affinity)]));
     const hashes = report.images.map((i) => i.image_hash);
@@ -1000,18 +971,18 @@
    * clamp is derived inside step() from heat, which the worker already receives,
    * so no new worker plumbing is needed. */
   function isSettled(energy: number): boolean {
-    // A drag in progress is NEVER "at rest": keep ticking + redrawing so the
-    // graph (and the node under the cursor) does not freeze mid-drag. Without
-    // this, heat cools to <=1.0001, isSettled trips, the rAF loop stops, and the
-    // canvas stops repainting -- the pointer keeps writing x/y but nothing draws
-    // (founder: "click and drag -> stops updating -> freezes a bit later"). The
-    // loop resumes settling once the pointer is released. (Standard force-graph
-    // drag behavior; mirrors d3-force holding alphaTarget>0 while dragging.)
-    if (dragging !== null || draggingAnchor !== null) return false;
-    const bodies = Math.max(1, nodes.length + anchors.length);
-    return (
-      energy / bodies < REST_ENERGY_PER_BODY && heat <= 1.0001 && settleCount > 30
-    );
+    // Pure rest predicate (forcegraph.ts isAtRest). A drag in progress is NEVER
+    // at rest -- keep ticking + redrawing so the node under the cursor cannot
+    // freeze mid-drag (the c8087d9 fix: otherwise heat cools, the rAF loop stops,
+    // and the canvas stops repainting while the pointer keeps writing x/y). The
+    // loop resumes settling on pointer release. Thresholds live in forcegraph.ts.
+    return isAtRest({
+      energy,
+      bodies: nodes.length + anchors.length,
+      heat,
+      settleCount,
+      dragging: dragging !== null || draggingAnchor !== null,
+    });
   }
 
   /** What a settle does (both paths): stop ticking and recompute the influence
@@ -1853,13 +1824,24 @@
    * members spill out from the super-node's position with their real per-image
    * affinity; the sim re-runs over the mixed set (this cluster expanded, the
    * rest still aggregated), staying within the budget. */
-  function expandSuper(node: ImageNode) {
-    nodes = expandSuperNode(nodes, node.hash, affinity, topics.length);
+  /** INVARIANT (STATE-MACHINE.md 6b — the re-seed/reheat pairing): a node-set
+   * re-seed jumps node positions (and zeroes velocity), so it MUST reheat before
+   * restarting. Otherwise heat is still ~1 from the prior settled layout, the
+   * heat-tied anneal clamp (forcegraph.ts) pins the displaced nodes to sub-pixel
+   * steps, and the layout visibly jitters/"freezes" as it oozes apart (the
+   * expandSuper click bug). EVERY re-seed funnels through here so the pairing can
+   * never be forgotten again. `staticDirty` signals the worker that its static
+   * mirror + buffer sizes changed and must resync before the next compute. */
+  function reseedAndRestart(nextNodes: ImageNode[]) {
+    nodes = nextNodes;
     nodeCount = nodes.length;
-    // The node set changed (a super-node became its members), so the worker's
-    // static mirror + buffer sizes must resync before the next compute.
     staticDirty = true;
+    reheat();
     restartLoop();
+  }
+
+  function expandSuper(node: ImageNode) {
+    reseedAndRestart(expandSuperNode(nodes, node.hash, affinity, topics.length));
   }
   /** A small movement threshold (screen px) so a tiny jitter during a click is
    * still read as a click, not a drag. */
@@ -2034,23 +2016,19 @@
     const anyAggregated = nodes.some((n) => n.members !== undefined);
     if (zoom >= LOD_ZOOM_EXPAND && anyAggregated) {
       // Zoomed in: expand every remaining super-node into its members.
+      let expanded = nodes;
       for (const n of [...nodes]) {
         if (n.members !== undefined) {
-          nodes = expandSuperNode(nodes, n.hash, affinity, topics.length);
+          expanded = expandSuperNode(expanded, n.hash, affinity, topics.length);
         }
       }
-      nodeCount = nodes.length;
-      // The node set changed (super-nodes expanded), so resync the worker.
-      staticDirty = true;
-      restartLoop();
+      // Re-seed through the shared helper so the expanded members reheat + settle
+      // (the re-seed/reheat invariant), not jitter at cooled heat.
+      reseedAndRestart(expanded);
     } else if (zoom <= LOD_ZOOM_COLLAPSE && anyExpanded) {
       // Zoomed out: re-aggregate the full detail set back into super-nodes.
       const fullNodes = seedNodes([...affinity.keys()], affinity, topics.length);
-      nodes = aggregateToSuperNodes(fullNodes, topics.length);
-      nodeCount = nodes.length;
-      // The node set changed (re-aggregated), so resync the worker.
-      staticDirty = true;
-      restartLoop();
+      reseedAndRestart(aggregateToSuperNodes(fullNodes, topics.length));
     }
   }
 
@@ -2278,11 +2256,11 @@
         draw();
         scheduleFieldRecompute();
         void loadSuggestions();
-        // A snapshot saved while an embedder was still loading restores a
-        // degraded (no-signal) layout; re-arm the self-heal so it fills in once
-        // the embedder lands instead of staying stuck across a reopen.
-        readinessTries = 0;
-        void retryWhenEmbeddersReady();
+        // A snapshot saved while a half was still embedding restores a degraded
+        // (no-signal) layout. Seam 1: re-check now in case vectors landed while
+        // this view was closed, and leave lastVectorsVersion at -1 so the
+        // vectorsVersion effect fills it in as more land (it owns the wait now).
+        if (!visualReady || !annotationReady) scheduleVectorRefresh();
         return;
       }
       // Cold open (no snapshot, or scope/topics changed): the full path. Apply
@@ -2327,9 +2305,9 @@
         clearTimeout(lodZoomTimer);
         lodZoomTimer = null;
       }
-      // Stop the embedder-readiness poll so it can't recompute into a dead view
-      // (a reopen re-arms it from recompute()).
-      clearReadinessRetry();
+      // Drop a pending Seam 1 vector-refresh so it can't recompute into a dead
+      // view (a reopen re-checks from the restore/cold-open path).
+      clearVectorRefresh();
       // NOTE: we do NOT dispose `thumbs` — it is the MODULE-LEVEL cache that must
       // survive this unmount so a reopen reuses the loaded thumbnails. Detaching
       // the repaint hook (above) already makes any in-flight load that completes
@@ -2394,6 +2372,23 @@
         void loadSuggestions();
         void recompute();
       }
+    });
+  });
+
+  // Seam 1 refresh (replaces retryWhenEmbeddersReady's poll): when the vector-
+  // store version advances past the one this view rendered against AND a half it
+  // needs is still missing, the just-written vectors may be ours — re-fetch. A
+  // complete view (both halves ready) ignores bumps, so a settled or mid-drag
+  // layout never churns. Only `vectorsVersion` is a dep (untrack the rest); the
+  // readiness flags are read inside untrack so a readiness flip alone never fires
+  // this — a real data advance does. The throttle coalesces an embed burst.
+  $effect(() => {
+    const v = ui.shell.ingest.vectorsVersion;
+    untrack(() => {
+      if (tuning === null) return; // pre-load: onMount's recompute owns first paint
+      if (v === lastVectorsVersion) return; // no advance since our last render
+      if (visualReady && annotationReady) return; // nothing missing -> no refresh
+      scheduleVectorRefresh();
     });
   });
 
