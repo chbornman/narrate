@@ -6,6 +6,48 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 17 2026 - Seam 1 (data-version) visualizer proof + the sim-state pass
+
+The principled packet that ended the visualizer whack-a-mole (scoped in
+`docs/PLAN-SEAM1-SIMSTATE.md`; map `docs/STATE-MACHINE.md §6b`; target
+`docs/ARCHITECTURE-CONTRACTS.md` Seams 1 + 3). Replaces the leaky poll mechanism
+with a data-version contract and makes the sim invariants explicit + tested.
+Gate green: `cargo fmt`/`clippy` clean, `svelte-check` 0/0, 1111 vitest pass
+(9 new), em-dash clean. Two commits (backend, then frontend).
+
+- [x] **Seam 1 backend: `vectorsVersion` counter on the vector store** - `32251af`.
+  `PpvecStore` gained an in-memory monotonic `AtomicU64` bumped once per committed
+  write in `upsert_with_meta` (the single chokepoint, all VecKinds), exposed as
+  `vectors_version()`. It rides the existing `IngestStatus` on `ingest-progress`
+  (camelCase -> `vectorsVersion`); the pump's `prev != status` emit-gate already
+  fires on advance, so a committed write notifies views with NO new channel.
+  In-memory by design (monotonic per process is all a view needs; it re-fetches on
+  mount) -> no schema column, no migration.
+
+- [x] **Seam 1 frontend: visualizer refreshes on the version, self-heal poll
+  DELETED** - `b883dd3`. The visualizer holds the `vectorsVersion` it last rendered
+  against and re-fetches affinities only when the live version advances while a half
+  it needs is still missing (throttled to coalesce an embed burst). This RETIRES
+  `retryWhenEmbeddersReady` + `READINESS_*` entirely - the 45/sec -> 1.5s-beat
+  failure class (`STATE-MACHINE.md §6b`): no data advance, no work; a ready-but-
+  empty scope stays calm. `embeddersLoading` is now a `$derived` off the reactive
+  embedder slot state (no poll behind the banner). Rides the existing reactive
+  `ui.shell.ingest` snapshot, so no new wiring. (Interim narrowings `260eeb0` /
+  `9f6de6c` from June 16 are superseded by this.)
+
+- [x] **Sim-interaction state-machine pass: re-seed ALWAYS reheats + pure,
+  tested invariants** - `b883dd3`. Every node-set re-seed funnels through
+  `reseedAndRestart()`, which always `reheat()`s before `restartLoop` - closing the
+  open `expandSuper` click-jitter bug AND the same gap in both
+  `applyLodZoomTransition` branches (re-seed at cooled heat pins motion to
+  `ANNEAL_FLOOR` = jitter). The rest predicate + heat-tied clamp were extracted PURE
+  into `forcegraph.ts` (`isAtRest`, `annealedMaxStep`) with named thresholds
+  (`REST_ENERGY_PER_BODY` / `SETTLE_FRAMES` / `SETTLED_HEAT`, killing the inline
+  `1.0`/`30`/`1.0001` magic numbers - a Seam 3 down payment), so `isSettled`
+  delegates and the invariants are unit-tested (`forcegraph-restseed.test.ts`, 9
+  cases): drag holds awake (`c8087d9`), scale-invariant rest, and
+  cooled-pins-to-floor / reheat-frees (the WHY behind re-seed-must-reheat).
+
 ## June 16 2026 - Visualizer interaction/refresh state-machine fixes (3 of a class)
 
 Not backlog-sourced - these surfaced live during dogfooding, all the same class:

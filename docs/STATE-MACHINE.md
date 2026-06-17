@@ -143,7 +143,7 @@ ctx-menu  ─┘        (registry.ts)                 │ gates
 |---|---|---|
 | Single-click image node | `selectGraphNode(hash)` → `viewSelection=hash` (SELECTS, not opens) | TopicGraph.svelte:1983 |
 | Dbl-click image node | `openFromGraph(hash)` → openLook, `viewSelection=null` | TopicGraph.svelte |
-| Click super-node (LOD) | **`expandSuper()` → see §6b mech 2 — the click-jitter bug (OPEN)** | TopicGraph.svelte:1856-1863 |
+| Click super-node (LOD) | `expandSuper()` → **`reseedAndRestart()` (reheats; jitter fixed `b883dd3`, §6b)** | TopicGraph.svelte |
 | Drag node / anchor | `pointermove` writes x/y + **`reheat()`**; drag holds sim awake (§6b) | TopicGraph.svelte:1897-1910 |
 | `alpha` slider | `$effect` → **recompute()** (refetch affinities, reheat, restart) | TopicGraph.svelte:2333 |
 | `topicStrength` slider | `$effect` → reheat + restartLoop, **NO refetch** (force balance only) | TopicGraph.svelte:2347 |
@@ -424,78 +424,80 @@ total vector count. (embedders map; topic.rs:161-213; ppvec.rs:816-899.)
 
 ### 6b. ⭐ Visualizer self-heal poll + the "click → everything moves → freezes" bug
 
-> **STATUS (updated June 16 2026).** Two of the three mechanisms in this section
-> have since been fixed; one remains open. This surface is the
-> interaction/refresh state machine the whole doc was written to systematize, so
-> the fixes are tracked here, not smoothed away:
-> - ✅ **Self-heal poll thrash — FIXED** (`260eeb0` then `9f6de6c`). Was: ~45
->   recomputes/sec, then a 1.5s "beat" on a ready-but-empty scope. Now the poll
->   fires **only while the embedder state is `building`**; a Ready embedder over
->   an empty scope-join stops immediately. The poll is interim — Seam 1
->   (`ARCHITECTURE-CONTRACTS.md`) retires it entirely.
-> - ✅ **Drag freeze — FIXED** (`c8087d9`). Was: heat cooled mid-drag, `isSettled`
->   tripped, the rAF loop stopped, the canvas stopped repainting while the
->   pointer kept writing x/y. Now a drag in progress is never "at rest" and
->   `pointermove` reheats so neighbors follow the moved node.
-> - ❌ **`expandSuper` re-seed jitter — STILL OPEN** (mechanism 2 below). The
->   re-seed-without-reheat invariant violation is unfixed; this is the next item
->   of the same class. Tracked in `docs/BACKLOG.md`.
+> **STATUS (updated June 17 2026 — all three RESOLVED).** This whole section is
+> the interaction/refresh state machine the doc was written to systematize; the
+> three mechanisms below were the symptoms, and all three are now fixed at the
+> root. Kept here as the post-mortem map (the code anchors are historical):
+> - ✅ **Self-heal poll — RETIRED** (`32251af` + `b883dd3`, Seam 1). The whole
+>   poll (`retryWhenEmbeddersReady` + `READINESS_*`) is **deleted**. The
+>   visualizer now refreshes when the vector store's `vectorsVersion` advances
+>   (rides `ingest-progress`), so there is no timer to thrash: no data advance →
+>   no work; a ready-but-empty scope stays calm. Interim narrowings `260eeb0` /
+>   `9f6de6c` are superseded by this. (`ARCHITECTURE-CONTRACTS.md` Seam 1.)
+> - ✅ **Drag freeze — FIXED** (`c8087d9`). Heat cooled mid-drag, `isSettled`
+>   tripped, the loop stopped. Now a drag is never "at rest" and `pointermove`
+>   reheats. The rest predicate is now the pure, unit-tested `isAtRest`
+>   (`forcegraph.ts`); `b883dd3` extracted it.
+> - ✅ **`expandSuper` re-seed jitter — FIXED** (`b883dd3`). Every node-set
+>   re-seed now funnels through `reseedAndRestart()`, which **always reheats**
+>   before `restartLoop` (the same gap in both `applyLodZoomTransition` branches
+>   was closed too). Mechanism 2 below is the post-mortem.
 
-**Three coupled mechanisms** (two fixed, one open).
+**Three coupled mechanisms** (all now resolved — historical detail follows).
 
-**(1) Affinity self-heal poll** (`retryWhenEmbeddersReady`,
-TopicGraph.svelte:553-592). **[FIXED — `260eeb0`, `9f6de6c`.]** When `recompute()`
-lands with `visualReady` or `annotationReady` false, it now re-fetches affinities
-on a bounded 1.5s cadence **only while the missing half's slot state is
-`building`** (genuinely loading), up to `READINESS_MAX_TRIES=40` (~60s). A
-self-heal continuation passes `recompute(true)` which does **not** reset the
-budget, so a never-finishing space stops after the budget. `readinessTries`
-resets to 0 only on a **user-driven** recompute. The historical failure modes
-(documented for the post-mortem): the original code recomputed *immediately*
-whenever `clipReady` was true → ~45/sec tight loop over a mid-embedding space
-(`260eeb0`); the interim fix then treated any non-idle/non-failed state as
-"coming", so a Ready embedder over an empty **scope-join** (§6a — a HEIC folder,
-images not in the active space) beat `recompute()` on the 1.5s timer for its full
-budget every visit (`9f6de6c`). Both are gone; vectors that land for an empty
-scope now surface on the next user-driven recompute (and will surface *properly*
-once Seam 1 lands).
+**(1) Affinity self-heal poll** (was `retryWhenEmbeddersReady`).
+**[RETIRED — `32251af` + `b883dd3`, Seam 1.]** The poll is gone entirely. For the
+record, its failure arc: the original code recomputed *immediately* whenever
+`clipReady` was true → ~45/sec tight loop over a mid-embedding space (`260eeb0`);
+the interim fix treated any non-idle/non-failed state as "coming", so a Ready
+embedder over an empty **scope-join** (§6a — a HEIC folder, images not in the
+active space) beat `recompute()` on a 1.5s timer for its full 60s budget every
+visit (`9f6de6c`); narrowing it to `building`-only helped but was still a timer.
+The data-version contract removes the mechanism: the store bumps a monotonic
+`vectorsVersion` on every committed write, it rides `ingest-progress`, and the
+visualizer re-fetches **only when that version advances past the one it rendered
+against** while a half it needs is still missing (throttled). Empty scope → no
+write for it → no advance → no work. This is the Seam 1 proof.
 
-**(2) The click-jitter / re-seed bug. [STILL OPEN.]** Clicking a **LOD super-node**
-calls `expandSuper()` (TopicGraph.svelte:1856-1863):
+**(2) The click-jitter / re-seed bug. [FIXED — `b883dd3`.]** Clicking a **LOD
+super-node** called `expandSuper()`, which historically did
+(TopicGraph.svelte, pre-fix):
 
 ```
-expandSuper(node):
+expandSuper(node):            // PRE-FIX (b883dd3) — the bug
   expandSuperNode()   // rebuild nodes[] : members spiral-seeded around
                       // the super-node's CURRENT (x,y); vx/vy zeroed
   staticDirty = true
-  restartLoop()       // ← STILL NO reheat() here (the open bug)
+  restartLoop()       // ← NO reheat() — the jitter cause
 ```
 
-At this moment **heat is still ≈1.0** (steady state from the prior settled
-layout). The annealing clamp is **heat-tied** (forcegraph.ts:494:
-`anneal = clamp01((heat-1)/(REHEAT_START-1))`), so at heat≈1 the per-step
-displacement clamp is pinned at `ANNEAL_FLOOR (0.5px)`. The freshly-separated
-members feel **large mutual repulsion** (they just jumped apart) but the clamp
-damps it to sub-pixel steps — producing visible *jitter* over ~10-30 frames as
-heat cools toward 1 and the layout settles. User sees: **"click an image →
-everything moves a bit → freezes."**
+At that moment **heat was still ≈1.0** (steady state from the prior settled
+layout). The annealing clamp is **heat-tied** (now the pure `annealedMaxStep`,
+`forcegraph.ts`: `anneal = clamp01((heat-1)/(REHEAT_START-1))`), so at heat≈1 the
+per-step displacement clamp is pinned at `ANNEAL_FLOOR (0.5px)`. The
+freshly-separated members felt **large mutual repulsion** (they just jumped
+apart) but the clamp damped it to sub-pixel steps — visible *jitter* over ~10-30
+frames as the layout oozed apart. User saw: **"click an image → everything moves
+a bit → freezes."**
 
-**The fix** is the same invariant the drag-freeze fix (`c8087d9`) just proved on
-the neighboring path: **a re-seed must be paired with `reheat()`**. Call
-`reheat()` in `expandSuper()` **before** `restartLoop()` so the new positions
-settle under hot forces (mirrors lines 761/765, where the *other* re-seed path
-already reheats before restarting). This is the invariant the rest of the
-recompute path honors and this one path violates.
+**The fix (`b883dd3`):** every node-set re-seed now funnels through
+`reseedAndRestart()`, which **always `reheat()`s before `restartLoop()`** — so the
+displaced members settle under hot forces instead of crawling at the floor.
+`expandSuper` and **both** `applyLodZoomTransition` branches (expand + collapse,
+which had the same gap) route through it. The premise is unit-tested:
+`annealedMaxStep(1, …)` returns the floor (cooled = crawl) and
+`annealedMaxStep(REHEAT_START, …)` returns the full step (reheat = free) — see
+`forcegraph-restseed.test.ts`. The invariant now lives in **one** helper so it
+can't be forgotten on the next re-seed site.
 
 > **✅ CONTRADICTION RESOLVED (jitter mechanism).** Two earlier source maps
 > disagreed on the cause: *clamp-frozen* repulsion (heat≈1 → floor clamp →
 > sub-perceptual but visible jitter, **too-cold**) vs restart "with ACTIVE heat"
 > leaving "large velocity vectors" (**too-hot**). The **too-cold / clamp-frozen**
-> reading is now confirmed: the `c8087d9` drag-freeze fix demonstrated the exact
-> same heat-cooling dynamic on `isSettled` (heat falls to ≈1, motion clamps to
-> the floor, the loop quiesces). `vx/vy` are zeroed on re-seed (no inherited
-> velocity), so "too-hot" was never possible. Fix is unambiguous: `reheat()`
-> before `restartLoop()`.
+> reading was confirmed: the `c8087d9` drag-freeze fix demonstrated the exact
+> same heat-cooling dynamic on `isSettled`, `vx/vy` are zeroed on re-seed (no
+> inherited velocity, so "too-hot" was never possible), and the fix
+> (reheat-before-restart) resolved the jitter in practice.
 
 **Related visualizer footguns:**
 
@@ -593,8 +595,8 @@ recompute path honors and this one path violates.
 | Symptom | Most likely state | Start here |
 |---|---|---|
 | Graph "no signal" but vectors exist | scope × stored-hash empty join (§6a) | topic.rs:181, ppvec.rs:816 |
-| Visualizer stuck "loading" | embedder slot `building` (real wait); empty scope-join no longer polls (§6a, fixed `9f6de6c`) | embedders.rs:367, TopicGraph.svelte:553 |
-| Click super-node → jitter (OPEN) | expandSuper re-seed without reheat (§6b mech 2) | TopicGraph.svelte:1856, forcegraph.ts:494 |
+| Visualizer stuck "loading" | embedder slot `building` (real wait); refresh is now `vectorsVersion`-driven, no poll (§6a/§6b, Seam 1) | embedders.rs:367, TopicGraph.svelte (`vectorsVersion` $effect) |
+| Click super-node → jitter (FIXED `b883dd3`) | was: expandSuper re-seed without reheat (§6b mech 2); now `reseedAndRestart` | TopicGraph.svelte, forcegraph.ts `annealedMaxStep` |
 | Click+drag node → freeze (FIXED `c8087d9`) | was: `isSettled` cooled mid-drag, loop stopped | TopicGraph.svelte:1010, 1902 |
 | Grid stuck "Indexing" | `ingestExpecting` stranded on silent rescan failure | app.svelte.ts:501; pump.rs:258 |
 | UI dark, no models | runtime never emitted (silent-dark) | pump.rs:628; supervisors.rs:53 |

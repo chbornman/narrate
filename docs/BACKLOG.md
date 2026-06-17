@@ -296,38 +296,22 @@ photos draw together); rebalance + live-tunable knobs (`graph.attraction`,
 slider; "soft topics" unified INTO the Overlooked lens (detect unnamed coherent
 clusters via `synthesis.ts unnamedClusters`, list + glow them). Open items below.
 
-- [ ] **End the visualizer whack-a-mole: Seam 1 (data-version) + a sim-interaction
-  state-machine pass** (founder, June 16 2026 - the principled packet). Three
-  fixes landed in a row this session, all the same class - the visualizer's
-  interaction/refresh state machine (heat <-> settle <-> poll <-> recompute) with
-  implicit invariants we keep discovering by tripping them (`260eeb0`, `9f6de6c`,
-  `c8087d9`; see `docs/LANDED.md` + `docs/STATE-MACHINE.md §6b`). Stop patching
-  symptoms; systematize the surface. **Scoped packet:
-  `docs/PLAN-SEAM1-SIMSTATE.md`** (code-grounded: counter chokepoint, event
-  carrier, poll-deletion list, sim invariant + tests). TWO parts, each
-  independently shippable:
-  (1) **Seam 1 - library->view data-version** (`docs/ARCHITECTURE-CONTRACTS.md`):
-  the visualizer refreshes when its scope's `vectors[activeSpace]` version
-  advances, **retiring the self-heal poll entirely** (kills the beat-class bugs at
-  the root; a new photo reaches the graph cleanly). Migrate the visualizer first
-  (worst symptom), then generalize grid + inspector off their bespoke throttles.
-  (2) **Sim-interaction state-machine pass** - make the heat/settle/drag/recompute
-  invariants EXPLICIT and TESTED: drag holds awake (done), **re-seed ALWAYS
-  reheats** (fixes the open `expandSuper` jitter below), recompute is debounced,
-  "click does X" is specified not emergent. Pairs with the Seam 3 constants sweep
-  (no magic numbers) in the same doc.
+> **Seam 1 visualizer proof + the sim-state pass LANDED** (`32251af` + `b883dd3`,
+> June 17 2026 - see LANDED.md). The self-heal poll is deleted (visualizer now
+> refreshes on `vectorsVersion`), every node-set re-seed reheats via
+> `reseedAndRestart` (the `expandSuper` jitter is fixed), and the rest predicate /
+> anneal clamp are pure + unit-tested. What REMAINS of the packet is below.
 
-- [ ] **`expandSuper` re-seed jitter: reheat before restart** (founder, June 16
-  2026 - the one still-open fix of the 3-in-a-row class). Clicking a LOD super-node
-  calls `expandSuper()` (`TopicGraph.svelte:1856-1863`): it spiral-seeds the members
-  around the super-node's position (vx/vy zeroed) then `restartLoop()` with **NO
-  `reheat()`**. Heat is still ~1.0 from the prior settled layout, so the heat-tied
-  anneal clamp (`forcegraph.ts:494`) pins the freshly-separated members to sub-pixel
-  steps -> visible jitter for ~10-30 frames ("click an image -> everything moves a
-  bit -> freezes"). Fix: call `reheat()` before `restartLoop()` in `expandSuper`,
-  mirroring the other re-seed path (lines 761/765). Root cause + the now-resolved
-  too-cold/too-hot contradiction: `docs/STATE-MACHINE.md §6b` mech 2. Small + local;
-  folds naturally into the sim-state-machine pass above (the re-seed-reheat invariant).
+- [ ] **Seam 1 generalized: grid + inspector onto the version handshake** (founder,
+  June 17 2026 - the open tail of the data-version packet, `docs/PLAN-SEAM1-SIMSTATE.md`
+  "out of scope" / `docs/ARCHITECTURE-CONTRACTS.md` rollout step 3). The visualizer
+  proof landed with a COARSE `vectorsVersion` on `ingest-progress`. To retire the
+  grid's `INGEST_RELIST_MS` relist + the inspector's bespoke throttle, add the rest
+  of the `DataVersions` triple - `images` and `journal` monotonic counters - on the
+  same carrier, and move those views to "re-fetch only when my slice advances".
+  Also a watch item: if the coarse library-wide `vectors` counter shows false
+  refreshes (an unrelated-scope write nudging an empty-join graph), refine it to
+  per-(scope x space) granularity. Not urgent - the visualizer is calm today.
 
 - [ ] **Soft-topic v2: dogfood the force balance + tune defaults** (founder,
   June 15 2026): the ghost-anchor + promote-to-topic feature LANDED (`acc74c8`,

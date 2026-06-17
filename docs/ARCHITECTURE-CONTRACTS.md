@@ -42,14 +42,16 @@ self-heal poll** that re-fetches affinities and re-runs the layout. There is no
 staleness story (the grid's 2s relist, the visualizer's poll, the coarse
 `invalidateScopedGraphs` cache-drop).
 
-> **Interim narrowing landed (`260eeb0`, `9f6de6c`).** The poll's two worst
-> failure modes have been patched at the symptom: it no longer tight-loops
-> (~45/sec) on a mid-embedding space, and it no longer thrashes a 1.5s beat on a
-> Ready-but-empty-scope join — it now polls **only while the embedder state is
-> `building`**. This is a band-aid, not the contract: a new photo still doesn't
-> reach the graph cleanly (it waits for the next user-driven recompute), and the
-> poll still exists. **Seam 1 below retires the poll entirely** and is the
-> principled fix. See `STATE-MACHINE.md §6b` for the full post-mortem.
+> **✅ LANDED for the visualizer (`32251af` backend + `b883dd3` frontend).** The
+> poll is **deleted**. `PpvecStore` bumps a monotonic `vectorsVersion` on every
+> committed write (the single `upsert_with_meta` chokepoint), it rides
+> `ingest-progress` (the existing `PartialEq` emit-gate fires on advance), and the
+> visualizer holds the version it last rendered against, re-fetching only when it
+> advances while a half it needs is still missing (throttled). No data advance →
+> no work; a ready-but-empty scope stays calm. Interim narrowings `260eeb0` /
+> `9f6de6c` are superseded. See `STATE-MACHINE.md §6b`. **Still open:** generalize
+> the same handshake to the grid + inspector (below), and per-(scope×space)
+> granularity if the coarse counter shows false refreshes.
 
 ### The contract
 A single, typed, **versioned** change notification the library owns and every
@@ -75,12 +77,15 @@ DataChange  (backend -> all windows, coalesced)
   shows a calm "embedding…" state otherwise. No timer, no thrash.
 
 ### Migration (incremental, non-breaking)
-1. Add `DataVersions` to the `ingest-progress` / `runtime-status` payloads
-   (additive) — backend already commits these; just expose the counters.
-2. Migrate the **visualizer** first (it has the worst symptom): subscribe to the
-   version, delete `retryWhenEmbeddersReady`'s polling.
-3. Generalize: grid + inspector move from their bespoke throttles to the same
-   version handshake. Retire the ad-hoc `INGEST_RELIST_MS` / cache-drop hacks.
+1. ✅ **Add the version to `ingest-progress`** (`32251af`) — a coarse
+   `vectorsVersion: u64` (additive), bumped at the `upsert_with_meta` chokepoint.
+   (The full `DataVersions` triple — `images` / per-space `vectors` / `journal` —
+   is the refine; the coarse vectors counter covers the visualizer's 90%.)
+2. ✅ **Migrate the visualizer** (`b883dd3`) — subscribes to the version, deletes
+   `retryWhenEmbeddersReady`'s polling. **Done.**
+3. ⏳ **Generalize:** grid + inspector move from their bespoke throttles to the
+   same version handshake. Retire the ad-hoc `INGEST_RELIST_MS` / cache-drop hacks.
+   (Still open — needs `images` / `journal` counters added alongside `vectors`.)
 
 ### Decisions to make
 - **Granularity:** per-(scope×space) version vs a coarse `{images, vectors,
@@ -158,13 +163,17 @@ tuning field, **with a WHY comment**, in exactly one place.
 
 ## Incremental rollout (so we never refactor blind)
 
-1. **Seam 1 visualizer proof** — `DataVersions` in the ingest event; visualizer
-   subscribes, self-heal poll deleted. Fixes the thrash + the "new photo" gap in
-   one move, and is the smallest end-to-end demonstration of the contract.
+1. ✅ **Seam 1 visualizer proof** (`32251af` + `b883dd3`) — `vectorsVersion` in
+   the ingest event; visualizer subscribes, self-heal poll deleted. Fixed the
+   thrash; the smallest end-to-end demonstration of the contract. Paired with the
+   sim-state pass (`reseedAndRestart`, pure `isAtRest`/`annealedMaxStep`).
 2. **Constants sweep** — `constants.ts` + tuning-default consolidation + the
-   hot-path literal sweep. Cheap, high-clarity, unblocks safe tuning/swapping.
+   hot-path literal sweep. (Started: the forcegraph rest/anneal thresholds are
+   now named consts — `REST_ENERGY_PER_BODY` / `SETTLE_FRAMES` / `SETTLED_HEAT` —
+   killing the inline `1.0`/`30`/`1.0001`. The broader sweep + `constants.ts`
+   remain.) Cheap, high-clarity, unblocks safe tuning/swapping.
 3. **Seam 1 generalized** — grid + inspector onto the version handshake; retire
-   the bespoke throttles.
+   the bespoke throttles (needs `images` / `journal` counters).
 4. **Seam 2 re-embed contract** — fix `repend_passes_for_model` to cover all
    rows; formalize active-space switch → version bump.
 

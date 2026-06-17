@@ -1,5 +1,12 @@
 # PLAN — Seam 1 (data-version) + the sim-interaction state-machine pass
 
+> **✅ LANDED June 17 2026** (`32251af` backend + `b883dd3` frontend; see
+> `docs/LANDED.md`). Part A (visualizer) and Part B both shipped. What remains is
+> the **generalize** tail — grid + inspector onto the version handshake (needs the
+> `images`/`journal` counters) — tracked in `docs/BACKLOG.md`. This doc is kept as
+> the scoping record; the acceptance criteria below were met (gate green: clippy +
+> svelte-check 0/0 + 1111 vitest + em-dash).
+
 > The principled packet that ends the visualizer whack-a-mole. Companion to
 > `docs/ARCHITECTURE-CONTRACTS.md` (the target) and `docs/STATE-MACHINE.md` (the
 > map). Scoped against the live tree on `main`; every anchor verified. Spec wins.
