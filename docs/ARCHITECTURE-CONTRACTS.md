@@ -101,19 +101,24 @@ DataChange  (backend -> all windows, coalesced)
 ### Today
 Half-there and good: the `Embedder` trait is the seam (`OrtEmbedder` behind it;
 CoreML/CUDA/CPU EP selection internal), and there is **one vector space per
-`model_id`** (`vectors.model_id`). Gaps (`STATE-MACHINE.md §5/§6c`):
-`repend_passes_for_model` re-pends only **`done`** rows (skipped HEIC /
-annotation-less left behind); a swap with an unchanged `model_id` re-embeds
-nothing; retire-before-loaded once dropped the live space (fixed:
-verify-before-retire).
+`model_id`** (`vectors.model_id`). Remaining gaps (`STATE-MACHINE.md §5/§6c`):
+a swap with an **unchanged `model_id`** re-embeds nothing (weights replaced under
+the same id → user must `rebuild_index`); retire-before-loaded once dropped the
+live space (fixed: verify-before-retire). **✅ The re-pend coverage gap is now
+closed (June 17 2026):** `repend_passes_for_model` revives transiently-`skipped`
+(`preview-deferred`) + attempt-capped `error` rows on a genuine swap, not just
+`done` — see the Re-embed contract below.
 
 ### The contract
 Swapping a model = **register a space + re-embed, retire only when safe**:
 - A model is `{ id, role, EP-selection, vector space }`. Selecting it makes its
   space the **active** space for that role.
 - **Re-embed contract:** activating a space re-pends **every** image's embed pass
-  for that space (not just `done` — include `skipped`-for-transient and missing),
-  so no image is silently left in the old space.
+  for that space (not just `done` — include `skipped`-for-transient and
+  attempt-capped `error`), so no image is silently left in the old space.
+  **✅ Landed (June 17 2026)** in `repend_passes_for_model`: a transient-skip
+  allow-list (`TRANSIENT_SKIP_CODES`, currently `preview-deferred`) revives those
+  rows on a genuine swap; permanent skips (`root-removed`) are left alone.
 - **Retire contract:** the old space is dropped only once the new space is
   `Ready` AND producing vectors (verify-before-retire — already landed).
 - **View contract:** views read the **active** space via Seam 1's version; a swap
@@ -174,8 +179,10 @@ tuning field, **with a WHY comment**, in exactly one place.
    remain.) Cheap, high-clarity, unblocks safe tuning/swapping.
 3. **Seam 1 generalized** — grid + inspector onto the version handshake; retire
    the bespoke throttles (needs `images` / `journal` counters).
-4. **Seam 2 re-embed contract** — fix `repend_passes_for_model` to cover all
-   rows; formalize active-space switch → version bump.
+4. **Seam 2 re-embed contract** — ✅ `repend_passes_for_model` now covers
+   transient-skip + attempt-capped error rows (June 17 2026). REMAINING: the
+   unchanged-`model_id` swap (weights replaced under the same id → no re-embed),
+   and formalizing active-space switch → version bump.
 
 Each step is independently shippable and gated. The MAP (`STATE-MACHINE.md`) is
 the reference; this doc is the destination.

@@ -6,6 +6,26 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## June 17 2026 - Seam 2: model-swap re-embed coverage (revive transient skips)
+
+- [x] **`repend_passes_for_model` covers transiently-skipped + error rows, not
+  just `done`** - the Seam 2 re-embed-contract gap (`STATE-MACHINE.md §5/§6c`,
+  `ARCHITECTURE-CONTRACTS.md` Seam 2). A model swap used to re-pend only `done`
+  rows whose `model_id` differed, silently leaving **`preview-deferred`** HEIC/RAW
+  skips in the OLD vector space forever (partial signal that never heals). Now a
+  second cohort revives `skipped` rows in a `TRANSIENT_SKIP_CODES` allow-list
+  (currently `preview-deferred`) plus attempt-capped `error` rows - but ONLY when
+  cohort 1 found a genuine swap (a `done` row whose model changed), so these
+  `model_id IS NULL` rows can't churn skipped<->pending on every drain. PERMANENT
+  skips (`root-removed`: no active path, nothing to embed) are correctly left
+  alone; `running` + `priority` untouched. (Annotation-less text rows are `done`,
+  not skipped, so already covered - the audit's framing was imprecise; documented
+  in code.) Test: `model_swap_repends_transient_skip_not_permanent_skip` proves
+  done+transient-skip revive, root-removed/running don't, and a second same-model
+  call is a no-op (idempotent). Gate green (clippy + `cargo test -p photoproof-core`,
+  modulo the known-failing `s02_2` sidecar test). REMAINING (still BACKLOG): the
+  unchanged-`model_id` swap (weights replaced under the same id) re-embeds nothing.
+
 ## June 17 2026 - Seam 1 (data-version) visualizer proof + the sim-state pass
 
 The principled packet that ended the visualizer whack-a-mole (scoped in

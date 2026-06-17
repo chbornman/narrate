@@ -353,10 +353,16 @@ process_embedding_queue re-embeds @ fp16       ▼
 
 **Migration gotchas (all real, all in the maps):**
 
-- `repend_passes_for_model` only re-pends **DONE** rows. **SKIPPED** rows
-  (preview-deferred HEIC, annotation-less images) are left alone → a model
-  swap silently misses them until the skipped pass re-runs. No auto-recovery
-  (embedders map footgun; ingest map footgun).
+- ✅ **FIXED (`Seam 2`, June 17 2026).** `repend_passes_for_model` used to re-pend
+  only **DONE** rows, silently leaving **transiently-SKIPPED** rows
+  (`preview-deferred` HEIC/RAW) in the old space forever. It now revives a second
+  cohort — `skipped` rows in the `TRANSIENT_SKIP_CODES` allow-list **plus**
+  attempt-capped `error` rows — but **only when cohort 1 found a genuine swap** (a
+  `done` row whose `model_id` changed), so they can't churn skipped↔pending on
+  every drain. PERMANENT skips (`root-removed`: no active path, nothing to embed)
+  are correctly left alone; `running` + `priority` untouched. (Annotation-less
+  images are marked `done`, not skipped, so they were already covered.) Test:
+  `model_swap_repends_transient_skip_not_permanent_skip` (ingest.rs).
 - **Model swap with no model_id change** (e.g. weights file replaced but id
   reused) leaves DONE rows untouched → no re-embed. User must `rebuild_index`
   / rescan. (Add-folder map footgun.)

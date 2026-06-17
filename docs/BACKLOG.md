@@ -302,16 +302,44 @@ clusters via `synthesis.ts unnamedClusters`, list + glow them). Open items below
 > `reseedAndRestart` (the `expandSuper` jitter is fixed), and the rest predicate /
 > anneal clamp are pure + unit-tested. What REMAINS of the packet is below.
 
-- [ ] **Seam 1 generalized: grid + inspector onto the version handshake** (founder,
-  June 17 2026 - the open tail of the data-version packet, `docs/PLAN-SEAM1-SIMSTATE.md`
-  "out of scope" / `docs/ARCHITECTURE-CONTRACTS.md` rollout step 3). The visualizer
-  proof landed with a COARSE `vectorsVersion` on `ingest-progress`. To retire the
-  grid's `INGEST_RELIST_MS` relist + the inspector's bespoke throttle, add the rest
-  of the `DataVersions` triple - `images` and `journal` monotonic counters - on the
-  same carrier, and move those views to "re-fetch only when my slice advances".
-  Also a watch item: if the coarse library-wide `vectors` counter shows false
-  refreshes (an unrelated-scope write nudging an empty-join graph), refine it to
-  per-(scope x space) granularity. Not urgent - the visualizer is calm today.
+- [ ] **Frontend coupling packet (P1-P7) - the audit's punch-list** (founder,
+  June 17 2026). Full findings + anchors + dependency-ordered packet in
+  **`docs/AUDIT-FRONTEND-COUPLING.md`** (the same implicit-seam / staleness bug
+  class as the visualizer fixes, swept across all 5 frontend axes; the dispatch
+  spine, escape ladder, lane machine, and note/mic snapshots audited CLEAN). The
+  debt concentrates one ring out from the visualizer. Order:
+  - **P1 - `ingestExpecting` watchdog** (CONFIRMED `STATE-MACHINE.md §6e`): set in
+    3 paths (`app.svelte.ts:696/1500/2277`), cleared only on an `ingest-progress`
+    event (`:861`); a rescan that returns Ok but emits no status (deleted path /
+    zero change) strands the grid on "Indexing..." forever. Clear on the
+    `scanning`/images signal it bridges to + a named-const watchdog timeout.
+    Smallest blast radius, highest user-visible payoff. (The shell comment
+    claiming "cannot strand" is wrong - fix it too.)
+  - **P2 - generalize Seam 1 to grid + inspector** (= the old "Seam 1 generalized"
+    item; `ARCHITECTURE-CONTRACTS.md` rollout step 3). Add `images` + `journal`
+    monotonic counters beside `vectorsVersion`; DELETE the `App.svelte:261`
+    `setInterval(INGEST_RELIST_MS)` AND the `app.svelte.ts:867` 2s throttle AND
+    the `onJournalChanged` membership relist (`:1781`) - two redundant timers +
+    a membership test where the visualizer now has one versioned signal. Unblocks P3.
+  - **P3 - key the visualizer caches on the data-version** (B1/B2): `graphStateKey`
+    (`graphstore.ts:42`, used at `TopicGraph.svelte:2115`) omits `alpha` /
+    `fullLibrary` / version, so a reopen-after-ingest can restore a stale layout
+    the missing-half guard won't refresh (the persistence-side twin of the poll bug).
+  - **P4-P7** (low): `selectedTopic` by phrase not array index (B3); explicit
+    query/similar->graph scope instead of silent `{kind:'library'}` fallback (B4);
+    single-clearer pencil session rotation (C1); source-window event tag (E1) +
+    the Seam 3 constants sweep (B5). Detail + anchors in the audit doc.
+  - **Watch item:** if the coarse library-wide `vectors` counter shows false
+    refreshes (unrelated-scope write nudging an empty-join graph), refine to
+    per-(scope x space) granularity. Not urgent - the visualizer is calm today.
+
+- [ ] **Seam 2 tail: re-embed on an unchanged-`model_id` swap** (June 17 2026 -
+  the one remaining Seam 2 gap; the transient-skip coverage LANDED, see LANDED.md).
+  If weights are replaced under the SAME `model_id`, `repend_passes_for_model`
+  sees no model change and re-embeds nothing - the user must `rebuild_index` /
+  rescan. Options: a content hash of the weights file folded into the staleness
+  check, or an explicit "force re-embed this space" op. Low priority (you don't
+  normally reuse an id for new weights), but it's the honest hole.
 
 - [ ] **Soft-topic v2: dogfood the force balance + tune defaults** (founder,
   June 15 2026): the ghost-anchor + promote-to-topic feature LANDED (`acc74c8`,
