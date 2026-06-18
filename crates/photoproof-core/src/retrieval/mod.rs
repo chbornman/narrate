@@ -12,9 +12,17 @@
 //! signals based on journal coverage.
 
 mod chunk;
+// Representative-subset selection for the Diversify view filter
+// (DESIGN-DEDUP-AND-SIMILARITY.md, the duplication-tolerance slider): pure
+// selection math over the `knn_within` CLIP graph.
+pub mod diversity;
 mod ppvec;
 
 pub use chunk::{Chunk, ChunkContext, PREFIX_SCHEME_VERSION, chunk_folded_text};
+pub use diversity::{
+    QualityScores, Selection, facility_location_select, k_center_select, mmr_select,
+    tolerance_to_cutoff, tolerance_to_lambda,
+};
 pub use ppvec::{
     COMPACT_DEAD_FRACTION, COMPACT_DEAD_ROWS, DTYPE_F32, DTYPE_INT8, KnnGraph, MRL_DIMS,
     PpvecHeader, PpvecStore, ReconciledSpace, SpaceReconcileReason, SpaceReconcileReport, VecMeta,

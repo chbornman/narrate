@@ -14,6 +14,10 @@
 pub mod app;
 pub mod capture;
 pub mod collections;
+// Diversify / duplication-tolerance view filter (DESIGN-DEDUP-AND-SIMILARITY.md):
+// representative-subset selection over the CLIP k-NN graph. A self-contained
+// command module reusing graph.rs's scope enumeration.
+pub mod diversify;
 // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): topic_affinities /
 // suggest_topics / graph_tuning. A self-contained command module.
 pub mod graph;
