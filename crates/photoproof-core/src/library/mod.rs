@@ -367,6 +367,28 @@ impl Library {
         Ok(n)
     }
 
+    /// FORCE a full re-embed of an embed pass into the active space — the Seam 2
+    /// tail (`docs/ARCHITECTURE-CONTRACTS.md` rollout step 4). Thin wrapper over
+    /// [`ingest::force_repend_passes`]: re-pends EVERY embeddable row (`done` +
+    /// transient-skip + attempt-capped `error`) UNCONDITIONALLY, for the
+    /// "I swapped weights under the same `model_id`" case the model-aware re-pend
+    /// cannot see. Unlike [`Self::repend_pass`] (doctor: `done` only) this covers
+    /// the same broader cohorts as [`ingest::repend_passes_for_model`], and
+    /// leaves `priority` untouched (a watcher P0 keeps its lane). Returns rows
+    /// re-pended. The explicit `force_reembed` command is the only caller — it is
+    /// kept off the automatic staleness path so it can never fire by surprise.
+    pub fn force_repend_pass(&self, pass: ingest::PassName) -> Result<usize, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let n = ingest::force_repend_passes(&conn, pass)?;
+        if n > 0 {
+            self.log(format!(
+                "force re-embed: re-pended {n} {} passes",
+                pass.as_str()
+            ));
+        }
+        Ok(n)
+    }
+
     fn now(&self) -> UtcMillis {
         self.clock.now()
     }

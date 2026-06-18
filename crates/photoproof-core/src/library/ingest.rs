@@ -459,6 +459,55 @@ pub fn repend_passes_for_model(
     Ok(done_repended + revived)
 }
 
+/// FORCE a re-embed of an embed pass into the active space, UNCONDITIONALLY —
+/// the Seam 2 *tail* (`docs/ARCHITECTURE-CONTRACTS.md` rollout step 4): the case
+/// [`repend_passes_for_model`] cannot see, where the WEIGHTS behind a model are
+/// replaced but the `model_id` is REUSED. The model-aware re-pend gates cohort 1
+/// on `model_id <> ?` and, finding no change, re-pends nothing, so the new
+/// weights never reach any existing image — the user is otherwise stuck doing a
+/// full rescan.
+///
+/// This revives the SAME cohorts [`repend_passes_for_model`] does — `done` +
+/// transiently-`skipped` ([`TRANSIENT_SKIP_CODES`]) + attempt-capped `error` —
+/// but with the model-id guard and the genuine-swap gate REMOVED: *force* means
+/// unconditional. It is the explicit "I swapped weights under the same id"
+/// escape hatch, kept SEPARATE from (and never touching) the automatic
+/// staleness path so an accidental call can never trigger a surprise mass
+/// re-embed — the founder has to ask for it.
+///
+/// Same invariants as the model-aware twin: `running` rows are left in flight
+/// (an events-engine mid-run re-pend must win — see [`mark_done`]) and
+/// `priority` is left untouched (a watcher P0 keeps its lane). A PERMANENT skip
+/// (`root-removed` — no active path, nothing to embed) is still left alone by
+/// the [`TRANSIENT_SKIP_CODES`] allow-list. Returns the total rows re-pended.
+pub fn force_repend_passes(conn: &Connection, pass: PassName) -> rusqlite::Result<usize> {
+    // The transient-skip allow-list is a small static set of registry strings,
+    // never user input; the IN list is assembled from quoted constants.
+    let transient_in = TRANSIENT_SKIP_CODES
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // One statement, all cohorts: `done` (with NO `model_id` predicate — that
+    // guard is exactly what force overrides), transient-`skipped`, and under-cap
+    // `error`. `running` is excluded; `priority` is never written.
+    let repended = conn.execute(
+        &format!(
+            "UPDATE ingest_passes
+             SET state = 'pending', started_at = NULL, completed_at = NULL,
+                 not_before = NULL, error = NULL, attempts = 0
+             WHERE pass_name = ?1 AND pass_version = ?2
+               AND (
+                 state = 'done'
+                 OR (state = 'skipped' AND error IN ({transient_in}))
+                 OR (state = 'error' AND attempts < ?3)
+               )"
+        ),
+        params![pass.as_str(), PASS_VERSION, MAX_LIFETIME_ATTEMPTS],
+    )?;
+    Ok(repended)
+}
+
 pub fn mark_skipped(
     conn: &Connection,
     item: &QueueItem,
@@ -891,6 +940,130 @@ mod tests {
         assert_eq!(
             noop, 0,
             "no genuine swap -> no re-pend (no skipped<->pending churn)"
+        );
+    }
+
+    /// Seam 2 TAIL (`docs/ARCHITECTURE-CONTRACTS.md` rollout step 4): the gap the
+    /// model-aware re-pend cannot close — weights replaced under an UNCHANGED
+    /// `model_id`. [`force_repend_passes`] must re-pend a `done` row whose
+    /// `model_id` is the SAME as the configured model (where
+    /// [`repend_passes_for_model`] would no-op), AND the transient-skip cohort,
+    /// while leaving a `running` row and a PERMANENT skip untouched.
+    #[test]
+    fn force_repend_revives_unchanged_model_done_and_transient_skip() {
+        let (_tmp, conn) = setup();
+        let now = UtcMillis::now();
+        let ts = now.to_rfc3339();
+        let pass = PassName::ImageEmbedding;
+
+        // A `done` row recorded under the SAME id force will be asked for. This
+        // is the exact gap: the weights changed but the id did not, so the
+        // model-aware re-pend sees no change and would re-embed NOTHING.
+        let done_hash = ContentHash::from_hex(&"11".repeat(32)).unwrap();
+        enqueue(
+            &conn,
+            &done_hash,
+            pass,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        let done_item = claim_next_of(&conn, now, &[pass], false).unwrap().unwrap();
+        mark_done_with_model(&conn, &done_item, "same-model", now).unwrap();
+
+        // PROVE the gap first: the model-aware re-pend, given the SAME id, is a
+        // no-op — nothing is revived. This is what force exists to override.
+        let model_aware = repend_passes_for_model(&conn, pass, "same-model").unwrap();
+        assert_eq!(
+            model_aware, 0,
+            "model-aware re-pend no-ops on an unchanged model_id (the gap)"
+        );
+
+        // A TRANSIENTLY-skipped row: real image, preview deferred until decode.
+        let skip_hash = ContentHash::from_hex(&"22".repeat(32)).unwrap();
+        enqueue(
+            &conn,
+            &skip_hash,
+            pass,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        let skip_item = claim_next_of(&conn, now, &[pass], false).unwrap().unwrap();
+        mark_skipped(&conn, &skip_item, "preview-deferred", now).unwrap();
+
+        // A PERMANENTLY-skipped row: no active path — nothing to embed, ever.
+        let orphan_hash = ContentHash::from_hex(&"33".repeat(32)).unwrap();
+        conn.execute(
+            "INSERT INTO ingest_passes
+               (image_hash, pass_name, pass_version, model_id, state, priority,
+                attempts, error, enqueued_at, started_at, completed_at, not_before)
+             VALUES (?1, ?2, ?3, NULL, 'skipped', ?4, 0, 'root-removed', ?5, NULL, ?5, NULL)",
+            params![
+                orphan_hash.as_str(),
+                pass.as_str(),
+                PASS_VERSION,
+                PRIORITY_GPU,
+                ts
+            ],
+        )
+        .unwrap();
+
+        // A RUNNING row must never be disturbed by a force re-embed.
+        let running_hash = ContentHash::from_hex(&"44".repeat(32)).unwrap();
+        enqueue(
+            &conn,
+            &running_hash,
+            pass,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        claim_next_of(&conn, now, &[pass], false).unwrap().unwrap(); // -> running
+
+        // FORCE: unconditional, no model id supplied.
+        let repended = force_repend_passes(&conn, pass).unwrap();
+
+        let state_of = |hash: &ContentHash| -> String {
+            conn.query_row(
+                "SELECT state FROM ingest_passes WHERE image_hash = ?1 AND pass_name = ?2",
+                params![hash.as_str(), pass.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // done (UNCHANGED model) + transient skip are revived; permanent skip +
+        // running are NOT.
+        assert_eq!(
+            state_of(&done_hash),
+            "pending",
+            "force must re-pend a done row even when its model_id is unchanged"
+        );
+        assert_eq!(
+            state_of(&skip_hash),
+            "pending",
+            "force must revive the transient-skip cohort"
+        );
+        assert_eq!(
+            state_of(&orphan_hash),
+            "skipped",
+            "permanently-skipped (root-removed) must be left alone"
+        );
+        assert_eq!(
+            state_of(&running_hash),
+            "running",
+            "a running row must never be disturbed by a force re-embed"
+        );
+        assert_eq!(
+            repended, 2,
+            "exactly the done + transient-skip rows re-pended"
         );
     }
 }
