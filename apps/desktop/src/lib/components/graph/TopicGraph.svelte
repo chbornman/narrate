@@ -122,6 +122,7 @@
   import {
     countAboveThreshold,
     DEFAULT_BAKE_THRESHOLD,
+    resolveTopicIndex,
     selectedAboveThreshold,
     type ScoredImage,
   } from "../../logic/topicbake";
@@ -268,7 +269,18 @@
   // provenance recorded by the backend). The threshold -> selected-set math is
   // the shared pure logic/topicbake module, so the glow set here and the Topics
   // tab's count and the bake membership agree exactly.
-  let selectedTopic = $state<number | null>(null);
+  /** The bake selection is tracked by the topic's STABLE IDENTITY (its phrase),
+   * NOT by its array index. WHY: `topics` is reverse-sorted from a store the user
+   * can mutate; removing an EARLIER topic shifts later indices down by one. An
+   * index would silently retarget the live selection to the wrong topic for the
+   * in-flight frame (the §6b "selectedTopic off-by-one" footgun). The phrase is
+   * self-healing: a removed topic's phrase simply no longer resolves. */
+  let selectedTopic = $state<string | null>(null);
+  /** The CURRENT array index of the selected phrase (or -1 if it is gone). All
+   * the positional consumers (affinity columns, ring anchors, the panel) read
+   * THIS, re-derived from the live `topics` order, so a reorder/removal can never
+   * point them at a stale row. */
+  let selectedTopicIndex = $derived(resolveTopicIndex(topics, selectedTopic));
   let bakeThreshold = $state(DEFAULT_BAKE_THRESHOLD);
   let bakeName = $state("");
   let baking = $state(false);
@@ -278,11 +290,11 @@
    * runs over this so the glow + count + bake all key off the same numbers the
    * graph already computed (DESIGN: "reuse the affinity data the graph has"). */
   let bakeScored = $derived<ScoredImage[]>(
-    selectedTopic === null
+    selectedTopicIndex < 0
       ? []
       : [...affinity.entries()].map(([hash, row]) => ({
           hash,
-          score: row[selectedTopic!] ?? 0,
+          score: row[selectedTopicIndex] ?? 0,
         })),
   );
   /** The hashes glowing right now (affinity >= threshold for the selected
@@ -297,12 +309,18 @@
    * threshold + the collection name (to the phrase), and repaint so the glow
    * appears. A re-click on the same anchor closes it (toggle). */
   function selectTopicForBake(topicIndex: number) {
-    if (selectedTopic === topicIndex) {
+    // The caller hands us the CURRENT array index (an anchor's `topic`); we
+    // immediately resolve it to the phrase and store THAT as the identity, so a
+    // later removal/reorder of the topics list can't strand the selection on a
+    // shifted index.
+    const phrase = topics[topicIndex] ?? null;
+    if (phrase === null) return;
+    if (selectedTopic === phrase) {
       selectedTopic = null;
     } else {
-      selectedTopic = topicIndex;
+      selectedTopic = phrase;
       bakeThreshold = DEFAULT_BAKE_THRESHOLD;
-      bakeName = topics[topicIndex] ?? "";
+      bakeName = phrase;
     }
     draw();
   }
@@ -313,8 +331,10 @@
    * close the panel (the new collection appears in the rail via the snapshot
    * refresh). */
   async function commitBake() {
+    // selectedTopic IS the phrase now (identity, not index), so the bake call
+    // reads it directly rather than indexing the live (mutable) topics array.
     if (selectedTopic === null || baking) return;
-    const phrase = topics[selectedTopic];
+    const phrase = selectedTopic;
     baking = true;
     try {
       const created = await ui.bakeTopicCollection(phrase, bakeThreshold, bakeName);
@@ -328,9 +348,15 @@
     }
   }
 
-  // A topic removed while selected drops the bake panel (the index would dangle).
+  // A topic removed while selected drops the bake panel. Identity tracking makes
+  // this self-healing AND exact: the positional consumers (glow/count/anchor) all
+  // read `selectedTopicIndex`, which is already -1 once the phrase is gone, so they
+  // show nothing even before this runs (no wrong-topic in-flight frame, unlike the
+  // old index-clamp that only caught OUT-OF-BOUNDS and missed a mid-array SHIFT).
+  // This effect's sole remaining job is to close the panel by clearing the now-
+  // orphaned phrase; it fires on a genuine removal, not on every reorder.
   $effect(() => {
-    if (selectedTopic !== null && selectedTopic >= topics.length) {
+    if (selectedTopic !== null && selectedTopicIndex < 0) {
       selectedTopic = null;
     }
   });
@@ -1432,7 +1458,9 @@
     // The bake selection takes visual priority over the attention overlay: when
     // a topic anchor is selected, the above-threshold images GLOW and the rest
     // recede (the signature "nearby set lighting up"). Computed once per frame.
-    const bakeActive = selectedTopic !== null;
+    // Bake glow is active only when the selected phrase still resolves to a live
+    // anchor (selectedTopicIndex >= 0); a removed topic stops glowing this frame.
+    const bakeActive = selectedTopicIndex >= 0;
     // The image node SELECTED on the graph (founder decision): it draws a clear
     // selection ring so the user sees which image their voice/rating targets
     // while staying on the graph. Read once per frame; reading the $state here
@@ -1661,7 +1689,9 @@
       }
       // The anchor SELECTED for baking reads as distinct: a larger accent ring
       // (it is the topic whose threshold is lighting the graph up).
-      const isBakeSel = selectedTopic === a.topic;
+      // Identity-correct: compare the anchor's topic index to the index the
+      // selected PHRASE resolves to right now, so a reorder glows the right ring.
+      const isBakeSel = selectedTopicIndex === a.topic;
       ctx.beginPath();
       ctx.arc(sx, sy, isBakeSel ? 10 : 8, 0, Math.PI * 2);
       ctx.fillStyle = c.anchorFill;
@@ -2713,11 +2743,16 @@
     {#if selectedTopic !== null}
       <div class="bake-panel" aria-label="Bake topic into a collection">
         <div class="bake-head">
-          <span class="bake-topic">{topics[selectedTopic] ?? ""}</span>
+          <!-- selectedTopic IS the phrase now, so the label reads it directly. -->
+          <span class="bake-topic">{selectedTopic}</span>
           <button
             class="bake-x"
             aria-label="Close bake panel"
-            onclick={() => selectTopicForBake(selectedTopic!)}>x</button
+            onclick={() => {
+              // Close = drop the identity; the glow/panel fall away with it.
+              selectedTopic = null;
+              draw();
+            }}>x</button
           >
         </div>
         <label class="bake-slider">

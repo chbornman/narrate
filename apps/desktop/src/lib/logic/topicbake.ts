@@ -64,3 +64,28 @@ export function rankedHashes(ranked: readonly RankedImageDto[]): string[] {
  * 0..1 slider (affinities are cosines; the strong matches cluster well above
  * the midpoint). The user drags from here. */
 export const DEFAULT_BAKE_THRESHOLD = 0.5;
+
+/**
+ * Resolve a selected topic PHRASE to its current array index, or -1 if the
+ * phrase is no longer present.
+ *
+ * WHY this exists (the "identity not index" seam): the bake selection must be
+ * tracked by the topic's STABLE identity (its phrase), NOT by its position in
+ * the live topics array. The affinity-matrix columns, the ring anchors, and the
+ * panel label are all keyed POSITIONALLY against that array, and the array is
+ * reverse-sorted from a store that the user can mutate (remove a topic) while a
+ * selection is live. If we stored a raw index, removing an EARLIER topic would
+ * shift later indices down by one and silently retarget the selection to the
+ * wrong topic for the in-flight frame. Storing the phrase and re-deriving the
+ * index here makes the selection self-healing: a removed phrase resolves to -1
+ * (drop the panel) and a reordered phrase resolves to its NEW position (glow
+ * stays on the right anchor). Phrases are unique in the store (AppStore.addTopic
+ * dedupes by phrase), so indexOf is an exact identity lookup.
+ */
+export function resolveTopicIndex(
+  topics: readonly string[],
+  phrase: string | null,
+): number {
+  if (phrase === null) return -1;
+  return topics.indexOf(phrase);
+}
