@@ -151,13 +151,18 @@ export const findSimilar = (hash: string, limit?: number) =>
 
 // -- semantic topic-graph (DESIGN-SEMANTIC-GRAPH.md) ------------------------
 
-/** The grid scope the graph lens is pointed at — a folder, a collection, or
- * the WHOLE library (the deliberate scale spike). Field names are snake_case to
- * match the Rust `GraphScope` (serde tag = "kind", snake_case). */
+/** The grid scope the graph lens is pointed at — a folder, a collection, the
+ * WHOLE library (the deliberate scale spike), or an EXPLICIT hash list (a
+ * SEARCH RESULT: a committed query / "more like this" / a ranked topic, which
+ * has no folder/collection/library noun to name). Field names are snake_case to
+ * match the Rust `GraphScope` (serde tag = "kind", snake_case). The backend
+ * filters a `hashes` scope down to images that still exist in the library, so
+ * a stale grid hash never enters a scan. */
 export type GraphScope =
   | { kind: "folder"; root_id: string; folder: string }
   | { kind: "collection"; id: string }
-  | { kind: "library" };
+  | { kind: "library" }
+  | { kind: "hashes"; hashes: string[] };
 
 /** One image's blended affinity to one topic anchor (snake_case twin of the
  * Rust `TopicScore` — same convention as the search `ImageResult`). */

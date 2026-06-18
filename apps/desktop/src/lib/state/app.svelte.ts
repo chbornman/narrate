@@ -1322,10 +1322,16 @@ export class Ui {
     const scope = this.graphScope();
     const load = ++this.gridLoad;
     let ranked: import("../types/dto").RankedImageDto[] = [];
-    try {
-      ranked = (await ipc.topicRankedImages(phrase, scope)) ?? [];
-    } catch {
-      ranked = []; // unreachable backend / empty index: an honest empty grid
+    // graphScope() can refuse (null) when there is no folder/collection source to
+    // name. A topic scope's `within` is always a folder/collection by
+    // construction, so null is the defensive "source removed" path: rank nothing
+    // (an honest empty grid) rather than widen the rank to the whole library.
+    if (scope !== null) {
+      try {
+        ranked = (await ipc.topicRankedImages(phrase, scope)) ?? [];
+      } catch {
+        ranked = []; // unreachable backend / empty index: an honest empty grid
+      }
     }
     if (load !== this.gridLoad) return; // a newer scope owns the grid now
     // Cache the ranked scores for the Topics-tab bake bar (threshold -> count ->
@@ -1413,9 +1419,14 @@ export class Ui {
   ): Promise<CollectionDto | null> {
     const trimmed = name.trim();
     if (trimmed === "") return null;
+    const scope = this.graphScope();
+    // Refuse the bake when the scope has no folder/collection source to name: a
+    // bake is a one-way commit, so baking the WHOLE library by accident (the old
+    // silent fallback) would be the worst possible scale spike. null => no bake.
+    if (scope === null) return null;
     const created = await ipc.createCollectionFromTopic(
       phrase,
-      this.graphScope(),
+      scope,
       threshold,
       trimmed,
       alpha,
@@ -1484,18 +1495,56 @@ export class Ui {
   }
 
   /** The backend GraphScope for the lens, derived from the CURRENT grid scope
-   * (the lens shows whatever the grid shows). A derived scope (query/similar)
-   * unwraps to its underlying folder/collection source; the founder can also
-   * point the lens at the WHOLE library (the deliberate scale spike) via the
-   * lens' own control, which passes `{ kind: "library" }` directly. */
-  graphScope(): ipc.GraphScope {
+   * (the lens shows whatever the grid shows). The founder can also point the
+   * lens at the WHOLE library (the deliberate scale spike) via the lens' own
+   * control, which passes `{ kind: "library" }` directly.
+   *
+   * SCOPING RULES (option (a): scope the lenses to the actual SEARCH RESULT) —
+   *  - folder / collection: name the source directly (a plain grid scope).
+   *  - topic: a topic is a RANKING OVER a source, so it unwraps to that source
+   *    (folder/collection) — the topic rank itself reads this to know WHAT to
+   *    rank, so it must resolve to the underlying set, never to the (not-yet-
+   *    computed) result. This is the "topic-over-a-source" case, kept as-is.
+   *  - query / similar: a committed search has NO folder/collection/library
+   *    noun the backend could name, but the frontend ALREADY holds the result
+   *    hashes (`grid.scopeHashes`, the same set the diversify path reads). We
+   *    return `{ kind: "hashes", hashes }` so the lenses (visualizer / dedup /
+   *    diversify / affinities) operate on EXACTLY the result the reviewer is
+   *    looking at — not the underlying folder, and never silently widened to
+   *    the whole library (AUDIT-FRONTEND-COUPLING B4 / STATE-MACHINE 6f). The
+   *    backend `Hashes` arm filters these down to images that still exist in
+   *    the library, so a stale grid hash never enters a scan.
+   *
+   * EMPTY-SCOPE BOUNDARY: returns `null` ONLY for a genuinely empty /
+   * unresolvable scope — a query/similar result with NO hashes at all (nothing
+   * to scope to), or a derived scope whose `within` is somehow neither
+   * folder nor collection. `null` is the deliberate calm REFUSE the callers
+   * already handle (no-op, never widen). A non-empty result is always a real
+   * `hashes` scope now, so the common search case flows through normally. */
+  graphScope(): ipc.GraphScope | null {
+    // A query/similar scope IS the search result: scope to its actual hashes,
+    // not to the source folder underneath it. Read the scope kind off the LIVE
+    // gridScope (not scopeSource(), which deliberately unwraps to the source for
+    // the topic/return-to-source paths).
+    if (
+      this.gridScope.kind === "query" ||
+      this.gridScope.kind === "similar"
+    ) {
+      const hashes = this.grid.scopeHashes;
+      // A truly-empty result has nothing to scope to: refuse (null) so the
+      // lenses no-op calmly rather than scan an empty/whole-library set. This
+      // is the one empty-scope boundary the calm refuse still covers.
+      if (hashes.length === 0) return null;
+      return { kind: "hashes", hashes };
+    }
     const src = this.scopeSource();
     if (src.kind === "collection") return { kind: "collection", id: src.id };
     if (src.kind === "folder")
       return { kind: "folder", root_id: src.rootId, folder: src.folder };
-    // A bare query/similar with no resolvable folder/collection source falls
-    // back to the whole library (nothing narrower to scope to).
-    return { kind: "library" };
+    // A topic scope reached here unwraps to its source (folder/collection)
+    // above; anything else has no nameable source and no hashes to scope to —
+    // refuse, never widen.
+    return null;
   }
 
   /** Click a topic anchor → scope the grid to that topic (visualizer->grid +
@@ -2968,12 +3017,23 @@ export class Ui {
       this.diversifyDegraded = false;
       return;
     }
+    const scope = this.graphScope();
+    if (scope === null) {
+      // No folder/collection source to name and no result-set scope variant to
+      // pass the actual hashes: refuse rather than diversify the WHOLE library
+      // (the old silent fallback). Clear the filter (show everything) and don't
+      // claim degradation — the rig is fine, this scope just isn't diversifiable.
+      this.grid.diversifyShown = null;
+      this.diversifyHidden = 0;
+      this.diversifyDegraded = false;
+      return;
+    }
     const tolerance = percentToTolerance(this.diversifyTolerancePercent);
     const load = ++this.diversifyLoad;
     try {
       // Reuse the SAME GraphScope the visualizer/topic commands resolve, so the
       // backend diversifies exactly the set the grid is scoped to.
-      const report = await ipc.diversifyScope(this.graphScope(), tolerance);
+      const report = await ipc.diversifyScope(scope, tolerance);
       if (load !== this.diversifyLoad) return; // a newer pass owns the filter now
       this.diversifyDegraded = report.degraded;
       if (report.degraded) {
@@ -3039,15 +3099,21 @@ export class Ui {
    * lens just shows the none-state. */
   async fetchDuplicates() {
     if (!this.dupesOn) return;
+    const scope = this.graphScope();
+    if (scope === null) {
+      // No folder/collection source to name and no result-set scope variant to
+      // pass the actual hashes: refuse rather than scan the WHOLE library (the
+      // old silent fallback). Resolve to the none-state (an empty group set) so
+      // the lens shows "nothing to dedup here", not a stuck "scanning" line.
+      this.dupeGroups = [];
+      return;
+    }
     const load = ++this.dupeLoad;
     // null marks "scanning" so the view can show a quiet in-flight line instead
     // of flashing the none-state between a scope change and its result.
     this.dupeGroups = null;
     try {
-      const groups = await ipc.findNearDuplicates(
-        this.graphScope(),
-        this.dupeThreshold,
-      );
+      const groups = await ipc.findNearDuplicates(scope, this.dupeThreshold);
       if (load !== this.dupeLoad) return; // a newer scan won
       this.dupeGroups = groups ?? [];
     } catch {

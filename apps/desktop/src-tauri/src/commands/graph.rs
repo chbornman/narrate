@@ -33,7 +33,9 @@ use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
 /// The grid scope the graph is pointed at (mirrors the frontend `GridScope`
-/// sources — folder / collection / the full-library scale spike).
+/// sources — folder / collection / the full-library scale spike — plus an
+/// explicit hash list so a SEARCH RESULT, which the other arms cannot name, is
+/// expressible directly).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GraphScope {
@@ -43,6 +45,21 @@ pub enum GraphScope {
     Collection { id: String },
     /// The WHOLE library — the deliberate scale spike (DESIGN §scale).
     Library,
+    /// An EXPLICIT image-hash list — the lens scoped to exactly a search
+    /// RESULT (a committed query / "more like this" / a ranked topic), which
+    /// has no folder/collection/library noun the other arms could resolve. The
+    /// frontend already holds those hashes (`grid.scopeHashes`); this variant
+    /// lets the lenses (visualizer / dedup / diversify / topic affinities)
+    /// operate on the result set the reviewer is actually looking at instead of
+    /// refusing or silently widening to the whole library.
+    ///
+    /// The serde tag is `kind: "hashes"` (snake_case, like the other arms), so
+    /// the frontend sends `{ kind: "hashes", hashes: [...] }`.
+    ///
+    /// NOTE the hashes are UNTRUSTED frontend input: `enumerate_scope` filters
+    /// them down to images that still actually exist (active) in the library —
+    /// see the arm below — so a stale/deleted hash never enters a scan.
+    Hashes { hashes: Vec<String> },
 }
 
 /// Resolve a scope to its in-scope image hashes (lowercase hex strings), the
@@ -75,6 +92,29 @@ pub(crate) fn enumerate_scope(app: &App, scope: &GraphScope) -> CmdResult<Vec<St
             .into_iter()
             .map(|h| h.as_str().to_owned())
             .collect(),
+        GraphScope::Hashes { hashes } => {
+            // The frontend sends the CURRENT grid result hashes verbatim, so we
+            // must NOT trust them: a hash can be stale (its file was deleted /
+            // its root removed since the grid listed it). INTERSECT with the
+            // real, live image set — exactly the `state = 'active'` rows
+            // `image_hashes()` already surfaces (the Library arm's universe) —
+            // so a scan never touches an orphaned hash. We resolve the live set
+            // ONCE into a HashSet and keep the frontend's hashes that survive,
+            // PRESERVING the frontend's (relevance / ranked) order so a lens
+            // that cares about order sees the result order, not hash order.
+            let live: std::collections::HashSet<String> = app
+                .library
+                .image_hashes()
+                .map_err(|e| CmdError::Invalid(format!("hashes scope: {e}")))?
+                .into_iter()
+                .map(|h| h.as_str().to_owned())
+                .collect();
+            hashes
+                .iter()
+                .filter(|h| live.contains(h.as_str()))
+                .cloned()
+                .collect()
+        }
     };
     Ok(hashes)
 }
@@ -603,6 +643,86 @@ mod tests {
         ))
         .expect("cluster_topics");
         assert!(out.is_empty());
+    }
+
+    /// Seed ONE active image (an `images` row plus an `active` `paths` row on
+    /// an online volume) directly into the App's db over a sibling connection —
+    /// the `m1_core_api` seed pattern. This is what `image_hashes()` (the live
+    /// universe the `Hashes` arm intersects against) surfaces, so the test can
+    /// prove the existence filter keeps it and drops everything else.
+    fn seed_active_image(app: &App, hash: &str) {
+        let db_path = app.app_data.join("photoproof.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute(
+            "INSERT INTO volumes (volume_id, state, mount_point, read_only, first_seen_at, last_seen_at)
+             VALUES ('vol1', 'online', '/mnt/test', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed volume");
+        conn.execute(
+            "INSERT INTO roots (root_id, volume_id, rel_path, display_name, state, created_at)
+             VALUES ('root1', 'vol1', 'photos', 'Test', 'active', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("seed root");
+        conn.execute(
+            "INSERT INTO images (image_hash, byte_size, format, first_ingested_at, capture_ts)
+             VALUES (?1, 1000, 'jpeg', '2026-02-01T00:00:00Z', NULL)",
+            rusqlite::params![hash],
+        )
+        .expect("seed image");
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, root_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p1', ?1, 'vol1', 'root1', 'photos/a.jpg', 1000, 0, 'active',
+                     '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')",
+            rusqlite::params![hash],
+        )
+        .expect("seed path");
+    }
+
+    /// The `Hashes` scope (option (a): scope the lenses to the actual SEARCH
+    /// RESULT) resolves to EXACTLY the in-library subset of the given hashes,
+    /// in the FRONTEND's order. A hash the frontend still holds but that no
+    /// longer exists in the library (deleted file / removed root / never
+    /// ingested) is DROPPED — the arm never trusts a stale grid hash. This is
+    /// the shared-by-all-callers contract (graph_neighbors / topic_affinities /
+    /// find_near_duplicates / diversify_scope all flow through enumerate_scope).
+    #[test]
+    fn enumerate_scope_hashes_keeps_only_in_library_hashes() {
+        let (_tmp, tauri_app) = mock_app();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let app = state.inner().clone();
+
+        // One real, in-library image; one hash the frontend holds but that is
+        // NOT in the library (a stale/deleted/never-ingested grid hash).
+        let real = "ab".repeat(32);
+        let unknown = "cd".repeat(32);
+        seed_active_image(&app, &real);
+
+        // Order: unknown FIRST so the assertion also proves order is preserved
+        // (the result order the lenses care about), not re-sorted by hash.
+        let scope = GraphScope::Hashes {
+            hashes: vec![unknown.clone(), real.clone()],
+        };
+        let resolved = enumerate_scope(&app, &scope).expect("enumerate_scope");
+
+        // Exactly the in-library subset: the unknown hash is dropped, the real
+        // one kept.
+        assert_eq!(resolved, vec![real]);
+    }
+
+    /// An EMPTY `Hashes` scope (the truly-empty search result the frontend
+    /// declines to send, but defended here too) resolves to no images — never
+    /// an error. The graceful-by-construction posture every arm shares.
+    #[test]
+    fn enumerate_scope_hashes_empty_is_empty() {
+        let (_tmp, tauri_app) = mock_app();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let app = state.inner().clone();
+        let resolved =
+            enumerate_scope(&app, &GraphScope::Hashes { hashes: Vec::new() }).expect("enumerate");
+        assert!(resolved.is_empty());
     }
 
     /// `graph_tuning` returns the shipped defaults (the slider's start value +
