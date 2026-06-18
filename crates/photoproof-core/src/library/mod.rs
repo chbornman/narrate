@@ -16,6 +16,7 @@ mod hashing;
 mod ingest;
 mod metadata;
 mod paths;
+mod phash;
 mod placeholder;
 mod preview;
 mod raw_develop;
@@ -37,6 +38,10 @@ pub use ingest::{
     PRIORITY_WATCHER, PassCounters, PassName, PassState, placeholder_sentinel,
 };
 pub use paths::{Availability, BestPath, PathRow, StaleReason};
+// Tier-1 near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier 1").
+// The dHash + Hamming-grouping primitives; the DuplicateGroup wire shape is the
+// `find_near_duplicates` command's return element.
+pub use phash::{DuplicateGroup, dhash, group_near_duplicates, hamming};
 pub use placeholder::{
     PlaceholderDetector, PlatformPlaceholderDetector, SharedSetPlaceholderDetector,
 };
@@ -2102,6 +2107,11 @@ impl Library {
             .time(|| preview::decode_original_display_oriented(abs, image.exif_orientation));
         match decoded {
             Ok((img, _orientation)) => {
+                // Tier-1 near-dup dHash off the SAME decoded, display-oriented,
+                // sRGB image — near-free here (a 72 px² downscale + 64 compares)
+                // and exactly the "compute it in the preview pass" hook the
+                // design doc calls for. Stored below in the mark_done txn.
+                let phash = phash::dhash(&img);
                 let artifacts = preview::write_artifacts(
                     &self.cache_dir,
                     &item.image_hash,
@@ -2117,6 +2127,7 @@ impl Library {
                         PreviewSource::Original,
                         false,
                     )?;
+                    self.record_perceptual_hash_locked(&conn, &item.image_hash, phash)?;
                     ingest::mark_done(&conn, item, self.now())?;
                     Ok(())
                 })?;
@@ -2176,6 +2187,11 @@ impl Library {
                 // config (code default 2048; file-overridable via tuning.toml).
                 let accept_edge = crate::tuning::tuning().preview.embedded_accept_edge;
                 let meets_threshold = pw.max(ph) >= accept_edge;
+                // Tier-1 near-dup dHash off the oriented embedded preview (the
+                // RAW's own JPEG thumbnail) — the same near-free hook as the
+                // original path. A RAW and its exported JPEG share this embedded
+                // preview's look, so they near-dup-match as intended.
+                let phash = phash::dhash(&oriented);
                 let artifacts = preview::write_artifacts(
                     &self.cache_dir,
                     &item.image_hash,
@@ -2210,6 +2226,7 @@ impl Library {
                 // with no eager enqueue there is no pending count to misread,
                 // and a stroked RAW develops when viewed like any other.
                 let _ = meets_threshold;
+                self.record_perceptual_hash_locked(&conn, &item.image_hash, phash)?;
                 ingest::mark_done(&conn, item, now)?;
                 self.metrics.db_record.record(db_started.elapsed());
                 report.done += 1;
@@ -2472,6 +2489,25 @@ impl Library {
         Ok(())
     }
 
+    /// Store an image's Tier-1 perceptual hash (DESIGN-DEDUP-AND-SIMILARITY.md
+    /// §"Tier 1"). Called from inside the preview pass's already-held DB lock,
+    /// in the same transaction as `mark_done`, so the hash and the preview land
+    /// atomically. The `u64` dHash is bit-reinterpreted to `i64` for SQLite's
+    /// signed INTEGER; `find_near_duplicates` reverses it before XOR+popcount,
+    /// so every bit round-trips and the sign is never observed.
+    fn record_perceptual_hash_locked(
+        &self,
+        conn: &Connection,
+        hash: &ContentHash,
+        phash: u64,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "UPDATE images SET perceptual_hash = ?2 WHERE image_hash = ?1",
+            params![hash.as_str(), phash as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn pass_counters(
         &self,
     ) -> Result<std::collections::BTreeMap<(String, i64), PassCounters>, LibraryError> {
@@ -2553,6 +2589,57 @@ impl Library {
             ContentHash::from_hex(&h).map_err(|_| rusqlite::Error::InvalidQuery)
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Tier-1 near-duplicate detection over a scope (DESIGN-DEDUP-AND-SIMILARITY
+    /// .md §"Tier 1"). Given the image hashes that define a scope (folder /
+    /// collection / library — the shell resolves the scope to hashes) and a
+    /// Hamming `threshold`, returns GROUPS of images whose perceptual hashes are
+    /// transitively within `threshold` of one another (union-find over pairs).
+    ///
+    /// Only images that actually carry a perceptual hash participate; images
+    /// still awaiting the preview pass (NULL `perceptual_hash`) are silently
+    /// skipped rather than mis-grouped as all-zero. The scan is linear O(n²)
+    /// over the scope by design (the doc: linear is adequate at our scale; the
+    /// BK-tree is an optional optimization).
+    ///
+    /// Exact byte-identical files already collapse upstream (one BLAKE3
+    /// `image_hash` == one row, K13), so this tier surfaces the NEAR-dups: the
+    /// re-encodes, resizes, and light edits that share a look but not bytes.
+    pub fn find_near_duplicates(
+        &self,
+        scope: &[ContentHash],
+        threshold: u32,
+    ) -> Result<Vec<DuplicateGroup>, LibraryError> {
+        if scope.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.lock().expect("poisoned");
+        // Pull (hash, phash) for the in-scope images that have a phash. We query
+        // per-hash rather than build a giant IN-list: the scope can be tens of
+        // thousands, past SQLite's bound-parameter / expression-depth limits,
+        // and a prepared single-row lookup reused across the scope is simple and
+        // index-hits the PRIMARY KEY. The grouping cost (O(n²)) dominates this
+        // O(n) read anyway.
+        let mut stmt = conn.prepare("SELECT perceptual_hash FROM images WHERE image_hash = ?1")?;
+        let mut items: Vec<(String, u64)> = Vec::with_capacity(scope.len());
+        for h in scope {
+            // Two layers of "absent": the IMAGE row may not exist for this hash
+            // (`.optional()` → outer Option), and the `perceptual_hash` COLUMN
+            // may be NULL for an image not yet through the preview pass (the
+            // closure's `Option<i64>` → inner Option). Both mean "no hash to
+            // group", so we skip; only a present, non-NULL value participates.
+            let phash: Option<Option<i64>> = stmt
+                .query_row(params![h.as_str()], |r| r.get::<_, Option<i64>>(0))
+                .optional()?;
+            if let Some(Some(bits)) = phash {
+                // Reverse the i64<->u64 bit-reinterpret used at store time.
+                items.push((h.as_str().to_owned(), bits as u64));
+            }
+        }
+        drop(stmt);
+        drop(conn);
+        Ok(phash::group_near_duplicates(&items, threshold))
     }
 
     pub fn image(&self, hash: &ContentHash) -> Result<Option<ImageRecord>, LibraryError> {

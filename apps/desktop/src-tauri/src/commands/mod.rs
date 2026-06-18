@@ -14,6 +14,9 @@
 pub mod app;
 pub mod capture;
 pub mod collections;
+// Tier-1 near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier 1"):
+// find_near_duplicates over the perceptual-hash column. A self-contained module.
+pub mod dedup;
 // Diversify / duplication-tolerance view filter (DESIGN-DEDUP-AND-SIMILARITY.md):
 // representative-subset selection over the CLIP k-NN graph. A self-contained
 // command module reusing graph.rs's scope enumeration.
