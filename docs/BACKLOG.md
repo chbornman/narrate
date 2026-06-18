@@ -724,12 +724,20 @@ magnitudes.
   BLAKE3 (K13). Surfaces as stacks (folds in the open "Burst/HDR-bracket stacks"
   item) or a "Duplicates"/"Diversify" scope; keep/cull decisions are TRUTH ->
   sidecar events. Opt-in toggle (it is destructive-adjacent). REFERENCE: look at
-  dupeGuru's picture mode (block-based average-color + match-% threshold). A deep-
-  research report on SOTA dedup techniques + a recommendation is IN FLIGHT (run
-  `wf_1b3bf86f`, June 17 2026); it will feed a `DESIGN-DEDUP-AND-SIMILARITY.md`
-  (the "wide think": emergent kNN engine, union-find -> stacks, pHash cull tier,
-  the tolerance slider mapping one control to a similarity/Hamming threshold, +
-  adjacent use cases - ML dataset de-dup, reverse-image/copyright, "best of burst").
+  dupeGuru's picture mode (block-based average-color + match-% threshold).
+  **WIDE THINK + cited SOTA research LANDED: `docs/DESIGN-DEDUP-AND-SIMILARITY.md`**
+  (deep-research, 24 verified claims). Headline recommendation: a THREE-tier stack
+  - BLAKE3 exact (built) / perceptual hash dHash or pHash via the Rust `img_hash`
+  crate for precise "same photo" near-dup (the small add; threshold EMPIRICALLY
+  calibrated - the normality assumption was refuted) / CLIP cosine kNN for "looks
+  alike" (built; also our crop+rotation fallback, so likely NO local-feature tier
+  needed). The tolerance slider = greedy FACILITY-LOCATION (or MMR-lambda) over the
+  existing `knn_within` graph to collapse each cluster to a representative; the
+  0-100% dupeGuru/digiKam slider is the UX template. Bursts = `capture_ts` +
+  similarity. Recommended phasing + open questions (esp. the empirical Hamming
+  threshold, and whether one slider spans both Hamming+cosine spaces) in the doc.
+  Adjacent use cases the engine generalizes to: ML dataset de-dup, reverse-image/
+  copyright (Meta SSCD), content-versioning, "best of burst" auto-pick.
 
 ## Lighting up M3 (the semantic-search chain, in order)
 

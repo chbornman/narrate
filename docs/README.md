@@ -33,6 +33,7 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 | `LICENSES.md` | The license inventory: our own code, the Rust + npm dep trees, the ML runtimes, the GPU runtimes, and the model weights, with the copyleft + model-license flags. Re-run `cargo license` when deps/models change. |
 | `STATE-INTEGRITY-AUDIT.md` | Data/state integrity audit: silent-failure bugs, version/downgrade guards, disk-vs-DB reconciliation, recovery/reset gaps, plus a living checklist for new state classes. Re-run `scripts/state-integrity-audit.workflow.js`. |
 | `AUDIT-FRONTEND-COUPLING.md` | Frontend implicit-seam / staleness audit: the 5 interaction axes (viewMode × scope × search-lane × capture × escape) swept for the visualizer bug class, anchored CONFIRMED/SUSPECTED, ending in the P1-P7 fix packet (tracked in `BACKLOG.md`). |
+| `DESIGN-DEDUP-AND-SIMILARITY.md` | Wide-think + cited SOTA research for similarity grouping, near-dup dedup, and the "duplication-tolerance" hide-for-variety slider: the three-tier model (BLAKE3 / perceptual hash / CLIP), diverse-subset algorithms over the existing kNN graph, burst grouping, and adjacent use cases. |
 | `SPIKE-ASR35.md` | Nemotron 3.5 dev evaluation + the chunk-size root-cause finding (B74). |
 | `SPIKE-P6.3.md` | Model-spike findings and recipes (ASR/LLM/VAD pins, flags, measurements) — load-bearing for RUNTIME. |
 | `SPEC-GAPS.md` | CLOSED historical record: the gap-id registry the spec status banners cite ("Closes E5"). Not a TODO. |
