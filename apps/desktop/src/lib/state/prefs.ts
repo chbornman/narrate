@@ -282,6 +282,34 @@ export function saveHeatAllTime(on: boolean) {
   saveBool("pp.heatAllTime", on);
 }
 
+// ---- near-duplicate lens (DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1") ----------
+
+/** The Duplicates lens toggle, default OFF (opt-in, destructive-adjacent — the
+ * design doc's "Opt-in" rule). Persisted like the other review-aid toggles so a
+ * reviewer mid-cull keeps it across a relaunch. */
+export function loadDupesOn(): boolean {
+  return loadBool("pp.dupesOn", false);
+}
+
+export function saveDupesOn(on: boolean) {
+  saveBool("pp.dupesOn", on);
+}
+
+/** The looseness-slider value (Hamming threshold over the 64-bit perceptual
+ * hash), persisted so a sweep the founder settled on survives the session.
+ * `fallback` is the caller's calibrated default (tuning.DEDUP_THRESHOLD_DEFAULT)
+ * so the one-true default lives in the tuning registry, not here. A stored
+ * non-number / out-of-nowhere value falls back rather than feeding the backend
+ * garbage. */
+export function loadDupeThreshold(fallback: number): number {
+  const v = Number(safeGet("pp.dupeThreshold"));
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
+export function saveDupeThreshold(value: number) {
+  safeSet("pp.dupeThreshold", String(value));
+}
+
 // ---- semantic graph: attention overlay (heatmap x graph synthesis) ----------
 
 /** The three-state Attention overlay on the topic-graph (Off / Engaged /

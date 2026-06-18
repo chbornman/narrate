@@ -9,6 +9,10 @@
   import { ui } from "../../state/app.svelte";
   import GridHeader from "./GridHeader.svelte";
   import Grid from "./Grid.svelte";
+  // The Duplicates lens (DESIGN-DEDUP-AND-SIMILARITY.md): an opt-in DISPLAY view
+  // over the current scope, rendered IN PLACE of the grid when ui.dupesOn (the
+  // header stays so the toggle is always reachable).
+  import DuplicatesView from "./DuplicatesView.svelte";
 
   /** One size step per accumulated notch (mouse notch ≈ 100–120,
    * trackpads stream smaller deltas). */
@@ -32,7 +36,11 @@
     <GridHeader />
   {/if}
   <div class="grid-area">
-    <Grid />
+    {#if ui.dupesOn}
+      <DuplicatesView />
+    {:else}
+      <Grid />
+    {/if}
   </div>
 </div>
 

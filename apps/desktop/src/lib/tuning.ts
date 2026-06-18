@@ -30,3 +30,27 @@ export const SEARCH_DEBOUNCE_MS = 50;
  * set nobody asked for. Shorter queries with no chips clear the results instead.
  */
 export const MIN_QUERY_CHARS = 2;
+
+/**
+ * Looseness-slider debounce, ms (Duplicates lens, DESIGN-DEDUP-AND-SIMILARITY.md
+ * "looseness slider"). The near-dup scan is O(n^2) over the scope and can run on
+ * tens of thousands of images, so while the founder DRAGS the Hamming threshold
+ * we coalesce the sweep and only re-scan once the slider settles. Larger than the
+ * search debounce because this is a heavier, off-keystroke-path control: a brief
+ * settle reads as deliberate, and it spares the backend a scan per slider tick.
+ */
+export const DEDUP_THRESHOLD_DEBOUNCE_MS = 250;
+
+/**
+ * Looseness-slider bounds (Hamming distance over a 64-bit perceptual hash). The
+ * backend's calibrated default lives in `tuning.toml` (`[dedup].hamming_threshold`,
+ * 8/64) and is what an UNTUNED scan uses; these are only the UI sweep RANGE so
+ * the founder can explore tighter ("same file re-saved") to looser ("light
+ * edits"). Kept well below 32 (half the bits = coin-flip, i.e. unrelated) so the
+ * slider never claims unrelated photos are dupes.
+ */
+export const DEDUP_THRESHOLD_MIN = 0;
+export const DEDUP_THRESHOLD_MAX = 16;
+/** Where the slider sits before the founder moves it: the backend's documented
+ * 8/64 default, mirrored so the control opens AT the scan it first ran. */
+export const DEDUP_THRESHOLD_DEFAULT = 8;
