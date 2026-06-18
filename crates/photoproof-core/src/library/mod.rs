@@ -67,7 +67,7 @@ pub use watcher::{
 };
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -169,6 +169,16 @@ pub struct Library {
     debug_log: Mutex<Vec<String>>,
     /// Ingest-stage timings (BACKLOG "measured, not vibes" — first slice).
     metrics: PipelineMetrics,
+    /// Monotonic, in-memory image-set version (Seam 1, sibling of
+    /// `PpvecStore::vectors_version`). Bumped on every committed NEW-image
+    /// insert (`new_image_tx`) so the library->view data-change contract lets
+    /// the grid re-list when its slice advances instead of polling on a
+    /// wall-clock throttle. In-memory only: no schema column, no migration —
+    /// views re-list on mount, so a counter that resets to 0 at process start
+    /// is correct. NOTE: this counts ADDED images only; root-removal already
+    /// rides its own `roots-changed` event, so it deliberately does not bump
+    /// here (see ARCHITECTURE-CONTRACTS.md Seam 1).
+    images_version: AtomicU64,
 }
 
 impl Library {
@@ -238,6 +248,7 @@ impl Library {
             clock: MonotonicMillis::new(),
             debug_log: Mutex::new(Vec::new()),
             metrics: PipelineMetrics::default(),
+            images_version: AtomicU64::new(0),
         };
         if recovered > 0 {
             lib.log(format!(
@@ -1610,7 +1621,21 @@ impl Library {
             &tx, hash, byte_size, volume_id, root_id, rel_path, mtime_ns, priority,
         )?;
         tx.commit()?;
+        // Library->view data-version (Seam 1): a NEW image row has committed, so
+        // the grid's slice changed. Bump AFTER the commit (the `?` early returns
+        // above are errors and must not advance the version) so the pump's
+        // `prev != status` emit-gate refreshes the grid over the existing
+        // `ingest-progress` channel instead of the old 2s wall-clock relist.
+        self.images_version.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Monotonic per-process image-set version (Seam 1, sibling of
+    /// [`crate::retrieval::PpvecStore::vectors_version`]). Views compare it to
+    /// the value they last rendered against and re-list only when it advances.
+    /// Counts ADDED images; root removal rides `roots-changed` separately.
+    pub fn images_version(&self) -> u64 {
+        self.images_version.load(Ordering::Relaxed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4061,6 +4086,32 @@ mod tests {
             finished.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the one item claimed before the error still finished (no stuck work)"
+        );
+    }
+
+    /// Seam 1 (ARCHITECTURE-CONTRACTS.md): a committed NEW-image insert advances
+    /// `images_version` so the grid re-lists on the data-version handshake. A
+    /// duplicate insert (same hash, ON CONFLICT DO NOTHING) still rides the same
+    /// `new_image_tx` chokepoint, so the version is monotone over calls — the
+    /// view only ever sees it go up; the coarse counter is intentionally
+    /// per-call, not per-row.
+    #[test]
+    fn images_version_advances_on_new_image() {
+        let (_tmp, lib) = pipeline_test_library();
+        assert_eq!(lib.images_version(), 0, "fresh library starts at 0");
+
+        let h1 = ContentHash::from_hex(&format!("{:064x}", 1)).unwrap();
+        lib.new_image_tx(&h1, 1234, "vol1", None, "a/IMG_1.jpg", 1_000, 0)
+            .unwrap();
+        let after_first = lib.images_version();
+        assert!(after_first > 0, "a new image advanced the version");
+
+        let h2 = ContentHash::from_hex(&format!("{:064x}", 2)).unwrap();
+        lib.new_image_tx(&h2, 5678, "vol1", None, "a/IMG_2.jpg", 2_000, 0)
+            .unwrap();
+        assert!(
+            lib.images_version() > after_first,
+            "a second new image advanced the version again (monotone)"
         );
     }
 }

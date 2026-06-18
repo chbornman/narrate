@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use thiserror::Error;
@@ -325,6 +325,15 @@ pub struct EventStore {
     /// synchronously (RETRIEVAL §13.5) — the metadata rows live in this
     /// same database, only the bytes are external.
     vectors_dir: Option<std::path::PathBuf>,
+    /// Monotonic, in-memory journal version (Seam 1, sibling of
+    /// `PpvecStore::vectors_version` and `Library::images_version`). Bumped on
+    /// every committed journal MUTATION — a minted event (`append`), a
+    /// redaction (`redact`), or a sidecar merge that landed events (`merge`) —
+    /// so the library->view data-change contract lets the inspector/journal
+    /// re-read when its slice advances instead of running an ad-hoc membership
+    /// test. In-memory only: no schema column, no migration; views re-read on
+    /// mount, so a counter that resets to 0 at process start is correct.
+    journal_version: AtomicU64,
 }
 
 impl EventStore {
@@ -354,6 +363,7 @@ impl EventStore {
             next_reader: AtomicUsize::new(0),
             minter: Minter::new(),
             vectors_dir: crate::retrieval::default_vectors_dir(path),
+            journal_version: AtomicU64::new(0),
         };
         // Two migrations added an `image_journal_stats` column with a
         // placeholder DEFAULT that the real fold must backfill: v5 added
@@ -364,6 +374,21 @@ impl EventStore {
             store.rebuild_derived()?;
         }
         Ok(store)
+    }
+
+    /// Monotonic per-process journal version (Seam 1, sibling of
+    /// [`crate::retrieval::PpvecStore::vectors_version`] and
+    /// [`crate::library::Library::images_version`]). Views compare it to the
+    /// value they last read against and re-read only when it advances.
+    pub fn journal_version(&self) -> u64 {
+        self.journal_version.load(Ordering::Relaxed)
+    }
+
+    /// Bump the journal version (Seam 1) after a committed journal mutation.
+    /// Centralized so every mutating path advances it the same way; callers
+    /// invoke it only AFTER the writing transaction commits.
+    fn bump_journal_version(&self) {
+        self.journal_version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Monotonic ULID + UTC ts, for pre-allocation at capture onset (§1.2).
@@ -475,6 +500,10 @@ impl EventStore {
         }
         recompute_derived(&tx, &roots, &dirty)?;
         tx.commit().map_err(StoreError::from)?;
+        // Library->view data-version (Seam 1): a journal event was minted, so
+        // the inspector's slice changed. Bump AFTER the commit (the `?` above
+        // are errors) so views re-read over the existing event channel.
+        self.bump_journal_version();
         Ok(event)
     }
 
@@ -892,6 +921,9 @@ impl EventStore {
         //    The scrub above is already committed; a CheckpointBlocked error
         //    here means hygiene is incomplete, not that the redaction failed.
         checkpoint_truncate(&w)?;
+        // Library->view data-version (Seam 1): a redaction mutated the journal,
+        // so the inspector's slice changed. Bump after the durable commit.
+        self.bump_journal_version();
         Ok(out)
     }
 
@@ -1042,6 +1074,13 @@ impl EventStore {
             schema::run_pragma(&w, "ANALYZE")?;
             w.execute("INSERT INTO event_fts(event_fts) VALUES('optimize')", [])?;
             checkpoint_truncate(&w)?;
+        }
+        // Library->view data-version (Seam 1): bump only when the merge actually
+        // changed the journal — new events landed or a merge-learned redaction
+        // scrubbed existing ones. A pure no-op merge (all duplicates) leaves the
+        // version untouched so views do not re-read on nothing.
+        if report.inserted > 0 || report.newly_scrubbed > 0 {
+            self.bump_journal_version();
         }
         Ok(report)
     }

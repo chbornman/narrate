@@ -71,7 +71,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "clear_dwell":
         return cmd === "clear_dwell" ? 0 : null;
       case "ingest_status":
-        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 };
+        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0 };
       case "toggle_mic":
       case "set_mic": {
         // Echo the §11 indicator the way the core does — set_mic lands

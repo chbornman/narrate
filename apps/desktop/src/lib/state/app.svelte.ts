@@ -93,12 +93,16 @@ import { GridSlice } from "./grid.svelte";
 import { LookSlice } from "./look.svelte";
 import { InspectorSlice } from "./inspector.svelte";
 
-/** Mid-scan grid refresh cadence — ONE policy shared by both refresh
- * paths: the event-driven re-list throttle in onIngestProgress and
- * App.svelte's poll interval. 2 s keeps a slow network-volume scan
- * visibly streaming into the grid without hammering list_folder; a
- * shared export keeps the two paths from drifting apart silently. */
-export const INGEST_RELIST_MS = 2_000;
+/** Debounce window for the version-driven mid-scan grid re-list (Seam 1,
+ * ARCHITECTURE-CONTRACTS.md step 3). The grid now re-lists when the backend's
+ * `imagesVersion` ADVANCES (a NEW image committed) rather than on a wall-clock
+ * poll; a fast scan bumps the version many times per second, so we coalesce a
+ * burst into ONE list_folder. WHY 300 ms: short enough that a new image appears
+ * in the grid promptly (well inside the old 2 s throttle's responsiveness), long
+ * enough that a flurry of inserts collapses to a single re-list instead of
+ * hammering list_folder. The running→idle settle edge re-lists once more,
+ * immediately and un-debounced, so the final state is exact. */
+export const INGEST_RELIST_DEBOUNCE_MS = 300;
 
 /** Watchdog deadline for the optimistic `ingestExpecting` bridge
  * (shell.expectIngest). WHY this value: the bridge covers the dark window
@@ -967,14 +971,26 @@ export class Ui {
     if (load === this.gridLoad) this.grid.setItems(items);
   }
 
-  /** Coalesced ingest progress (pump.rs, ≤1 per 400 ms): the indicator
-   * pill always updates; while ingest RUNS the open folder also re-lists
-   * on a 2 s throttle — new images and previewReady flips only enter the
-   * grid through list_folder, and without this the grid sat EMPTY for the
-   * whole first scan of a slow network volume (founder, SMB, June 2026).
-   * The running→idle edge re-lists once more, unthrottled, so the settled
-   * state is exact. */
-  private lastIngestRefresh = 0;
+  /** The `imagesVersion` (Seam 1) the grid last re-listed against. The grid
+   * re-lists only when the backend reports a HIGHER version — a NEW image
+   * committed — so a fast scan that bumps the version repeatedly coalesces into
+   * one debounced re-list, and an event carrying no image change (a previewReady
+   * flip, a rate tick) does NO grid work. previewReady flips reach the grid on
+   * their own `previews-changed` channel; this path owns only image membership.
+   * Starts -1 so the first real status (version ≥ 0) always seeds a baseline
+   * without a spurious re-list. */
+  private lastImagesVersion = -1;
+  /** Pending debounce timer for the version-driven re-list (coalesces a burst
+   * of `imagesVersion` advances into one list_folder; see
+   * INGEST_RELIST_DEBOUNCE_MS). `ReturnType<typeof setTimeout>` is `number` in
+   * the browser; null when no re-list is scheduled. */
+  private relistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Coalesced ingest progress (pump.rs, ≤1 per 400 ms): the indicator pill
+   * always updates; the grid re-lists on the Seam 1 version handshake — when
+   * `imagesVersion` ADVANCES (a new image entered the open folder), debounced —
+   * replacing the retired 2 s wall-clock throttle and App.svelte's redundant
+   * setInterval. The running→idle settle edge re-lists once more, immediately
+   * and un-debounced, so the settled state is exact. */
   async onIngestProgress(status: IngestStatus) {
     // Real status arrived: the optimistic add-root/rescan bridge stands
     // down — `running` (walk-aware via `scanning`) owns the empty-state
@@ -984,16 +1000,39 @@ export class Ui {
     // clear after a healthy scan already took over.
     this.shell.clearIngestExpecting();
     const wasRunning = this.shell.ingest.running;
+    const prevImagesVersion = this.lastImagesVersion;
     this.shell.ingest = status;
     if (this.grid.rootId === null) return;
-    if (status.running) {
-      const now = Date.now();
-      if (now - this.lastIngestRefresh < INGEST_RELIST_MS) return;
-      this.lastIngestRefresh = now;
-      await this.refreshItems();
-    } else if (wasRunning) {
+    // Seam 1: re-list when, and only when, the image-set version advanced past
+    // what the grid last rendered. Seed the baseline on the first event (or any
+    // event before the version moved) so we never re-list on no change.
+    const versionAdvanced =
+      prevImagesVersion >= 0 && status.imagesVersion > prevImagesVersion;
+    this.lastImagesVersion = status.imagesVersion;
+    if (versionAdvanced) this.scheduleVersionRelist();
+    // The settle edge is exact and un-debounced: cancel any pending debounce so
+    // a single final list_folder reflects the finished scan (covers the last
+    // image and any in-flight coalesced burst).
+    if (!status.running && wasRunning) {
+      if (this.relistTimer !== null) {
+        clearTimeout(this.relistTimer);
+        this.relistTimer = null;
+      }
       await this.refreshItems();
     }
+  }
+
+  /** Debounced grid re-list for the Seam 1 version handshake: a burst of
+   * `imagesVersion` advances collapses to one list_folder after the open folder
+   * goes quiet for INGEST_RELIST_DEBOUNCE_MS. Re-arming resets the window so a
+   * steady stream keeps deferring until it pauses (then the settle edge takes
+   * over). */
+  private scheduleVersionRelist() {
+    if (this.relistTimer !== null) clearTimeout(this.relistTimer);
+    this.relistTimer = setTimeout(() => {
+      this.relistTimer = null;
+      void this.refreshItems();
+    }, INGEST_RELIST_DEBOUNCE_MS);
   }
 
   async applySelection(next: sel.SelState) {
@@ -1892,7 +1931,21 @@ export class Ui {
    * (tests run without a Tauri event loop); the duplicate fetch this
    * implies for same-window writes is absorbed by the inspector slice's
    * stale-response guard. The Look overlay's strokesVersion bump MIGRATED
-   * here from the indicator-pulse heuristic — hash-aware now. */
+   * here from the indicator-pulse heuristic — hash-aware now.
+   *
+   * Seam 1 NOTE (ARCHITECTURE-CONTRACTS.md step 3): the grid + inspector moved
+   * onto the `imagesVersion` handshake, but this membership-test path is KEPT
+   * deliberately. The new `journalVersion` counter is COARSE — it says "the
+   * journal changed" but NOT which hashes — whereas this path carries the
+   * affected hashes and refreshes ONLY the open surface that is actually
+   * affected (the viewed hash's strokes, the open inspector's image, the folder
+   * that contains an affected image). Keying off `journalVersion` advancing
+   * alone would reload/relist on EVERY journal mutation anywhere, strictly more
+   * work and less precise. `journalVersion` still earns its place — it rides
+   * `ingest-progress`, so a cross-window/voice mutation that emits no
+   * `journal-changed` in THIS window still nudges the pump's emit-gate — but the
+   * precise refresh stays hash-driven. (Per-hash `journalVersion` would let this
+   * path go versioned too; that is the Seam 1 per-slice refinement, out of P2.) */
   async onJournalChanged(hashes: string[]) {
     const affected = new Set(hashes);
     if (this.look.currentHash !== null && affected.has(this.look.currentHash))

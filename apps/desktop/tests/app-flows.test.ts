@@ -63,7 +63,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "list_archived_roots":
         return [];
       case "ingest_status":
-        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 };
+        return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0 };
       case "search":
         // Fused-order result hashes; the test seeds them via failSearch-free
         // default of three results r1..r3 (overridable per-test isn't needed).
@@ -102,7 +102,11 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (p: string, proto = "asset") => `${proto}://localhost/${p}`,
 }));
 
-import { Ui, INGEST_EXPECT_TIMEOUT_MS } from "../src/lib/state/app.svelte";
+import {
+  Ui,
+  INGEST_EXPECT_TIMEOUT_MS,
+  INGEST_RELIST_DEBOUNCE_MS,
+} from "../src/lib/state/app.svelte";
 import * as sel from "../src/lib/logic/selection";
 
 const item = (hash: string, fileName = `${hash}.jpg`): GridItem => ({
@@ -389,7 +393,7 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
       errors: 0,
       passes: [],
       scanning: true,
-      discovered: 42, offlineVolumes: [], vectorsVersion: 0
+      discovered: 42, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0
     });
     // The walk-aware status owns the copy now — and carries the count.
     expect(ui.shell.ingestExpecting).toBe(false);
@@ -409,7 +413,7 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
       errors: 0,
       passes: [],
       scanning: false,
-      discovered: 0, offlineVolumes: [], vectorsVersion: 0
+      discovered: 0, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0
     });
     expect(ui.shell.ingestExpecting).toBe(false);
   });
@@ -459,7 +463,7 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
         errors: 0,
         passes: [],
         scanning: true,
-        discovered: 7, offlineVolumes: [], vectorsVersion: 0
+        discovered: 7, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0
       });
       expect(ui.shell.ingestExpecting).toBe(false);
       // The watchdog must be CANCELLED: advancing past the deadline must not
@@ -471,34 +475,100 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
   });
 });
 
-describe("mid-scan grid re-list (founder, SMB, June 2026)", () => {
-  it("running ingest re-lists on a 2 s throttle; the idle edge re-lists once more", async () => {
+describe("mid-scan grid re-list — Seam 1 imagesVersion handshake (P2)", () => {
+  // The grid moved off the old 2 s wall-clock throttle + App.svelte's redundant
+  // setInterval onto the `imagesVersion` data-version contract: re-list when,
+  // and only when, the image-set version ADVANCES (a NEW image committed),
+  // debounced so a burst coalesces; the running→idle edge re-lists once more,
+  // immediately, for an exact settled state. previewReady flips reach the grid
+  // on their own `previews-changed` channel, NOT through this path.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** One ingest status; only the fields this contract reads matter. */
+  const status = (over: {
+    running: boolean;
+    imagesVersion: number;
+  }) => ({
+    running: over.running,
+    done: 0,
+    total: 10,
+    errors: 0,
+    passes: [],
+    scanning: false,
+    discovered: 0,
+    offlineVolumes: [],
+    vectorsVersion: 0,
+    imagesVersion: over.imagesVersion,
+    journalVersion: 0,
+  });
+
+  it("re-lists when imagesVersion advances (debounced) and NOT on an unrelated event", async () => {
     const ui2 = new Ui();
     ui2.grid.rootId = "R1";
     ui2.grid.folder = "";
     const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder").length;
     const before = calls();
-    const nowSpy = vi.spyOn(Date, "now");
 
-    nowSpy.mockReturnValue(100_000);
-    await ui2.onIngestProgress({ running: true, done: 1, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 });
-    expect(calls()).toBe(before + 1); // first running tick lists
+    // First event seeds the baseline version — no re-list on a first sighting.
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 0 }));
+    expect(calls()).toBe(before);
 
-    nowSpy.mockReturnValue(100_500);
-    await ui2.onIngestProgress({ running: true, done: 2, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 });
-    expect(calls()).toBe(before + 1); // inside the 2 s throttle: no re-list
+    // A NEW image lands: version advances 0→1. The re-list is debounced, so it
+    // has NOT fired synchronously; it fires once the debounce window elapses.
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 1 }));
+    expect(calls()).toBe(before); // still pending inside the debounce window
+    await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS);
+    expect(calls()).toBe(before + 1); // one coalesced re-list
 
-    nowSpy.mockReturnValue(103_000);
-    await ui2.onIngestProgress({ running: true, done: 5, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 });
-    expect(calls()).toBe(before + 2); // throttle elapsed
+    // An UNRELATED event (progress ticks, same imagesVersion) does NO grid work:
+    // the old throttle re-listed on every running tick; the version handshake
+    // re-lists only on a real image change.
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 1 }));
+    await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS);
+    expect(calls()).toBe(before + 1); // unchanged: no false refresh
+  });
 
-    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 });
-    expect(calls()).toBe(before + 3); // running→idle edge: exact final state
+  it("coalesces a burst of advances into ONE re-list", async () => {
+    const ui2 = new Ui();
+    ui2.grid.rootId = "R1";
+    ui2.grid.folder = "";
+    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder").length;
+    const before = calls();
+
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 0 })); // seed
+    // A fast scan bumps the version repeatedly inside one debounce window.
+    for (let v = 1; v <= 5; v++)
+      await ui2.onIngestProgress(status({ running: true, imagesVersion: v }));
+    expect(calls()).toBe(before); // all coalesced, still pending
+    await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS);
+    expect(calls()).toBe(before + 1); // the burst collapsed to a single re-list
+  });
+
+  it("the running→idle edge re-lists immediately and cancels any pending debounce", async () => {
+    const ui2 = new Ui();
+    ui2.grid.rootId = "R1";
+    ui2.grid.folder = "";
+    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder").length;
+    const before = calls();
+
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 0 })); // seed
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 3 })); // arms debounce
+    expect(calls()).toBe(before); // debounce pending, not yet fired
+
+    // Scan settles: the idle edge re-lists ONCE, immediately, for the exact
+    // final state — and must cancel the pending debounce so the burst does not
+    // also fire a second, redundant list_folder after.
+    await ui2.onIngestProgress(status({ running: false, imagesVersion: 3 }));
+    expect(calls()).toBe(before + 1); // exact final state, un-debounced
     expect(ui2.shell.ingest.running).toBe(false);
+    await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS * 2);
+    expect(calls()).toBe(before + 1); // pending debounce was cancelled
 
-    await ui2.onIngestProgress({ running: false, done: 10, total: 10, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0 });
-    expect(calls()).toBe(before + 3); // already idle: indicator only
-    nowSpy.mockRestore();
+    // Already idle, version unchanged: indicator only, no grid work.
+    await ui2.onIngestProgress(status({ running: false, imagesVersion: 3 }));
+    await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS);
+    expect(calls()).toBe(before + 1);
   });
 });
 
