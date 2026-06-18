@@ -195,14 +195,17 @@ describe("graphScope derivation from the current grid scope", () => {
     expect(ui.graphScope()).toEqual({ kind: "collection", id: "c1" });
   });
 
-  it("a query/similar scope unwraps to its underlying source", () => {
+  it("a query/similar scope maps to its RESULT HASHES (option a, the lens follows the result)", () => {
     ui.gridScope = {
       kind: "query",
       query: "fog",
       chips: [],
       within: { kind: "collection", id: "c2" },
     };
-    expect(ui.graphScope()).toEqual({ kind: "collection", id: "c2" });
+    // The grid result is what the lens scopes to now (not the source collection
+    // underneath, and never the whole library). rawItems is seeded in
+    // beforeEach to ["a","b","x"].
+    expect(ui.graphScope()).toEqual({ kind: "hashes", hashes: ["a", "b", "x"] });
   });
 });
 

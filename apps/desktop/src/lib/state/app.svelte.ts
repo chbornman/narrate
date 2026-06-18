@@ -1456,31 +1456,55 @@ export class Ui {
   }
 
   /** The backend GraphScope for the lens, derived from the CURRENT grid scope
-   * (the lens shows whatever the grid shows). A derived scope (query/similar/
-   * topic) unwraps to its underlying folder/collection source; the founder can
-   * also point the lens at the WHOLE library (the deliberate scale spike) via
-   * the lens' own control, which passes `{ kind: "library" }` directly.
+   * (the lens shows whatever the grid shows). The founder can also point the
+   * lens at the WHOLE library (the deliberate scale spike) via the lens' own
+   * control, which passes `{ kind: "library" }` directly.
    *
-   * Returns `null` when the current scope has NO folder/collection source the
-   * backend `GraphScope` can name. WHY return null instead of `{kind:"library"}`:
-   * the backend enum (commands/graph.rs `GraphScope`) is folder | collection |
-   * library only — it has no explicit hash-list / result-set variant — so a
-   * search-result scope whose source can't be resolved is NOT representable as
-   * "exactly the result set". Silently falling back to `{kind:"library"}` would
-   * widen the lens/dedup/diversify pass from the result the user is looking at
-   * to the ENTIRE library, a surprising scale spike happening by accident
-   * (AUDIT-FRONTEND-COUPLING B4 / STATE-MACHINE 6f). We make the transition
-   * EXPLICIT: refuse (null) and let each caller no-op calmly rather than widen.
-   * By construction today every derived scope's `within` is a folder/collection
-   * (scopeSource always unwraps to one), so null is the defensive "source was
-   * removed / a future un-sourced scope" path, never the common case. */
+   * SCOPING RULES (option (a): scope the lenses to the actual SEARCH RESULT) —
+   *  - folder / collection: name the source directly (a plain grid scope).
+   *  - topic: a topic is a RANKING OVER a source, so it unwraps to that source
+   *    (folder/collection) — the topic rank itself reads this to know WHAT to
+   *    rank, so it must resolve to the underlying set, never to the (not-yet-
+   *    computed) result. This is the "topic-over-a-source" case, kept as-is.
+   *  - query / similar: a committed search has NO folder/collection/library
+   *    noun the backend could name, but the frontend ALREADY holds the result
+   *    hashes (`grid.scopeHashes`, the same set the diversify path reads). We
+   *    return `{ kind: "hashes", hashes }` so the lenses (visualizer / dedup /
+   *    diversify / affinities) operate on EXACTLY the result the reviewer is
+   *    looking at — not the underlying folder, and never silently widened to
+   *    the whole library (AUDIT-FRONTEND-COUPLING B4 / STATE-MACHINE 6f). The
+   *    backend `Hashes` arm filters these down to images that still exist in
+   *    the library, so a stale grid hash never enters a scan.
+   *
+   * EMPTY-SCOPE BOUNDARY: returns `null` ONLY for a genuinely empty /
+   * unresolvable scope — a query/similar result with NO hashes at all (nothing
+   * to scope to), or a derived scope whose `within` is somehow neither
+   * folder nor collection. `null` is the deliberate calm REFUSE the callers
+   * already handle (no-op, never widen). A non-empty result is always a real
+   * `hashes` scope now, so the common search case flows through normally. */
   graphScope(): ipc.GraphScope | null {
+    // A query/similar scope IS the search result: scope to its actual hashes,
+    // not to the source folder underneath it. Read the scope kind off the LIVE
+    // gridScope (not scopeSource(), which deliberately unwraps to the source for
+    // the topic/return-to-source paths).
+    if (
+      this.gridScope.kind === "query" ||
+      this.gridScope.kind === "similar"
+    ) {
+      const hashes = this.grid.scopeHashes;
+      // A truly-empty result has nothing to scope to: refuse (null) so the
+      // lenses no-op calmly rather than scan an empty/whole-library set. This
+      // is the one empty-scope boundary the calm refuse still covers.
+      if (hashes.length === 0) return null;
+      return { kind: "hashes", hashes };
+    }
     const src = this.scopeSource();
     if (src.kind === "collection") return { kind: "collection", id: src.id };
     if (src.kind === "folder")
       return { kind: "folder", root_id: src.rootId, folder: src.folder };
-    // No folder/collection source to scope to, and no result-set variant in the
-    // backend GraphScope to scope to the actual hashes — refuse, never widen.
+    // A topic scope reached here unwraps to its source (folder/collection)
+    // above; anything else has no nameable source and no hashes to scope to —
+    // refuse, never widen.
     return null;
   }
 

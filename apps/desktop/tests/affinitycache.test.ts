@@ -35,6 +35,21 @@ describe("scopeKey — stable, change-sensitive scope identity", () => {
       scopeKey(collection),
     );
   });
+
+  it("a 'hashes' scope keys on its CONTENT so two results never collide", () => {
+    // Two different search results both read kind:"hashes"; keying on the kind
+    // alone would COLLIDE and serve one result's cached graph for another's.
+    const a: ScopeKeyInput = { kind: "hashes", hashes: ["aa", "bb"] };
+    const b: ScopeKeyInput = { kind: "hashes", hashes: ["cc", "dd"] };
+    expect(scopeKey(a)).not.toBe(scopeKey(b));
+    // The same result re-keys identically (a cache hit across a re-derive).
+    expect(scopeKey({ kind: "hashes", hashes: ["aa", "bb"] })).toBe(scopeKey(a));
+    // Order matters (the backend preserves result order): a reorder is a
+    // genuinely different lens input and must miss.
+    expect(scopeKey({ kind: "hashes", hashes: ["bb", "aa"] })).not.toBe(
+      scopeKey(a),
+    );
+  });
 });
 
 describe("affinityKey — order-insensitive over the topic SET", () => {
