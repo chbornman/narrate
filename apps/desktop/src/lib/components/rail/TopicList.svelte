@@ -28,8 +28,16 @@
 
   async function loadClusters() {
     const token = ++loadToken;
+    const scope = ui.graphScope();
+    // A refused scope (no folder/collection source to name) has nothing to
+    // cluster over; show no suggestions rather than cluster the whole library
+    // by accident (the old silent fallback, AUDIT-FRONTEND-COUPLING B4).
+    if (scope === null) {
+      clusters = [];
+      return;
+    }
     try {
-      const got = (await ipc.clusterTopics(ui.graphScope())) ?? [];
+      const got = (await ipc.clusterTopics(scope)) ?? [];
       if (token === loadToken) clusters = got;
     } catch {
       if (token === loadToken) clusters = []; // degraded rig: no suggestions

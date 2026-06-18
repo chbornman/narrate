@@ -1283,10 +1283,16 @@ export class Ui {
     const scope = this.graphScope();
     const load = ++this.gridLoad;
     let ranked: import("../types/dto").RankedImageDto[] = [];
-    try {
-      ranked = (await ipc.topicRankedImages(phrase, scope)) ?? [];
-    } catch {
-      ranked = []; // unreachable backend / empty index: an honest empty grid
+    // graphScope() can refuse (null) when there is no folder/collection source to
+    // name. A topic scope's `within` is always a folder/collection by
+    // construction, so null is the defensive "source removed" path: rank nothing
+    // (an honest empty grid) rather than widen the rank to the whole library.
+    if (scope !== null) {
+      try {
+        ranked = (await ipc.topicRankedImages(phrase, scope)) ?? [];
+      } catch {
+        ranked = []; // unreachable backend / empty index: an honest empty grid
+      }
     }
     if (load !== this.gridLoad) return; // a newer scope owns the grid now
     // Cache the ranked scores for the Topics-tab bake bar (threshold -> count ->
@@ -1374,9 +1380,14 @@ export class Ui {
   ): Promise<CollectionDto | null> {
     const trimmed = name.trim();
     if (trimmed === "") return null;
+    const scope = this.graphScope();
+    // Refuse the bake when the scope has no folder/collection source to name: a
+    // bake is a one-way commit, so baking the WHOLE library by accident (the old
+    // silent fallback) would be the worst possible scale spike. null => no bake.
+    if (scope === null) return null;
     const created = await ipc.createCollectionFromTopic(
       phrase,
-      this.graphScope(),
+      scope,
       threshold,
       trimmed,
       alpha,
@@ -1445,18 +1456,32 @@ export class Ui {
   }
 
   /** The backend GraphScope for the lens, derived from the CURRENT grid scope
-   * (the lens shows whatever the grid shows). A derived scope (query/similar)
-   * unwraps to its underlying folder/collection source; the founder can also
-   * point the lens at the WHOLE library (the deliberate scale spike) via the
-   * lens' own control, which passes `{ kind: "library" }` directly. */
-  graphScope(): ipc.GraphScope {
+   * (the lens shows whatever the grid shows). A derived scope (query/similar/
+   * topic) unwraps to its underlying folder/collection source; the founder can
+   * also point the lens at the WHOLE library (the deliberate scale spike) via
+   * the lens' own control, which passes `{ kind: "library" }` directly.
+   *
+   * Returns `null` when the current scope has NO folder/collection source the
+   * backend `GraphScope` can name. WHY return null instead of `{kind:"library"}`:
+   * the backend enum (commands/graph.rs `GraphScope`) is folder | collection |
+   * library only — it has no explicit hash-list / result-set variant — so a
+   * search-result scope whose source can't be resolved is NOT representable as
+   * "exactly the result set". Silently falling back to `{kind:"library"}` would
+   * widen the lens/dedup/diversify pass from the result the user is looking at
+   * to the ENTIRE library, a surprising scale spike happening by accident
+   * (AUDIT-FRONTEND-COUPLING B4 / STATE-MACHINE 6f). We make the transition
+   * EXPLICIT: refuse (null) and let each caller no-op calmly rather than widen.
+   * By construction today every derived scope's `within` is a folder/collection
+   * (scopeSource always unwraps to one), so null is the defensive "source was
+   * removed / a future un-sourced scope" path, never the common case. */
+  graphScope(): ipc.GraphScope | null {
     const src = this.scopeSource();
     if (src.kind === "collection") return { kind: "collection", id: src.id };
     if (src.kind === "folder")
       return { kind: "folder", root_id: src.rootId, folder: src.folder };
-    // A bare query/similar with no resolvable folder/collection source falls
-    // back to the whole library (nothing narrower to scope to).
-    return { kind: "library" };
+    // No folder/collection source to scope to, and no result-set variant in the
+    // backend GraphScope to scope to the actual hashes — refuse, never widen.
+    return null;
   }
 
   /** Click a topic anchor → scope the grid to that topic (visualizer->grid +
@@ -2915,12 +2940,23 @@ export class Ui {
       this.diversifyDegraded = false;
       return;
     }
+    const scope = this.graphScope();
+    if (scope === null) {
+      // No folder/collection source to name and no result-set scope variant to
+      // pass the actual hashes: refuse rather than diversify the WHOLE library
+      // (the old silent fallback). Clear the filter (show everything) and don't
+      // claim degradation — the rig is fine, this scope just isn't diversifiable.
+      this.grid.diversifyShown = null;
+      this.diversifyHidden = 0;
+      this.diversifyDegraded = false;
+      return;
+    }
     const tolerance = percentToTolerance(this.diversifyTolerancePercent);
     const load = ++this.diversifyLoad;
     try {
       // Reuse the SAME GraphScope the visualizer/topic commands resolve, so the
       // backend diversifies exactly the set the grid is scoped to.
-      const report = await ipc.diversifyScope(this.graphScope(), tolerance);
+      const report = await ipc.diversifyScope(scope, tolerance);
       if (load !== this.diversifyLoad) return; // a newer pass owns the filter now
       this.diversifyDegraded = report.degraded;
       if (report.degraded) {
@@ -2986,15 +3022,21 @@ export class Ui {
    * lens just shows the none-state. */
   async fetchDuplicates() {
     if (!this.dupesOn) return;
+    const scope = this.graphScope();
+    if (scope === null) {
+      // No folder/collection source to name and no result-set scope variant to
+      // pass the actual hashes: refuse rather than scan the WHOLE library (the
+      // old silent fallback). Resolve to the none-state (an empty group set) so
+      // the lens shows "nothing to dedup here", not a stuck "scanning" line.
+      this.dupeGroups = [];
+      return;
+    }
     const load = ++this.dupeLoad;
     // null marks "scanning" so the view can show a quiet in-flight line instead
     // of flashing the none-state between a scope change and its result.
     this.dupeGroups = null;
     try {
-      const groups = await ipc.findNearDuplicates(
-        this.graphScope(),
-        this.dupeThreshold,
-      );
+      const groups = await ipc.findNearDuplicates(scope, this.dupeThreshold);
       if (load !== this.dupeLoad) return; // a newer scan won
       this.dupeGroups = groups ?? [];
     } catch {

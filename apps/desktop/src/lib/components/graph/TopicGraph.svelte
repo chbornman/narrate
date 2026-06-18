@@ -162,6 +162,12 @@
 
   // -- readiness / telemetry (surfaced, never hidden) -------------------------
   let loading = $state(false);
+  /** True when the grid's scope has no folder/collection source the backend can
+   * name, so the lens REFUSES to compute rather than silently widen to the whole
+   * library (AUDIT-FRONTEND-COUPLING B4). The template shows a calm "open the
+   * visualizer from a folder or collection" affordance; flip the full-library
+   * toggle to scan everything on purpose. */
+  let refused = $state(false);
   let nodeCount = $state(0);
   let visualReady = $state(false);
   let annotationReady = $state(false);
@@ -499,7 +505,15 @@
   const LOD_THRESHOLD_FALLBACK = 1500;
   const lodThreshold = (): number => tuning?.lod_threshold ?? LOD_THRESHOLD_FALLBACK;
 
-  const scope = (): ipc.GraphScope =>
+  // The lens scope: the founder's explicit full-library toggle passes
+  // `{kind:"library"}` directly (the deliberate scale spike), otherwise we take
+  // the grid's scope. `ui.graphScope()` can REFUSE (null) when the grid scope
+  // has no folder/collection source the backend GraphScope can name (a bare
+  // search result whose source was removed). We surface that refusal as a calm
+  // empty state (see `recompute`) instead of silently widening to the whole
+  // library, so a scope-based lens over a search result never becomes a library
+  // scan by accident (AUDIT-FRONTEND-COUPLING B4 / STATE-MACHINE 6f).
+  const scope = (): ipc.GraphScope | null =>
     fullLibrary ? { kind: "library" } : ui.graphScope();
 
   // Weak origin spring on the topic anchors — a SAFETY TETHER (see
@@ -570,7 +584,11 @@
 
   function refetchForLandedVectors() {
     vectorRefreshAt = performance.now();
-    affinityCache.delete(topics, scope(), alpha);
+    // A refused scope has nothing cached to evict (recompute never fetched); skip
+    // the delete (the cache key is scope-relative) and let recompute re-confirm
+    // the refusal calmly.
+    const sc = scope();
+    if (sc !== null) affinityCache.delete(topics, sc, alpha);
     void recompute();
   }
 
@@ -649,9 +667,26 @@
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
   async function recompute() {
+    const sc = scope();
+    // The scope refused (no folder/collection source, no result-set variant to
+    // name): show the calm refusal affordance instead of computing over the WHOLE
+    // library by accident. We clear the layout + readiness so the view reads
+    // "no scope", not a stale or empty-but-loading graph (B4 / STATE-MACHINE 6f).
+    if (sc === null) {
+      refused = true;
+      loading = false;
+      scaleNote = null;
+      nodes = [];
+      anchors = [];
+      nodeCount = 0;
+      visualReady = false;
+      annotationReady = false;
+      draw();
+      return;
+    }
+    refused = false;
     loading = true;
     scaleNote = null;
-    const sc = scope();
     // Keep the reactive watchers' keys in sync REGARDLESS of what triggered this
     // recompute (mount, alpha, scope, or a topic change), so the $effects do not
     // fire a duplicate recompute for the set/blend we are about to lay out.
@@ -887,6 +922,14 @@
 
   async function loadSuggestions() {
     const sc = scope();
+    // A refused scope has nothing to suggest topics over (no folder/collection to
+    // mine); clear the rails rather than call the backend with a widened scope.
+    if (sc === null) {
+      suggestions = [];
+      clusterSuggestions = [];
+      llmSuggestions = [];
+      return;
+    }
     // Cheap candidates (note n-grams + collection names) + v2 cluster auto-labels
     // in parallel. Each degrades to empty on its own so a slow/absent half never
     // blocks the rail.
@@ -2139,10 +2182,13 @@
   let lastAlpha = Number.NaN;
   let lastFullLibrary: boolean | null = null;
 
-  /** The key for the CURRENT view (scope + topic-set). A null scope-less call
-   * site never happens (scope() always resolves), so this is total. */
-  function currentStateKey(): string {
-    return graphStateKey(scope(), topics);
+  /** The key for the CURRENT view (scope + topic-set), or null when the scope
+   * refuses (no folder/collection source to name). A refused view has no layout
+   * worth snapshotting/restoring, so the save/restore call sites skip on null
+   * rather than key a (would-be-widened) library snapshot. */
+  function currentStateKey(): string | null {
+    const sc = scope();
+    return sc === null ? null : graphStateKey(sc, topics);
   }
 
   /** Snapshot the current settled state into the module store, so a reopen of
@@ -2171,14 +2217,21 @@
       unnamedClusterList,
       unnamedMemberSet,
     };
-    graphState.set(currentStateKey(), snap);
+    // A refused scope (null key) has no real layout to restore later; don't store
+    // a snapshot that would be keyed under a widened/absent scope.
+    const key = currentStateKey();
+    if (key !== null) graphState.set(key, snap);
   }
 
   /** Restore a snapshot into this fresh instance, reusing the settled positions
    * + caches so the reopen paints immediately with NO recompute. Returns true on
    * a hit (the caller then skips the affinity fetch / reseed / reheat). */
   function restoreSnapshot(): boolean {
-    const snap = graphState.get(currentStateKey()) as GraphSnapshot | null;
+    // A refused scope (null key) never stored a snapshot, so there is nothing to
+    // restore — fall through to recompute(), which renders the calm refusal.
+    const key = currentStateKey();
+    if (key === null) return false;
+    const snap = graphState.get(key) as GraphSnapshot | null;
     if (snap === null) return false;
     alpha = snap.alpha;
     nodes = snap.nodes;
@@ -2649,7 +2702,17 @@
 
   <!-- readiness honesty + LOD note -->
   <div class="status">
-    {#if loading}
+    {#if refused}
+      <!-- The grid scope has no folder/collection source the lens can name, so
+           it REFUSES rather than silently widen to the whole library (B4). The
+           message points at the explicit affordances: scope from a folder or
+           collection, or flip the full-library toggle to scan everything on
+           purpose. No em-dashes (user-visible copy). -->
+      <span class="dim">
+        open the visualizer from a folder or collection, or turn on full library
+        to scan everything
+      </span>
+    {:else if loading}
       <span>computing affinities...</span>
     {:else}
       <span>{imageTotal.toLocaleString()} images</span>
