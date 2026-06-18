@@ -43,6 +43,11 @@ import {
   type SignalToggles,
 } from "../logic/ranking";
 import { afterCommit } from "../logic/advance";
+import {
+  DEFAULT_TOLERANCE_PERCENT,
+  hiddenCount,
+  percentToTolerance,
+} from "../logic/diversify";
 import { invalidateScopedGraphs } from "../logic/graphstore";
 import {
   collectionRows,
@@ -74,7 +79,7 @@ import type {
   TopicDto,
 } from "../types/dto";
 import type { Filter } from "../types/search";
-import { MIN_QUERY_CHARS } from "../tuning";
+import { DIVERSIFY_DEBOUNCE_MS, MIN_QUERY_CHARS } from "../tuning";
 import { copyKey, copyToClipboard } from "../primitives/copyflash.svelte";
 import * as prefs from "./prefs";
 import { ShellSlice } from "./shell.svelte";
@@ -293,6 +298,44 @@ export class Ui {
    * mere selection change. */
   private heatItemsKey = "";
 
+  // -- diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) -------
+  // The opt-in "hide redundancy -> surface variety" view filter. It is a DISPLAY
+  // LAYER over whatever scope the grid is showing (any kind), NOT a scope kind:
+  // it composes with folder/collection/query/topic/similar, so making it a scope
+  // would forbid diversifying a search result. The root owns the (debounced)
+  // diversify_scope IPC and mirrors the resulting `shown` set into the grid slice
+  // (grid.diversifyShown), exactly as the heat tint mirrors `intensity`.
+
+  /** Diversify on/off. Default OFF — it is opt-in (the design's "Opt-in: it's
+   * destructive-adjacent") and a pure view filter, so a fresh session shows the
+   * whole scope. Persisted like the other reviewing-aid toggles. */
+  diversifyOn = $state(false);
+  /** The 0..100% duplication-tolerance slider value (the dupeGuru/digiKam idiom).
+   * 0 shows everything; higher hides more (collapses each similar cluster to one
+   * representative). Mapped to the backend's 0..1 tolerance by percentToTolerance
+   * at call time. Persisted so the slider reopens where the reviewer left it. */
+  diversifyTolerancePercent = $state(DEFAULT_TOLERANCE_PERCENT);
+  /** True when the last diversify pass came back `degraded` (no CLIP model /
+   * un-embedded scope): the slider disables and the chrome shows a calm "embed
+   * photos to diversify" hint instead of implying the slider had no effect. */
+  diversifyDegraded = $state(false);
+  /** How many in-scope images the filter is currently hiding — the header's
+   * unobtrusive "N hidden" affordance. Derived from the loaded scope size minus
+   * the shown set (hiddenCount), so it stays honest if an item left the scope
+   * between the diversify call and a re-list. 0 when off / degraded / nothing
+   * collapsed. */
+  diversifyHidden = $state(0);
+  /** Monotone token so a slow diversify_scope pass cannot overwrite a newer
+   * scope's / tolerance's result (the heatLoad/gridLoad precedent). */
+  private diversifyLoad = 0;
+  /** Debounce handle for the slider drag: a continuous drag fires ONE pass on
+   * settle (DIVERSIFY_DEBOUNCE_MS), never one per intermediate value. */
+  private diversifyTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The scope item-set the cached `shown` set was computed for (the heatItemsKey
+   * signature, for the diversify path): reportScope fires on every focus move, so
+   * the active filter only re-runs when the SCOPE's items actually changed. */
+  private diversifyScopeKey = "";
+
   // -- search bar (M3 search-as-scope) ----------------------------------------
   // The bar's live input state. `query`/`chips` drive the always-visible bar
   // in the grid header; committing them re-scopes the grid (runQueryScope).
@@ -384,6 +427,11 @@ export class Ui {
     // Attention overlay on the graph (heatmap x graph synthesis), persisted like
     // the heat tint so the lens reopens in the view the reviewer left it.
     this.graphAttention = prefs.loadAttentionMode();
+    // Diversify (duplication-tolerance) filter, persisted like the other
+    // reviewing-aid toggles. The first openFolder below drives the diversify
+    // pass via reportScope when the filter restores ON.
+    this.diversifyOn = prefs.loadDiversifyOn();
+    this.diversifyTolerancePercent = prefs.loadDiversifyTolerance();
     try {
       this.applySettings(await ipc.settingsGet());
     } catch {
@@ -600,6 +648,11 @@ export class Ui {
     // on a mere focus move) — reportScope fires far more often than the items
     // change, and intensity is per-scope.
     this.refreshHeatIfItemsChanged();
+    // Diversify: re-run the filter on the SAME scope-changed trigger so the
+    // shown set follows folder/collection/query/topic switches while the filter
+    // is on (the design's "Re-run when the scope changes while active"). A no-op
+    // when off or the scope is unchanged.
+    this.refreshDiversifyIfScopeChanged();
   }
 
   /** Refetch heat-tint intensity when the loaded grid item-set changed since
@@ -2722,6 +2775,116 @@ export class Ui {
       this.setIntensity(new Map(scores.map((s) => [s.hash, s.intensity])));
     } catch {
       /* backend unavailable: leave the tint dark */
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md)
+  // ---------------------------------------------------------------------------
+
+  /** Toggle the Diversify view filter, persisted. Turning it ON runs an
+   * immediate (un-debounced) diversify pass for the current scope; turning it
+   * OFF restores the full set by clearing the grid's shown filter and the hidden
+   * count. The slider's tolerance is preserved across off/on so re-enabling
+   * resumes where the reviewer left it. */
+  toggleDiversify() {
+    this.diversifyOn = !this.diversifyOn;
+    prefs.saveDiversifyOn(this.diversifyOn);
+    if (this.diversifyOn) {
+      // Immediate on the explicit toggle (no drag to coalesce): the user asked
+      // for the filter now. Force the next pass regardless of the cached scope
+      // signature (the scope may be unchanged but the filter just turned on).
+      this.diversifyScopeKey = "";
+      void this.runDiversify();
+    } else {
+      this.applyDiversifyOff();
+    }
+  }
+
+  /** Slider moved (0..100%): persist the value and re-run the pass, DEBOUNCED so
+   * a continuous drag fires ONE backend pass on settle rather than one per
+   * intermediate value (the diversify pass is far heavier than a keystroke
+   * search). A no-op while the filter is off (the slider is only interactive when
+   * on). */
+  setDiversifyTolerance(percent: number) {
+    this.diversifyTolerancePercent = percent;
+    prefs.saveDiversifyTolerance(percent);
+    if (!this.diversifyOn) return;
+    clearTimeout(this.diversifyTimer);
+    // Force a recompute on settle: the tolerance changed, so the cached scope
+    // signature must not short-circuit it.
+    this.diversifyScopeKey = "";
+    this.diversifyTimer = setTimeout(() => void this.runDiversify(), DIVERSIFY_DEBOUNCE_MS);
+  }
+
+  /** Clear the Diversify filter: drop the grid's shown set (restoring the full
+   * scope), zero the hidden count, and cancel any pending debounced pass. The
+   * single funnel for "turn off" and "no signal to filter on". */
+  private applyDiversifyOff() {
+    clearTimeout(this.diversifyTimer);
+    this.diversifyScopeKey = "";
+    this.grid.diversifyShown = null;
+    this.diversifyHidden = 0;
+  }
+
+  /** Re-run the active Diversify pass when the SCOPE's item-set changed since the
+   * last pass (a cheap length + endpoints signature, the heat-tint precedent) —
+   * reportScope fires far more often than the items change, and the shown set is
+   * per-scope. Cheap no-op when the filter is off or the scope is unchanged.
+   * Called from reportScope so the filter follows folder/collection/query/topic
+   * switches automatically (the design's "Re-run when the scope changes while
+   * active"). */
+  private refreshDiversifyIfScopeChanged() {
+    if (!this.diversifyOn) return;
+    const h = this.grid.scopeHashes;
+    const key = `${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
+    if (key === this.diversifyScopeKey) return;
+    this.diversifyScopeKey = key;
+    void this.runDiversify();
+  }
+
+  /** Run a diversify_scope pass for the current scope at the current tolerance
+   * and mirror the resulting `shown` set into the grid. Guarded by a monotone
+   * token so a slow pass cannot overwrite a newer scope's / tolerance's result.
+   * GRACEFUL like every lens command: an empty scope or a degraded rig clears the
+   * filter (shows everything) and flags `diversifyDegraded` so the chrome can
+   * explain why; a backend failure (tests/dev) leaves the filter cleared. */
+  async runDiversify() {
+    if (!this.diversifyOn) return;
+    const hashes = this.grid.scopeHashes;
+    if (hashes.length === 0) {
+      // Nothing in scope: clear the filter and don't claim degradation (there is
+      // simply nothing to diversify).
+      this.grid.diversifyShown = null;
+      this.diversifyHidden = 0;
+      this.diversifyDegraded = false;
+      return;
+    }
+    const tolerance = percentToTolerance(this.diversifyTolerancePercent);
+    const load = ++this.diversifyLoad;
+    try {
+      // Reuse the SAME GraphScope the visualizer/topic commands resolve, so the
+      // backend diversifies exactly the set the grid is scoped to.
+      const report = await ipc.diversifyScope(this.graphScope(), tolerance);
+      if (load !== this.diversifyLoad) return; // a newer pass owns the filter now
+      this.diversifyDegraded = report.degraded;
+      if (report.degraded) {
+        // No CLIP signal: show everything (the honest "all shown"), the slider
+        // disables, and the chrome shows "embed photos to diversify".
+        this.grid.diversifyShown = null;
+        this.diversifyHidden = 0;
+        return;
+      }
+      const shown = new Set(report.shown);
+      this.grid.diversifyShown = shown;
+      // Hidden count off the loaded scope size minus the shown set (stays honest
+      // if an item left the scope between the call and a re-list).
+      this.diversifyHidden = hiddenCount(this.grid.scopeHashes.length, shown);
+    } catch {
+      // Backend unavailable (tests/dev): leave the filter cleared, never error.
+      if (load !== this.diversifyLoad) return;
+      this.grid.diversifyShown = null;
+      this.diversifyHidden = 0;
     }
   }
 
