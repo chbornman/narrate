@@ -111,6 +111,18 @@ const HEATMAP_DWELL_CAP_MS: i64 = 60_000;
 /// annotation from `half_life` days ago counts half as much as today's.
 const HEATMAP_RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 
+/// Tier-1 near-dup Hamming threshold (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier 1"):
+/// the maximum number of differing bits (out of 64) for two perceptual hashes to
+/// count as the SAME photo. WHY 8: the design doc's starting point is "≈ ≤6-10 /
+/// 64" — the precise "same photo" radius for dHash on re-saved / resized / lightly
+/// edited copies — and it ALSO stresses this MUST be calibrated empirically (the
+/// one research claim it refuted was the textbook normal-distribution assumption,
+/// so do NOT treat 8 as settled). 8 is the conservative mid-point of that band: a
+/// file-overridable starting value the founder re-feels on real libraries, NOT a
+/// magic constant baked into the query. Larger = looser (more, fuzzier groups);
+/// smaller = stricter (fewer, tighter groups).
+const DEDUP_HAMMING_THRESHOLD: u32 = 8;
+
 // --- Validation bounds (sane ranges; an out-of-range loaded value is rejected
 //     back to the default with a logged warning — never a silent bad number) ---
 
@@ -132,6 +144,13 @@ const BETA_MAX: f64 = 1.0;
 /// enough not to be a typo'd multi-gigapixel target.
 const EDGE_MIN: u32 = 256;
 const EDGE_MAX: u32 = 16_384;
+/// The dedup threshold is a Hamming distance over a 64-bit hash, so it lives in
+/// [0, 64]. 0 = only identical perceptual hashes group (effectively re-encodes
+/// that hash the same); 64 = everything groups (the whole scope becomes one
+/// blob). Both extremes are degenerate but in-range — the bound just rejects a
+/// typo'd value that exceeds the hash's bit width.
+const DEDUP_HAMMING_MIN: u32 = 0;
+const DEDUP_HAMMING_MAX: u32 = 64;
 /// A dwell-tier rate is a fraction-or-multiple of raw elapsed time; outside
 /// (0, 1] it would either erase dwell (0) or invent more than really elapsed.
 const DWELL_RATE_MIN: f64 = 0.0; // exclusive lower bound enforced below
@@ -452,6 +471,47 @@ impl PreviewTuning {
                 self.embedded_accept_edge,
                 d.embedded_accept_edge,
             ),
+        }
+    }
+}
+
+/// Tier-1 near-duplicate dedup tuning (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier
+/// 1"). LIVE consumer: the `find_near_duplicates` command's default threshold.
+/// The doc is explicit that this threshold MUST be empirically calibrated on
+/// real libraries — so it lives here, file-overridable, NOT as a magic number in
+/// the query path.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DedupTuning {
+    /// Max Hamming distance (of 64 bits) for two perceptual hashes to count as
+    /// the same photo. Default 8; calibrate on real data (the doc's "≈ ≤6-10").
+    pub hamming_threshold: u32,
+}
+
+impl Default for DedupTuning {
+    fn default() -> Self {
+        Self {
+            hamming_threshold: DEDUP_HAMMING_THRESHOLD,
+        }
+    }
+}
+
+impl DedupTuning {
+    fn validated(self) -> Self {
+        let d = Self::default();
+        DedupTuning {
+            hamming_threshold: if (DEDUP_HAMMING_MIN..=DEDUP_HAMMING_MAX)
+                .contains(&self.hamming_threshold)
+            {
+                self.hamming_threshold
+            } else {
+                tracing::warn!(
+                    field = "dedup.hamming_threshold",
+                    value = self.hamming_threshold,
+                    "tuning value out of range; keeping default"
+                );
+                d.hamming_threshold
+            },
         }
     }
 }
@@ -835,6 +895,7 @@ impl HeatmapTuning {
 pub struct Tuning {
     pub search: SearchTuning,
     pub preview: PreviewTuning,
+    pub dedup: DedupTuning,
     pub graph: GraphTuning,
     pub heatmap: HeatmapTuning,
     pub voice: VoiceTuning,
@@ -872,6 +933,7 @@ impl Tuning {
         Tuning {
             search: self.search.validated(),
             preview: self.preview.validated(),
+            dedup: self.dedup.validated(),
             graph: self.graph.validated(),
             heatmap: self.heatmap.validated(),
             voice: self.voice.validated(),
@@ -1011,6 +1073,8 @@ mod tests {
         assert_eq!(t.search.beta, 0.5);
         assert_eq!(t.preview.display_edge, 2560);
         assert_eq!(t.preview.embedded_accept_edge, 2048);
+        // Tier-1 near-dup threshold (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier 1").
+        assert_eq!(t.dedup.hamming_threshold, 8);
         // Graph (DESIGN-SEMANTIC-GRAPH.md) — must match tuning.default.toml.
         assert_eq!(t.graph.alpha_default, 0.5);
         assert_eq!(t.graph.attraction, 0.08);
@@ -1110,6 +1174,29 @@ mod tests {
         let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
         assert_eq!(merged.voice.vad_enter, 0.0);
         assert_eq!(merged.voice.vad_exit, 0.0);
+    }
+
+    /// The Tier-1 dedup threshold merges from a `[dedup]` section; an in-band
+    /// value (0..=64) takes, an over-width value snaps back to the default.
+    #[test]
+    fn dedup_threshold_merge_and_range_reject() {
+        // In-band override (a stricter "same photo" radius) takes.
+        let strict = toml::from_str::<Tuning>("[dedup]\nhamming_threshold = 5\n")
+            .unwrap()
+            .validated();
+        assert_eq!(strict.dedup.hamming_threshold, 5);
+        // The inclusive extremes are legal (0 = identical-only, 64 = all).
+        let wide = toml::from_str::<Tuning>("[dedup]\nhamming_threshold = 64\n")
+            .unwrap()
+            .validated();
+        assert_eq!(wide.dedup.hamming_threshold, 64);
+        // Past the 64-bit width is a typo: snap back to the default.
+        let bad = toml::from_str::<Tuning>("[dedup]\nhamming_threshold = 200\n")
+            .unwrap()
+            .validated();
+        assert_eq!(bad.dedup.hamming_threshold, 8);
+        // A missing section is the pure default.
+        assert_eq!(Tuning::default().dedup.hamming_threshold, 8);
     }
 
     /// A partial `[graph]` override merges over defaults like every other

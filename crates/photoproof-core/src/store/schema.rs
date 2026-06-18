@@ -319,7 +319,15 @@ CREATE TABLE images (
   camera_make TEXT, camera_model TEXT, lens_model TEXT,
   focal_length_mm REAL, iso INTEGER, f_number REAL,
   exposure_time TEXT, gps_lat REAL, gps_lon REAL,  -- exposure as written, e.g. '1/250'
-  first_ingested_at TEXT NOT NULL
+  first_ingested_at TEXT NOT NULL,
+  -- Tier-1 near-dup perceptual hash (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier 1"):
+  -- a 64-bit dHash, DERIVED + rebuildable (an index, NOT sidecar truth — same
+  -- status as vectors/previews). NULL = not yet computed (computed in the
+  -- preview pass, near-free off the already-decoded preview; backfillable). The
+  -- u64 is stored in SQLite's signed 8-byte INTEGER via a bit-reinterpret cast,
+  -- so all 64 bits round-trip exactly; consumers XOR + popcount, never compare
+  -- magnitude, so the sign reinterpretation is irrelevant to correctness.
+  perceptual_hash   INTEGER                    -- 64-bit dHash, or NULL if unhashed
 );
 
 CREATE TABLE paths (
@@ -618,7 +626,7 @@ CREATE TABLE IF NOT EXISTS topic_notes ( -- append-only, like collection_notes
 /// lockstep with the last `if version < N` block below. It is the upper bound
 /// the downgrade guard enforces: a DB stamped higher than this was written by a
 /// newer app and must not be opened by this one.
-pub(crate) const CURRENT_VERSION: i64 = 15;
+pub(crate) const CURRENT_VERSION: i64 = 16;
 
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
@@ -774,6 +782,27 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
         conn.execute_batch(TOPIC_NOTES_SCHEMA_SQL)?;
         run_pragma(conn, "PRAGMA user_version = 15")?;
     }
+    if version < 16 {
+        // v16: the Tier-1 near-dup perceptual hash (DESIGN-DEDUP-AND-SIMILARITY
+        // .md §"Tier 1"). A single nullable INTEGER column on `images`, holding
+        // a derived/rebuildable 64-bit dHash — modeled on the EXIF subset and
+        // pixel_width/height already on this table ("nullable, read-only,
+        // rebuildable"), not a separate table, because it is one scalar per
+        // image with the same lifecycle. A fresh DB gets the column from the v1
+        // DDL; older DBs need the ALTER, so it is guarded by a column probe like
+        // v5's `has_text` and v12's `stroke_count`. NULL means "not yet hashed":
+        // the preview pass fills it on next ingest, and a backfill can re-pend.
+        let has_column: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('images')
+             WHERE name = 'perceptual_hash'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_column {
+            conn.execute_batch("ALTER TABLE images ADD COLUMN perceptual_hash INTEGER")?;
+        }
+        run_pragma(conn, "PRAGMA user_version = 16")?;
+    }
     Ok(version)
 }
 
@@ -839,12 +868,14 @@ mod tests {
             [],
         )
         .expect("v14 CHECK admits 'archived'");
-        // A full migrate lands on the LATEST version (bumped to 15 by the
-        // topic_notes migration, which runs after the v14 roots rebuild).
+        // A full migrate lands on the LATEST version (every migration after the
+        // v14 roots rebuild ran too). Assert against CURRENT_VERSION so this
+        // does not break on each later bump — it tests "migrate reaches the
+        // head", not a frozen number.
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, CURRENT_VERSION);
     }
 
     /// A database stamped NEWER than this build supports (a downgrade) is refused

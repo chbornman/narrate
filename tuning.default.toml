@@ -44,6 +44,18 @@ display_edge = 2560          # display-tier preview longest edge, px
 embedded_accept_edge = 2048  # in-RAW JPEG is "good enough" at >= this px
 
 # ---------------------------------------------------------------------------
+# Dedup — Tier-1 near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md
+# §"Tier 1"). The Hamming-distance cutoff for "is this the SAME photo" over the
+# 64-bit dHash perceptual hash. The design doc is explicit: this MUST be
+# calibrated empirically on real libraries (the textbook normal-distribution
+# assumption was refuted) — 8 is a STARTING point in the doc's "≈ ≤6-10 / 64"
+# band, not a settled value. Lower = stricter (fewer, tighter groups); higher =
+# looser. Range [0, 64].
+# ---------------------------------------------------------------------------
+[dedup]
+hamming_threshold = 8  # max differing bits (of 64) to count as the same photo
+
+# ---------------------------------------------------------------------------
 # Graph — semantic topic-graph force lens (DESIGN-SEMANTIC-GRAPH.md). The
 # force-directed lens' physics + the looks/said blend default. Tuned by feel:
 # alpha_default also gates topic_affinities when a caller passes no alpha.

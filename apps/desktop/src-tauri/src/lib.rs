@@ -231,6 +231,8 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::capture::set_mic,
         commands::search::search,
         commands::search::find_similar,
+        // Tier-1 near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md).
+        commands::dedup::find_near_duplicates,
         // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md).
         commands::graph::topic_affinities,
         commands::graph::suggest_topics,
@@ -325,6 +327,8 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::capture::set_mic,
         commands::search::search,
         commands::search::find_similar,
+        // Tier-1 near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md).
+        commands::dedup::find_near_duplicates,
         // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md).
         commands::graph::topic_affinities,
         commands::graph::suggest_topics,
