@@ -238,6 +238,8 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::graph::graph_neighbors,
         commands::graph::suggest_topics_llm,
         commands::graph::graph_tuning,
+        // Diversify / duplication-tolerance view filter (DESIGN-DEDUP-AND-SIMILARITY.md).
+        commands::diversify::diversify_scope,
         // Topics + autosuggest + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md).
         commands::topics::add_topic,
         commands::topics::list_topics,
@@ -332,6 +334,8 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::graph::graph_neighbors,
         commands::graph::suggest_topics_llm,
         commands::graph::graph_tuning,
+        // Diversify / duplication-tolerance view filter (DESIGN-DEDUP-AND-SIMILARITY.md).
+        commands::diversify::diversify_scope,
         // Topics + autosuggest + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md).
         commands::topics::add_topic,
         commands::topics::list_topics,

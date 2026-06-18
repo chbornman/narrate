@@ -218,6 +218,54 @@ const GRAPH_CLUSTER_K_MAX: u32 = 12;
 /// per-step displacement clamp + per-body settle test that bound the sim itself.
 const GRAPH_LOD_THRESHOLD: u32 = 700;
 
+// --- Diversify / duplication-tolerance slider (DESIGN-DEDUP-AND-SIMILARITY.md)
+//
+// The "hide-for-variety" view filter's knobs. The single user-facing
+// `tolerance ∈ [0,1]` maps to a cosine SIMILARITY CUTOFF (and, for the MMR
+// objective, a λ) through these endpoints. They are FEEL knobs — how alike is
+// "alike enough to be redundant", how hard the slider's top end collapses — so
+// they live here, file-overridable, never as bare literals in the selection
+// math. The slider drives greedy FACILITY-LOCATION over the CLIP k-NN graph by
+// default (the design's recommended core); the λ endpoint exists for the
+// alternate MMR objective. See `retrieval::diversity::tolerance_to_cutoff` for
+// the exact curve and WHY it is linear.
+
+/// Cutoff at tolerance 0: only an image essentially IDENTICAL to a neighbor is
+/// redundant, so the full scope shows. 1.0 honors "slider at zero shows
+/// everything" — distinct frames (cosine < 1) never collapse here.
+const DIVERSIFY_CUTOFF_HIGH: f64 = 1.0;
+/// Cutoff at tolerance 1: even loosely-similar frames (same scene / subject)
+/// count as redundant and collapse to one representative. 0.55 is a starting
+/// point — well below the ~0.7+ "same burst" band so a hard slide hides whole
+/// sessions, but above the ~0.4 "merely same genre" band so unrelated photos
+/// survive. MUST be calibrated on real libraries (the design flags thresholds
+/// as starting points), which is exactly why it is a tunable, not a const.
+const DIVERSIFY_CUTOFF_LOW: f64 = 0.55;
+/// MMR λ floor at tolerance 1 (only used when the MMR objective drives the
+/// slider): a little QUALITY pull survives even at max diversity so a cluster's
+/// representative is still its best frame, not an arbitrary one. 0.3 keeps
+/// diversity dominant (weight 0.7) while never fully ignoring quality.
+const DIVERSIFY_LAMBDA_FLOOR: f64 = 0.3;
+/// k-NN fan-out the Diversify pass requests from `knn_within` — how many
+/// neighbors per image seed the sparse similarity graph. Larger sees more of
+/// each cluster (better collapse) at more cost; 12 comfortably spans a typical
+/// burst without an O(n·k) blow-up. The graph lens uses 6 for layout springs;
+/// diversification wants a wider view of each cluster, hence the larger default.
+const DIVERSIFY_KNN_K: u32 = 12;
+
+// Validation bounds for the diversify knobs.
+/// Cutoffs are cosine similarities in [0, 1]. Outside that a cutoff is
+/// meaningless (cosine of unit vectors can't exceed 1 here).
+const DIVERSIFY_CUTOFF_MIN: f64 = 0.0;
+const DIVERSIFY_CUTOFF_MAX: f64 = 1.0;
+/// λ is a blend fraction in [0, 1] like every other quality/diversity weight.
+const DIVERSIFY_LAMBDA_MIN: f64 = 0.0;
+const DIVERSIFY_LAMBDA_MAX: f64 = 1.0;
+/// k must be at least 1 (zero neighbors ⇒ no edges ⇒ nothing collapses), capped
+/// so a typo can't request an absurd fan-out per image.
+const DIVERSIFY_K_MIN: u32 = 1;
+const DIVERSIFY_K_MAX: u32 = 256;
+
 // --- Voice endpoint/VAD feel dials (DESIGN-TUNING-LOOP.md "voice" arm) -------
 //
 // The voice DIALS lifted out of `pp-asr-server`'s consts and the silero/engine
@@ -769,6 +817,72 @@ impl GraphTuning {
     }
 }
 
+/// Diversify / duplication-tolerance tuning (DESIGN-DEDUP-AND-SIMILARITY.md).
+/// LIVE consumers: the `diversify_scope` command, which maps the user's single
+/// `tolerance` to the cutoff/λ through these endpoints and requests `knn_k`
+/// neighbors from `knn_within`. Defaults are starting points the founder
+/// calibrates on real libraries (the design flags thresholds as exactly that) —
+/// which is why they are config, not consts in the selection math.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiversifyTuning {
+    /// Similarity cutoff at tolerance 0 (1.0 ⇒ "slider at zero shows all").
+    pub cutoff_high: f64,
+    /// Similarity cutoff at tolerance 1 (how loosely-similar still collapses).
+    pub cutoff_low: f64,
+    /// MMR λ floor at tolerance 1 (residual quality pull at max diversity).
+    pub lambda_floor: f64,
+    /// k-NN fan-out the Diversify pass requests per image from `knn_within`.
+    pub knn_k: u32,
+}
+
+impl Default for DiversifyTuning {
+    fn default() -> Self {
+        Self {
+            cutoff_high: DIVERSIFY_CUTOFF_HIGH,
+            cutoff_low: DIVERSIFY_CUTOFF_LOW,
+            lambda_floor: DIVERSIFY_LAMBDA_FLOOR,
+            knn_k: DIVERSIFY_KNN_K,
+        }
+    }
+}
+
+impl DiversifyTuning {
+    fn validated(self) -> Self {
+        let d = Self::default();
+        DiversifyTuning {
+            cutoff_high: range_or_default(
+                "diversify.cutoff_high",
+                self.cutoff_high,
+                DIVERSIFY_CUTOFF_MIN,
+                DIVERSIFY_CUTOFF_MAX,
+                d.cutoff_high,
+            ),
+            cutoff_low: range_or_default(
+                "diversify.cutoff_low",
+                self.cutoff_low,
+                DIVERSIFY_CUTOFF_MIN,
+                DIVERSIFY_CUTOFF_MAX,
+                d.cutoff_low,
+            ),
+            lambda_floor: range_or_default(
+                "diversify.lambda_floor",
+                self.lambda_floor,
+                DIVERSIFY_LAMBDA_MIN,
+                DIVERSIFY_LAMBDA_MAX,
+                d.lambda_floor,
+            ),
+            knn_k: count_or_default(
+                "diversify.knn_k",
+                self.knn_k,
+                DIVERSIFY_K_MIN,
+                DIVERSIFY_K_MAX,
+                d.knn_k,
+            ),
+        }
+    }
+}
+
 impl HeatmapTuning {
     fn validated(self) -> Self {
         let d = Self::default();
@@ -836,6 +950,7 @@ pub struct Tuning {
     pub search: SearchTuning,
     pub preview: PreviewTuning,
     pub graph: GraphTuning,
+    pub diversify: DiversifyTuning,
     pub heatmap: HeatmapTuning,
     pub voice: VoiceTuning,
 }
@@ -873,6 +988,7 @@ impl Tuning {
             search: self.search.validated(),
             preview: self.preview.validated(),
             graph: self.graph.validated(),
+            diversify: self.diversify.validated(),
             heatmap: self.heatmap.validated(),
             voice: self.voice.validated(),
         }
@@ -1028,6 +1144,12 @@ mod tests {
         assert_eq!(t.graph.cluster_k_min, 2);
         assert_eq!(t.graph.cluster_k_max, 12);
         assert_eq!(t.graph.lod_threshold, 700);
+        // Diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) —
+        // must match tuning.default.toml's [diversify] section.
+        assert_eq!(t.diversify.cutoff_high, 1.0);
+        assert_eq!(t.diversify.cutoff_low, 0.55);
+        assert_eq!(t.diversify.lambda_floor, 0.3);
+        assert_eq!(t.diversify.knn_k, 12);
         // Heatmap defaults (DESIGN-ATTENTION-HEATMAP.md): dwell leads, the
         // grid tier is a small fraction of Look, 60 s cap, 14-day half-life.
         assert_eq!(t.heatmap.w_dwell, 0.0001);
@@ -1141,6 +1263,29 @@ mod tests {
         assert_eq!(merged.graph.cluster_k_min, 2);
         // Other sections are entirely undisturbed:
         assert_eq!(merged.search, SearchTuning::default());
+    }
+
+    /// A partial `[diversify]` override merges over defaults, and out-of-range
+    /// knobs snap back to their defaults (never a silent bad number).
+    #[test]
+    fn diversify_partial_merge_and_range_reject() {
+        let toml = r#"
+            [diversify]
+            cutoff_low = 0.6
+            cutoff_high = 5.0
+            knn_k = 999
+            lambda_floor = 0.2
+        "#;
+        let merged = toml::from_str::<Tuning>(toml).unwrap().validated();
+        // In-range overrides took:
+        assert_eq!(merged.diversify.cutoff_low, 0.6);
+        assert_eq!(merged.diversify.lambda_floor, 0.2);
+        // Out-of-range cutoff (>1) and k (>256) snapped back:
+        assert_eq!(merged.diversify.cutoff_high, 1.0);
+        assert_eq!(merged.diversify.knn_k, 12);
+        // Other sections undisturbed:
+        assert_eq!(merged.search, SearchTuning::default());
+        assert_eq!(merged.graph, GraphTuning::default());
     }
 
     /// A partial `[heatmap]` file sets one knob and leaves the rest at their

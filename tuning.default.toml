@@ -68,6 +68,19 @@ cluster_k_max = 12    # maximum cluster count (caps the suggestion rail width). 
 # v2 full-library LOD: aggregate images into super-nodes past this node count.
 lod_threshold = 1500  # node count past which the lens aggregates into super-nodes. Range [50, 1000000].
 
+# Diversify — duplication-tolerance "hide-for-variety" slider
+# (DESIGN-DEDUP-AND-SIMILARITY.md). The single tolerance [0,1] maps to a cosine
+# similarity CUTOFF (and, for the MMR objective, a lambda) through these
+# endpoints. The slider drives greedy facility-location over the CLIP k-NN graph
+# by default. Calibrate the cutoffs on real libraries (thresholds are starting
+# points, not findings).
+# ---------------------------------------------------------------------------
+[diversify]
+cutoff_high = 1.0    # cutoff at tolerance 0: only near-identical collapses ⇒ slider-at-zero shows everything. Range [0, 1].
+cutoff_low = 0.55    # cutoff at tolerance 1: even loosely-similar frames collapse. Range [0, 1].
+lambda_floor = 0.3   # MMR lambda floor at tolerance 1 (residual quality pull at max diversity). Range [0, 1].
+knn_k = 12           # k-NN neighbors per image requested from knn_within to seed the sparse graph. Range [1, 256].
+
 # Heatmap — attention/engagement intensity (DESIGN-ATTENTION-HEATMAP.md). NOT a
 # gaze tracker: it scores where you put intent (what you opened/marked/said),
 # capped and local. Dwell leads; stroke-count is a small factor. The tier rates
