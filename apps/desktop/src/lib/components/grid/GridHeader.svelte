@@ -20,6 +20,8 @@
    */
   // Lucide (BACKLOG "Adopt Lucide icons").
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  // The Duplicates lens glyph: stacked "copies" reads as near-dup groups.
+  import Copy from "@lucide/svelte/icons/copy";
   import Flame from "@lucide/svelte/icons/flame";
   // Diversify (duplication-tolerance): a "fold the stack down to one" glyph reads
   // as "collapse redundant frames to a representative" (DESIGN-DEDUP-AND-SIMILARITY).
@@ -223,6 +225,23 @@
       {@attach tooltip({ actionId: "toggle-graph" })}
     >
       <Share2 size={14} />
+    </button>
+
+    <!-- Duplicates lens (DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1"): an opt-in
+         near-dup DETECT + DISPLAY view over the current scope. When on, the
+         grid surface shows the near-dup GROUPS (clusters, a representative
+         highlighted) instead of the ordinary grid; the scan reuses the same
+         scope the graph lens does. DISPLAY ONLY in v1 (no delete/archive). No
+         em-dashes in the tooltip (gate: check:emdash). -->
+    <button
+      class="quiet"
+      class:active={ui.dupesOn}
+      onclick={() => ui.toggleDuplicates()}
+      aria-label="Duplicates"
+      aria-pressed={ui.dupesOn}
+      {@attach tooltip({ text: "Duplicates: find near-duplicate photos in this view" })}
+    >
+      <Copy size={14} />
     </button>
 
     <!-- ⚙ "Ranking signals" (Phase 3): on-demand, never on the keystroke path.

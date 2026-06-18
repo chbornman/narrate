@@ -13,6 +13,7 @@ import type {
   CollectionDto,
   CollectionNoteDto,
   DiversifyReport,
+  DuplicateGroupDto,
   ExportReportDto,
   FolderNode,
   GridItem,
@@ -286,6 +287,30 @@ export const graphTuning = () => invoke<GraphTuning>("graph_tuning");
  * other lens commands. */
 export const diversifyScope = (scope: GraphScope, tolerance: number) =>
   invoke<DiversifyReport>("diversify_scope", { scope, tolerance });
+// -- near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1") ------
+
+/** Tier-1 perceptual-hash near-dup GROUPS in a scope. The backend reuses the
+ * graph lens' `GraphScope` + `enumerate_scope` verbatim, so the "Duplicates"
+ * lens resolves to the SAME image set the grid/graph already show for a folder /
+ * collection / the whole library — `ui.graphScope()` feeds this exactly like the
+ * graph commands. Returns the transitive near-dup clusters (each size >= 2)
+ * whose 64-bit perceptual hashes are within the Hamming threshold.
+ *
+ * `hammingThreshold` is OPTIONAL: omitted, the backend uses the empirically
+ * calibrated `[dedup].hamming_threshold` (default 8/64) the design doc insists
+ * must be tuned, NOT a magic number on the wire. A caller passes an explicit
+ * value to sweep tighter/looser live (the looseness slider). Sent sparsely so an
+ * untuned call is byte-identical to the default. GRACEFUL: an un-hashed scope
+ * (previews still pending) or an empty scope resolves to `[]`, never an error,
+ * so the lens is correct on a fresh/mock machine. */
+export const findNearDuplicates = (
+  scope: GraphScope,
+  hammingThreshold?: number,
+) => {
+  const args: Record<string, unknown> = { scope };
+  if (hammingThreshold !== undefined) args.hammingThreshold = hammingThreshold;
+  return invoke<DuplicateGroupDto[]>("find_near_duplicates", args);
+};
 
 // -- roots & grid -----------------------------------------------------------
 

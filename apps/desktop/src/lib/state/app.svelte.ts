@@ -22,6 +22,7 @@
 import * as ipc from "../ipc/commands";
 import * as sel from "../logic/selection";
 import * as note from "../logic/note";
+import * as dedup from "../logic/dedup";
 import * as topicbake from "../logic/topicbake";
 import { isMac } from "../logic/platform";
 import { escapeAction, type EscapeContext } from "../logic/escape";
@@ -72,6 +73,7 @@ import type {
   AddRootOutcome,
   AppSettings,
   CollectionDto,
+  DuplicateGroupDto,
   FolderNode,
   IngestStatus,
   RootDto,
@@ -79,7 +81,11 @@ import type {
   TopicDto,
 } from "../types/dto";
 import type { Filter } from "../types/search";
-import { DIVERSIFY_DEBOUNCE_MS, MIN_QUERY_CHARS } from "../tuning";
+import {
+  DEDUP_THRESHOLD_DEFAULT,
+  DIVERSIFY_DEBOUNCE_MS,
+  MIN_QUERY_CHARS,
+} from "../tuning";
 import { copyKey, copyToClipboard } from "../primitives/copyflash.svelte";
 import * as prefs from "./prefs";
 import { ShellSlice } from "./shell.svelte";
@@ -335,6 +341,34 @@ export class Ui {
    * signature, for the diversify path): reportScope fires on every focus move, so
    * the active filter only re-runs when the SCOPE's items actually changed. */
   private diversifyScopeKey = "";
+  // -- near-duplicate lens (DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1") -----------
+  // An OPT-IN display lens over the CURRENT grid scope (like the heat tint, not
+  // a new ViewMode peer): when on, the grid surface renders the near-dup GROUPS
+  // (each cluster a row, a representative highlighted) instead of the ordinary
+  // grid. DETECT + DISPLAY only — no delete/archive; keep/cull is sidecar truth,
+  // deliberately deferred. The scope is `graphScope()` (the same image set the
+  // grid/graph show); the lens re-fetches when that scope changes.
+
+  /** Duplicates lens toggle, default OFF (opt-in, destructive-adjacent).
+   * Persisted like the heat toggle. */
+  dupesOn = $state(false);
+  /** The raw near-dup groups from the last `find_near_duplicates` scan, or null
+   * before the first scan / while one is in flight (the view shows a quiet
+   * "scanning" line on null, the none-state on []). Replaced wholesale; the
+   * pure logic/dedup.ts turns it into ordered clusters for the view. */
+  dupeGroups = $state<DuplicateGroupDto[] | null>(null);
+  /** The looseness-slider value (Hamming threshold / 64). Drives an explicit
+   * `hammingThreshold` so the founder can sweep tighter/looser live; the slider
+   * debounces the re-scan. Defaults to the backend's calibrated 8/64 (mirrored
+   * from the tuning registry), persisted across sessions. */
+  dupeThreshold = $state(DEDUP_THRESHOLD_DEFAULT);
+  /** Monotone token so a slow near-dup scan cannot overwrite a newer one's
+   * result (the heatLoad/gridLoad precedent, for the dedup path). */
+  private dupeLoad = 0;
+  /** The scope signature the cached groups were scanned for (a cheap kind +
+   * length + endpoints key) so reportScope only re-scans when the SCOPE's image
+   * set actually changed, never on a mere focus move. */
+  private dupeScopeKey = "";
 
   // -- search bar (M3 search-as-scope) ----------------------------------------
   // The bar's live input state. `query`/`chips` drive the always-visible bar
@@ -424,6 +458,12 @@ export class Ui {
     // reportScope when the heat tint comes back on.
     this.heatOn = prefs.loadHeatOn();
     this.heatAllTime = prefs.loadHeatAllTime();
+    // Duplicates lens (DESIGN-DEDUP-AND-SIMILARITY.md): the toggle + looseness
+    // slider, persisted like the heat toggles. The first openFolder drives the
+    // scan via reportScope when the lens comes back on. The threshold default
+    // lives in the tuning registry (passed as the fallback), not duplicated here.
+    this.dupesOn = prefs.loadDupesOn();
+    this.dupeThreshold = prefs.loadDupeThreshold(DEDUP_THRESHOLD_DEFAULT);
     // Attention overlay on the graph (heatmap x graph synthesis), persisted like
     // the heat tint so the lens reopens in the view the reviewer left it.
     this.graphAttention = prefs.loadAttentionMode();
@@ -653,6 +693,21 @@ export class Ui {
     // is on (the design's "Re-run when the scope changes while active"). A no-op
     // when off or the scope is unchanged.
     this.refreshDiversifyIfScopeChanged();
+    // Duplicates lens: rescan only when the SCOPE's item set changed, same as
+    // the heat tint (the scan is per-scope and O(n^2), so never on a focus move).
+    this.refreshDupesIfScopeChanged();
+  }
+
+  /** Rescan near-duplicates when the loaded grid item-set changed since the last
+   * scan (the heat-tint signature, reused). Cheap no-op when the lens is off or
+   * the scope is unchanged. */
+  private refreshDupesIfScopeChanged() {
+    if (!this.dupesOn) return;
+    const h = this.grid.scopeHashes;
+    const key = `${this.gridScope.kind}:${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
+    if (key === this.dupeScopeKey) return;
+    this.dupeScopeKey = key;
+    void this.fetchDuplicates();
   }
 
   /** Refetch heat-tint intensity when the loaded grid item-set changed since
@@ -2886,6 +2941,90 @@ export class Ui {
       this.grid.diversifyShown = null;
       this.diversifyHidden = 0;
     }
+  }
+
+  // The Duplicates lens (DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1") — opt-in
+  // near-dup DETECT + DISPLAY over the current grid scope. Mirrors the heat-tint
+  // toggle's shape (toggle -> persist -> fetch-or-clear); DISPLAY ONLY, nothing
+  // here deletes or writes a sidecar (cull is deferred to founder design).
+  // ---------------------------------------------------------------------------
+
+  /** Toggle the Duplicates lens, persisted. Turning it on scans the current
+   * scope for near-dup groups; off clears the cached groups so the grid surface
+   * returns to the ordinary grid. */
+  toggleDuplicates() {
+    this.dupesOn = !this.dupesOn;
+    prefs.saveDupesOn(this.dupesOn);
+    // Force the next scan regardless of the cached scope signature (the scope
+    // may be unchanged but the lens just turned on).
+    this.dupeScopeKey = "";
+    if (this.dupesOn) {
+      void this.fetchDuplicates();
+    } else {
+      this.dupeGroups = null;
+    }
+  }
+
+  /** Set the looseness slider (Hamming threshold / 64) and rescan, persisted.
+   * The COMPONENT debounces the drag (logic/dedup.debounce) so this only lands
+   * on a settled value; it forces a rescan even at an unchanged scope because the
+   * threshold, not the scope, changed. */
+  setDupeThreshold(value: number) {
+    if (value === this.dupeThreshold) return;
+    this.dupeThreshold = value;
+    prefs.saveDupeThreshold(value);
+    if (this.dupesOn) {
+      this.dupeScopeKey = ""; // the threshold changed: force a rescan
+      void this.fetchDuplicates();
+    }
+  }
+
+  /** Scan the loaded grid scope for near-dup groups and replace the cached set.
+   * Reuses `graphScope()` (the same image set the grid/graph show) and passes
+   * the explicit looseness threshold. Guarded by a monotone token so a slow scan
+   * cannot overwrite a newer one's. Silent on backend failure (tests/dev): the
+   * lens just shows the none-state. */
+  async fetchDuplicates() {
+    if (!this.dupesOn) return;
+    const load = ++this.dupeLoad;
+    // null marks "scanning" so the view can show a quiet in-flight line instead
+    // of flashing the none-state between a scope change and its result.
+    this.dupeGroups = null;
+    try {
+      const groups = await ipc.findNearDuplicates(
+        this.graphScope(),
+        this.dupeThreshold,
+      );
+      if (load !== this.dupeLoad) return; // a newer scan won
+      this.dupeGroups = groups ?? [];
+    } catch {
+      if (load === this.dupeLoad) this.dupeGroups = [];
+    }
+  }
+
+  /** Non-destructive "select the redundant copies" affordance (the design doc's
+   * welcome-if-clean multi-select): replace the grid selection with every
+   * non-representative member across the near-dup clusters, reusing the grid's
+   * own selection model. NO delete — it just gathers the redundant ones so the
+   * founder can act with the existing verbs (or simply SEE which would go). A
+   * no-op when the lens is off or there is nothing redundant. */
+  selectRedundantDuplicates() {
+    if (!this.dupesOn || this.dupeGroups === null) return;
+    const clusters = dedup.toClusters(this.dupeGroups, (h) => this.ratingOf(h));
+    const hashes = dedup.redundantHashes(clusters);
+    if (hashes.length === 0) return;
+    // Build the selection directly from the hashes (the lens renders bare
+    // hashes, not grid units, so it owns its own order); focus the first so the
+    // indicator and any active-hash verb have a subject.
+    this.grid.setSelection({ order: hashes, focus: 0, anchor: 0 });
+  }
+
+  /** The folded rating of an in-scope image, or null when unknown — the
+   * representative pick prefers the highest-rated copy to keep. Looked up from
+   * the loaded grid rawItems (the lens scopes to the same image set), so it is
+   * present for the visible scope and null for anything not loaded. */
+  private ratingOf(hash: string): number | null {
+    return this.grid.rawItems.find((i) => i.hash === hash)?.rating ?? null;
   }
 
   /** Targets for the membership verbs: the WHOLE stack-expanded selection

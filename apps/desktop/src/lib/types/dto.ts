@@ -443,6 +443,21 @@ export interface CollectionCandidateDto {
   score: number;
 }
 
+/** One near-duplicate GROUP (twin of the Rust `DuplicateGroupDto`,
+ * DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1"): a transitive cluster of images whose
+ * 64-bit perceptual hashes are within the Hamming threshold of one another, so
+ * they are the SAME photo re-saved / resized / lightly edited (exact byte-dupes
+ * already collapse to one hash upstream via BLAKE3 — these are the NEAR-dups).
+ *
+ * `imageHashes` are the member content hashes (lowercase BLAKE3 hex), sorted;
+ * groups are always size >= 2 (a singleton is not a duplicate). `count` is the
+ * member count, shipped so the "x3" per-group badge needs no `.length`. This is
+ * DETECT + DISPLAY only — keep/cull is sidecar truth, deliberately deferred. */
+export interface DuplicateGroupDto {
+  imageHashes: string[];
+  count: number;
+}
+
 /** One semantic-attraction edge for the Visualizer's force layout (twin of the
  * Rust `Neighbor`): a similar image and how strongly it should pull this one
  * toward it (`weight` is a cosine similarity in roughly [0,1], higher = more
