@@ -30,3 +30,16 @@ export const SEARCH_DEBOUNCE_MS = 50;
  * set nobody asked for. Shorter queries with no chips clear the results instead.
  */
 export const MIN_QUERY_CHARS = 2;
+
+/**
+ * Diversify (duplication-tolerance) slider debounce, ms
+ * (DESIGN-DEDUP-AND-SIMILARITY.md). The tolerance slider drives a backend
+ * `diversify_scope` pass (a brute-force CLIP k-NN precompute + greedy
+ * facility-location) that is FAR heavier than a keystroke search and runs on a
+ * blocking thread, so the drag must coalesce hard: 250 ms waits out a continuous
+ * slider drag and fires ONE pass when the user settles, rather than one pass per
+ * intermediate value. Deliberately well above SEARCH_DEBOUNCE_MS — this is not on
+ * a sub-100 ms budget; it is an explicit, opt-in review action where a beat of
+ * latency for a much cheaper IPC load is the right trade.
+ */
+export const DIVERSIFY_DEBOUNCE_MS = 250;

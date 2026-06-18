@@ -299,6 +299,33 @@ export function saveAttentionMode(mode: AttentionMode) {
   safeSet("pp.graphAttention", mode);
 }
 
+// ---- diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) ------
+
+/** The Diversify view filter on/off, default OFF (opt-in: a pure view filter
+ * that is destructive-adjacent). Persisted like the other reviewing-aid toggles
+ * so a reviewer who wants the de-duplicated view keeps it across sessions. */
+export function loadDiversifyOn(): boolean {
+  return loadBool("pp.diversifyOn", false);
+}
+
+export function saveDiversifyOn(on: boolean) {
+  saveBool("pp.diversifyOn", on);
+}
+
+/** The 0..100% duplication-tolerance slider value, default 50 (a middle strength
+ * that visibly collapses near-dup bursts without over-hiding). Persisted so the
+ * slider reopens where the reviewer left it. A malformed/absent value falls back
+ * to the default; the result is clamped to 0..100. */
+export function loadDiversifyTolerance(): number {
+  const v = Number(safeGet("pp.diversifyTolerance"));
+  if (!Number.isFinite(v)) return 50;
+  return Math.max(0, Math.min(100, Math.round(v)));
+}
+
+export function saveDiversifyTolerance(percent: number) {
+  safeSet("pp.diversifyTolerance", String(Math.max(0, Math.min(100, Math.round(percent)))));
+}
+
 // ---- semantic graph: per-topic influence field ------------------------------
 
 /** The per-topic INFLUENCE FIELD layer on the topic-graph (the soft colored

@@ -12,6 +12,7 @@ import type {
   CollectionCandidateDto,
   CollectionDto,
   CollectionNoteDto,
+  DiversifyReport,
   ExportReportDto,
   FolderNode,
   GridItem,
@@ -270,6 +271,21 @@ export const graphNeighbors = (scope: GraphScope, k?: number) => {
 
 /** The GraphTuning knobs the force sim + alpha slider read. */
 export const graphTuning = () => invoke<GraphTuning>("graph_tuning");
+
+// -- diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) ------
+
+/** The duplication-tolerance "Diversify" view filter: for a scope and a single
+ * `tolerance ∈ [0,1]` (0 = show everything, higher = hide more), return WHICH
+ * in-scope images are representatives (`shown`) and which are redundant
+ * (`hidden`) — `shown ∪ hidden` is exactly the scope. Reuses the SAME GraphScope
+ * shape `topicAffinities`/`graphNeighbors` use (the diversify set matches the
+ * grid exactly), running greedy facility-location over the CLIP cosine k-NN
+ * graph. NEVER errors on a degraded rig: an un-embedded scope / missing CLIP
+ * model resolves to an "all shown" report flagged `degraded` (the UI then
+ * disables the slider and shows a calm hint), the same graceful posture as the
+ * other lens commands. */
+export const diversifyScope = (scope: GraphScope, tolerance: number) =>
+  invoke<DiversifyReport>("diversify_scope", { scope, tolerance });
 
 // -- roots & grid -----------------------------------------------------------
 

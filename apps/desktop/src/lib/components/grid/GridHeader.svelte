@@ -21,6 +21,9 @@
   // Lucide (BACKLOG "Adopt Lucide icons").
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Flame from "@lucide/svelte/icons/flame";
+  // Diversify (duplication-tolerance): a "fold the stack down to one" glyph reads
+  // as "collapse redundant frames to a representative" (DESIGN-DEDUP-AND-SIMILARITY).
+  import Layers from "@lucide/svelte/icons/layers";
   import Search from "@lucide/svelte/icons/search";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   // Topic-graph lens entry (DESIGN-SEMANTIC-GRAPH.md): a network glyph reads as
@@ -266,6 +269,50 @@
       </button>
     {/if}
 
+    <!-- Diversify (duplication-tolerance) toggle + slider
+         (DESIGN-DEDUP-AND-SIMILARITY.md). A quiet reviewing aid like the heat
+         tint, OFF by default (opt-in: a pure view filter that hides redundant,
+         often same-session frames so fewer, more varied results show). Toggling
+         it on reveals a 0..100% tolerance slider; the grid filters to the
+         representative set and the header folds the rest behind an "N hidden"
+         count. No em-dashes in the copy (gate: check:emdash). -->
+    <button
+      class="quiet diversify"
+      class:active={ui.diversifyOn}
+      onclick={() => ui.toggleDiversify()}
+      aria-label="Diversify"
+      aria-pressed={ui.diversifyOn}
+      {@attach tooltip({ text: "Diversify: hide near-duplicate frames to surface variety" })}
+    >
+      <Layers size={14} />
+    </button>
+    {#if ui.diversifyOn}
+      <!-- The tolerance slider reveals only while Diversify is on (the
+           toggle-reveals-slider idiom, mirroring the heat all-time switch). When
+           the rig is degraded (no CLIP model / un-embedded scope) the slider
+           disables and a calm hint replaces the readout, never an error. -->
+      {#if ui.diversifyDegraded}
+        <span class="diversify-hint">embed photos to diversify</span>
+      {:else}
+        <input
+          class="diversify-slider"
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          value={ui.diversifyTolerancePercent}
+          aria-label="Duplication tolerance"
+          oninput={(e) => ui.setDiversifyTolerance(Number(e.currentTarget.value))}
+          {@attach tooltip({ text: "Duplication tolerance: higher hides more similar photos" })}
+        />
+        <!-- The unobtrusive "N hidden" affordance: a live count of folded frames.
+             0 reads "all shown" so the slider's effect is always legible. -->
+        <span class="diversify-count">
+          {ui.diversifyHidden > 0 ? `${ui.diversifyHidden} hidden` : "all shown"}
+        </span>
+      {/if}
+    {/if}
+
     <button
       bind:this={sortBtn}
       class="quiet"
@@ -434,6 +481,23 @@
     background: transparent;
     border: none;
     padding: 0;
+  }
+  /* The Diversify tolerance slider mirrors the thumb slider's quiet styling, a
+     touch narrower so the toggle + slider + count read as one compact cluster. */
+  .diversify-slider {
+    width: 72px;
+    accent-color: var(--text-faint);
+    background: transparent;
+    border: none;
+    padding: 0;
+  }
+  /* The "N hidden" / "all shown" count + the degraded hint: faint, like the lane
+     hint, so they sit quietly in the chrome until the eye looks for them. */
+  .diversify-count,
+  .diversify-hint {
+    color: var(--text-faint);
+    white-space: nowrap;
+    font-size: 12px;
   }
   .detail-row {
     display: flex;

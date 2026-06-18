@@ -16,6 +16,7 @@
 import * as sel from "../logic/selection";
 import { sortItems, THUMB_STEPS, type SortMode } from "../logic/sort";
 import * as stacks from "../logic/stacks";
+import { filterToShown } from "../logic/diversify";
 import { nextLevel } from "../logic/cellinfo";
 import type { GridItem } from "../types/dto";
 import type { DisplayUnit } from "../types/display";
@@ -59,6 +60,17 @@ export class GridSlice {
    * when the heat tint is off. */
   intensity = $state<ReadonlyMap<string, number>>(new Map());
 
+  // -- diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) ----------
+  /** The Diversify view filter's representative ("shown") set, or null when the
+   * filter is OFF (the default — it is opt-in, a display layer over the current
+   * scope, not a scope kind). When a set is present the grid renders ONLY items
+   * whose hash is in it and folds the rest behind the header's "N hidden" count.
+   * Mirrored from the root (ui.diversifyShown) exactly as `intensity` is, so the
+   * grid never reaches back into the composition root; the root owns the
+   * (debounced) diversify_scope IPC and re-runs on scope/tolerance change. A
+   * ReadonlySet in a $state so swapping it re-renders the grid. */
+  diversifyShown = $state<ReadonlySet<string> | null>(null);
+
   // -- scroll anchor (preserved across Look round-trips and folder revisits) ------
   scrollAnchor = $state<{ index: number; offset: number } | null>(null);
 
@@ -84,10 +96,18 @@ export class GridSlice {
   // `attention` sort consults the intensity map; every other mode ignores it.
   // The map is mirrored from the root, not derived from `items`, so there is no
   // sort↔fetch cycle (the heat fetch keys off the unsorted scope hashes).
-  items = $derived(sortItems(this.rawItems, this.sort, this.intensity));
+  // The Diversify filter runs FIRST, over rawItems: hiding redundant frames is a
+  // display layer beneath sort/stacks/selection, so everything downstream
+  // (units, focus, selectionTargets) sees only the shown set, exactly as if the
+  // scope contained those items. `null` (filter off) is the identity, so the
+  // default path is byte-identical to before the feature.
+  shownItems = $derived(filterToShown(this.rawItems, this.diversifyShown));
+  items = $derived(sortItems(this.shownItems, this.sort, this.intensity));
   itemHashes = $derived(this.items.map((i) => i.hash));
   /** Unsorted SCOPE hashes (rawItems order) — the heat fetch keys off these so
-   * the `attention` sort can reorder by the result without a fetch cycle. */
+   * the `attention` sort can reorder by the result without a fetch cycle. The
+   * FULL scope (pre-Diversify): the heat fetch and the diversify pass both key
+   * off the whole scope, never the post-filter subset. */
   scopeHashes = $derived(this.rawItems.map((i) => i.hash));
 
   /** Pairing + collapse over the sorted items (units + per-unit pair key). */

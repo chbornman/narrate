@@ -460,6 +460,27 @@ export interface ImageNeighbors {
   neighbors: Neighbor[];
 }
 
+/** `diversify_scope` result (DESIGN-DEDUP-AND-SIMILARITY.md, the
+ * duplication-tolerance slider) — twin of the Rust `DiversifyReport` (camelCase
+ * on the wire). The duplication-tolerance view filter answers, for a scope and a
+ * single `tolerance ∈ [0,1]`, WHICH in-scope images are representatives (`shown`)
+ * and which are redundant (`hidden`); `shown ∪ hidden` is exactly the scope. The
+ * grid renders `shown` and folds `hidden` behind an unobtrusive count, so this is
+ * a NON-DESTRUCTIVE display layer over the current scope, never a delete. */
+export interface DiversifyReport {
+  /** Representative image hashes the grid renders. */
+  shown: string[];
+  /** Redundant image hashes folded into a representative the grid hides. */
+  hidden: string[];
+  /** The cosine similarity cutoff the tolerance resolved to (two images at or
+   * above it are treated as redundant) — surfaced for transparency/telemetry. */
+  cutoff: number;
+  /** True when no CLIP similarity signal existed (un-embedded / no model), so the
+   * report is a trivial "all shown": the UI disables the slider and shows a calm
+   * "embed to diversify" hint rather than implying the slider had no effect. */
+  degraded: boolean;
+}
+
 /** image_abs_path result (D4: reveal / copy path / open-default). */
 export interface ImagePathsDto {
   /** Best online absolute path, null when every path is offline. */
