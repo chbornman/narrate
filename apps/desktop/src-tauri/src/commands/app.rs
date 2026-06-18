@@ -303,6 +303,38 @@ pub async fn rebuild_index(app: S<'_>) -> CmdResult<RebuildReportDto> {
     .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
+/// Settings → "Force re-embed (swapped weights)" maintenance action — the Seam 2
+/// TAIL (`docs/ARCHITECTURE-CONTRACTS.md` rollout step 4). The automatic
+/// model-aware re-pend keys off `model_id`, so replacing the WEIGHTS behind a
+/// model while REUSING its id re-embeds nothing; this is the explicit escape
+/// hatch for that case. It force re-pends BOTH embed passes (image + text) into
+/// the active space(s) UNCONDITIONALLY; the pump drains them on its next tick,
+/// exactly like `rebuild_previews`. Re-pending a pass whose embedder is not
+/// configured just leaves those rows pending (NotConfigured-style, harmless),
+/// so the command stays simple and does not probe which embedders are live.
+/// Returns the total rows re-pended across both passes.
+///
+/// Kept SEPARATE from `rebuild_index` (sidecar union) and from the automatic
+/// staleness path on purpose: this is the only thing that can trigger a full
+/// re-embed under an unchanged id, so it must be an explicit, founder-invoked
+/// verb — never something the staleness logic could fire by surprise.
+#[tauri::command]
+pub async fn force_reembed(app: S<'_>) -> CmdResult<usize> {
+    use photoproof_core::library::PassName;
+    let app = app.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.touch()?;
+        // Both embed passes: a weights swap can hit the CLIP and/or the text
+        // model, and we cannot tell which from here — force both, let the
+        // unconfigured one sit pending.
+        let mut repended = app.library.force_repend_pass(PassName::ImageEmbedding)?;
+        repended += app.library.force_repend_pass(PassName::TextEmbedding)?;
+        Ok(repended)
+    })
+    .await
+    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+}
+
 /// The settings window (UI §2.4): one modest separate window.
 #[tauri::command]
 pub fn open_settings_window(handle: AppHandle) -> CmdResult<()> {
