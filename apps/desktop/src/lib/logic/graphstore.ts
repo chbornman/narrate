@@ -30,21 +30,43 @@
 import { scopeKey, type ScopeKeyInput } from "./affinitycache";
 
 /**
- * The identity a Visualizer snapshot is keyed on: the SCOPE plus the TOPIC SET.
- * A change to either invalidates the snapshot (a different scope re-scans every
- * affinity; a different topic set re-seeds the layout). The topic set is sorted
- * + joined so it is order-insensitive — adding A then B keys the same as B then
- * A (the same backend result + the same anchors), matching the affinity cache's
- * own keying. The alpha blend is NOT part of the key: an alpha move re-blends in
- * place and reheats, but it is still "the same view" the user is sitting in, so
- * a close/reopen at the current alpha should restore, not recompute.
+ * The identity a Visualizer snapshot is keyed on: the SCOPE, the TOPIC SET, the
+ * ALPHA blend, the FULL-LIBRARY flag, and the VECTORS VERSION the layout was
+ * computed against. A change to ANY of these invalidates the snapshot, because
+ * each one changes the laid-out positions:
+ *   - scope: re-scans every affinity (the layout is scope-relative);
+ *   - topic set: re-seeds the anchor ring + every node's pull (sorted + joined
+ *     so it is order-insensitive — adding A then B keys the same as B then A,
+ *     matching the affinity cache's own keying);
+ *   - alpha: re-blends looks-vs-said, moving every node (rounded to 3 decimals,
+ *     finer than the 0.05-step slider, so float jitter buckets together but a
+ *     real blend change keys distinctly — mirrors affinityKey);
+ *   - fullLibrary: widens the scope to the whole library, a different node set;
+ *   - vectorsVersion: the Seam 1 ingest counter. New images embedding into a
+ *     scope bumps it; a layout snapshotted at an OLDER version is missing those
+ *     nodes, so it must be a different key (a MISS that recomputes) rather than
+ *     restoring a stale layout the missing-half guard cannot refresh.
+ *
+ * WHY fold these into the KEY (rather than restore-then-validate): a key miss is
+ * exactly the existing "scope/topics changed" path — the restore returns null
+ * and the caller cold-opens (recomputes). No new validation branch, and the
+ * fast-path is preserved: an UNCHANGED reopen (same scope/topics/alpha/flag and
+ * no new vectors since) keys identically and still hits the instant restore.
  */
 export function graphStateKey(
   scope: ScopeKeyInput,
   topics: readonly string[],
+  alpha: number,
+  fullLibrary: boolean,
+  vectorsVersion: number,
 ): string {
   const set = [...topics].sort().join(" ");
-  return `${scopeKey(scope)}|${set}`;
+  // 3 decimals is finer than the 0.05-step blend slider, so distinct blends key
+  // distinctly while float jitter (0.5 vs 0.50000001) collapses to one bucket —
+  // the same rounding affinityKey uses, so the two caches agree on what "the
+  // same blend" means.
+  const a = alpha.toFixed(3);
+  return `${scopeKey(scope)}|${set}|a=${a}|fl=${fullLibrary}|v=${vectorsVersion}`;
 }
 
 /**
@@ -69,6 +91,22 @@ class GraphStateStore {
    */
   get(key: string): unknown {
     return this.storedKey === key ? this.payload : null;
+  }
+
+  /**
+   * The stored payload WITHOUT a key check, or null when the slot is empty. The
+   * keyed `get` is the validated accessor; `peek` exists for one narrow need: on
+   * a fresh mount the component's own ALPHA + fullLibrary start at their defaults
+   * (the snapshot is the source of truth for what they should be), so it cannot
+   * build the alpha/fullLibrary-bearing key BEFORE it knows the snapshot's alpha.
+   * It peeks the single slot to read those layout inputs, sets them, THEN does
+   * the validated `get` — so the scope/topics/vectors-version still gate the
+   * restore, but a non-default-alpha view (saved at a=0.7, reopened with the
+   * component freshly at a=0.5) still hits the fast path instead of self-missing.
+   * Safe because the box is single-slot: there is at most one snapshot to peek.
+   */
+  peek(): unknown {
+    return this.payload;
   }
 
   /** Whether a payload is stored for `key` (a reopen of the SAME view can be

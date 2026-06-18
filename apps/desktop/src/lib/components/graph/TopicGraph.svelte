@@ -21,13 +21,18 @@
 
   const moduleAffinityCache = new AffinityCache<AffinityReport>();
 
-  /** MODULE-LEVEL semantic-neighbor cache, keyed on SCOPE ONLY. Unlike
-   * affinities, the k-NN neighbor graph depends only on the scope's image set
-   * (CLIP/note similarity), NOT on the topic set or the alpha blend — so adding a
-   * topic or moving the blend slider must REUSE the already-fetched neighbors
-   * instead of re-running the vector scan. Outlives the lens mount/unmount like
-   * the affinity + thumb caches so a close→reopen reuses it. A scope change is
-   * the only thing that produces a different key (and thus a fresh fetch). */
+  /** MODULE-LEVEL semantic-neighbor cache, keyed on SCOPE + the vectors-version
+   * the graph was fetched at (B2). Unlike affinities, the k-NN neighbor graph
+   * depends only on the scope's image set (CLIP/note similarity), NOT on the
+   * topic set or the alpha blend — so adding a topic or moving the blend slider
+   * must REUSE the already-fetched neighbors instead of re-running the vector
+   * scan. It DOES depend on the image set itself, so a vectorsVersion advance
+   * (new images embedded into the scope) keys a fresh fetch rather than reusing a
+   * graph that is missing the new images' edges. Outlives the lens mount/unmount
+   * like the affinity + thumb caches so a close→reopen reuses it. The cached
+   * value is HASH-addressed raw neighbor data (re-resolved to current array
+   * indices on each use in applyNeighbors), so a cross-scope reuse could never
+   * leak stale INDICES even before the version was added to the key. */
   const moduleNeighborCache = new Map<string, ImageNeighbors[]>();
 
   /** The live component's repaint hook for the shared thumbnail cache. Each mount
@@ -610,7 +615,17 @@
       for (const n of nodes) n.neighbors = undefined;
       return;
     }
-    const key = scopeKey(sc);
+    // Key the k-NN cache on scope AND the vectors-version this recompute is
+    // laying out against (B2): the cached graph is HASH-addressed raw neighbor
+    // data (re-resolved to current array indices below, so index validity is
+    // never a cross-scope hazard), but it is still SCOPE-DATA -- new images
+    // embedding into the scope (vectorsVersion advances) means the cached graph
+    // is missing their k-NN edges. Folding the version in makes a post-ingest
+    // recompute fetch a FRESH graph instead of reusing the pre-ingest one, while
+    // a topic/alpha change at the same version still reuses it (neighbors do not
+    // depend on topics or blend). `lastVectorsVersion` is set by recompute()
+    // immediately before this call, so it is the version this layout belongs to.
+    const key = `${scopeKey(sc)}|v=${lastVectorsVersion}`;
     let graph = neighborCache.get(key);
     if (graph === undefined) {
       try {
@@ -2108,6 +2123,7 @@
    * keyed by (scope, topic-set) via graphState. */
   interface GraphSnapshot {
     alpha: number;
+    fullLibrary: boolean;
     nodes: ImageNode[];
     anchors: TopicAnchor[];
     affinity: Map<string, number[]>;
@@ -2139,17 +2155,52 @@
   let lastAlpha = Number.NaN;
   let lastFullLibrary: boolean | null = null;
 
-  /** The key for the CURRENT view (scope + topic-set). A null scope-less call
-   * site never happens (scope() always resolves), so this is total. */
-  function currentStateKey(): string {
-    return graphStateKey(scope(), topics);
+  /** The scope that corresponds to a GIVEN fullLibrary value (not necessarily the
+   * live one). `scope()` reads the live `fullLibrary`; the restore path needs the
+   * scope for the snapshot's OWN fullLibrary (peeked) before it has adopted it,
+   * so it passes that value in here. */
+  function scopeFor(fl: boolean): ipc.GraphScope {
+    return fl ? { kind: "library" } : ui.graphScope();
+  }
+
+  /** The key for a view: scope + topic-set + alpha + fullLibrary + the
+   * vectors-version the layout belongs to. All layout inputs are passed
+   * EXPLICITLY (not read live) because SAVE and RESTORE key against different
+   * values:
+   *   - SAVE keys at the LIVE alpha/fullLibrary + `lastVectorsVersion` — the
+   *     version this layout was computed against (recompute records it), so the
+   *     snapshot is stamped with its own data generation;
+   *   - RESTORE keys at the PEEKED alpha/fullLibrary (the snapshot is the source
+   *     of truth for those on a fresh mount) + the LIVE
+   *     `ui.shell.ingest.vectorsVersion` — so if new vectors landed for this
+   *     scope while the lens was closed, the live key no longer matches the saved
+   *     one and the lookup MISSES, forcing a cold-open recompute instead of
+   *     restoring a layout that is missing the new nodes.
+   * An unchanged reopen (same alpha/fullLibrary, no new vectors since the save)
+   * keys identically and still hits the instant restore, so the fast-path holds.
+   * A null scope-less call never happens (scopeFor always resolves), so this is
+   * total. */
+  function stateKey(
+    alphaVal: number,
+    fullLibVal: boolean,
+    version: number,
+  ): string {
+    return graphStateKey(
+      scopeFor(fullLibVal),
+      topics,
+      alphaVal,
+      fullLibVal,
+      version,
+    );
   }
 
   /** Snapshot the current settled state into the module store, so a reopen of
-   * this same (scope, topic-set) restores instantly. Called on unmount. */
+   * this same view (and no new vectors since) restores instantly. Called on
+   * unmount; keyed at the vectors-version this layout was built against. */
   function saveSnapshot() {
     const snap: GraphSnapshot = {
       alpha,
+      fullLibrary,
       nodes,
       anchors,
       affinity,
@@ -2171,15 +2222,38 @@
       unnamedClusterList,
       unnamedMemberSet,
     };
-    graphState.set(currentStateKey(), snap);
+    // Key the snapshot at the LIVE alpha/fullLibrary and the vectors-version it
+    // was COMPUTED against, so a later reopen after new vectors landed (or at a
+    // different blend) keys differently and recomputes.
+    graphState.set(stateKey(alpha, fullLibrary, lastVectorsVersion), snap);
   }
 
   /** Restore a snapshot into this fresh instance, reusing the settled positions
    * + caches so the reopen paints immediately with NO recompute. Returns true on
    * a hit (the caller then skips the affinity fetch / reseed / reheat). */
   function restoreSnapshot(): boolean {
-    const snap = graphState.get(currentStateKey()) as GraphSnapshot | null;
+    // PEEK the single-slot snapshot to learn the alpha + fullLibrary it was laid
+    // out at, and key the lookup against THOSE (into locals, NOT by mutating
+    // component state yet). On a fresh mount `alpha`/`fullLibrary` are at their
+    // defaults (0.5 / false) -- the snapshot is the source of truth for what they
+    // should be -- so keying off the live defaults would self-MISS any
+    // non-default-alpha view (the key carries alpha, default 0.5 != saved 0.7).
+    // We deliberately do NOT mutate component state from the peek: a stale-
+    // version / different-scope / different-topics slot must still MISS the keyed
+    // `get` below and cold-open with the DEFAULTS, so only a CONFIRMED hit adopts
+    // the snapshot's values.
+    const peeked = graphState.peek() as GraphSnapshot | null;
+    const lookupAlpha = peeked?.alpha ?? alpha;
+    const lookupFullLib = peeked?.fullLibrary ?? fullLibrary;
+    // Look up at the LIVE vectors-version: a snapshot saved against an OLDER
+    // version (new images embedded into this scope while the lens was closed)
+    // keys differently and misses here, so we cold-open and recompute instead of
+    // restoring a stale layout the missing-half guard could not refresh.
+    const snap = graphState.get(
+      stateKey(lookupAlpha, lookupFullLib, ui.shell.ingest.vectorsVersion),
+    ) as GraphSnapshot | null;
     if (snap === null) return false;
+    fullLibrary = snap.fullLibrary;
     alpha = snap.alpha;
     nodes = snap.nodes;
     anchors = snap.anchors;
