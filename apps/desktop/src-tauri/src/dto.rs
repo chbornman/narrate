@@ -213,6 +213,17 @@ pub struct IngestStatus {
     /// needed. Serializes as `vectorsVersion`. `u64` defaults to 0, so
     /// `IngestStatus::default()` stays valid.
     pub vectors_version: u64,
+    /// Monotonic image-set version (Seam 1, sibling of `vectors_version`).
+    /// Bumped when a NEW image row commits. The pump's `prev != status` gate
+    /// fires when it advances, so the grid re-lists over this existing channel
+    /// instead of the retired 2s wall-clock throttle. Serializes as
+    /// `imagesVersion`; `u64` defaults to 0.
+    pub images_version: u64,
+    /// Monotonic journal version (Seam 1, sibling of `vectors_version`). Bumped
+    /// when a journal event is minted / redacted / merged-in. The inspector
+    /// re-reads when it advances instead of an ad-hoc membership test.
+    /// Serializes as `journalVersion`; `u64` defaults to 0.
+    pub journal_version: u64,
 }
 
 /// One offline volume the library has photos on (the warn surface).

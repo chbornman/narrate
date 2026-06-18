@@ -1395,3 +1395,45 @@ fn merge_order_shuffle_property() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Seam 1 (ARCHITECTURE-CONTRACTS.md): journal_version advances on mutation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn journal_version_advances_on_mutation() {
+    let ts = new_store();
+    assert_eq!(ts.store.journal_version(), 0, "fresh store starts at 0");
+
+    // A minted event (append) advances the version: the inspector re-reads on
+    // the data-version handshake instead of an ad-hoc membership test.
+    ts.store
+        .append(&ts.session, d_remark("first note", vec![hash(1)]), None)
+        .unwrap();
+    let after_append = ts.store.journal_version();
+    assert!(after_append > 0, "append advanced the journal version");
+
+    // A merge that lands a NEW event advances it again.
+    let dir2 = tempfile::tempdir().unwrap();
+    let store2 = EventStore::open(dir2.path().join("j2.db")).unwrap();
+    let ev = store2
+        .append(&ts.session, d_remark("from elsewhere", vec![hash(2)]), None)
+        .unwrap();
+    let report = ts.store.merge(std::slice::from_ref(&ev)).unwrap();
+    assert_eq!(report.inserted, 1, "the merge landed a new event");
+    let after_merge = ts.store.journal_version();
+    assert!(
+        after_merge > after_append,
+        "a merge that inserts a new event advanced the version"
+    );
+
+    // A pure no-op merge (the SAME event again, all duplicates) must NOT advance
+    // it — views must not re-read on nothing.
+    let report2 = ts.store.merge(std::slice::from_ref(&ev)).unwrap();
+    assert_eq!(report2.inserted, 0, "the re-merge inserted nothing");
+    assert_eq!(
+        ts.store.journal_version(),
+        after_merge,
+        "a no-op merge left the journal version untouched"
+    );
+}

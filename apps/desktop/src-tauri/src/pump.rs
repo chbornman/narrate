@@ -187,6 +187,12 @@ pub fn ingest_status(app: &App) -> IngestStatus {
     // emit-gate fires when a committed vector write advances it, refreshing
     // views over the existing channel instead of polling.
     status.vectors_version = app.vectors.vectors_version();
+    // Seam 1 (siblings): the image-set + journal versions ride the same gate so
+    // the grid re-lists on a NEW image and the inspector re-reads on a journal
+    // mutation — over this one channel, replacing the bespoke 2s grid throttle
+    // and the journal membership-test relist.
+    status.images_version = app.library.images_version();
+    status.journal_version = app.store.journal_version();
     status
 }
 

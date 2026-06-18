@@ -35,7 +35,7 @@ const ingest = (over: Partial<IngestStatus> = {}): IngestStatus => ({
   passes: [],
   scanning: false,
   discovered: 0,
-  offlineVolumes: [], vectorsVersion: 0,
+  offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0,
   ...over,
 });
 

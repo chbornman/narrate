@@ -26,7 +26,7 @@
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { INGEST_RELIST_MS, ui } from "./lib/state/app.svelte";
+  import { ui } from "./lib/state/app.svelte";
   import { dispatch } from "./lib/logic/keymap";
   import { resolveAction } from "./lib/actions/registry";
   import type { ActionDef } from "./lib/actions/types";
@@ -228,9 +228,9 @@
       listen<IndicatorState>("indicator-state", (e) => {
         ui.shell.onIndicatorState(e.payload);
       }),
-      // Indicator pill + the mid-scan grid re-list (2 s throttle inside —
-      // a slow network-volume scan otherwise shows an EMPTY grid until
-      // some unrelated refresh happens to fire).
+      // Indicator pill + the mid-scan grid re-list. The grid now re-lists on
+      // the Seam 1 `imagesVersion` handshake inside onIngestProgress (debounced)
+      // — a new image entering the open folder advances the version; no poll.
       listen<IngestStatus>("ingest-progress", (e) => void ui.onIngestProgress(e.payload)),
       // The Settings window's edits land live (set_stack_display emits to
       // every window; the grid re-pairs stacks on the spot).
@@ -255,19 +255,13 @@
         if (e.payload.type === "drop") ui.offerDrop(e.payload.paths);
       }),
     ];
-    // While ingest runs, the grid populates incrementally (UI §3.3/§9.1)
-    // on the same cadence as the event-driven re-list throttle — one
-    // shared constant, one mid-scan refresh policy.
-    const poll = setInterval(() => {
-      if (ui.shell.ingest.running) {
-        void ui.refreshItems();
-        void ipc.ingestStatus().then((s) => {
-          ui.shell.ingest = s;
-        });
-      }
-    }, INGEST_RELIST_MS);
+    // Seam 1 (ARCHITECTURE-CONTRACTS.md step 3): the mid-scan grid re-list is
+    // driven entirely by the `imagesVersion` handshake in onIngestProgress now.
+    // The old setInterval(INGEST_RELIST_MS) poll that ALSO re-listed while
+    // ingest ran is DELETED — it was a second, redundant timer for the same job
+    // (the "each view invents its own staleness story" anti-pattern). One
+    // versioned refresh policy, zero wall-clock timers.
     return () => {
-      clearInterval(poll);
       for (const u of unlisteners) void u.then((f) => f());
     };
   });

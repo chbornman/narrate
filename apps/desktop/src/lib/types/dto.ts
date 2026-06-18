@@ -148,6 +148,15 @@ export interface IngestStatus {
    * the version it last rendered against and re-fetches only on an advance —
    * this retires the old self-heal poll. Serialized as `vectorsVersion`. */
   vectorsVersion: number;
+  /** Monotonic image-set version (Seam 1, sibling of `vectorsVersion`): bumped
+   * once per committed NEW image row. The grid re-lists when it advances —
+   * replacing the retired 2s wall-clock throttle + the redundant App.svelte
+   * setInterval. Serialized as `imagesVersion`. */
+  imagesVersion: number;
+  /** Monotonic journal version (Seam 1, sibling of `vectorsVersion`): bumped
+   * once per minted / redacted / merged journal event. The inspector re-reads
+   * when it advances. Serialized as `journalVersion`. */
+  journalVersion: number;
 }
 
 /** Per-role embedder slot state (twin of `dto.rs`): the HONEST lifecycle of

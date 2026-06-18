@@ -157,6 +157,8 @@ export class ShellSlice {
     discovered: 0,
     offlineVolumes: [],
     vectorsVersion: 0,
+    imagesVersion: 0,
+    journalVersion: 0,
   });
   /** Optimistic "ingest is coming" bridge (founder, June 2026): between
    * the add-root/rescan click and the pump's first scanning=true emit,
