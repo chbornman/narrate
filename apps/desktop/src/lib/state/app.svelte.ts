@@ -89,6 +89,19 @@ import { InspectorSlice } from "./inspector.svelte";
  * shared export keeps the two paths from drifting apart silently. */
 export const INGEST_RELIST_MS = 2_000;
 
+/** Watchdog deadline for the optimistic `ingestExpecting` bridge
+ * (shell.expectIngest). WHY this value: the bridge covers the dark window
+ * between an add/rescan click and the pump's FIRST `ingest-progress` emit. A
+ * silent no-op (deleted path, zero-change rescan) emits NO progress, so without
+ * a deadline the flag — and the "Indexing…" empty state — strands forever
+ * (AUDIT-FRONTEND-COUPLING A2 / STATE-MACHINE §6e). 8 s sits comfortably past a
+ * slow network volume's walk-start dark window (the SMB scan that motivated the
+ * bridge begins streaming well inside this) while still standing the lie down
+ * fast enough that a stranded grid self-heals on its own — no restart needed.
+ * If a real status DOES land, it cancels this timer (shell.clearIngestExpecting),
+ * so a healthy scan never trips it. */
+export const INGEST_EXPECT_TIMEOUT_MS = 8_000;
+
 // MIN_QUERY_CHARS (the minimum free-text query length before a search runs)
 // now lives in the centralized UI tuning module (lib/tuning.ts) — imported
 // above. The gating policy it encodes is unchanged.
@@ -692,20 +705,21 @@ export class Ui {
     // The lying window (founder, June 2026): between this call and the
     // pump's first scanning=true emit, ingest.running is still false —
     // the empty state must read "indexing", never "no photographs".
-    // Optimistic; the first real status event clears it (onIngestProgress).
-    this.shell.ingestExpecting = true;
+    // Optimistic; the first real status event clears it (onIngestProgress),
+    // and the watchdog stands it down if a silent no-op emits nothing.
+    this.shell.expectIngest(INGEST_EXPECT_TIMEOUT_MS);
     let outcome: AddRootOutcome;
     try {
       outcome = await ipc.addRoot(dir);
     } catch (e) {
-      this.shell.ingestExpecting = false; // terminal: no scan will run
+      this.shell.clearIngestExpecting(); // terminal: no scan will run
       throw e;
     }
     // Refuse + alias (folder-tree improvements): a folder that overlaps an
     // existing active root is NOT re-ingested. Navigate to the root the user
     // already has instead, and stand the optimistic bridge down (no scan).
     if (outcome.kind === "overlap") {
-      this.shell.ingestExpecting = false;
+      this.shell.clearIngestExpecting();
       await this.openFolder(outcome.existingRootId, "");
       return;
     }
@@ -857,8 +871,10 @@ export class Ui {
     // Real status arrived: the optimistic add-root/rescan bridge stands
     // down — `running` (walk-aware via `scanning`) owns the empty-state
     // copy from here. Cleared on EVERY event, idle ones included: an
-    // instantly-finished scan must not leave "Indexing" stranded.
-    this.shell.ingestExpecting = false;
+    // instantly-finished scan must not leave "Indexing" stranded. This also
+    // CANCELS the pending watchdog so a late timer can't fire a spurious
+    // clear after a healthy scan already took over.
+    this.shell.clearIngestExpecting();
     const wasRunning = this.shell.ingest.running;
     this.shell.ingest = status;
     if (this.grid.rootId === null) return;
@@ -1497,7 +1513,7 @@ export class Ui {
     if (paths === null) return;
     // Same optimistic bridge as the picker flow: registration kicks an
     // initial scan, and the empty state must say so immediately.
-    this.shell.ingestExpecting = true;
+    this.shell.expectIngest(INGEST_EXPECT_TIMEOUT_MS);
     let first: string | null = null;
     for (const path of paths) {
       try {
@@ -1513,7 +1529,7 @@ export class Ui {
         this.dropError = e instanceof Error ? e.message : String(e);
         // Only a FULLY refused drop stands the bridge down — once one
         // root registered, its scan is real and the events will clear it.
-        if (first === null) this.shell.ingestExpecting = false;
+        if (first === null) this.shell.clearIngestExpecting();
         return;
       }
     }
@@ -2273,13 +2289,15 @@ export class Ui {
         break;
       case "rescan-root":
         // The add-root optimistic bridge applies here too: a rescan's
-        // walk has the same dark window before its first status emit.
-        this.shell.ingestExpecting = true;
+        // walk has the same dark window before its first status emit. The
+        // watchdog matters MOST here — a zero-change / deleted-path rescan
+        // returns Ok but may emit no progress at all (the §6e strand).
+        this.shell.expectIngest(INGEST_EXPECT_TIMEOUT_MS);
         try {
           await ipc.rescanRoot(action.rootId);
         } catch {
           /* unreachable backend in tests */
-          this.shell.ingestExpecting = false;
+          this.shell.clearIngestExpecting();
         }
         break;
       case "rebuild-previews":

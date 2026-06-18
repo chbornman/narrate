@@ -102,7 +102,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (p: string, proto = "asset") => `${proto}://localhost/${p}`,
 }));
 
-import { Ui } from "../src/lib/state/app.svelte";
+import { Ui, INGEST_EXPECT_TIMEOUT_MS } from "../src/lib/state/app.svelte";
 import * as sel from "../src/lib/logic/selection";
 
 const item = (hash: string, fileName = `${hash}.jpg`): GridItem => ({
@@ -426,6 +426,48 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
     ui.offerDrop(["/not/a/folder.jpg"]);
     await ui.confirmDrop();
     expect(ui.shell.ingestExpecting).toBe(false);
+  });
+
+  // The §6e strand (AUDIT-FRONTEND-COUPLING A2): a rescan/add that returns Ok
+  // but emits NO ingest-progress (deleted path, zero-change rescan) used to
+  // leave "Indexing…" stranded forever. The watchdog stands it down.
+  describe("watchdog: a silent ingest no-op cannot strand the bridge", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("auto-clears after the deadline when no event ever arrives", async () => {
+      // A rescan whose backend returns Ok but emits nothing: bridge raised,
+      // no onIngestProgress will ever land.
+      await ui.perform({ kind: "rescan-root", rootId: "R1" });
+      expect(ui.shell.ingestExpecting).toBe(true);
+      // Just before the deadline it still holds (don't blink early).
+      vi.advanceTimersByTime(INGEST_EXPECT_TIMEOUT_MS - 1);
+      expect(ui.shell.ingestExpecting).toBe(true);
+      // At the deadline the watchdog stands the lie down — the strand is fixed.
+      vi.advanceTimersByTime(1);
+      expect(ui.shell.ingestExpecting).toBe(false);
+    });
+
+    it("a real ingest-progress event clears the flag AND cancels the watchdog", async () => {
+      await ui.perform({ kind: "rescan-root", rootId: "R1" });
+      expect(ui.shell.ingestExpecting).toBe(true);
+      // The healthy path: a real status lands first and takes over the copy.
+      await ui.onIngestProgress({
+        running: true,
+        done: 0,
+        total: 0,
+        errors: 0,
+        passes: [],
+        scanning: true,
+        discovered: 7, offlineVolumes: [], vectorsVersion: 0
+      });
+      expect(ui.shell.ingestExpecting).toBe(false);
+      // The watchdog must be CANCELLED: advancing past the deadline must not
+      // fire a late spurious clear (it would no-op here, but a leaked timer
+      // could clear a NEW expect raised in between — so prove it's gone).
+      vi.advanceTimersByTime(INGEST_EXPECT_TIMEOUT_MS * 2);
+      expect(ui.shell.ingestExpecting).toBe(false);
+    });
   });
 });
 

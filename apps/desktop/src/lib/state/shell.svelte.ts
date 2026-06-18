@@ -161,13 +161,59 @@ export class ShellSlice {
   /** Optimistic "ingest is coming" bridge (founder, June 2026): between
    * the add-root/rescan click and the pump's first scanning=true emit,
    * `ingest.running` still reads false — and the empty grid would lie
-   * "No photographs" over a folder about to be walked. Set synchronously
-   * by the perform sink (app.svelte.ts); cleared by the FIRST real status
-   * event (onIngestProgress — the backend's walk-aware `running` takes
-   * over from there) or when the add/rescan call terminally errors.
-   * In-memory only, never persisted: a refresh/restart starts false and
-   * boot fetches real status, so a stale flag cannot strand. */
+   * "No photographs" over a folder about to be walked. Raised synchronously
+   * by the perform sink (app.svelte.ts) through expectIngest(); cleared by
+   * the FIRST real status event (onIngestProgress — the backend's walk-aware
+   * `running` takes over from there), when the add/rescan call terminally
+   * errors, OR by the watchdog below.
+   *
+   * WHY the watchdog: the clear used to depend on an ingest-progress event
+   * ARRIVING. A rescan/add that returns Ok but emits NO progress (a path
+   * deleted out from under us, a zero-change rescan, an instant no-op) leaves
+   * the flag raised forever, so an empty grid reads "Indexing…" until restart
+   * (AUDIT-FRONTEND-COUPLING A2 / STATE-MACHINE §6e — the *confirmed* strand).
+   * Raising the flag therefore ARMS a deadline that stands it down if no real
+   * status lands in time; a real status event cancels the pending watchdog.
+   * In-memory only, never persisted: a refresh/restart starts false and boot
+   * fetches real status. */
   ingestExpecting = $state(false);
+  /** Pending watchdog handle for the bridge above; null whenever no expect is
+   * in flight. Plain field (not $state): only the slice's own arm/clear logic
+   * reads it, never the view. */
+  #ingestExpectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Raise the optimistic bridge AND arm its watchdog. Centralized here (one
+   * arm site, one clear site) so the set→clear lifecycle is symmetric and the
+   * timer can't leak across the three perform call sites. `timeoutMs` is the
+   * deadline the composition root owns (it lives with the other ingest timing
+   * constants in app.svelte.ts); the slice stays value-agnostic. */
+  expectIngest(timeoutMs: number) {
+    this.#clearIngestExpectTimer();
+    this.ingestExpecting = true;
+    // No real status by the deadline ⇒ stand the bridge down; the empty grid
+    // falls back to its honest "No photographs" copy rather than stranding on
+    // "Indexing…" forever.
+    this.#ingestExpectTimer = setTimeout(() => {
+      this.#ingestExpectTimer = null;
+      this.ingestExpecting = false;
+    }, timeoutMs);
+  }
+
+  /** Stand the bridge down and cancel any pending watchdog. The single clear
+   * sink for every path: the first real ingest-progress event, a terminal
+   * add/rescan error, and the watchdog's own fire all route through here so a
+   * late timer can never fire a spurious clear after the flag already cleared. */
+  clearIngestExpecting() {
+    this.#clearIngestExpectTimer();
+    this.ingestExpecting = false;
+  }
+
+  #clearIngestExpectTimer() {
+    if (this.#ingestExpectTimer !== null) {
+      clearTimeout(this.#ingestExpectTimer);
+      this.#ingestExpectTimer = null;
+    }
+  }
 
   debugOpen = $state(false);
 
