@@ -10,6 +10,7 @@ import {
   countAboveThreshold,
   rankedHashes,
   rankedToScored,
+  resolveTopicIndex,
   selectedAboveThreshold,
   type ScoredImage,
 } from "../src/lib/logic/topicbake";
@@ -69,5 +70,47 @@ describe("rankedToScored / rankedHashes", () => {
 
   it("rankedHashes is the hashes in ranked order (the grid feed order)", () => {
     expect(rankedHashes(ranked)).toEqual(["x", "y"]);
+  });
+});
+
+describe("resolveTopicIndex (identity-not-index for the bake selection)", () => {
+  // The graph's `topics` is reverse-sorted from the store; the bake panel tracks
+  // the selected topic by PHRASE and re-derives its index every frame via this.
+  // These tests pin the §6b "selectedTopic off-by-one" fix: the selection follows
+  // its identity through removals/reorders instead of dangling on a shifted index.
+  const topics = ["alpha", "bravo", "charlie", "delta"];
+
+  it("resolves a phrase to its current position", () => {
+    expect(resolveTopicIndex(topics, "charlie")).toBe(2);
+  });
+
+  it("null selection resolves to -1 (no glow, no panel)", () => {
+    expect(resolveTopicIndex(topics, null)).toBe(-1);
+  });
+
+  it("a phrase no longer present resolves to -1 (self-healing on removal)", () => {
+    expect(resolveTopicIndex(topics, "echo")).toBe(-1);
+  });
+
+  it("THE BUG: selecting B then removing an EARLIER topic A keeps B selected, not B's old neighbor", () => {
+    // Select "charlie" (index 2). The old index-based code stored 2.
+    const selected = "charlie";
+    const before = resolveTopicIndex(topics, selected);
+    expect(before).toBe(2);
+
+    // Remove an EARLIER topic ("alpha"). Later phrases shift DOWN by one. The old
+    // raw index 2 would now name "delta" (the wrong topic) for the in-flight frame;
+    // identity tracking re-derives "charlie" to its NEW index 1.
+    const afterRemoval = topics.filter((t) => t !== "alpha"); // ["bravo","charlie","delta"]
+    const after = resolveTopicIndex(afterRemoval, selected);
+    expect(after).toBe(1);
+    expect(afterRemoval[after]).toBe("charlie"); // still B, NOT "delta"
+    // Prove the old behavior was wrong: the stale raw index would have lit "delta".
+    expect(afterRemoval[before]).toBe("delta");
+  });
+
+  it("removing the SELECTED topic itself resolves to -1 (panel drops cleanly)", () => {
+    const afterRemoval = topics.filter((t) => t !== "charlie");
+    expect(resolveTopicIndex(afterRemoval, "charlie")).toBe(-1);
   });
 });
