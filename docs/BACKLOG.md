@@ -702,6 +702,35 @@ magnitudes.
   persistent view you return to or a transient "hold these two up" gesture. Needs a
   short design round on those before building. (Founder, June 13 2026.)
 
+- [ ] **Similarity grouping + duplication-tolerance lens** (founder, June 17 2026
+  - "worth a wide think"). OBSERVATION that sparked it: with NO topics, the
+  visualizer ALREADY groups by visual similarity (founder screenshot of
+  `photoproof_test_set`: near-dup bursts stack tightly, B&W / silhouette / family
+  shots pool separately). That grouping is EMERGENT from the CLIP-cosine k-NN
+  neighbor springs (`graph_neighbors` -> `knn_within`, `ppvec.rs:1030`); the
+  union-find we built for soft topics (`synthesis.ts unnamedClusters:367`) already
+  carves that graph into clumps. So the SIGNAL is built; this is about SURFACING it.
+  THE PRODUCT IDEA (founder): a **"duplication-tolerance" slider** that does not
+  delete but **HIDES** images similar enough to each other (often same-session
+  bursts) so the founder sees fewer, MORE VARIED, more interesting results - a
+  diversity/representative-subset view, not a cull-and-destroy tool. At tolerance 0
+  show everything; raise it and each similarity cluster collapses to a
+  representative (medoid / highest-rated / sharpest), hiding the rest.
+  TWO TIERS, be explicit (the algorithms differ): (a) CLIP cosine = "do these LOOK
+  alike / same scene" (already built, drives the slider's grouping); (b) a cheap
+  PERCEPTUAL HASH (dHash/pHash on the preview we already decode; derived +
+  rebuildable u64) = "is this the SAME photo" for precise near-dup cull + burst
+  detection when fused with `capture_ts`. Exact byte-dupes already collapse via
+  BLAKE3 (K13). Surfaces as stacks (folds in the open "Burst/HDR-bracket stacks"
+  item) or a "Duplicates"/"Diversify" scope; keep/cull decisions are TRUTH ->
+  sidecar events. Opt-in toggle (it is destructive-adjacent). REFERENCE: look at
+  dupeGuru's picture mode (block-based average-color + match-% threshold). A deep-
+  research report on SOTA dedup techniques + a recommendation is IN FLIGHT (run
+  `wf_1b3bf86f`, June 17 2026); it will feed a `DESIGN-DEDUP-AND-SIMILARITY.md`
+  (the "wide think": emergent kNN engine, union-find -> stacks, pHash cull tier,
+  the tolerance slider mapping one control to a similarity/Hamming threshold, +
+  adjacent use cases - ML dataset de-dup, reverse-image/copyright, "best of burst").
+
 ## Lighting up M3 (the semantic-search chain, in order)
 
 - [ ] **Real embedder connector + backfill packet**: implement the
