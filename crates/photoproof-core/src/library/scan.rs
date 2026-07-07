@@ -354,6 +354,11 @@ pub(crate) fn scan_root(
                 let conn = lib.db.lock().expect("poisoned");
                 paths::reactivate(&conn, &stale.path_id, root_id, lib.now())?;
             }
+            // Seam 1 (AUDIT-2026-07-07 S3): reactivation is a relink — the
+            // image re-enters the grid's slice — so it advances the version
+            // like `relink_tx` does, or the grid stays stale until an
+            // unrelated event.
+            lib.bump_images_version();
             report.relinked += 1;
             relinked_hashes.push(stale.image_hash);
         } else {
@@ -459,6 +464,12 @@ pub(crate) fn scan_root(
             )?;
         }
         tx.commit()?;
+        // Seam 1 (AUDIT-2026-07-07 S1/S4): files deleted while the app was
+        // closed are discovered HERE (the startup/maintenance reconcile), not
+        // by the watcher — without a bump the grid would keep their ghost
+        // thumbnails even after the scan staled the rows. One bump for the
+        // whole batch (single committed transaction), after the commit.
+        lib.bump_images_version();
         report.went_stale = known.len();
     }
 

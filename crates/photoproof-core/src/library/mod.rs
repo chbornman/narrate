@@ -170,14 +170,16 @@ pub struct Library {
     /// Ingest-stage timings (BACKLOG "measured, not vibes" — first slice).
     metrics: PipelineMetrics,
     /// Monotonic, in-memory image-set version (Seam 1, sibling of
-    /// `PpvecStore::vectors_version`). Bumped on every committed NEW-image
-    /// insert (`new_image_tx`) so the library->view data-change contract lets
-    /// the grid re-list when its slice advances instead of polling on a
-    /// wall-clock throttle. In-memory only: no schema column, no migration —
-    /// views re-list on mount, so a counter that resets to 0 at process start
-    /// is correct. NOTE: this counts ADDED images only; root-removal already
-    /// rides its own `roots-changed` event, so it deliberately does not bump
-    /// here (see ARCHITECTURE-CONTRACTS.md Seam 1).
+    /// `PpvecStore::vectors_version`). Bumped on every committed change to
+    /// the ACTIVE image↔path set — new image, supersede, relink/reactivate,
+    /// and live remove (AUDIT-2026-07-07 S3/S4: bumping only on new images
+    /// left the grid blind to in-place edits, moves, and deletions) — so the
+    /// library->view data-change contract lets the grid re-list when its
+    /// slice advances instead of polling on a wall-clock throttle. In-memory
+    /// only: no schema column, no migration — views re-list on mount, so a
+    /// counter that resets to 0 at process start is correct. Root-removal
+    /// still rides its own `roots-changed` event, so it deliberately does
+    /// not bump here (see ARCHITECTURE-CONTRACTS.md Seam 1).
     images_version: AtomicU64,
 }
 
@@ -1245,10 +1247,16 @@ impl Library {
     }
 
     /// Wake trigger (§7.3): watcher gaps across sleep are a canonical
-    /// missed-event source.
-    pub fn on_system_resume(&self) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+    /// missed-event source. Called by the shell's pump when its wall-clock
+    /// gap detector fires (AUDIT-2026-07-07 S2); takes `opts` so the caller
+    /// can wire the live discovered-counter/cancel seams the same way every
+    /// other scan trigger does.
+    pub fn on_system_resume(
+        &self,
+        opts: &ScanOptions,
+    ) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
         self.probe_volumes()?;
-        self.reconcile_all(&ScanOptions::default())
+        self.reconcile_all(opts)
     }
 
     /// The 6-hour tick (§7.3, §10.5): error-row retry + the doctor's
@@ -1455,8 +1463,20 @@ impl Library {
                 if let Some(stale) =
                     self.reactivatable_row(volume_id, rel_path, size, mtime_ns, tolerance_ns)?
                 {
-                    let conn = self.db.lock().expect("poisoned");
-                    paths::reactivate(&conn, &stale.path_id, root_id.unwrap_or(""), self.now())?;
+                    {
+                        let conn = self.db.lock().expect("poisoned");
+                        paths::reactivate(
+                            &conn,
+                            &stale.path_id,
+                            root_id.unwrap_or(""),
+                            self.now(),
+                        )?;
+                    }
+                    // Seam 1 (AUDIT-2026-07-07 S3): reactivation IS a relink
+                    // (the image re-enters the grid's slice), just via the
+                    // zero-hash fast path — same bump as `relink_tx`, after
+                    // the write and outside the lock.
+                    self.bump_images_version();
                     return Ok(Observed::Relinked(stale.image_hash));
                 }
                 let (hash, hashed_size) = hashing::hash_file(abs_path)?;
@@ -1515,6 +1535,13 @@ impl Library {
                         params![row.path_id],
                     )?;
                 }
+                // Seam 1 (AUDIT-2026-07-07 S4): a live delete/move-away just
+                // removed an image from the grid's slice, but staling a row
+                // enqueues no pass — without a bump the pump's `prev != status`
+                // gate never fires and the ghost thumbnail lingers until an
+                // unrelated event. The no-row branch below stays silent: nothing
+                // the grid shows changed, so no re-list is owed.
+                self.bump_images_version();
                 Ok(true)
             }
             None => Ok(false),
@@ -1577,6 +1604,12 @@ impl Library {
             move_window_start,
         )?;
         tx.commit()?;
+        // Seam 1 (AUDIT-2026-07-07 S3): a relink adds an active path for an
+        // existing image — the grid's slice changed (a moved/copied file is
+        // visible again), so the version must advance exactly like a new
+        // image, or the grid shows the pre-move state until an unrelated
+        // event fires. After the commit, mirroring `new_image_tx`.
+        self.bump_images_version();
         Ok(())
     }
 
@@ -1626,16 +1659,28 @@ impl Library {
         // above are errors and must not advance the version) so the pump's
         // `prev != status` emit-gate refreshes the grid over the existing
         // `ingest-progress` channel instead of the old 2s wall-clock relist.
-        self.images_version.fetch_add(1, Ordering::Relaxed);
+        self.bump_images_version();
         Ok(())
     }
 
     /// Monotonic per-process image-set version (Seam 1, sibling of
     /// [`crate::retrieval::PpvecStore::vectors_version`]). Views compare it to
     /// the value they last rendered against and re-list only when it advances.
-    /// Counts ADDED images; root removal rides `roots-changed` separately.
+    /// Advances on any committed active-set change (add, supersede, relink,
+    /// remove); root removal rides `roots-changed` separately.
     pub fn images_version(&self) -> u64 {
         self.images_version.load(Ordering::Relaxed)
+    }
+
+    /// Advance the Seam-1 image-set version. Call AFTER a successful commit
+    /// (never before — an aborted transaction must not trigger a re-list of
+    /// unchanged data), from every path that changes which images the grid
+    /// would show: new image, supersede, relink/reactivate, live remove,
+    /// rename-relink, and the scan's went-stale sweep. One chokepoint so a
+    /// future mutation path can't quietly miss the bump again
+    /// (AUDIT-2026-07-07 S3/S4).
+    pub(crate) fn bump_images_version(&self) {
+        self.images_version.fetch_add(1, Ordering::Relaxed);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1778,6 +1823,11 @@ impl Library {
             )?;
         }
         tx.commit()?;
+        // Seam 1 (AUDIT-2026-07-07 S3): an in-place edit swaps which image
+        // lives at this path — the grid must re-list to show the new content
+        // hash. Bump after the commit (the in-tx helpers above deliberately
+        // do NOT bump, so this is the single bump for the whole supersede).
+        self.bump_images_version();
         Ok(())
     }
 
@@ -4112,6 +4162,98 @@ mod tests {
         assert!(
             lib.images_version() > after_first,
             "a second new image advanced the version again (monotone)"
+        );
+    }
+
+    /// Seed one committed image and return (lib, hash, tempdir) — the shared
+    /// rig for the Seam-1 version-bump pins below (AUDIT-2026-07-07 S3/S4).
+    fn seeded_library() -> (tempfile::TempDir, Library, ContentHash) {
+        let (tmp, lib) = pipeline_test_library();
+        let h1 = ContentHash::from_hex(&format!("{:064x}", 1)).unwrap();
+        lib.new_image_tx(&h1, 1234, "vol1", None, "a/IMG_1.jpg", 1_000, 0)
+            .unwrap();
+        (tmp, lib, h1)
+    }
+
+    /// AUDIT-2026-07-07 S3: an in-place edit (supersede) changes WHICH image
+    /// lives at a path, so it must advance `images_version` — the bump lived
+    /// only in `new_image_tx`, leaving the grid stale on in-place edits until
+    /// an unrelated event. This pins the committed supersede path.
+    #[test]
+    fn images_version_advances_on_supersede() {
+        let (_tmp, lib, _h1) = seeded_library();
+        let before = lib.images_version();
+        let path_id: String = {
+            let conn = lib.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT path_id FROM paths
+                 WHERE volume_id = 'vol1' AND rel_path = 'a/IMG_1.jpg' AND state = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let h2 = ContentHash::from_hex(&format!("{:064x}", 2)).unwrap();
+        lib.supersede_tx(&path_id, &h2, 4321, 2_000, "vol1", None, "a/IMG_1.jpg", 0)
+            .unwrap();
+        assert!(
+            lib.images_version() > before,
+            "a committed supersede must advance images_version (S3)"
+        );
+    }
+
+    /// AUDIT-2026-07-07 S3: a relink (live move / copy of a known hash) adds
+    /// an active path for an existing image — the grid's slice changed, so
+    /// the version must advance exactly like a new image.
+    #[test]
+    fn images_version_advances_on_relink() {
+        let (_tmp, lib, h1) = seeded_library();
+        let before = lib.images_version();
+        lib.relink_tx(
+            &h1,
+            "vol1",
+            None,
+            "b/COPY_OF_IMG_1.jpg",
+            1234,
+            3_000,
+            UtcMillis::from_epoch_ms(0),
+        )
+        .unwrap();
+        assert!(
+            lib.images_version() > before,
+            "a committed relink must advance images_version (S3)"
+        );
+    }
+
+    /// AUDIT-2026-07-07 S4: a live delete stales the row but enqueues no pass,
+    /// so `images_version` is the ONLY signal the pump's emit-gate has — no
+    /// bump meant ghost thumbnails until the next folder revisit. Also pins
+    /// the negative: removing a path the index never knew changes nothing the
+    /// grid shows, so it must NOT bump (no spurious re-lists).
+    #[test]
+    fn images_version_advances_on_observe_removed() {
+        let (_tmp, lib, _h1) = seeded_library();
+        let before = lib.images_version();
+
+        let window = UtcMillis::from_epoch_ms(0);
+        assert!(
+            !lib.observe_removed("vol1", "b/NEVER_SEEN.jpg", window)
+                .unwrap(),
+            "unknown path: nothing removed"
+        );
+        assert_eq!(
+            lib.images_version(),
+            before,
+            "a no-op remove must not force a grid re-list"
+        );
+
+        assert!(
+            lib.observe_removed("vol1", "a/IMG_1.jpg", window).unwrap(),
+            "the active row was removed"
+        );
+        assert!(
+            lib.images_version() > before,
+            "a committed live remove must advance images_version (S4)"
         );
     }
 }

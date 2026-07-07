@@ -9,11 +9,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use photoproof_core::UtcMillis;
-use photoproof_core::library::QueueOptions;
+use photoproof_core::library::{QueueOptions, ScanOptions};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::dto::{IngestStatus, PassRemaining};
@@ -39,6 +39,18 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
 const SIDECAR_TICK: Duration = Duration::from_millis(500);
+/// Wall-clock gap between pump iterations that we treat as a sleep/resume
+/// (AUDIT-2026-07-07 S2). WHY wall clock: `Instant` is suspend-paused on
+/// macOS/Linux, so a laptop lid-close leaves `last_maintenance.elapsed()`
+/// unmoved and the watcher's missed-while-asleep events invisible until the
+/// next 10-minute tick; `SystemTime` keeps advancing through sleep, so a big
+/// jump between iterations is the cross-platform wake signal (no OS wake
+/// observer needed). WHY 2 minutes: iterations are normally paced by
+/// IDLE_SLEEP (500 ms) or a bounded work batch — far below this — while any
+/// real sleep worth reconciling is minutes-plus. A rare false positive (an
+/// iteration genuinely stalled > 2 min) just triggers one redundant
+/// reconcile, which is idempotent and arguably owed after such a stall.
+const RESUME_WALL_GAP: Duration = Duration::from_secs(120);
 /// Block-for-one-event timeout in the runtime pump's recv loop. The
 /// timeout exists to re-check `app.shutdown`, not to pace events —
 /// events wake the loop immediately; this only bounds quit latency.
@@ -263,6 +275,17 @@ fn status_from_counters(
     s
 }
 
+/// Pure sleep/resume decision (AUDIT-2026-07-07 S2), factored out of the pump
+/// loop so it is testable without real clocks: did the machine plausibly
+/// suspend between two consecutive iterations? A clock that went BACKWARDS
+/// (NTP step, manual adjustment) is a clock correction, not a suspend, and
+/// must return false — otherwise every backwards step near a scan would risk
+/// a spurious full-library walk.
+fn wall_gap_signals_resume(prev: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(prev)
+        .is_ok_and(|gap| gap >= RESUME_WALL_GAP)
+}
+
 /// Drives `process_queue` continuously, plus the periodic volume probe and
 /// maintenance tick, emitting coalesced `ingest-progress` events.
 pub fn spawn_ingest_pump(handle: AppHandle) {
@@ -276,6 +299,12 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
             let mut rate_trackers: HashMap<String, RateEma> = HashMap::new();
             let mut last_probe = Instant::now();
             let mut last_maintenance = Instant::now();
+            // S2 sleep/resume detection state: the previous iteration's WALL
+            // time (see RESUME_WALL_GAP for why not `Instant`), plus a
+            // one-in-flight latch so rapid wake/sleep cycles cannot stack
+            // concurrent full-library reconciles.
+            let mut last_wall = SystemTime::now();
+            let resume_scan_running = Arc::new(AtomicBool::new(false));
             loop {
                 let Some(app) = handle.try_state::<Arc<App>>() else {
                     std::thread::sleep(IDLE_SLEEP);
@@ -285,6 +314,47 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                 if app.shutdown.load(Ordering::Relaxed) {
                     return;
                 }
+                // S2: a large wall-clock gap since the previous iteration means
+                // the machine slept — the notify watcher silently missed every
+                // filesystem event in between, so force the §7.3 wake reconcile
+                // now instead of waiting out the 10-minute maintenance tick.
+                let now_wall = SystemTime::now();
+                if wall_gap_signals_resume(last_wall, now_wall)
+                    // swap(true) latches: only the FIRST detection while no
+                    // reconcile is in flight spawns one.
+                    && !resume_scan_running.swap(true, Ordering::SeqCst)
+                {
+                    tracing::info!(
+                        gap_secs = now_wall
+                            .duration_since(last_wall)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                        "wall-clock gap between pump iterations: treating as \
+                         sleep/resume, reconciling roots"
+                    );
+                    // Off-thread: reconcile_all walks every root and can take
+                    // minutes on a big library, and the pump must keep draining
+                    // the queue and emitting progress meanwhile. Registered
+                    // with `app.scans` (the add-root/rescan idiom) so the walk
+                    // is visible as scanning/discovered in `ingest_status`.
+                    let resume_app = app.clone();
+                    let latch = Arc::clone(&resume_scan_running);
+                    std::thread::Builder::new()
+                        .name("pp-resume-reconcile".into())
+                        .spawn(move || {
+                            let _walk = resume_app.scans.begin();
+                            let opts = ScanOptions {
+                                discovered: Some(resume_app.scans.counter()),
+                                ..ScanOptions::default()
+                            };
+                            if let Err(e) = resume_app.library.on_system_resume(&opts) {
+                                tracing::warn!(error = %e, "resume reconcile failed");
+                            }
+                            latch.store(false, Ordering::SeqCst);
+                        })
+                        .expect("spawn resume reconcile");
+                }
+                last_wall = now_wall;
                 if last_probe.elapsed() >= PROBE_INTERVAL {
                     last_probe = Instant::now();
                     let _ = app.library.probe_volumes();
@@ -720,6 +790,49 @@ pub fn drain_capture_at_quit<C: photoproof_core::capture::Clock>(
         minted += engine.pump(store).len();
     }
     minted
+}
+
+#[cfg(test)]
+mod resume_gap_tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::{RESUME_WALL_GAP, wall_gap_signals_resume};
+
+    /// AUDIT-2026-07-07 S2: the sleep/resume decision. Normal pacing (the
+    /// 500 ms idle tick, even a slow multi-second batch) stays far below the
+    /// threshold; at/above it a resume reconcile fires. Boundary pinned at
+    /// exactly RESUME_WALL_GAP so a future threshold tweak is deliberate.
+    #[test]
+    fn gap_at_or_above_threshold_signals_resume() {
+        let prev = SystemTime::UNIX_EPOCH + Duration::from_secs(1_780_000_000);
+        assert!(
+            !wall_gap_signals_resume(prev, prev + Duration::from_millis(500)),
+            "the idle tick is not a resume"
+        );
+        assert!(
+            !wall_gap_signals_resume(prev, prev + RESUME_WALL_GAP - Duration::from_secs(1)),
+            "just under the threshold: still normal pacing"
+        );
+        assert!(
+            wall_gap_signals_resume(prev, prev + RESUME_WALL_GAP),
+            "the threshold itself fires"
+        );
+        assert!(
+            wall_gap_signals_resume(prev, prev + Duration::from_secs(8 * 3600)),
+            "an overnight sleep fires"
+        );
+    }
+
+    /// A wall clock that stepped BACKWARDS (NTP correction, manual change) is
+    /// not a suspend and must never trigger a full-library walk.
+    #[test]
+    fn backwards_clock_is_not_a_resume() {
+        let prev = SystemTime::UNIX_EPOCH + Duration::from_secs(1_780_000_000);
+        assert!(!wall_gap_signals_resume(
+            prev,
+            prev - Duration::from_secs(3600)
+        ));
+    }
 }
 
 #[cfg(test)]

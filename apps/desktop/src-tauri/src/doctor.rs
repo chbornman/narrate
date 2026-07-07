@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use photoproof_connectors::vector_store::VecKind;
-use photoproof_core::library::PassName;
+use photoproof_core::library::{PassName, ScanOptions};
 use photoproof_core::retrieval::SpaceReconcileReason;
 
 use crate::state::App;
@@ -102,6 +102,53 @@ pub fn run_startup_doctor(app: &Arc<App>) {
             "startup integrity report: preview cache reconciled"
         ),
         Err(e) => tracing::error!(error = %e, "startup doctor: preview reconcile failed"),
+    }
+
+    // 4. Filesystem reconcile (AUDIT-2026-07-07 S1). The notify watcher does
+    //    not replay events from while the app was closed, and the pump's first
+    //    maintenance tick is a full interval (~10 min) after launch — so
+    //    offline adds/deletes/edits were invisible until then. Scanning every
+    //    active root HERE closes the gap: this thread already runs off the UI
+    //    path (launch is never blocked), it runs AFTER the derived-state heals
+    //    above (previews/passes are consistent before new work is enqueued),
+    //    and the watchers are already live (lib.rs starts them before spawning
+    //    this thread), so nothing that happens mid-scan is lost — the scan and
+    //    the watcher converge on the same idempotent observe_* per-path
+    //    algorithm. The pump's maintenance seed is untouched, so this cannot
+    //    double-run with an early maintenance tick.
+    //
+    //    The walk registers with `app.scans` (the add-root/rescan idiom) so
+    //    `ingest_status` reports scanning/discovered live instead of the grid
+    //    lying "No photographs" over a busy startup walk.
+    {
+        let _walk = app.scans.begin(); // guard: de-registers on every exit
+        let opts = ScanOptions {
+            discovered: Some(app.scans.counter()),
+            ..ScanOptions::default()
+        };
+        match app.library.reconcile_all(&opts) {
+            Ok(reports) => {
+                for (root_id, r) in &reports {
+                    // Log only roots with drift; a clean root at startup is
+                    // the common case and must not spam the report.
+                    if r.new_images + r.superseded + r.relinked + r.went_stale > 0 {
+                        tracing::info!(
+                            root_id = %root_id,
+                            new_images = r.new_images,
+                            superseded = r.superseded,
+                            relinked = r.relinked,
+                            went_stale = r.went_stale,
+                            "startup doctor: reconciled offline filesystem changes"
+                        );
+                    }
+                }
+                tracing::info!(
+                    roots = reports.len(),
+                    "startup integrity report: filesystem reconciled"
+                );
+            }
+            Err(e) => tracing::error!(error = %e, "startup doctor: filesystem reconcile failed"),
+        }
     }
 
     tracing::info!("startup integrity report: done");

@@ -2777,3 +2777,39 @@ fn doctor_heals_missing_artifacts_counts_orphans_and_sweeps_temps() {
     assert_eq!(again.temps_swept, 0);
     assert_eq!(again.stale_orphans, 1);
 }
+
+/// AUDIT-2026-07-07 S1/S4: the startup/maintenance reconcile is what
+/// discovers files deleted while the app was closed, and the grid re-lists
+/// only when `images_version` advances — so the scan's went-stale sweep must
+/// bump it, or the ghost thumbnails survive the very scan added to heal
+/// them. The no-change scan is pinned too: an idle reconcile must NOT bump,
+/// or every 10-minute tick would force a pointless grid re-list.
+#[test]
+fn reconcile_scan_bumps_images_version_only_on_change() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    env.write("photos/a.jpg", &unique_jpeg(7501));
+    env.write("photos/b.jpg", &unique_jpeg(7502));
+    env.scan(&root);
+
+    // "While the app was closed": a.jpg deleted behind the index's back.
+    std::fs::remove_file(env.mount.join("photos/a.jpg")).unwrap();
+    let before = env.lib.images_version();
+    let report = env.scan(&root);
+    assert_eq!(report.went_stale, 1, "the offline delete was discovered");
+    assert!(
+        env.lib.images_version() > before,
+        "the went-stale sweep advanced images_version (S1/S4)"
+    );
+
+    // A second, no-change scan: pure fast path, no bump, no re-list churn.
+    let before = env.lib.images_version();
+    let report = env.scan(&root);
+    assert_eq!(report.went_stale + report.new_images + report.superseded, 0);
+    assert_eq!(
+        env.lib.images_version(),
+        before,
+        "an idle reconcile must not force a grid re-list"
+    );
+}

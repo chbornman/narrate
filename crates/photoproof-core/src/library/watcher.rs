@@ -419,6 +419,13 @@ impl WatchPipeline {
                     now_db,
                 )?;
                 tx.commit()?;
+                drop(conn);
+                // Seam 1 (AUDIT-2026-07-07 S3/S4): this branch commits its own
+                // relink transaction (it bypasses `relink_tx`), so it owes the
+                // same post-commit version bump — a live rename changes the
+                // path the grid sorts/labels by, and without the bump the grid
+                // shows the old name until an unrelated event re-lists it.
+                self.lib.bump_images_version();
                 Ok(vec![PipelineEffect::RenameRelinked {
                     from: from_rel,
                     to: to_rel,
