@@ -7,6 +7,59 @@ loop. The vision filter applies to every line (reviewing/processing = core;
 managing = off-thesis). Shipped items move to LANDED.md verbatim — only open
 work lives here.
 
+## Audit 2026-07-07 - deferred items (wave-1 fixes shipped; see LANDED.md + docs/AUDIT-2026-07-07.md)
+
+The full-codebase audit shipped its wave-1 fixes (G1, S1-S4, U1/U2/U4-U7,
+F1/F2/F3, D1/D2/D3/D5 - all in LANDED.md July 7 2026). These findings were
+logged but deliberately deferred; each names its audit ID and why.
+
+- [ ] **S5: orphan preview/vector sweep** - `doctor()` only counts
+  `stale_orphans`; thumb/display artifacts and `.ppvec` rows for images with no
+  active path are kept forever (only the 1:1 full-decode tier LRU-evicts), so a
+  churning library leaks previews + embeddings on disk unbounded. Deferred: it
+  wants a deletion-window ruling (how long after last-active-path before a
+  conservative sweep, vs the move-correlation window) before writing a
+  destructive doctor step. `mod.rs:1363-1374`.
+- [ ] **S6 / `s02_2`: case-only rename correlation on APFS** - `watcher.rs`
+  correlates renames by exact `rel_path`; a case-only rename on a
+  case-insensitive volume can leave a ghost row. This is the standing
+  case-sensitivity ruling (also the known-red `s02_2` sidecar test).
+- [ ] **D4: reclaim failed partial downloads from the UI** - a terminally-
+  failed model keeps `.part` gigabytes the orphan scan skips (it has a manifest
+  entry) and the settings row offers only Download. Surface partial bytes + a
+  "Discard partial" action. `runtime.rs:791-795`, `gc.rs:132-151`.
+- [ ] **D6: post-install model re-verification** - installed files are trusted
+  by byte-length only; disk corruption surfaces as an opaque spawn failure. A
+  doctor/verify action re-hashing a model's files (`sha256_file` exists).
+- [ ] **D7: lock-guard installed.json mutation** - single-worker today, but
+  `remove_model` runs on a command thread; also `remove_installed_record`
+  lacks the `create_dir_all` its counterpart has. `download.rs:189-221`.
+- [ ] **D8: unhosted fp16 CLIP manifest entry** - `ViT-H-14-378-quickgelu__
+  dfn5b-fp16` (revision `local-fp16-convert`) is offered at tiers 1-2 but the
+  artifact is dev-staged only; an unstaged machine configured for it downloads-
+  fails forever. Wants a hosting decision (host + re-pin, or stop offering it
+  until hosted). `manifest.rs:536-569`.
+- [ ] **U3: force-reembed affordance** - `force_reembed` is registered but has
+  no UI caller (dev-console only). Wants a product decision on where the
+  affordance lives (Settings -> Models "Force re-embed", or explicit
+  dev-only). `commands/app.rs:322`.
+- [ ] **U8: Duplicates lens interactivity** - cluster thumbnails are
+  non-interactive `<figure>`s bypassing the Thumb retry path (moot: a grouped
+  image necessarily has a preview). Tier-1 follow-up. `DuplicatesView.svelte`.
+- [ ] **F4: client-side fling load ordering** - the grid delegates all loading
+  to native `loading="eager"`; superseded fling requests keep completing. The
+  graph's `ThumbQueue` solves this. Medium effort; measure first.
+- [ ] **F5/F6: grid derived recompute + per-row EXISTS subqueries** - full-array
+  deriveds recompute per mid-scan re-list; `list_folder` runs two correlated
+  subqueries per row. Bounded, off the render path. Baseline via the T2
+  grid-list bench before optimizing.
+- [ ] **F7: full-res protocol routes read whole files** - `/original`,
+  `/embedded`, `/full-decode` have no HTTP range support. Look-scale only.
+- [ ] **T2: `pp_bench` preview-serve + grid-list scenarios** - append to
+  `bench-results.jsonl` and wire into `tune-check` baselines (the Rust T1
+  serve-latency test + T3 vitest budgets already landed). **T4:** optional
+  headless scripted-scroll harness counting requests-fired vs cells-settled.
+
 ## Dogfood round 4 (founder, June 12 2026 evening — second live session)
 
 - [x] **Search ranking is rank-flat: any note outranks a perfect CLIP

@@ -6,6 +6,88 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## July 7 2026 - Full audit fix wave (loops, sync, model downloads, UX, perf)
+
+Full-codebase audit (`docs/AUDIT-2026-07-07.md`, findings keyed G/S/D/U/F/T)
+of the recently-landed features and the standing background loops, then a
+wave-1 fix pass. Five parallel deep-read audits over `b9ff46f`; every fix
+below carries a named test.
+
+- [x] **G1 - gate was red on clean main beyond `s02_2`** - `config_toml.rs`'s
+  `spec_block_equals_defaults` compared the RUNTIME sec 4.4 spec literal against
+  `Config::default()` verbatim, but the CLIP default had become
+  platform-conditional (fp16 single-file on CUDA builds, int8 base on
+  macOS/CPU because the fp16 graph fragments into ~36 CoreML partitions). The
+  test now pins the embedder model per-platform and compares the rest exactly;
+  the spec block comment states the conditional compiled default. `c2617cb`,
+  `0d84280`.
+
+- [x] **S1/S2 - the grid showed stale/ghost assets for up to 10 min after
+  launch and after sleep** - nothing reconciled the filesystem at startup (the
+  first scan was the +10 min maintenance tick, and the notify watcher does not
+  replay pre-launch events), and `on_system_resume` existed but had zero
+  callers so sleep/wake missed events silently. The startup doctor now runs a
+  background `reconcile_all` as its final ordered step (after the vector/pass/
+  preview heals, using the add-root discovered-counter seam so the walk is
+  visible in the header); the pump tracks wall-clock gaps between iterations
+  (`SystemTime`, since `Instant` pauses during suspend) and a >120 s gap spawns
+  a latched background resume reconcile. `wall_gap_signals_resume` extracted as
+  a pure fn with boundary + backwards-clock tests. `dc65cc8`.
+
+- [x] **S3/S4 - in-place edits, live moves, and live deletes never notified the
+  grid** - `images_version` bumped only in `new_image_tx`, so supersede,
+  relink, `observe_removed`, the rename-relink watcher branch, and the scan
+  went-stale sweep all changed grid membership without advancing the seam-1
+  handshake. All routes now go through one post-commit `bump_images_version`
+  chokepoint; idle reconciles deliberately do not bump (pinned by
+  `reconcile_scan_bumps_images_version_only_on_change`, no 10-min re-list
+  churn). `dc65cc8`.
+
+- [x] **U1 - Diversify silently hid newly-ingested photos** - mid-ingest
+  re-lists called `grid.setItems` without re-running the diversify pass, and
+  the filter dropped any hash the stale pass had never seen, so import-and-
+  review with Diversify on hid every new photo with no hint. Re-lists now
+  funnel through a shared `refreshLensesIfScopeChanged` (heat + diversify +
+  dupes), and the fold was inverted to key on the report's `hidden` set so
+  unknown-hash -> visible is the structural default; `diversifyHidden` is now a
+  live getter. Also fixed `selectRedundantDuplicates` mis-focus + missing
+  reportScope (U2), the redundant second lens pass on toggle-on (U4), a missing
+  debounce cancel (U5), a "diversifying..." pending affordance (U6), and
+  kind-blind lens cache keys (U7). `753e865`.
+
+- [x] **F1 - the protocol handler could spawn hundreds of transient OS
+  threads on a fling-scroll** - `photoproof://` spawned a fresh thread per
+  request doing a blocking `fs::read`, all contending for the FS and the db
+  lock. Replaced with a fixed pool sized to core count (clamped 2..8): the
+  burst queues FIFO on a constant number of workers, queue as backpressure.
+  Locked in by `preview_serve_latency` (T1): 200 concurrent serves 2.78 ms
+  wall, warm p99 0.089 ms on M1. `0a2d957`.
+
+- [x] **F2/F3 - grid scroll jank and bitmap bloat at scale** - `isSelected` did
+  `order.includes` per mounted cell per scroll frame (Select-All on 10k then
+  scrolling measured 1363 ms of string compares per sweep); now a
+  WeakMap-memoized Set keyed on the order array identity (0.72 ms same
+  workload). The grid also always decoded the 512 px thumb tier even into 96 px
+  cells (~150 MB of decoded bitmaps zoomed out); it now picks the 96 px micro
+  tier for cells <=200 px with a 404-fallback heal. Perf-budget vitests added
+  (T3). `d1fc1a6`.
+
+- [x] **D1/D2/D3/D5 - model-download operational resilience and visibility** -
+  a disk-space preflight before the ~13.4 GB tier-1 bundle (statvfs, 2 GiB
+  margin, distinct `InsufficientSpace` row); transient 429/5xx now retry
+  through the existing backoff honoring Retry-After (only socket-cuts did
+  before); a per-model cancel flag + Cancel button (parts kept for resume, no
+  error row); and a live "1.2 / 3.9 GB - 8.0 MB/s" throughput line (frontend
+  EWMA over the existing byte samples). `4779983`.
+
+REMAINING (still BACKLOG, logged in the audit sec 6): S5 orphan preview/vector
+sweep (wants a deletion-window ruling), S6/`s02_2` (case-sensitivity ruling),
+D4 partial-download reclaim UI, D6 post-install re-verify, D7 installed.json
+lock, D8 unhosted fp16 CLIP entry (hosting decision), U3 force-reembed
+affordance (product decision), U8 dupes-lens interactivity, F4 fling load
+ordering, F5/F6 (measure via T2 first), F7 full-res ranges, T2 grid-list bench,
+T4 scripted-scroll harness.
+
 ## June 17 2026 - Seam 2: model-swap re-embed coverage (revive transient skips)
 
 - [x] **`repend_passes_for_model` covers transiently-skipped + error rows, not
