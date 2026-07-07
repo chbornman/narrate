@@ -32,6 +32,7 @@
 //! headers and the webview's own HTTP cache does the rest.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use photoproof_core::ContentHash;
 use photoproof_core::library::{
@@ -186,6 +187,104 @@ pub fn respond_not_found() -> http::Response<Vec<u8>> {
         .header("cache-control", "no-store")
         .body(Vec::new())
         .expect("static response")
+}
+
+// ---- bounded serve pool (AUDIT-2026-07-07 F1) -------------------------------
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Fixed-size worker pool the `photoproof://` protocol registration runs
+/// `serve` on.
+///
+/// WHY a bound: the handler used to `std::thread::spawn` per request, so a
+/// fling-scroll over a large grid burst dozens-to-hundreds of transient OS
+/// threads, every one doing blocking `std::fs::read` — all competing for the
+/// filesystem and (on the /original, /embedded, and /full-decode routes) the
+/// library's db lock. A fixed pool turns that burst into a FIFO queue:
+/// thread count stays constant, requests keep their arrival order (the
+/// viewport-first ordering the frontend already establishes server-side),
+/// and backpressure is the queue — not the OS scheduler.
+pub struct ServePool {
+    tx: mpsc::Sender<Job>,
+    workers: usize,
+}
+
+impl ServePool {
+    fn new(workers: usize) -> Self {
+        let (tx, rx) = mpsc::channel::<Job>();
+        // The workers share one receiver behind a mutex (std::sync::mpsc is
+        // single-consumer). Only the DEQUEUE is serialized: the guard drops
+        // at the end of the match arm, before the job runs, so the jobs
+        // themselves execute in parallel across the pool.
+        let rx = Arc::new(Mutex::new(rx));
+        for i in 0..workers {
+            let rx = Arc::clone(&rx);
+            std::thread::Builder::new()
+                .name(format!("pp-protocol-{i}"))
+                .spawn(move || {
+                    loop {
+                        let job = match rx.lock() {
+                            Ok(guard) => guard.recv(),
+                            // Poisoned dequeue lock: unreachable short of a
+                            // panic inside `recv` itself; bail rather than
+                            // spin on a broken pool.
+                            Err(_) => break,
+                        };
+                        match job {
+                            // catch_unwind so one panicking request cannot
+                            // permanently shrink the FIXED pool — a leaked
+                            // worker here is capacity lost for the whole
+                            // process lifetime.
+                            Ok(job) => {
+                                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                            }
+                            // Channel closed (pool dropped): workers retire.
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("spawn photoproof protocol worker");
+        }
+        Self { tx, workers }
+    }
+
+    /// The bound itself — the number of worker threads. Exposed so the
+    /// preview_serve_latency perf test can pin that the shipping mechanism
+    /// is a fixed pool (F1's regression guard).
+    pub fn workers(&self) -> usize {
+        self.workers
+    }
+
+    /// Queue a request job. Never blocks the caller (the webview's protocol
+    /// thread): the channel is unbounded, so a burst QUEUES instead of
+    /// spawning — the bounded resource is threads, which is what F1 was
+    /// leaking. Send only fails if every worker retired, impossible while
+    /// the static pool is alive (jobs are unwind-caught); dropping the job
+    /// then lets the responder surface Tauri's default failure.
+    pub fn run(&self, job: impl FnOnce() + Send + 'static) {
+        let _ = self.tx.send(Box::new(job));
+    }
+}
+
+/// The process-wide pool the protocol registration in `lib.rs` drives — and
+/// the SAME instance the preview_serve_latency perf test fires 200
+/// concurrent requests through, so the test locks in exactly the mechanism
+/// that ships.
+pub fn serve_pool() -> &'static ServePool {
+    static POOL: OnceLock<ServePool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        // Sized to core count, clamped to [2, 8]: serve is blocking-I/O
+        // dominated (fs::read of small cached WebPs), so a few threads
+        // saturate the disk and more only add FS + db-lock contention. The
+        // floor of 2 keeps a slow /embedded extraction from head-of-line
+        // blocking every thumb on tiny machines; the cap of 8 stops
+        // many-core desktops from re-creating the F1 stampede at pool size.
+        let n = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4)
+            .clamp(2, 8);
+        ServePool::new(n)
+    })
 }
 
 #[cfg(test)]

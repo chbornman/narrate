@@ -29,7 +29,10 @@ mod note;
 // thread spawns and before the first ort session is built. A no-op on the
 // macOS/CPU builds where the feature is off.
 pub mod ort_runtime;
-mod protocol;
+// `pub` so the crate's integration tests (tests/preview_serve_latency.rs)
+// can drive `protocol::serve` and the SAME bounded serve pool the
+// registration below uses (AUDIT-2026-07-07 F1/T1); nothing else imports it.
+pub mod protocol;
 mod pump;
 mod runtime;
 mod scope;
@@ -141,7 +144,14 @@ pub fn run() {
                 .app_handle()
                 .try_state::<Arc<App>>()
                 .map(|s| s.library.clone());
-            std::thread::spawn(move || {
+            // AUDIT-2026-07-07 F1: a FIXED pool instead of a thread per
+            // request. A fling-scroll bursts dozens-to-hundreds of thumb
+            // requests; spawning an OS thread for each flooded the FS and
+            // the db lock. The pool queues the burst FIFO on ~core-count
+            // workers (the bound's WHY lives on protocol::serve_pool). The
+            // no-library window (before setup manages App) still answers
+            // 404 through the same path.
+            protocol::serve_pool().run(move || {
                 let response = match library {
                     Some(lib) => protocol::serve(&lib, &path),
                     None => protocol::respond_not_found(),
@@ -290,6 +300,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::runtime_remove_model,
         commands::app::runtime_restart,
         commands::app::runtime_redetect,
+        runtime::runtime_cancel_download,
         commands::app::export_journal,
         commands::app::rebuild_index,
         commands::app::force_reembed,
@@ -389,6 +400,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::runtime_remove_model,
         commands::app::runtime_restart,
         commands::app::runtime_redetect,
+        runtime::runtime_cancel_download,
         commands::app::export_journal,
         commands::app::rebuild_index,
         commands::app::force_reembed,
