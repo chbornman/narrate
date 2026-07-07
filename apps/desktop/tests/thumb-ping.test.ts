@@ -40,7 +40,10 @@ function props(over: Record<string, unknown> = {}) {
     rating: null,
     selected: false,
     active: false,
-    size: 128,
+    // Above the micro-tier cutoff (urls.ts tierForCell) so this suite keeps
+    // pinning the THUMB-tier URLs; tier selection has its own suite
+    // (thumb-tier.test.ts).
+    size: 240,
     infoStrip: 0,
     intensity: 0,
     onpointerselect: () => {},

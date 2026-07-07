@@ -15,7 +15,7 @@
   // Lucide Unplug = the offline-volume badge (BACKLOG "Adopt Lucide
   // icons"; Lucide ships no eject — "disconnected" is the meaning).
   import Unplug from "@lucide/svelte/icons/unplug";
-  import { srcHash, thumbUrl } from "../../ipc/urls";
+  import { microUrl, srcHash, thumbUrl, tierForCell } from "../../ipc/urls";
   import { infoLine } from "../../logic/cellinfo";
   import { signalHint } from "../../logic/ranking";
   import type { CellInfoLevel } from "../../state/grid.svelte";
@@ -139,6 +139,14 @@
   /** Last applied previews-changed ping — its seq joins the cache-buster
    * so the reload URL is NOVEL (never a previously-404'd one). */
   let applied = $state({ hash: "", seq: 0 });
+  /** Micro-tier miss fallback (keyed by hash like `retry`): `previewReady`
+   * only promises the THUMB artifact exists — the micro tier is a
+   * generator_version-3 regen that may not have run yet — so a micro 404
+   * must not burn the retry budget waiting on a regen that may never come.
+   * The first micro error drops this hash to the thumb tier immediately
+   * (the graph loader's documented fallback, ipc/urls.ts); a
+   * previews-changed ping clears it so a freshly-written micro is used. */
+  let microMiss = $state({ hash: "" });
 
   const attempt = $derived(retry.hash === hash ? retry.n : 0);
   const pingSeq = $derived(applied.hash === hash ? applied.seq : 0);
@@ -148,11 +156,20 @@
    * never mounts — placeholder only, zero protocol traffic. */
   const ready = $derived(previewReady || pingSeq > 0);
 
+  /** Decode tier by DISPLAY size (AUDIT F3, ipc/urls.ts tierForCell):
+   * micro (96 px) for the two smallest zoom steps, thumb (512 px) above.
+   * Safe on a zoom-step tier flip for a loaded cell: the URL keeps the
+   * same hash, so `loaded` (and the srcHash guards below) stay true and
+   * the old tier's bitmap keeps painting until the new src decodes — no
+   * flash of empty at the boundary. */
+  const useMicro = $derived(tierForCell(size) === "micro" && microMiss.hash !== hash);
+
   const src = $derived.by(() => {
+    const base = useMicro ? microUrl(hash) : thumbUrl(hash);
     const parts = [];
     if (attempt > 0) parts.push(`r=${attempt}`);
     if (pingSeq > 0) parts.push(`p=${pingSeq}`);
-    return parts.length === 0 ? thumbUrl(hash) : `${thumbUrl(hash)}?${parts.join("&")}`;
+    return parts.length === 0 ? base : `${base}?${parts.join("&")}`;
   });
 
   $effect(() => {
@@ -188,10 +205,19 @@
     if (!global && (loaded || !ping.hashes.has(hash))) return;
     clearTimeout(retryTimer);
     retry = { hash, n: 0 };
+    // The regen that just landed may have written the micro artifact —
+    // retry the size-appropriate tier, not the sticky thumb fallback.
+    if (microMiss.hash === hash) microMiss = { hash: "" };
     applied = { hash, seq: ping.seq };
   });
 
   function handleError() {
+    // Micro tier 404: fall back to the guaranteed thumb tier at once (see
+    // microMiss above) — the retry budget stays for genuine thumb misses.
+    if (useMicro) {
+      microMiss = { hash };
+      return;
+    }
     const n = retry.hash === hash ? retry.n : 0;
     if (n >= MAX_RETRIES) return;
     const forHash = hash;

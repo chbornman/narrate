@@ -23,6 +23,29 @@ export const microUrl = (hash: string): string =>
   `photoproof://localhost/micro/${hash}`;
 
 /**
+ * Grid decode tier by DISPLAY size (AUDIT 2026-07-07 F3): the two smallest
+ * THUMB_STEPS (96/160 targets) used to decode the 512 px thumb into tiny
+ * cells — ~28x the needed pixels held decoded across the mounted window
+ * (~150 MB vs ~5 MB). The 96 px micro tier covers them; larger steps keep
+ * the thumb. The cutoff sits at the midpoint of the 160/240 steps because
+ * the integer-column snap (gridlayout.ts) stretches a 160-target cell up
+ * toward ~200 px at ordinary column counts — the tier tracks the ACTUAL
+ * rendered size, so a slider step keeps one tier in any real grid. Softness
+ * from upscaling micro at the 160 step is the audit's accepted trade: at
+ * those sizes the grid reads as an overview, and decode memory wins.
+ */
+export const MICRO_TIER_MAX_CELL_PX = 200;
+
+export type PreviewTier = "micro" | "thumb";
+
+export const tierForCell = (cellPx: number): PreviewTier =>
+  cellPx <= MICRO_TIER_MAX_CELL_PX ? "micro" : "thumb";
+
+/** The grid cell's preview URL for its display size (tierForCell). */
+export const previewTierUrl = (hash: string, cellPx: number): string =>
+  tierForCell(cellPx) === "micro" ? microUrl(hash) : thumbUrl(hash);
+
+/**
  * The hash a preview URL names — the last path segment, with any
  * cache-busting query stripped ("" for non-URL strings, e.g. an empty
  * `currentSrc`).

@@ -26,8 +26,31 @@ export interface SelState {
 
 export const EMPTY: SelState = { order: [], focus: -1, anchor: -1 };
 
+/**
+ * Memoized membership Set, keyed on the ORDER ARRAY'S IDENTITY (AUDIT
+ * 2026-07-07 F2). WHY: isSelected runs per mounted cell per scroll frame
+ * (Grid.svelte renders `selected` for every pool slot), so the old linear
+ * `order.includes(hash)` made Select-All-then-scroll O(selection × cells)
+ * — ~1.5M string compares per frame at 10k selected. Array identity is a
+ * complete cache key because selections are immutable-by-replacement
+ * everywhere: every verb in this file and every state-side constructor
+ * (grid.svelte.ts fixupSelection/setSelection, app.svelte.ts) mints a
+ * fresh `order` and assigns a whole new SelState; nothing mutates an order
+ * in place. The WeakMap lets replaced selections' Sets collect.
+ */
+const membership = new WeakMap<readonly string[], ReadonlySet<string>>();
+
+function memberSet(order: readonly string[]): ReadonlySet<string> {
+  let set = membership.get(order);
+  if (set === undefined) {
+    set = new Set(order);
+    membership.set(order, set);
+  }
+  return set;
+}
+
 export function isSelected(s: SelState, hash: string): boolean {
-  return s.order.includes(hash);
+  return memberSet(s.order).has(hash);
 }
 
 /** Plain click: select exactly this item; focus + anchor follow. */
@@ -53,7 +76,7 @@ export function rangeTo(s: SelState, items: string[], i: number): SelState {
 export function toggle(s: SelState, items: string[], i: number): SelState {
   if (i < 0 || i >= items.length) return s;
   const hash = items[i];
-  const order = s.order.includes(hash)
+  const order = memberSet(s.order).has(hash)
     ? s.order.filter((h) => h !== hash)
     : [...s.order, hash];
   return { order, focus: i, anchor: i };
@@ -170,8 +193,10 @@ export function marqueeMerge(
     .sort((a, b) => a - b);
   if (valid.length === 0) return additive ? s : clear(s);
   const hitHashes = valid.map((i) => items[i]);
+  // memberSet keeps a marquee over a large existing selection O(hits),
+  // not O(hits × selection).
   const order = additive
-    ? [...s.order, ...hitHashes.filter((h) => !s.order.includes(h))]
+    ? [...s.order, ...hitHashes.filter((h) => !memberSet(s.order).has(h))]
     : hitHashes;
   const focus = valid[valid.length - 1];
   return { order, focus, anchor: focus };
