@@ -36,6 +36,7 @@ pub use bus::{ProcessId, RuntimeBus, RuntimeEvent};
 pub use children::{ChildRecord, ChildRegistry, InstanceLock, process_start_time};
 pub use download::{
     DownloadError, DownloadManager, DownloadOutcome, InstalledRecord, NoPace, Pacer, SleepPacer,
+    available_disk_bytes, is_retryable_status,
 };
 pub use gc::{GcCoordinator, GcDecision, ReindexGate, StubReindexGate};
 pub use logs::RotatingLog;

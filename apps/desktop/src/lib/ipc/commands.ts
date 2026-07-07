@@ -475,6 +475,10 @@ export const runtimeAcceptLicense = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_accept_license", { modelId });
 export const runtimeDownloadModel = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_download_model", { modelId });
+/** D3: cancel a queued or in-flight model download. Part files are kept,
+ * so a later Download resumes instead of restarting; no error row. */
+export const runtimeCancelDownload = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_cancel_download", { modelId });
 export const runtimeRemoveModel = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_remove_model", { modelId });
 /** Settings → "restart runtime" (§8.1: fresh attempt budget). */

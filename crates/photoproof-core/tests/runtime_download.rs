@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use photoproof_connectors::mock::{StubHttpServer, StubResponse};
@@ -53,6 +54,10 @@ fn accepted(model: &ModelEntry) -> Acceptances {
 
 const NOW: &str = "2026-06-11T09:00:00Z";
 
+/// D3: the never-cancelled flag most tests pass — a static so the 20-odd
+/// call sites don't each mint a local.
+static NO_CANCEL: AtomicBool = AtomicBool::new(false);
+
 #[test]
 fn s13_4_cut_mid_download_resumes_from_the_byte_offset_across_relaunch() {
     let server = StubHttpServer::start();
@@ -79,7 +84,7 @@ fn s13_4_cut_mid_download_resumes_from_the_byte_offset_across_relaunch() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect_err("cut connection interrupts");
     assert!(
         matches!(err, DownloadError::Interrupted { got_bytes: 80_000 }),
@@ -98,7 +103,7 @@ fn s13_4_cut_mid_download_resumes_from_the_byte_offset_across_relaunch() {
     // Relaunch: a NEW manager instance resumes from the part length.
     let manager2 = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager2
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("resume completes");
     let requests = server.requests_for("/weights/model.gguf");
     assert_eq!(requests.len(), 2);
@@ -134,7 +139,14 @@ fn s13_7_license_gate_zero_bytes_before_acceptance_asserted_at_the_server() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &Acceptances::default(), &mut NoPace, NOW)
+        .download_model(
+            &model,
+            1,
+            &Acceptances::default(),
+            &mut NoPace,
+            &NO_CANCEL,
+            NOW,
+        )
         .expect_err("gated without acceptance");
     assert!(matches!(err, DownloadError::LicenseNotAccepted { .. }));
     assert!(
@@ -148,7 +160,7 @@ fn s13_7_license_gate_zero_bytes_before_acceptance_asserted_at_the_server() {
 
     // The recorded acceptance opens the gate.
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("accepted download");
     assert_eq!(server.requests().len(), 1);
     assert!(manager.is_installed("test-model"));
@@ -179,7 +191,7 @@ fn corrupted_part_is_deleted_and_refetched_once_automatically() {
     .unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("auto re-fetch saves the day");
     let requests = server.requests_for("/model.gguf");
     assert_eq!(requests.len(), 2, "resume attempt + ONE automatic re-fetch");
@@ -215,7 +227,7 @@ fn second_checksum_failure_surfaces_instead_of_looping() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect_err("surfaces after the single automatic retry");
     assert!(matches!(err, DownloadError::ChecksumFailed { .. }));
     assert_eq!(
@@ -246,7 +258,7 @@ fn byte_complete_part_verifies_and_installs_with_zero_network() {
     std::fs::write(dir.path().join("test-model/model.gguf.part"), &payload).unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("the complete part verifies in place");
     assert!(
         server.requests().is_empty(),
@@ -282,7 +294,7 @@ fn corrupt_byte_complete_part_restarts_clean_once() {
     .unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("one clean re-fetch saves it");
     let requests = server.requests_for("/model.gguf");
     assert_eq!(
@@ -321,7 +333,7 @@ fn installed_only_when_all_files_verify_one_file_at_a_time() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect_err("file b cut");
     assert!(matches!(err, DownloadError::Interrupted { .. }));
     assert!(
@@ -339,7 +351,7 @@ fn installed_only_when_all_files_verify_one_file_at_a_time() {
     assert!(last_a < first_b, "§5.2: one file at a time, got {order:?}");
 
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("finishes b");
     assert!(manager.is_installed("test-model"));
     // The verified a.gguf was NOT re-fetched.
@@ -374,6 +386,7 @@ fn pacer_seam_is_consulted_with_chunk_sizes() {
             1,
             &accepted(&model),
             &mut Recording(calls.clone()),
+            &NO_CANCEL,
             NOW,
         )
         .expect("download");
@@ -409,7 +422,14 @@ fn https_urls_are_refused_with_zero_traffic_until_the_p63_tls_client() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &Acceptances::default(), &mut NoPace, NOW)
+        .download_model(
+            &model,
+            1,
+            &Acceptances::default(),
+            &mut NoPace,
+            &NO_CANCEL,
+            NOW,
+        )
         .expect_err("an unpinned entry never reaches the network (B55)");
     assert!(matches!(err, DownloadError::Unpinned { .. }), "{err:?}");
 }
@@ -430,7 +450,7 @@ fn download_progress_rides_the_bus_coalesced() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), bus);
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("download");
     let mut progress = Vec::new();
     while let Ok(e) = rx.try_recv() {
@@ -482,7 +502,7 @@ fn progress_is_model_cumulative_across_files() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), bus);
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("download");
     let mut progress = Vec::new();
     while let Ok(e) = rx.try_recv() {
@@ -550,7 +570,7 @@ fn same_basename_in_different_dirs_do_not_collide() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("both nested files install");
 
     // Both files exist at their preserved relative paths with their OWN
@@ -595,7 +615,7 @@ fn path_escaping_the_model_dir_is_rejected_with_zero_side_effects() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect_err("the escaping path is refused");
     assert!(
         matches!(err, DownloadError::UnsafePath { ref file } if file == "../sibling-model/model.onnx"),
@@ -641,7 +661,7 @@ fn nested_path_resumes_from_the_byte_offset_across_relaunch() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let err = manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect_err("cut interrupts the nested transfer");
     assert!(
         matches!(err, DownloadError::Interrupted { got_bytes: 60_000 }),
@@ -657,7 +677,7 @@ fn nested_path_resumes_from_the_byte_offset_across_relaunch() {
     // Relaunch: a fresh manager resumes from the nested part's length.
     let manager2 = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager2
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("resume completes at the nested path");
     let requests = server.requests_for("/visual/model.onnx");
     assert_eq!(requests.len(), 2);
@@ -695,11 +715,106 @@ fn flat_entry_layout_is_unchanged_for_installed_models() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     manager
-        .download_model(&model, 1, &accepted(&model), &mut NoPace, NOW)
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
         .expect("flat entry installs");
     // Directly under models_dir/<id>/, NOT in any subdirectory.
     let dest = dir.path().join("test-model/encoder.int8.onnx");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert!(manager.is_installed("test-model"));
+}
+
+/// D3: a cancel that lands before the transfer starts (queued model) stops
+/// at the between-files check — zero requests, zero on-disk residue.
+#[test]
+fn cancel_before_the_first_byte_issues_no_request() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(50_000, 13);
+    let model = model_with(&server, vec![("model.gguf", &payload)], false);
+    server.route(
+        "/model.gguf",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    let cancel = AtomicBool::new(true);
+    let err = manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &cancel, NOW)
+        .expect_err("pre-set cancel refuses before any byte moves");
+    assert!(matches!(err, DownloadError::Cancelled), "{err:?}");
+    assert!(server.requests().is_empty(), "no request was issued");
+    assert!(!manager.is_installed("test-model"));
+}
+
+/// D3: a cancel observed mid-transfer (the per-chunk check next to the
+/// pacer) stops promptly, KEEPS the part file, and a later download
+/// resumes from its length — cancel is a pause, not a discard.
+#[test]
+fn cancel_mid_transfer_keeps_the_part_file_and_resumes_later() {
+    /// Flips the shared cancel flag once the transfer passes a threshold —
+    /// exactly how a settings-window cancel lands relative to the chunk
+    /// loop (between two chunks).
+    struct CancelAfter {
+        cancel: Arc<AtomicBool>,
+        seen: usize,
+        after: usize,
+    }
+    impl Pacer for CancelAfter {
+        fn pace(&mut self, just_transferred: usize) {
+            self.seen += just_transferred;
+            if self.seen >= self.after {
+                self.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    let server = StubHttpServer::start();
+    let payload = file_bytes(300_000, 17);
+    let model = model_with(&server, vec![("model.gguf", &payload)], false);
+    server.route(
+        "/model.gguf",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let err = manager
+        .download_model(
+            &model,
+            1,
+            &accepted(&model),
+            &mut CancelAfter {
+                cancel: cancel.clone(),
+                seen: 0,
+                after: 64 * 1024,
+            },
+            &cancel,
+            NOW,
+        )
+        .expect_err("cancel lands mid-transfer");
+    assert!(matches!(err, DownloadError::Cancelled), "{err:?}");
+    let part = dir.path().join("test-model/model.gguf.part");
+    let kept = std::fs::metadata(&part).expect("part file kept").len();
+    assert!(
+        kept >= 64 * 1024 && kept < payload.len() as u64,
+        "stopped promptly with the progress on disk: {kept}"
+    );
+    assert!(!manager.is_installed("test-model"));
+
+    // The user clicks Download again: a FRESH flag resumes from the part.
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
+        .expect("resume completes");
+    let requests = server.requests_for("/model.gguf");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].header("Range"),
+        Some(format!("bytes={kept}-").as_str()),
+        "the resume Ranges from the cancelled part's length"
+    );
     assert!(manager.is_installed("test-model"));
 }
 
@@ -739,7 +854,14 @@ fn real_https_fetch_verifies_the_smallest_pin() {
     let dir = tempfile::tempdir().unwrap();
     let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
     let out = manager
-        .download_model(&tiny, 1, &Acceptances::default(), &mut NoPace, NOW)
+        .download_model(
+            &tiny,
+            1,
+            &Acceptances::default(),
+            &mut NoPace,
+            &NO_CANCEL,
+            NOW,
+        )
         .expect("real https fetch + verify");
     assert_eq!(out.files_fetched, 1);
     assert!(manager.is_installed("tokens-probe"));

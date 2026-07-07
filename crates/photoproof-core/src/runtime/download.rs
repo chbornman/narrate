@@ -78,6 +78,21 @@ pub enum DownloadError {
     /// retry/relaunch resumes from its length.
     #[error("transfer interrupted at {got_bytes} bytes (resumable)")]
     Interrupted { got_bytes: u64 },
+    /// D1 disk-space preflight: refused BEFORE the first byte moves. A
+    /// full disk used to surface as a raw Io error minutes into a
+    /// multi-GB pull; this names the shortfall up front in the units the
+    /// settings row displays. The Display string is user-visible copy —
+    /// no em-dashes.
+    #[error(
+        "not enough disk space: needs {} free, {} available",
+        human_size(*required),
+        human_size(*available)
+    )]
+    InsufficientSpace { required: u64, available: u64 },
+    /// D3: the user cancelled. Not a failure — part files stay on disk
+    /// (a later download resumes from them) and no error row is written.
+    #[error("download cancelled")]
+    Cancelled,
     /// SHA-256 mismatch after the automatic re-fetch — surfaced to
     /// settings/debug panel (§5.2).
     #[error("checksum mismatch for {file} after automatic re-fetch")]
@@ -100,7 +115,14 @@ pub enum DownloadError {
     #[error("manifest entry path {file} is not a relative in-dir path; refusing to fetch")]
     UnsafePath { file: String },
     #[error("backend answered {status} for {url}")]
-    Http { status: u16, url: String },
+    Http {
+        status: u16,
+        url: String,
+        /// D2: a server-provided `Retry-After` (seconds form), captured at
+        /// the fetch site so the retry loop can honor it without re-parsing
+        /// headers it no longer has.
+        retry_after_secs: Option<u64>,
+    },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("bad url: {0}")]
@@ -246,12 +268,18 @@ impl DownloadManager {
     /// Download (or finish downloading) one model: license gate first,
     /// then file-by-file — one at a time (§5.2). On full verification the
     /// model is recorded installed.
+    ///
+    /// `cancel` (D3) is observed between files and between chunks: flipping
+    /// it stops the transfer promptly with [`DownloadError::Cancelled`],
+    /// keeping the part files so a later download resumes instead of
+    /// restarting.
     pub fn download_model(
         &self,
         model: &ModelEntry,
         manifest_version: u32,
         acceptances: &Acceptances,
         pacer: &mut dyn Pacer,
+        cancel: &AtomicBool,
         now_rfc3339: &str,
     ) -> Result<DownloadOutcome, DownloadError> {
         // THE LICENSE GATE — before any socket is opened, any request
@@ -286,6 +314,12 @@ impl DownloadManager {
         // model on disk", the one meaning the settings row displays.
         let mut base: u64 = 0;
         for file in &model.files {
+            // D3: the between-files cancel point — a many-file model (DFN5B
+            // is ~400 files) must not run hundreds more fetches after the
+            // user said stop.
+            if cancel.load(Ordering::Relaxed) {
+                return Err(DownloadError::Cancelled);
+            }
             // Path-preserving dest under models_dir/<model_id>/<file.path>.
             // The subdirectory layout is load-bearing: ort resolves the
             // DFN5B visual tower's ~100 external-data files RELATIVE to
@@ -302,7 +336,7 @@ impl DownloadManager {
                 base += file.bytes;
                 continue; // verified at rename time on a previous run
             }
-            match self.fetch_and_verify(model, file, &dest, pacer, base) {
+            match self.fetch_and_verify(model, file, &dest, pacer, cancel, base) {
                 Ok(bytes) => {
                     outcome.files_fetched += 1;
                     outcome.bytes_fetched += bytes;
@@ -312,7 +346,7 @@ impl DownloadManager {
                     // automatic retry, then surface.
                     let _ = std::fs::remove_file(part_path(&dest));
                     let _ = std::fs::remove_file(&dest);
-                    match self.fetch_and_verify(model, file, &dest, pacer, base) {
+                    match self.fetch_and_verify(model, file, &dest, pacer, cancel, base) {
                         Ok(bytes) => {
                             outcome.files_fetched += 1;
                             outcome.bytes_fetched += bytes;
@@ -341,6 +375,7 @@ impl DownloadManager {
         file: &FileEntry,
         dest: &Path,
         pacer: &mut dyn Pacer,
+        cancel: &AtomicBool,
         base: u64,
     ) -> Result<u64, DownloadError> {
         // B55 fail-closed pre-flight: an unpinned entry never reaches the
@@ -372,7 +407,7 @@ impl DownloadManager {
         }
         let url = file.url();
         if url.starts_with("https://") {
-            return self.fetch_https(model, file, dest, &part, have, &url, pacer, base);
+            return self.fetch_https(model, file, dest, &part, have, &url, pacer, cancel, base);
         }
         let (addr, path) = parse_http_url(&url)?;
         let mut headers: Vec<(String, String)> = Vec::new();
@@ -395,6 +430,7 @@ impl DownloadManager {
             other => DownloadError::Http {
                 status: 0,
                 url: format!("{url} ({other})"),
+                retry_after_secs: None,
             },
         })?;
         match resp.status {
@@ -406,7 +442,16 @@ impl DownloadManager {
                     have = 0;
                 }
             }
-            status => return Err(DownloadError::Http { status, url }),
+            status => {
+                // D2: carry a seconds-form Retry-After up with the status
+                // so the retry loop can honor a 429/503's requested wait.
+                let retry_after_secs = resp.header("Retry-After").and_then(parse_retry_after_secs);
+                return Err(DownloadError::Http {
+                    status,
+                    url,
+                    retry_after_secs,
+                });
+            }
         }
         let mut out = std::fs::OpenOptions::new()
             .create(true)
@@ -423,6 +468,12 @@ impl DownloadManager {
                     have += n as u64;
                     fetched += n as u64;
                     pacer.pace(n);
+                    // D3: the per-chunk cancel point, next to the pacer —
+                    // the part file keeps the bytes for a later resume.
+                    if cancel.load(Ordering::Relaxed) {
+                        out.flush()?;
+                        return Err(DownloadError::Cancelled);
+                    }
                     // Coalesced progress on the bus, in MODEL-cumulative
                     // terms (the only meaning the settings row displays).
                     if have - last_progress >= PROGRESS_STEP_BYTES {
@@ -443,6 +494,7 @@ impl DownloadManager {
                     return Err(DownloadError::Http {
                         status: 0,
                         url: format!("{url} ({e})"),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -470,12 +522,17 @@ impl DownloadManager {
         mut have: u64,
         url: &str,
         pacer: &mut dyn Pacer,
+        cancel: &AtomicBool,
         base: u64,
     ) -> Result<u64, DownloadError> {
         use std::io::Read;
+        // http_status_as_error(false): ureq's StatusCode error carries only
+        // the code, and D2 needs the Retry-After HEADER off a 429/503 —
+        // so take the response whole and classify the status ourselves.
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_connect(Some(self.connect_timeout))
             .timeout_recv_response(Some(self.read_timeout))
+            .http_status_as_error(false)
             .build()
             .into();
         let mut req = agent.get(url);
@@ -484,17 +541,26 @@ impl DownloadManager {
         }
         let resp = match req.call() {
             Ok(r) => r,
-            Err(ureq::Error::StatusCode(status)) => {
-                return Err(DownloadError::Http {
-                    status,
-                    url: url.into(),
-                });
-            }
             // Transport-class failures (DNS, connect, TLS, mid-read cuts)
             // are all resumable from the part file's length.
             Err(_) => return Err(DownloadError::Interrupted { got_bytes: have }),
         };
-        if resp.status() == 200 && have > 0 {
+        let status = resp.status().as_u16();
+        // Redirects were already followed by the agent; anything outside
+        // 200/206 here is the backend's verdict on the request itself.
+        if status != 200 && status != 206 {
+            let retry_after_secs = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after_secs);
+            return Err(DownloadError::Http {
+                status,
+                url: url.into(),
+                retry_after_secs,
+            });
+        }
+        if status == 200 && have > 0 {
             // Server ignored the Range: restart clean.
             let _ = std::fs::remove_file(part);
             have = 0;
@@ -515,6 +581,12 @@ impl DownloadManager {
                     have += n as u64;
                     fetched += n as u64;
                     pacer.pace(n);
+                    // D3: the per-chunk cancel point, next to the pacer —
+                    // the part file keeps the bytes for a later resume.
+                    if cancel.load(Ordering::Relaxed) {
+                        out.flush()?;
+                        return Err(DownloadError::Cancelled);
+                    }
                     if have - last_progress >= PROGRESS_STEP_BYTES {
                         last_progress = have;
                         self.bus.publish(RuntimeEvent::DownloadProgress {
@@ -614,6 +686,71 @@ fn parse_http_url(url: &str) -> Result<(SocketAddr, String), DownloadError> {
     Ok((addr, path.to_owned()))
 }
 
+/// Human-readable size for user-visible download copy: one-decimal GB once
+/// past a GiB, whole MB below (matching the settings cache readout's
+/// units). Binary units, like every other byte sum in the app.
+pub fn human_size(bytes: u64) -> String {
+    const GIB: f64 = (1024u64 * 1024 * 1024) as f64;
+    const MIB: f64 = (1024 * 1024) as f64;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.1} GB", b / GIB)
+    } else {
+        format!("{:.0} MB", b / MIB)
+    }
+}
+
+/// D2: HTTP statuses worth re-attempting on the interrupted-transfer
+/// backoff schedule. These are all "try again later" verdicts (timeouts,
+/// rate limits, upstream hiccups) — a CDN 429/503 is weather, like a cut
+/// connection. Every other status (403, 404, 416, …) is a verdict about
+/// the REQUEST, and retrying re-proves a falsehood.
+pub fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// D2: parse a `Retry-After` header value, SECONDS form only. The
+/// HTTP-date form is deliberately ignored (returns None): honoring it
+/// needs a wall clock at the parse site, and the CDNs this downloader
+/// talks to send the delta-seconds form — a date falls back to the
+/// caller's own backoff schedule, which is always a safe wait.
+pub fn parse_retry_after_secs(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+/// D1: free bytes available to this (unprivileged) process on the volume
+/// holding `path`, via statvfs — no new dependency, libc is already here.
+/// Walks up to the nearest EXISTING ancestor first: the models dir itself
+/// may not exist before the first download. `None` means "could not
+/// determine" (no existing ancestor, or a non-unix build) — callers must
+/// treat that as "don't block", never as zero.
+#[cfg(unix)]
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    let c = std::ffi::CString::new(probe.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs only writes the out-param on success; the zeroed
+    // struct is a valid initial value and `c` outlives the call.
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut vfs) } != 0 {
+        return None;
+    }
+    // f_bavail (blocks available to unprivileged users, root reserve
+    // excluded) times the fragment size — the number `df -h` calls Avail.
+    Some((vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64))
+}
+
+/// Non-unix builds have no statvfs; report "unknown" so the preflight
+/// passes rather than blocking every download. A Windows
+/// GetDiskFreeSpaceExW wrapper can slot in here when that target ships.
+#[cfg(not(unix))]
+pub fn available_disk_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(path)?;
@@ -640,4 +777,76 @@ pub struct NoPace;
 
 impl Pacer for NoPace {
     fn pace(&mut self, _just_transferred: usize) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D2: the retryable set is exactly the "try again later" statuses;
+    /// request-verdict 4xx (and the odd 5xx that is really a verdict,
+    /// like 501) stay terminal.
+    #[test]
+    fn retryable_statuses_are_transient_only() {
+        for s in [408, 425, 429, 500, 502, 503, 504] {
+            assert!(is_retryable_status(s), "{s} is transient");
+        }
+        for s in [
+            0, 200, 206, 301, 400, 401, 403, 404, 416, 418, 451, 501, 505,
+        ] {
+            assert!(!is_retryable_status(s), "{s} is a verdict, not weather");
+        }
+    }
+
+    /// D2: seconds form parses (with whitespace tolerance); the HTTP-date
+    /// form and garbage fall back to None (the caller's own backoff).
+    #[test]
+    fn retry_after_parses_seconds_form_only() {
+        assert_eq!(parse_retry_after_secs("120"), Some(120));
+        assert_eq!(parse_retry_after_secs(" 5 "), Some(5));
+        assert_eq!(parse_retry_after_secs("0"), Some(0));
+        assert_eq!(
+            parse_retry_after_secs("Wed, 21 Oct 2026 07:28:00 GMT"),
+            None
+        );
+        assert_eq!(parse_retry_after_secs("-3"), None);
+        assert_eq!(parse_retry_after_secs(""), None);
+    }
+
+    /// D1: the InsufficientSpace Display is the settings row's copy —
+    /// human units, and no em-dash (user-visible copy rule).
+    #[test]
+    fn insufficient_space_display_is_human_readable() {
+        let err = DownloadError::InsufficientSpace {
+            required: 14_400_000_000, // ~13.4 GiB
+            available: 4_500_000_000, // ~4.2 GiB
+        };
+        let msg = err.to_string();
+        assert_eq!(
+            msg,
+            "not enough disk space: needs 13.4 GB free, 4.2 GB available"
+        );
+        assert!(!msg.contains('\u{2014}'), "no em-dash in UI copy");
+    }
+
+    #[test]
+    fn human_size_switches_units_at_a_gib() {
+        assert_eq!(human_size(0), "0 MB");
+        assert_eq!(human_size(500 * 1024 * 1024), "500 MB");
+        assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    /// D1: the statvfs wrapper answers for an existing dir, for a
+    /// not-yet-created child (walks up), and the number is sane (nonzero
+    /// on a live tempdir volume).
+    #[cfg(unix)]
+    #[test]
+    fn available_disk_bytes_walks_up_to_an_existing_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let direct = available_disk_bytes(dir.path()).expect("existing dir answers");
+        assert!(direct > 0, "a live tempdir volume has free space");
+        let nested = dir.path().join("models/not/created/yet");
+        let walked = available_disk_bytes(&nested).expect("missing child walks up");
+        assert!(walked > 0);
+    }
 }

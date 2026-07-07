@@ -17,6 +17,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open } from "@tauri-apps/plugin-dialog";
   import * as ipc from "../ipc/commands";
+  import { progressDetail, updateRate, type RateState } from "../logic/downloadrate";
   import { isMac } from "../logic/platform";
   import AckButton from "../primitives/AckButton.svelte";
   import { theme } from "../theme/theme-store.svelte";
@@ -78,6 +79,33 @@
 
   let roots = $state<RootDto[]>([]);
   let runtime = $state<RuntimeStatus | null>(null);
+  /** D5: per-model smoothed throughput for the progress detail line, fed
+   * one sample per status snapshot. Entries exist only while their row is
+   * downloading, so a finished/cancelled model starts fresh next time. */
+  let rates = $state<Record<string, RateState>>({});
+
+  /** Every path that lands a fresh RuntimeStatus goes through here so the
+   * rate tracker sees each snapshot exactly once, whether it arrived on
+   * the runtime-status channel or as a command's return value. */
+  function setRuntime(rt: RuntimeStatus | null) {
+    // Runtime status can be null before the backend has detected hardware
+    // (and the settings template already renders a "detecting" state off a
+    // null `runtime`). Guard so the rate tracker never dereferences it.
+    if (!rt) {
+      rates = {};
+      runtime = null;
+      return;
+    }
+    const now = Date.now();
+    const next: Record<string, RateState> = {};
+    for (const m of rt.models) {
+      if (m.state === "downloading") {
+        next[m.id] = updateRate(rates[m.id] ?? null, now, m.downloadedBytes);
+      }
+    }
+    rates = next;
+    runtime = rt;
+  }
   let settings = $state<AppSettings | null>(null);
   let removeWarnFor = $state<string | null>(null);
   let rebuildConfirm = $state(false);
@@ -100,7 +128,7 @@
     // Models section froze at its initial percentages until some action
     // returned fresh status (founder dogfood, June 2026).
     const unlisten = listen<RuntimeStatus>("runtime-status", (e) => {
-      runtime = e.payload;
+      setRuntime(e.payload);
     });
     return () => {
       void unlisten.then((u) => u());
@@ -109,7 +137,7 @@
 
   async function refresh() {
     roots = await ipc.listRoots();
-    runtime = await ipc.runtimeStatus();
+    setRuntime(await ipc.runtimeStatus());
     settings = await ipc.settingsGet();
     // Seed the GB input from the persisted byte budget, and read the live
     // cache size (refreshed on every open, per the design's "visible
@@ -180,25 +208,30 @@
   }
 
   async function acceptLicense(modelId: string) {
-    runtime = await ipc.runtimeAcceptLicense(modelId);
+    setRuntime(await ipc.runtimeAcceptLicense(modelId));
   }
 
   async function downloadModel(modelId: string) {
-    runtime = await ipc.runtimeDownloadModel(modelId);
+    setRuntime(await ipc.runtimeDownloadModel(modelId));
+  }
+
+  /** D3: stop a transfer; part files are kept so Download later resumes. */
+  async function cancelDownload(modelId: string) {
+    setRuntime(await ipc.runtimeCancelDownload(modelId));
   }
 
   async function removeModel(modelId: string) {
-    runtime = await ipc.runtimeRemoveModel(modelId);
+    setRuntime(await ipc.runtimeRemoveModel(modelId));
   }
 
   /** §8.1: Failed re-enters Spawning with a fresh budget. */
   async function restartRuntime() {
-    runtime = await ipc.runtimeRestart();
+    setRuntime(await ipc.runtimeRestart());
   }
 
   /** §6.1.4: cached + re-detect on demand. */
   async function redetect() {
-    runtime = await ipc.runtimeRedetect();
+    setRuntime(await ipc.runtimeRedetect());
   }
 
   async function runRebuild() {
@@ -474,6 +507,15 @@
           <span class="state">
             {#if m.state === "downloading"}
               downloading - {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
+              <!-- D5: bytes + smoothed throughput beside the percent, from
+                   the same snapshots the percent already rides. -->
+              <span class="dim"
+                >{progressDetail(
+                  m.downloadedBytes,
+                  m.totalBytes,
+                  rates[m.id]?.bytesPerSec ?? null,
+                )}</span
+              >
               <!-- Auto-retry of an interrupted transfer: still
                    "downloading", never a terminal "failed" until the
                    retry schedule is exhausted. -->
@@ -499,6 +541,11 @@
             {:else}
               <button class="quiet" onclick={() => void downloadModel(m.id)}>Download</button>
             {/if}
+          {/if}
+          {#if m.state === "downloading"}
+            <!-- D3: cancel keeps the part files, so a later Download
+                 resumes from where this stopped. -->
+            <button class="quiet" onclick={() => void cancelDownload(m.id)}>Cancel</button>
           {/if}
           {#if m.state === "installed"}
             <button class="quiet" onclick={() => void removeModel(m.id)}>Remove</button>

@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use photoproof_connectors::config::{Config, from_toml_str};
@@ -52,6 +52,55 @@ const INTERRUPTED_BACKOFF: [std::time::Duration; 4] = [std::time::Duration::from
 /// The backoff sleeps in slices this long so the quit signal is observed
 /// promptly — a quit mid-backoff must not hang on a 30 s sleep.
 const BACKOFF_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// D2: ceiling on an honored `Retry-After`. A server asking for a couple
+/// of minutes is throttling honestly; anything longer would pin the ONE
+/// download worker (and the whole queue behind it) on a single model, so
+/// past this the schedule's own backoff takes over.
+const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// D1: free space that must REMAIN after a download batch completes.
+/// A model pull that lands the last byte on a zero-free disk still breaks
+/// the app around it (SQLite journal, previews, logs all share the
+/// volume), so the preflight demands the batch fit with this to spare.
+const DOWNLOAD_DISK_MARGIN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// D1: the disk-space preflight verdict, pure for testing. `available`
+/// is `None` when the platform cannot answer (see
+/// `available_disk_bytes`) — that must PASS, not block: an unknown is
+/// not a zero. A zero-byte requirement (everything already on disk,
+/// only verification left) also passes — finishing needs no new space.
+/// Returns `Some((needed, available))` when the batch must be refused,
+/// with `needed` including the margin (it is the "needs X free" the
+/// settings row shows).
+fn disk_shortfall(required_bytes: u64, available: Option<u64>) -> Option<(u64, u64)> {
+    if required_bytes == 0 {
+        return None;
+    }
+    let available = available?;
+    let needed = required_bytes.saturating_add(DOWNLOAD_DISK_MARGIN_BYTES);
+    (available < needed).then_some((needed, available))
+}
+
+/// D2: should this failed attempt re-run on the backoff schedule?
+/// `None` = terminal (retrying re-proves a falsehood: checksum, license,
+/// 4xx verdicts). `Some(server_wait)` = retryable, where the inner
+/// Option carries a server-requested Retry-After (capped at
+/// [`RETRY_AFTER_CAP`]) to honor INSTEAD of the schedule's own gap.
+fn retry_wait(err: &DownloadError) -> Option<Option<std::time::Duration>> {
+    match err {
+        // A cut or stall is weather; the part files make retries resume.
+        DownloadError::Interrupted { .. } => Some(None),
+        DownloadError::Http {
+            status,
+            retry_after_secs,
+            ..
+        } if photoproof_core::runtime::is_retryable_status(*status) => {
+            Some(retry_after_secs.map(|s| std::time::Duration::from_secs(s).min(RETRY_AFTER_CAP)))
+        }
+        _ => None,
+    }
+}
 
 /// §10.3: "Later" re-offers from settings only; "Never" is remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +183,10 @@ struct HostState {
     /// §5.2 "one file at a time" is a rule of the download MANAGER, not
     /// of one model: pending model ids drain through ONE worker thread.
     download_queue: VecDeque<String>,
+    /// D3: model id → the cancel flag its transfer observes (per chunk
+    /// and between files). One flag per ENQUEUE, replaced on re-download,
+    /// so a cancel can never leak into a later attempt of the same model.
+    download_cancels: BTreeMap<String, Arc<AtomicBool>>,
     download_worker_live: bool,
     /// Startup orphan sweep result (killed, skipped) for the debug panel.
     #[cfg_attr(not(any(feature = "debug-panel", debug_assertions)), allow(dead_code))]
@@ -247,6 +300,7 @@ impl RuntimeHost {
                 download_errors: BTreeMap::new(),
                 download_retries: BTreeMap::new(),
                 download_queue: VecDeque::new(),
+                download_cancels: BTreeMap::new(),
                 download_worker_live: false,
                 orphan_sweep,
             }),
@@ -644,6 +698,36 @@ impl RuntimeHost {
                 (m, on_disk)
             })
             .collect();
+        // D1 disk-space preflight, BEFORE anything is queued: remaining
+        // bytes for the whole batch (manifest totals minus what the part/
+        // final files already hold) must fit on the models volume with a
+        // margin. Failing here writes one distinct error per row instead
+        // of a raw Io error minutes into a 13 GB pull; freeing space and
+        // clicking Download re-runs this check fresh.
+        let required: u64 = models
+            .iter()
+            .map(|(m, on_disk)| m.total_bytes.saturating_sub(*on_disk))
+            .sum();
+        let available = photoproof_core::runtime::available_disk_bytes(manager.models_dir());
+        if let Some((needed, available)) = disk_shortfall(required, available) {
+            let mut state = self.state.lock().expect("runtime state");
+            for (model, _) in &models {
+                // Skip rows already transferring: their bytes were counted
+                // as on-disk and stopping them mid-flight helps nothing.
+                if state.downloads.contains_key(&model.id) {
+                    continue;
+                }
+                state.download_errors.insert(
+                    model.id.clone(),
+                    DownloadError::InsufficientSpace {
+                        required: needed,
+                        available,
+                    }
+                    .to_string(),
+                );
+            }
+            return;
+        }
         let spawn_worker = {
             let mut state = self.state.lock().expect("runtime state");
             for (model, on_disk) in models {
@@ -654,6 +738,11 @@ impl RuntimeHost {
                     .downloads
                     .insert(model.id.clone(), (on_disk, model.total_bytes));
                 state.download_errors.remove(&model.id);
+                // A fresh cancel flag per enqueue: this transfer's Cancel
+                // button flips exactly this one (D3).
+                state
+                    .download_cancels
+                    .insert(model.id.clone(), Arc::new(AtomicBool::new(false)));
                 state.download_queue.push_back(model.id);
             }
             if state.download_worker_live || state.download_queue.is_empty() {
@@ -708,12 +797,20 @@ impl RuntimeHost {
             .lock()
             .expect("download thread log")
             .push((model.id.clone(), std::thread::current().id()));
-        let acceptances = self
-            .state
-            .lock()
-            .expect("runtime state")
-            .acceptances
-            .clone();
+        let (acceptances, cancel) = {
+            let state = self.state.lock().expect("runtime state");
+            (
+                state.acceptances.clone(),
+                // D3: THIS transfer's cancel flag (seeded at enqueue).
+                // Cloned out so a re-enqueue's fresh flag can never be
+                // flipped by a stale cancel of this attempt.
+                state
+                    .download_cancels
+                    .get(&model.id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
         let manager = self.manager();
         let mut pacer = SleepPacer::new(self.capture_live.clone());
         let attempt = |pacer: &mut SleepPacer| {
@@ -722,25 +819,40 @@ impl RuntimeHost {
                 self.manifest.manifest_version,
                 &acceptances,
                 pacer,
+                &cancel,
                 &UtcMillis::now().to_rfc3339(),
             )
         };
         let mut result = attempt(&mut pacer);
         let attempts_total = 1 + INTERRUPTED_BACKOFF.len();
         for (retry, backoff) in INTERRUPTED_BACKOFF.iter().enumerate() {
-            if !matches!(result, Err(DownloadError::Interrupted { .. })) {
-                break; // success, or a class where retrying re-proves a falsehood
-            }
+            // D2: retry the transient classes — a cut/stall (Interrupted)
+            // and the "try again later" HTTP statuses (408/425/429/5xx) —
+            // through the same schedule. Everything else is a verdict;
+            // retrying re-proves a falsehood.
+            let server_wait = match &result {
+                Err(e) => match retry_wait(e) {
+                    Some(w) => w,
+                    None => break,
+                },
+                Ok(_) => break,
+            };
             {
                 let mut state = self.state.lock().expect("runtime state");
                 // The row stays "downloading" — download_errors is written
                 // only when the schedule is exhausted, so a single cut
                 // never flashes a terminal "failed". The hint names what
                 // the worker is actually doing for settings to surface.
+                let reason = match &result {
+                    Err(DownloadError::Http { status, .. }) => {
+                        format!("server answered {status}")
+                    }
+                    _ => "connection interrupted".into(),
+                };
                 state.download_retries.insert(
                     model.id.clone(),
                     format!(
-                        "connection interrupted — retrying (attempt {} of {})",
+                        "{reason}, retrying (attempt {} of {})",
                         retry + 2,
                         attempts_total
                     ),
@@ -757,8 +869,10 @@ impl RuntimeHost {
             // pacing, not decision logic, and this dedicated thread has
             // nothing else to do. Sliced so the quit signal (the
             // supervisors' stop latch, flipped once by App::shutdown) is
-            // observed within a beat instead of after up to 30 s.
-            let deadline = std::time::Instant::now() + *backoff;
+            // observed within a beat instead of after up to 30 s. A
+            // Retry-After from a 429/503 (capped) replaces the schedule's
+            // own gap — the server named the honest wait.
+            let deadline = std::time::Instant::now() + server_wait.unwrap_or(*backoff);
             loop {
                 if self.supervisors.stopping() {
                     // Quitting: no further attempt, and no error row for a
@@ -767,6 +881,11 @@ impl RuntimeHost {
                     let mut state = self.state.lock().expect("runtime state");
                     state.downloads.remove(&model.id);
                     state.download_retries.remove(&model.id);
+                    return;
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    // D3: cancelled while waiting out the backoff —
+                    // cancel_download already cleared this model's rows.
                     return;
                 }
                 let now = std::time::Instant::now();
@@ -779,9 +898,23 @@ impl RuntimeHost {
             // their lengths); nothing already verified moves again.
             result = attempt(&mut pacer);
         }
+        if matches!(result, Err(DownloadError::Cancelled)) {
+            // D3: user intent, not a failure — no error row, and the maps
+            // were already cleared by cancel_download (touching them here
+            // could clobber a re-enqueued fresh attempt of the same model).
+            return;
+        }
         let mut state = self.state.lock().expect("runtime state");
+        match state.download_cancels.get(&model.id) {
+            Some(flag) if Arc::ptr_eq(flag, &cancel) => {}
+            // A cancel raced in after the verdict (its cleanup already
+            // ran), possibly followed by a fresh enqueue whose rows and
+            // flag must survive this attempt's cleanup — leave everything.
+            _ => return,
+        }
         state.downloads.remove(&model.id);
         state.download_retries.remove(&model.id);
+        state.download_cancels.remove(&model.id);
         match result {
             Ok(_) => {}
             Err(DownloadError::LicenseNotAccepted { .. }) => {
@@ -794,6 +927,25 @@ impl RuntimeHost {
                     .insert(model.id.clone(), e.to_string());
             }
         }
+    }
+
+    /// D3: Settings → Cancel a queued or in-flight download. The flag is
+    /// observed per chunk and between files, so the worker stops within a
+    /// beat; part files are KEPT (a later Download resumes from them), no
+    /// error row is written, and the row reads "not-downloaded" again
+    /// immediately.
+    pub fn cancel_download(&self, model_id: &str) {
+        let mut state = self.state.lock().expect("runtime state");
+        if let Some(flag) = state.download_cancels.remove(model_id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        // Queued but not started: drop it before the worker gets there.
+        state.download_queue.retain(|id| id != model_id);
+        // Clear the live rows now rather than when the worker notices —
+        // the status snapshot the cancel command returns must already
+        // read "not-downloaded".
+        state.downloads.remove(model_id);
+        state.download_retries.remove(model_id);
     }
 
     /// Settings → remove a model's weights (§2.4). Installed records and
@@ -843,6 +995,25 @@ impl RuntimeHost {
             *slot = (downloaded, total);
         }
     }
+}
+
+/// D3: Settings → Cancel a queued or in-flight model download. Lives here
+/// beside the host it drives (the other runtime_* commands predate this
+/// file's split and sit in commands/app.rs); registered in lib.rs's
+/// generate_handler! lists like the rest.
+#[tauri::command]
+pub fn runtime_cancel_download(
+    app: tauri::State<'_, Arc<crate::state::App>>,
+    handle: tauri::AppHandle,
+    model_id: String,
+) -> crate::dto::RuntimeStatus {
+    app.runtime.cancel_download(&model_id);
+    // Push the fresh snapshot on the same channel the pump uses so every
+    // webview sees the row flip back to not-downloaded at once (the bus
+    // publishes nothing for a cancel, so nobody else would emit).
+    let status = app.runtime.status();
+    let _ = tauri::Emitter::emit(&handle, "runtime-status", status.clone());
+    status
 }
 
 #[cfg(test)]
@@ -1078,6 +1249,100 @@ mod tests {
                 "{id}: explicit download is accepted at the seam"
             );
         }
+    }
+
+    /// D1: the preflight verdict — unknown availability passes, a
+    /// zero-byte requirement passes, and a real shortfall reports the
+    /// margin-inclusive need.
+    #[test]
+    fn disk_shortfall_blocks_only_a_real_known_shortfall() {
+        let gib = 1024u64 * 1024 * 1024;
+        // Unknown availability (non-unix / probe failure): never block.
+        assert_eq!(disk_shortfall(10 * gib, None), None);
+        // Nothing left to download: finishing needs no new space, so a
+        // verification-only resume passes even on a nearly full disk.
+        assert_eq!(disk_shortfall(0, Some(0)), None);
+        // Fits with the margin to spare.
+        assert_eq!(disk_shortfall(gib, Some(4 * gib)), None);
+        // Fits only WITHOUT the margin: blocked, and the reported need
+        // includes it (that is the "needs X free" the row shows).
+        assert_eq!(disk_shortfall(gib, Some(2 * gib)), Some((3 * gib, 2 * gib)));
+    }
+
+    /// D2: the retry classification — transient HTTP statuses join
+    /// Interrupted on the backoff schedule, Retry-After is honored for the
+    /// throttling statuses (capped), and verdict classes stay terminal.
+    #[test]
+    fn retry_classification_matches_d2() {
+        use std::time::Duration;
+        let http = |status: u16, retry_after_secs: Option<u64>| DownloadError::Http {
+            status,
+            url: "https://cdn.test/w".into(),
+            retry_after_secs,
+        };
+        assert_eq!(
+            retry_wait(&DownloadError::Interrupted { got_bytes: 1 }),
+            Some(None)
+        );
+        for status in [408, 425, 429, 500, 502, 503, 504] {
+            assert_eq!(
+                retry_wait(&http(status, None)),
+                Some(None),
+                "{status} retries on the schedule"
+            );
+        }
+        for status in [0, 400, 401, 403, 404, 416, 501] {
+            assert_eq!(
+                retry_wait(&http(status, Some(5))),
+                None,
+                "{status} is terminal even with a Retry-After"
+            );
+        }
+        // Retry-After (seconds form) replaces the schedule's gap, capped.
+        assert_eq!(
+            retry_wait(&http(429, Some(30))),
+            Some(Some(Duration::from_secs(30)))
+        );
+        assert_eq!(
+            retry_wait(&http(503, Some(86_400))),
+            Some(Some(RETRY_AFTER_CAP))
+        );
+        // Verdict classes never retry.
+        assert_eq!(retry_wait(&DownloadError::Cancelled), None);
+        assert_eq!(
+            retry_wait(&DownloadError::ChecksumFailed { file: "f".into() }),
+            None
+        );
+    }
+
+    /// D3: cancel drops a QUEUED model, flips the in-flight flag, and
+    /// clears the live rows so status reads not-downloaded at once — and
+    /// writes NO error row (cancel is intent, not failure).
+    #[test]
+    fn cancel_download_clears_rows_and_flips_the_flag() {
+        let (_dir, host) = host();
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut state = host.state.lock().unwrap();
+            state.downloads.insert("m".into(), (0, 100));
+            state.download_retries.insert("m".into(), "retrying".into());
+            state.download_cancels.insert("m".into(), flag.clone());
+            state.download_queue.push_back("m".into());
+        }
+        host.cancel_download("m");
+        let state = host.state.lock().unwrap();
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "the in-flight transfer observes the flip per chunk"
+        );
+        assert!(state.downloads.is_empty(), "row reads not-downloaded now");
+        assert!(state.download_retries.is_empty());
+        assert!(state.download_queue.is_empty(), "queued models never start");
+        assert!(state.download_cancels.is_empty());
+        assert!(
+            state.download_errors.is_empty(),
+            "no error row: cancel is not a failure"
+        );
     }
 
     #[test]
