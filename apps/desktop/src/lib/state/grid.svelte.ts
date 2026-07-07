@@ -16,7 +16,7 @@
 import * as sel from "../logic/selection";
 import { sortItems, THUMB_STEPS, type SortMode } from "../logic/sort";
 import * as stacks from "../logic/stacks";
-import { filterToShown } from "../logic/diversify";
+import { filterDiversify } from "../logic/diversify";
 import { nextLevel } from "../logic/cellinfo";
 import type { GridItem } from "../types/dto";
 import type { DisplayUnit } from "../types/display";
@@ -61,15 +61,18 @@ export class GridSlice {
   intensity = $state<ReadonlyMap<string, number>>(new Map());
 
   // -- diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) ----------
-  /** The Diversify view filter's representative ("shown") set, or null when the
-   * filter is OFF (the default — it is opt-in, a display layer over the current
-   * scope, not a scope kind). When a set is present the grid renders ONLY items
-   * whose hash is in it and folds the rest behind the header's "N hidden" count.
-   * Mirrored from the root (ui.diversifyShown) exactly as `intensity` is, so the
-   * grid never reaches back into the composition root; the root owns the
-   * (debounced) diversify_scope IPC and re-runs on scope/tolerance change. A
-   * ReadonlySet in a $state so swapping it re-renders the grid. */
-  diversifyShown = $state<ReadonlySet<string> | null>(null);
+  /** The hashes the last Diversify pass FOLDED (the backend report's `hidden`
+   * set), or null when the filter is OFF (the default — it is opt-in, a display
+   * layer over the current scope, not a scope kind). When a set is present the
+   * grid drops exactly these items and folds them behind the header's "N hidden"
+   * count. Keyed on the folded set rather than the report's `shown` twin so a
+   * hash the pass never saw (a mid-ingest arrival) stays VISIBLE until the
+   * re-run lands (AUDIT-2026-07-07 U1). Mirrored from the root exactly as
+   * `intensity` is, so the grid never reaches back into the composition root;
+   * the root owns the (debounced) diversify_scope IPC and re-runs on
+   * scope/tolerance change. A ReadonlySet in a $state so swapping it re-renders
+   * the grid. */
+  diversifyHiddenHashes = $state<ReadonlySet<string> | null>(null);
 
   // -- scroll anchor (preserved across Look round-trips and folder revisits) ------
   scrollAnchor = $state<{ index: number; offset: number } | null>(null);
@@ -101,7 +104,7 @@ export class GridSlice {
   // (units, focus, selectionTargets) sees only the shown set, exactly as if the
   // scope contained those items. `null` (filter off) is the identity, so the
   // default path is byte-identical to before the feature.
-  shownItems = $derived(filterToShown(this.rawItems, this.diversifyShown));
+  shownItems = $derived(filterDiversify(this.rawItems, this.diversifyHiddenHashes));
   items = $derived(sortItems(this.shownItems, this.sort, this.intensity));
   itemHashes = $derived(this.items.map((i) => i.hash));
   /** Unsorted SCOPE hashes (rawItems order) — the heat fetch keys off these so

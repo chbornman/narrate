@@ -325,9 +325,16 @@
           {@attach tooltip({ text: "Duplication tolerance: higher hides more similar photos" })}
         />
         <!-- The unobtrusive "N hidden" affordance: a live count of folded frames.
-             0 reads "all shown" so the slider's effect is always legible. -->
-        <span class="diversify-count">
-          {ui.diversifyHidden > 0 ? `${ui.diversifyHidden} hidden` : "all shown"}
+             0 reads "all shown" so the slider's effect is always legible. While
+             a pass is in flight the line reads "diversifying…" in a dimmed tone
+             (the Duplicates lens's quiet "Scanning" idiom) so a stale count
+             never poses as the settled answer. -->
+        <span class="diversify-count" class:pending={ui.diversifyPending}>
+          {ui.diversifyPending
+            ? "diversifying…"
+            : ui.diversifyHidden > 0
+              ? `${ui.diversifyHidden} hidden`
+              : "all shown"}
         </span>
       {/if}
     {/if}
@@ -517,6 +524,11 @@
     color: var(--text-faint);
     white-space: nowrap;
     font-size: 12px;
+  }
+  /* In-flight: dim the count line a step further so "diversifying…" reads as a
+     transient state, not a settled answer. */
+  .diversify-count.pending {
+    opacity: 0.7;
   }
   .detail-row {
     display: flex;

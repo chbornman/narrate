@@ -1,48 +1,41 @@
 /**
  * The Diversify / duplication-tolerance view filter, pure
  * (DESIGN-DEDUP-AND-SIMILARITY.md, the duplication-tolerance slider). The
- * backend's `diversify_scope` returns a `shown` representative set; the grid
- * renders only those items and folds the rest behind a "N hidden" affordance.
+ * backend's `diversify_scope` reports which in-scope images are redundant
+ * (`hidden`); the grid drops those and folds them behind a "N hidden"
+ * affordance.
  *
- * WHY a module: the `shown`-set filter is the load-bearing bit of the feature
- * (it must AGREE with the backend's report and survive a slow IPC racing a scope
+ * WHY a module: the fold filter is the load-bearing bit of the feature (it
+ * must AGREE with the backend's report and survive a slow IPC racing a scope
  * change), and the 0..1 tolerance <-> 0..100% slider mapping is the kind of
  * off-by-one math that wants one tested home rather than inline in the chrome.
  * Keeping it pure lets the seam be unit-tested without any Svelte or IPC.
  */
 
-/** Filter a grid item-list down to the `shown` representative set, preserving the
- * input order (the grid's own sort runs downstream over the result). A `null`
- * shown-set means "the filter is OFF" -> pass everything through unchanged, so the
- * caller can hold one nullable field for the whole on/off + filter state.
+/** Filter a grid item-list by DROPPING the report's `hidden` (redundant) set,
+ * preserving the input order (the grid's own sort runs downstream over the
+ * result). A `null` hidden-set means "the filter is OFF" -> pass everything
+ * through unchanged, so the caller can hold one nullable field for the whole
+ * on/off + filter state.
+ *
+ * WHY the filter keys on `hidden` rather than the report's `shown` twin: a
+ * hash the pass never saw PASSES THROUGH. Mid-ingest re-lists introduce
+ * new photos between passes, and keeping-what's-in-`shown` silently hid every
+ * one of them until the next pass landed (AUDIT-2026-07-07 U1). Dropping
+ * what the pass explicitly FOLDED makes "unknown -> visible" the structural
+ * default, which is the honest failure mode for a view filter.
  *
  * Generic over `{ hash }` so it filters GridItems without importing the DTO (the
  * grid slice owns that type); the only field it touches is `hash`. */
-export function filterToShown<T extends { hash: string }>(
+export function filterDiversify<T extends { hash: string }>(
   items: readonly T[],
-  shown: ReadonlySet<string> | null,
+  hidden: ReadonlySet<string> | null,
 ): T[] {
   // OFF (null) is the identity: returning the same items unfiltered is what
   // "turning Diversify off restores the full set" reduces to, with no special
   // case at the call site.
-  if (shown === null) return items as T[];
-  return items.filter((i) => shown.has(i.hash));
-}
-
-/** How many of the current scope's items the filter is hiding: the count the
- * "N hidden" affordance shows. Derived from the loaded scope size minus the shown
- * set so it stays honest even if `hidden` and the grid drift (e.g. an item left
- * the scope between the diversify call and a re-list). Never negative.
- *
- * `shown === null` (filter off) hides nothing. */
-export function hiddenCount(
-  scopeSize: number,
-  shown: ReadonlySet<string> | null,
-): number {
-  if (shown === null) return 0;
-  // Clamp at 0: a transiently-stale shown set (more shown hashes than the
-  // current scope, mid-relist) must never render a negative "hidden" count.
-  return Math.max(0, scopeSize - shown.size);
+  if (hidden === null) return items as T[];
+  return items.filter((i) => !hidden.has(i.hash));
 }
 
 /** The slider works in whole PERCENT (0..100, the dupeGuru/digiKam idiom — see

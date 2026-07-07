@@ -15,6 +15,7 @@
    * (and act on, with existing verbs) what would go. No em-dashes in copy
    * (gate: check:emdash).
    */
+  import { onDestroy } from "svelte";
   import Copy from "@lucide/svelte/icons/copy";
   import Star from "@lucide/svelte/icons/star";
   import { ui } from "../../state/app.svelte";
@@ -59,6 +60,10 @@
     sliderValue = v;
     sweep.run(v);
   }
+  // The debounce contract (logic/dedup.ts): cancel() on unmount, so a drag
+  // released just before the lens closes cannot fire a rescan into a view
+  // that no longer exists.
+  onDestroy(() => sweep.cancel());
 </script>
 
 <div class="dupes">
@@ -89,7 +94,7 @@
            culls); it just gathers them so the founder sees and can act. -->
       <button
         class="select-redundant"
-        onclick={() => ui.selectRedundantDuplicates()}
+        onclick={() => void ui.selectRedundantDuplicates()}
       >
         Select redundant copies
       </button>

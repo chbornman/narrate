@@ -46,7 +46,6 @@ import {
 import { afterCommit } from "../logic/advance";
 import {
   DEFAULT_TOLERANCE_PERCENT,
-  hiddenCount,
   percentToTolerance,
 } from "../logic/diversify";
 import { invalidateScopedGraphs } from "../logic/graphstore";
@@ -302,10 +301,10 @@ export class Ui {
   /** Monotone token so a slow intensity fetch cannot overwrite a newer scope's
    * (the gridLoad precedent, for the heat path). */
   private heatLoad = 0;
-  /** The grid item-set the cached intensity was fetched for (length + first /
-   * last hash) — a cheap signature so reportScope (which fires on every focus
-   * move) only re-fetches when the SCOPE's items actually changed, never on a
-   * mere selection change. */
+  /** The grid item-set the cached intensity was fetched for (scopeSignature —
+   * the ONE shared kind + length + endpoints format, U7) so reportScope (which
+   * fires on every focus move) only re-fetches when the SCOPE's items actually
+   * changed, never on a mere selection change. */
   private heatItemsKey = "";
 
   // -- diversify / duplication-tolerance (DESIGN-DEDUP-AND-SIMILARITY.md) -------
@@ -313,8 +312,9 @@ export class Ui {
   // LAYER over whatever scope the grid is showing (any kind), NOT a scope kind:
   // it composes with folder/collection/query/topic/similar, so making it a scope
   // would forbid diversifying a search result. The root owns the (debounced)
-  // diversify_scope IPC and mirrors the resulting `shown` set into the grid slice
-  // (grid.diversifyShown), exactly as the heat tint mirrors `intensity`.
+  // diversify_scope IPC and mirrors the report's FOLDED (`hidden`) set into the
+  // grid slice (grid.diversifyHiddenHashes), exactly as the heat tint mirrors
+  // `intensity`.
 
   /** Diversify on/off. Default OFF — it is opt-in (the design's "Opt-in: it's
    * destructive-adjacent") and a pure view filter, so a fresh session shows the
@@ -329,21 +329,30 @@ export class Ui {
    * un-embedded scope): the slider disables and the chrome shows a calm "embed
    * photos to diversify" hint instead of implying the slider had no effect. */
   diversifyDegraded = $state(false);
-  /** How many in-scope images the filter is currently hiding — the header's
-   * unobtrusive "N hidden" affordance. Derived from the loaded scope size minus
-   * the shown set (hiddenCount), so it stays honest if an item left the scope
-   * between the diversify call and a re-list. 0 when off / degraded / nothing
-   * collapsed. */
-  diversifyHidden = $state(0);
+  /** How many loaded items the filter is currently hiding — the header's
+   * unobtrusive "N hidden" affordance. A LIVE derivation off the grid's own
+   * raw-vs-shown item counts (never a snapshot), so it stays honest across
+   * mid-ingest re-lists: whatever the filter actually drops right now is
+   * exactly what it reads, and it can never go negative or count an item that
+   * already left the scope. 0 when off / degraded / nothing collapsed. */
+  get diversifyHidden(): number {
+    return this.grid.rawItems.length - this.grid.shownItems.length;
+  }
+  /** True while a diversify pass is committed or in flight (slider settle
+   * included): the header's count line shows a quiet "diversifying…" instead
+   * of a stale count (AUDIT-2026-07-07 U6 — the Duplicates lens's "Scanning"
+   * tone, for the filter). */
+  diversifyPending = $state(false);
   /** Monotone token so a slow diversify_scope pass cannot overwrite a newer
    * scope's / tolerance's result (the heatLoad/gridLoad precedent). */
   private diversifyLoad = 0;
   /** Debounce handle for the slider drag: a continuous drag fires ONE pass on
    * settle (DIVERSIFY_DEBOUNCE_MS), never one per intermediate value. */
   private diversifyTimer: ReturnType<typeof setTimeout> | undefined;
-  /** The scope item-set the cached `shown` set was computed for (the heatItemsKey
-   * signature, for the diversify path): reportScope fires on every focus move, so
-   * the active filter only re-runs when the SCOPE's items actually changed. */
+  /** The scope item-set the cached folded set was computed for (scopeSignature,
+   * the shared kind-prefixed format — U7): reportScope fires on every focus
+   * move, so the active filter only re-runs when the SCOPE's items actually
+   * changed. */
   private diversifyScopeKey = "";
   // -- near-duplicate lens (DESIGN-DEDUP-AND-SIMILARITY.md "Tier 1") -----------
   // An OPT-IN display lens over the CURRENT grid scope (like the heat tint, not
@@ -688,41 +697,51 @@ export class Ui {
     // leave / nav), so refocusing the dwell tracker here covers them all with
     // one localized hook (DESIGN-ATTENTION-HEATMAP.md).
     this.dwellRefocus();
-    // Heat-tint: refetch intensity only when the SCOPE's item set changed (not
-    // on a mere focus move) — reportScope fires far more often than the items
-    // change, and intensity is per-scope.
+    // The scope-following lenses (heat tint, Diversify, Duplicates) re-run
+    // only when the SCOPE's item set changed, never on a mere focus move —
+    // reportScope fires far more often than the items change, and every one of
+    // these passes is per-scope (the dedup scan is O(n^2)).
+    this.refreshLensesIfScopeChanged();
+  }
+
+  /** Re-run whichever scope-following lenses are ON when the loaded item-set
+   * changed since their last pass. ONE funnel for every item-set edge:
+   * reportScope (focus/scope flows) AND the mid-ingest re-lists (refreshItems),
+   * which land new items WITHOUT a reportScope — before this funnel existed,
+   * an active Diversify filter simply never saw those re-lists and silently
+   * hid every newly-ingested photo (AUDIT-2026-07-07 U1). */
+  private refreshLensesIfScopeChanged() {
     this.refreshHeatIfItemsChanged();
-    // Diversify: re-run the filter on the SAME scope-changed trigger so the
-    // shown set follows folder/collection/query/topic switches while the filter
-    // is on (the design's "Re-run when the scope changes while active"). A no-op
-    // when off or the scope is unchanged.
     this.refreshDiversifyIfScopeChanged();
-    // Duplicates lens: rescan only when the SCOPE's item set changed, same as
-    // the heat tint (the scan is per-scope and O(n^2), so never on a focus move).
     this.refreshDupesIfScopeChanged();
   }
 
+  /** Cheap signature of the loaded grid scope: kind + item count + endpoint
+   * hashes. The ONE home for the format — the three lens refreshers compare
+   * against it and the fetch paths RECORD it, so a "did the scope change?"
+   * check can never drift from the pass it gates (AUDIT-2026-07-07 U4/U7; the
+   * kind prefix is what makes same-size, same-endpoint scopes of DIFFERENT
+   * kinds re-run). */
+  private scopeSignature(): string {
+    const h = this.grid.scopeHashes;
+    return `${this.gridScope.kind}:${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
+  }
+
   /** Rescan near-duplicates when the loaded grid item-set changed since the last
-   * scan (the heat-tint signature, reused). Cheap no-op when the lens is off or
-   * the scope is unchanged. */
+   * scan. Cheap no-op when the lens is off or the scope is unchanged; the fetch
+   * itself records the signature it scanned (U4). */
   private refreshDupesIfScopeChanged() {
     if (!this.dupesOn) return;
-    const h = this.grid.scopeHashes;
-    const key = `${this.gridScope.kind}:${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
-    if (key === this.dupeScopeKey) return;
-    this.dupeScopeKey = key;
+    if (this.scopeSignature() === this.dupeScopeKey) return;
     void this.fetchDuplicates();
   }
 
   /** Refetch heat-tint intensity when the loaded grid item-set changed since
-   * the last fetch (a cheap length + endpoints signature). Cheap no-op when the
-   * heat tint is off or the scope is unchanged. */
+   * the last fetch. Cheap no-op when the heat tint is off or the scope is
+   * unchanged; the fetch itself records the signature it ran for (U4). */
   private refreshHeatIfItemsChanged() {
     if (!this.heatOn) return;
-    const h = this.grid.scopeHashes;
-    const key = `${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
-    if (key === this.heatItemsKey) return;
-    this.heatItemsKey = key;
+    if (this.scopeSignature() === this.heatItemsKey) return;
     void this.fetchIntensity();
   }
 
@@ -937,7 +956,14 @@ export class Ui {
     if (scope.kind === "collection") {
       const load = ++this.gridLoad;
       const items = (await ipc.listCollectionMembers(scope.id)) ?? [];
-      if (load === this.gridLoad) this.grid.setItems(items);
+      if (load === this.gridLoad) {
+        this.grid.setItems(items);
+        // A mid-ingest re-list lands new items WITHOUT a reportScope: the
+        // scope-following lenses must see the changed item set here or an
+        // active Diversify filter hides every new photo until the next
+        // focus move (AUDIT-2026-07-07 U1).
+        this.refreshLensesIfScopeChanged();
+      }
       return;
     }
     if (scope.kind === "query") {
@@ -968,7 +994,12 @@ export class Ui {
     if (this.grid.rootId === null) return;
     const load = ++this.gridLoad;
     const items = await ipc.listFolder(this.grid.rootId, this.grid.folder);
-    if (load === this.gridLoad) this.grid.setItems(items);
+    if (load === this.gridLoad) {
+      this.grid.setItems(items);
+      // Same U1 seam as the collection arm: this feeder skips reportScope, so
+      // the lens caches must be revalidated against the fresh item set here.
+      this.refreshLensesIfScopeChanged();
+    }
   }
 
   /** The `imagesVersion` (Seam 1) the grid last re-listed against. The grid
@@ -2886,9 +2917,9 @@ export class Ui {
   toggleHeat() {
     this.heatOn = !this.heatOn;
     prefs.saveHeatOn(this.heatOn);
-    // Force the next fetch regardless of the cached item signature (the scope
-    // may be unchanged but the tint just turned on).
-    this.heatItemsKey = "";
+    // The direct fetch records the scope signature it ran for, so no key
+    // blanking is needed to force it (U4) and the next reportScope at an
+    // unchanged scope stays a no-op.
     if (this.heatOn) {
       void this.fetchIntensity();
     } else {
@@ -2909,7 +2940,7 @@ export class Ui {
   toggleAllTime() {
     this.heatAllTime = !this.heatAllTime;
     prefs.saveHeatAllTime(this.heatAllTime);
-    this.heatItemsKey = ""; // the flag changed: force a refetch
+    // The flag changed: refetch directly (the fetch records the scope key, U4).
     if (this.heatOn) void this.fetchIntensity();
   }
 
@@ -2918,6 +2949,10 @@ export class Ui {
    * scope's. Silent on backend failure (tests/dev): the tint just stays dark. */
   async fetchIntensity() {
     if (!this.heatOn) return;
+    // Record the scope signature THIS fetch is for, so the next reportScope at
+    // an unchanged scope no-ops instead of re-fetching (U4). Recorded even on
+    // the empty early return: there is nothing more a re-run could learn.
+    this.heatItemsKey = this.scopeSignature();
     // Key off the UNSORTED scope hashes so the `attention` sort can reorder by
     // the result without a fetch cycle (the sorted `items` depend on this map).
     const hashes = this.grid.scopeHashes;
@@ -2949,9 +2984,8 @@ export class Ui {
     prefs.saveDiversifyOn(this.diversifyOn);
     if (this.diversifyOn) {
       // Immediate on the explicit toggle (no drag to coalesce): the user asked
-      // for the filter now. Force the next pass regardless of the cached scope
-      // signature (the scope may be unchanged but the filter just turned on).
-      this.diversifyScopeKey = "";
+      // for the filter now. The pass records the scope signature it runs for,
+      // so no key blanking is needed to force it (U4).
       void this.runDiversify();
     } else {
       this.applyDiversifyOff();
@@ -2968,52 +3002,66 @@ export class Ui {
     prefs.saveDiversifyTolerance(percent);
     if (!this.diversifyOn) return;
     clearTimeout(this.diversifyTimer);
-    // Force a recompute on settle: the tolerance changed, so the cached scope
-    // signature must not short-circuit it.
-    this.diversifyScopeKey = "";
+    // A pass is now COMMITTED (the debounce only defers it): show the pending
+    // affordance for the whole drag-to-settle window, not just the IPC flight,
+    // so the stale count never poses as current (U6). The debounced run
+    // records the scope signature itself, so the cached key needs no blanking
+    // to defeat the short-circuit (U4).
+    this.diversifyPending = true;
     this.diversifyTimer = setTimeout(() => void this.runDiversify(), DIVERSIFY_DEBOUNCE_MS);
   }
 
-  /** Clear the Diversify filter: drop the grid's shown set (restoring the full
-   * scope), zero the hidden count, and cancel any pending debounced pass. The
-   * single funnel for "turn off" and "no signal to filter on". */
+  /** Clear the Diversify filter: drop the grid's folded set (restoring the full
+   * scope) and cancel any pending debounced pass. The single funnel for "turn
+   * off" and "no signal to filter on". Bumping the monotone token INVALIDATES
+   * any pass already in flight — without it, a slow diversify_scope resolving
+   * after the off-toggle re-installed its folded set over a filter the user
+   * just turned off. */
   private applyDiversifyOff() {
     clearTimeout(this.diversifyTimer);
+    this.diversifyLoad += 1;
+    this.diversifyPending = false;
     this.diversifyScopeKey = "";
-    this.grid.diversifyShown = null;
-    this.diversifyHidden = 0;
+    this.grid.diversifyHiddenHashes = null;
   }
 
-  /** Re-run the active Diversify pass when the SCOPE's item-set changed since the
-   * last pass (a cheap length + endpoints signature, the heat-tint precedent) —
-   * reportScope fires far more often than the items change, and the shown set is
-   * per-scope. Cheap no-op when the filter is off or the scope is unchanged.
-   * Called from reportScope so the filter follows folder/collection/query/topic
-   * switches automatically (the design's "Re-run when the scope changes while
-   * active"). */
+  /** Re-run the active Diversify pass when the SCOPE's item-set changed since
+   * the last pass (the shared scopeSignature, the heat-tint precedent) —
+   * reportScope fires far more often than the items change, and the folded set
+   * is per-scope. Cheap no-op when the filter is off or the scope is unchanged;
+   * the pass itself records the signature it ran for (U4). Called from the
+   * refreshLensesIfScopeChanged funnel so the filter follows scope switches AND
+   * mid-ingest re-lists automatically (the design's "Re-run when the scope
+   * changes while active"; AUDIT-2026-07-07 U1). */
   private refreshDiversifyIfScopeChanged() {
     if (!this.diversifyOn) return;
-    const h = this.grid.scopeHashes;
-    const key = `${h.length}:${h[0] ?? ""}:${h[h.length - 1] ?? ""}`;
-    if (key === this.diversifyScopeKey) return;
-    this.diversifyScopeKey = key;
+    if (this.scopeSignature() === this.diversifyScopeKey) return;
     void this.runDiversify();
   }
 
   /** Run a diversify_scope pass for the current scope at the current tolerance
-   * and mirror the resulting `shown` set into the grid. Guarded by a monotone
-   * token so a slow pass cannot overwrite a newer scope's / tolerance's result.
-   * GRACEFUL like every lens command: an empty scope or a degraded rig clears the
-   * filter (shows everything) and flags `diversifyDegraded` so the chrome can
-   * explain why; a backend failure (tests/dev) leaves the filter cleared. */
+   * and mirror the report's FOLDED (`hidden`) set into the grid — folding what
+   * the pass explicitly hid, rather than keeping what it showed, is what lets a
+   * hash the pass never saw (a mid-ingest arrival) stay visible until the
+   * re-run lands (U1). Guarded by a monotone token so a slow pass cannot
+   * overwrite a newer scope's / tolerance's result. GRACEFUL like every lens
+   * command: an empty scope or a degraded rig clears the filter (shows
+   * everything) and flags `diversifyDegraded` so the chrome can explain why; a
+   * backend failure (tests/dev) leaves the filter cleared. */
   async runDiversify() {
     if (!this.diversifyOn) return;
+    // Record the scope signature THIS pass is for, so the next reportScope at
+    // an unchanged scope no-ops instead of re-running the pass (U4). Recorded
+    // on the refuse/empty paths too: re-running them would learn nothing.
+    this.diversifyScopeKey = this.scopeSignature();
     const hashes = this.grid.scopeHashes;
     if (hashes.length === 0) {
       // Nothing in scope: clear the filter and don't claim degradation (there is
-      // simply nothing to diversify).
-      this.grid.diversifyShown = null;
-      this.diversifyHidden = 0;
+      // simply nothing to diversify). The token bump cancels any in-flight pass
+      // so its stale folded set cannot land over this deliberate clear.
+      this.diversifyLoad += 1;
+      this.diversifyPending = false;
+      this.grid.diversifyHiddenHashes = null;
       this.diversifyDegraded = false;
       return;
     }
@@ -3023,36 +3071,41 @@ export class Ui {
       // pass the actual hashes: refuse rather than diversify the WHOLE library
       // (the old silent fallback). Clear the filter (show everything) and don't
       // claim degradation — the rig is fine, this scope just isn't diversifiable.
-      this.grid.diversifyShown = null;
-      this.diversifyHidden = 0;
+      this.diversifyLoad += 1;
+      this.diversifyPending = false;
+      this.grid.diversifyHiddenHashes = null;
       this.diversifyDegraded = false;
       return;
     }
     const tolerance = percentToTolerance(this.diversifyTolerancePercent);
     const load = ++this.diversifyLoad;
+    // Pending covers the IPC flight; a superseding pass takes it over (the
+    // token means only the LAST one to land clears it, so the chrome never
+    // flashes "settled" between overlapping passes) (U6).
+    this.diversifyPending = true;
     try {
       // Reuse the SAME GraphScope the visualizer/topic commands resolve, so the
       // backend diversifies exactly the set the grid is scoped to.
       const report = await ipc.diversifyScope(scope, tolerance);
       if (load !== this.diversifyLoad) return; // a newer pass owns the filter now
+      this.diversifyPending = false;
       this.diversifyDegraded = report.degraded;
       if (report.degraded) {
         // No CLIP signal: show everything (the honest "all shown"), the slider
         // disables, and the chrome shows "embed photos to diversify".
-        this.grid.diversifyShown = null;
-        this.diversifyHidden = 0;
+        this.grid.diversifyHiddenHashes = null;
         return;
       }
-      const shown = new Set(report.shown);
-      this.grid.diversifyShown = shown;
-      // Hidden count off the loaded scope size minus the shown set (stays honest
-      // if an item left the scope between the call and a re-list).
-      this.diversifyHidden = hiddenCount(this.grid.scopeHashes.length, shown);
+      // The folded set: `shown ∪ hidden` is exactly the scope the backend
+      // scanned, so anything OUTSIDE `hidden` (new arrivals included) renders.
+      // The header's "N hidden" count derives live off the grid's raw-vs-shown
+      // lengths, so no snapshot count is kept here.
+      this.grid.diversifyHiddenHashes = new Set(report.hidden);
     } catch {
       // Backend unavailable (tests/dev): leave the filter cleared, never error.
       if (load !== this.diversifyLoad) return;
-      this.grid.diversifyShown = null;
-      this.diversifyHidden = 0;
+      this.diversifyPending = false;
+      this.grid.diversifyHiddenHashes = null;
     }
   }
 
@@ -3068,9 +3121,9 @@ export class Ui {
   toggleDuplicates() {
     this.dupesOn = !this.dupesOn;
     prefs.saveDupesOn(this.dupesOn);
-    // Force the next scan regardless of the cached scope signature (the scope
-    // may be unchanged but the lens just turned on).
-    this.dupeScopeKey = "";
+    // The direct scan records the scope signature it ran for, so no key
+    // blanking is needed to force it (U4) and the next reportScope at an
+    // unchanged scope stays a no-op.
     if (this.dupesOn) {
       void this.fetchDuplicates();
     } else {
@@ -3086,10 +3139,9 @@ export class Ui {
     if (value === this.dupeThreshold) return;
     this.dupeThreshold = value;
     prefs.saveDupeThreshold(value);
-    if (this.dupesOn) {
-      this.dupeScopeKey = ""; // the threshold changed: force a rescan
-      void this.fetchDuplicates();
-    }
+    // The threshold changed: rescan directly even at an unchanged scope (the
+    // scan records the scope key itself, U4).
+    if (this.dupesOn) void this.fetchDuplicates();
   }
 
   /** Scan the loaded grid scope for near-dup groups and replace the cached set.
@@ -3099,6 +3151,10 @@ export class Ui {
    * lens just shows the none-state. */
   async fetchDuplicates() {
     if (!this.dupesOn) return;
+    // Record the scope signature THIS scan is for, so the next reportScope at
+    // an unchanged scope no-ops instead of re-running the O(n^2) scan (U4).
+    // Recorded even on the refuse path: re-running it would learn nothing.
+    this.dupeScopeKey = this.scopeSignature();
     const scope = this.graphScope();
     if (scope === null) {
       // No folder/collection source to name and no result-set scope variant to
@@ -3127,15 +3183,24 @@ export class Ui {
    * own selection model. NO delete — it just gathers the redundant ones so the
    * founder can act with the existing verbs (or simply SEE which would go). A
    * no-op when the lens is off or there is nothing redundant. */
-  selectRedundantDuplicates() {
+  async selectRedundantDuplicates() {
     if (!this.dupesOn || this.dupeGroups === null) return;
     const clusters = dedup.toClusters(this.dupeGroups, (h) => this.ratingOf(h));
     const hashes = dedup.redundantHashes(clusters);
     if (hashes.length === 0) return;
     // Build the selection directly from the hashes (the lens renders bare
-    // hashes, not grid units, so it owns its own order); focus the first so the
-    // indicator and any active-hash verb have a subject.
-    this.grid.setSelection({ order: hashes, focus: 0, anchor: 0 });
+    // hashes, not grid units, so it owns its own order). Focus/anchor index the
+    // UNIT list, never this hash list — `focus: 0` pointed the inspector/
+    // rating/Look target at whatever unit happened to sit first in the grid,
+    // generally an unselected keep-worthy image (AUDIT-2026-07-07 U2). -1
+    // (indexOf's miss) is the honest "no active cell" when the first redundant
+    // hash is not on the grid surface (e.g. hidden behind a collapsed stack).
+    const focus = this.grid.unitHashes.indexOf(hashes[0]);
+    this.grid.setSelection({ order: hashes, focus, anchor: focus });
+    // Report like every selection path (the applySelection twin): without it
+    // the backend write scope and the "● N" indicator lag behind the gathered
+    // selection until the next unrelated focus move.
+    await this.reportScope();
   }
 
   /** The folded rating of an in-scope image, or null when unknown — the
