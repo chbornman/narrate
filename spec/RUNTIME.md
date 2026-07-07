@@ -294,7 +294,7 @@ device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]
 backend = "local-ort"        # "local-ort" | "openai-compatible"
-model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file (CoreML/CUDA); CPU-only fallback: ViT-H-14-378-quickgelu__dfn5b (int8)
+model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file (CUDA builds); compiled default on macOS/CPU builds is the int8 base ViT-H-14-378-quickgelu__dfn5b (CoreML fragmentation, see backlog)
 device = "auto"              # "auto" | "cpu" | "gpu"
 
 [embedder.text]              # the text-embedding model (§3.3): annotation

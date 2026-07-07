@@ -42,7 +42,7 @@ device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]
 backend = "local-ort"        # "local-ort" | "openai-compatible"
-model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file; CPU-only fallback: ViT-H-14-378-quickgelu__dfn5b (int8)
+model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file (CUDA builds); compiled default on macOS/CPU builds is the int8 base ViT-H-14-378-quickgelu__dfn5b (CoreML fragmentation, see backlog)
 device = "auto"              # "auto" | "cpu" | "gpu"
 
 [embedder.text]              # the text-embedding model (§3.3): annotation
@@ -91,11 +91,27 @@ fn spec_literal_block_parses_with_no_warnings() {
 
 #[test]
 fn spec_block_equals_defaults() {
-    // §4.4 shows defaults: parsing it must equal an empty config.
+    // §4.4 shows defaults: parsing it must equal an empty config — modulo the
+    // one platform-conditional field. The CLIP model defaults to the fp16
+    // single-file only on CUDA builds; macOS/CPU builds compile the int8 base
+    // as the default (CoreML fragmentation, see EmbedderConfig::default). The
+    // spec block prints the GPU-ready value, so pin the field per-platform and
+    // compare everything else exactly.
     let from_spec = from_toml_str(SPEC_TOML).unwrap().config;
     let from_empty = from_toml_str("").unwrap().config;
-    assert_eq!(from_spec, from_empty);
     assert_eq!(from_empty, Config::default());
+
+    #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
+    assert_eq!(
+        from_empty.embedder.model,
+        "ViT-H-14-378-quickgelu__dfn5b-fp16"
+    );
+    #[cfg(not(all(not(target_os = "macos"), feature = "cuda")))]
+    assert_eq!(from_empty.embedder.model, "ViT-H-14-378-quickgelu__dfn5b");
+
+    let mut normalized = from_spec;
+    normalized.embedder.model = from_empty.embedder.model.clone();
+    assert_eq!(normalized, from_empty);
 }
 
 #[test]
