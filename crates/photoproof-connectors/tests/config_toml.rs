@@ -5,7 +5,7 @@
 
 use photoproof_connectors::config::{
     AsrBackend, AsrDevice, Config, ConfigError, EmbedDevice, EmbedderBackend, GpuLayers,
-    LlmBackend, TextEmbedderBackend, Tier, from_toml_str,
+    LlmBackend, ModelSelection, TextEmbedderBackend, Tier, from_toml_str, with_selected_model,
 };
 
 /// The literal TOML block from RUNTIME §4.4, comments included.
@@ -269,4 +269,57 @@ fn wrong_types_are_rejected() {
             "{toml}"
         );
     }
+}
+
+#[test]
+fn model_selection_changes_only_its_functional_seam() {
+    let source = r#"
+[runtime]
+tier = 2
+vram_headroom_mb = 4096
+future_key = "preserve-me"
+
+[llm]
+model = "small-model"
+
+[embedder]
+model = "visual-model"
+
+[embedder.text]
+model = "old-text-model"
+"#;
+    let selected =
+        with_selected_model(source, ModelSelection::TextEmbedder, "new-text-model").unwrap();
+    let document = selected.parse::<toml::Table>().unwrap();
+
+    assert_eq!(
+        document["embedder"]["text"]["model"].as_str(),
+        Some("new-text-model")
+    );
+    assert_eq!(document["embedder"]["model"].as_str(), Some("visual-model"));
+    assert_eq!(document["llm"]["model"].as_str(), Some("small-model"));
+    assert_eq!(
+        document["runtime"]["future_key"].as_str(),
+        Some("preserve-me")
+    );
+    let loaded = from_toml_str(&selected).unwrap();
+    assert_eq!(loaded.config.runtime.vram_headroom_mb, 4096);
+    assert_eq!(loaded.unknown_keys, vec!["runtime.future_key".to_string()]);
+}
+
+#[test]
+fn model_selection_rejects_a_non_table_target() {
+    let error = with_selected_model(
+        "embedder = \"invalid\"\n",
+        ModelSelection::VisualEmbedder,
+        "visual-model",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::InvalidValue {
+            field: "config",
+            ..
+        }
+    ));
 }

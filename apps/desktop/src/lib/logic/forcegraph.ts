@@ -153,6 +153,11 @@ export interface ForceConfig {
    * boosts this above 1 and the caller cools it toward 1, so the layout settles
    * fast then relaxes. Optional: absent ⇒ 1 (the un-reheated steady state). */
   heat?: number;
+  /** Remove whole-layout angular velocity and apply stronger cooled damping.
+   * Appropriate for the interactive semantic map, whose absolute rotation has
+   * no meaning. Optional so offline/reference simulations preserve their exact
+   * historical integrator unless they explicitly opt in. */
+  cancelRotation?: boolean;
   /** STABILITY CLAMP (visualizer audit, June 2026): the maximum distance a body
    * may move in ONE step, in sim-space px. The explicit integrator has no
    * intrinsic bound, so with inverse-square repulsion two affinity-clustered
@@ -233,16 +238,37 @@ export function annealedMaxStep(heat: number, maxStep: number): number {
   return ANNEAL_FLOOR + (maxStep - ANNEAL_FLOOR) * anneal;
 }
 
-/** Per-body residual kinetic energy below which the layout counts as "at rest".
- * Scale-invariant (energy is divided by body count) so a 5-node and a 5000-node
- * graph use the same bar. The visualizer audit's bounded-settle threshold. */
-export const REST_ENERGY_PER_BODY = 1.0;
+/** Per-body residual kinetic energy below which the layout counts as visually
+ * still. Scale-invariant (energy is divided by body count) so a 5-node and a
+ * 5000-node graph use the same bar. 0.0025 is an RMS displacement below
+ * 0.05 sim-px per step: motion must actually become imperceptible; cooling the
+ * heat is not, by itself, permission to stop the simulation. */
+export const REST_ENERGY_PER_BODY = 0.0025;
 /** Consecutive quiet frames required before declaring rest — debounces a lucky
  * single low-energy frame mid-churn into a real settle. */
 export const SETTLE_FRAMES = 30;
 /** Heat at/below which cooling is effectively complete (the ~1 steady state);
  * the small epsilon absorbs float drift in the cooling multiply. */
 export const SETTLED_HEAT = 1.0001;
+
+/** Advance the CONSECUTIVE quiet-frame count. Any real motion, elevated heat, or
+ * active drag resets the count to zero. Keeping this pure prevents the live
+ * worker and inline loops from accidentally treating "30 total frames elapsed"
+ * as "30 quiet frames" (the old sudden schedule-based stop). */
+export function nextSettleCount(p: {
+  energy: number;
+  bodies: number;
+  heat: number;
+  settleCount: number;
+  dragging: boolean;
+}): number {
+  const bodies = Math.max(1, p.bodies);
+  const quiet =
+    !p.dragging &&
+    p.heat <= SETTLED_HEAT &&
+    p.energy / bodies < REST_ENERGY_PER_BODY;
+  return quiet ? p.settleCount + 1 : 0;
+}
 
 /** Is the sim at rest? Pure predicate (testable; encodes two STATE-MACHINE.md 6b
  * invariants): a DRAG in progress is NEVER at rest — keep ticking + redrawing so
@@ -282,6 +308,44 @@ export const DEFAULT_NEIGHBOR_ATTRACTION = 0.06;
  * alongside DEFAULT_NEIGHBOR_ATTRACTION. */
 export const DEFAULT_NEIGHBOR_REST_LENGTH = 40;
 
+/** Normalize sparse k-NN bookkeeping into an undirected semantic graph. Cosine
+ * similarity has no direction, but top-k truncation can leave A listing B while
+ * B does not list A. Treating that storage asymmetry as a one-way physical pull
+ * injects meaningless net force/torque and can make the whole layout orbit.
+ *
+ * Each unordered pair is retained once at its strongest observed weight, then
+ * written back in both directions so `step` applies equal-and-opposite pulls.
+ * Mutates `nodes` and returns the number of unordered pairs. */
+export function symmetrizeNeighborEdges(nodes: ImageNode[]): number {
+  const n = nodes.length;
+  const pairs = new Map<number, number>();
+  for (let i = 0; i < n; i++) {
+    for (const edge of nodes[i].neighbors ?? []) {
+      const j = edge.i;
+      if (
+        j < 0 ||
+        j >= n ||
+        j === i ||
+        !Number.isFinite(edge.w) ||
+        edge.w <= 0
+      )
+        continue;
+      const a = Math.min(i, j);
+      const b = Math.max(i, j);
+      const key = a * n + b;
+      pairs.set(key, Math.max(pairs.get(key) ?? 0, edge.w));
+    }
+  }
+  for (const node of nodes) node.neighbors = undefined;
+  for (const [key, w] of [...pairs.entries()].sort((a, b) => a[0] - b[0])) {
+    const a = Math.floor(key / n);
+    const b = key % n;
+    (nodes[a].neighbors ??= []).push({ i: b, w });
+    (nodes[b].neighbors ??= []).push({ i: a, w });
+  }
+  return pairs.size;
+}
+
 /** Clamp a velocity/displacement vector to at most `max` magnitude, scaling both
  * components so direction is preserved. Returns the (possibly scaled) pair. */
 function clampStep(vx: number, vy: number, max: number): [number, number] {
@@ -291,6 +355,93 @@ function clampStep(vx: number, vy: number, max: number): [number, number] {
     return [vx * s, vy * s];
   }
   return [vx, vy];
+}
+
+/** Remove the rigid-body angular velocity of the movable layout around its
+ * mass-weighted centroid. Absolute graph orientation and whole-cloud rotation
+ * carry no semantic information; only relative positions do. Projecting out
+ * this single null mode leaves radial/local rearrangement intact while
+ * preventing residual angular momentum from presenting as endless spinning.
+ *
+ * Returns the angular velocity removed (useful to regression-test the
+ * projection). Fixed/dragged nodes and fixed/pinned anchors are excluded. */
+export function cancelRigidRotation(
+  nodes: ImageNode[],
+  anchors: TopicAnchor[],
+): number {
+  // Project images and anchors independently. Combining them would make a
+  // stationary anchor ring absorb image rotation and begin moving even when its
+  // own force configuration says it is at rest.
+  let nodeMass = 0;
+  let nodeCx = 0;
+  let nodeCy = 0;
+  for (const node of nodes) {
+    if (node.fixed === true) continue;
+    const mass = node.mass ?? 1;
+    nodeMass += mass;
+    nodeCx += mass * node.x;
+    nodeCy += mass * node.y;
+  }
+  let nodeOmega = 0;
+  if (nodeMass > 0) {
+    nodeCx /= nodeMass;
+    nodeCy /= nodeMass;
+    let momentum = 0;
+    let inertia = 0;
+    for (const node of nodes) {
+      if (node.fixed === true) continue;
+      const mass = node.mass ?? 1;
+      const rx = node.x - nodeCx;
+      const ry = node.y - nodeCy;
+      momentum += mass * (rx * node.vy - ry * node.vx);
+      inertia += mass * (rx * rx + ry * ry);
+    }
+    if (inertia > Number.EPSILON) {
+      nodeOmega = momentum / inertia;
+      for (const node of nodes) {
+        if (node.fixed === true) continue;
+        const rx = node.x - nodeCx;
+        const ry = node.y - nodeCy;
+        node.vx += nodeOmega * ry;
+        node.vy -= nodeOmega * rx;
+      }
+    }
+  }
+
+  let anchorCount = 0;
+  let anchorCx = 0;
+  let anchorCy = 0;
+  for (const anchor of anchors) {
+    if (anchor.fixed === true || anchor.pinned === true) continue;
+    anchorCount++;
+    anchorCx += anchor.x;
+    anchorCy += anchor.y;
+  }
+  let anchorOmega = 0;
+  if (anchorCount > 0) {
+    anchorCx /= anchorCount;
+    anchorCy /= anchorCount;
+    let momentum = 0;
+    let inertia = 0;
+    for (const anchor of anchors) {
+      if (anchor.fixed === true || anchor.pinned === true) continue;
+      const rx = anchor.x - anchorCx;
+      const ry = anchor.y - anchorCy;
+      momentum += rx * (anchor.vy ?? 0) - ry * (anchor.vx ?? 0);
+      inertia += rx * rx + ry * ry;
+    }
+    if (inertia > Number.EPSILON) {
+      anchorOmega = momentum / inertia;
+      for (const anchor of anchors) {
+        if (anchor.fixed === true || anchor.pinned === true) continue;
+        const rx = anchor.x - anchorCx;
+        const ry = anchor.y - anchorCy;
+        anchor.vx = (anchor.vx ?? 0) + anchorOmega * ry;
+        anchor.vy = (anchor.vy ?? 0) - anchorOmega * rx;
+      }
+    }
+  }
+  return nodeOmega + anchorOmega;
 }
 
 /** The view transform (sim-space ↔ screen) for the canvas: centered on the
@@ -540,7 +691,18 @@ export function step(
   // shrinking to ANNEAL_FLOOR as heat cools to 1 so motion freezes; Infinity
   // stays unbounded (the divergence-proof short-circuit lives in the helper).
   const effMax = annealedMaxStep(heat, maxStep);
-  let energy = 0;
+  // Preserve the configured feel during the hot organizing phase, then add
+  // stronger viscous damping as heat approaches steady state. This dissipates
+  // residual local oscillation physically; it does not stop on a clock and the
+  // loop still requires the measured motion threshold.
+  const restDampingScale = config.cancelRotation
+    ? 0.4 + 0.6 * clamp01(heat - 1)
+    : 1;
+  const nodeDamping = config.damping * restDampingScale;
+  const anchorDamping = config.anchorDamping * restDampingScale;
+  // First compute every velocity without moving positions. That lets us project
+  // out the layout's meaningless whole-cloud angular velocity before it becomes
+  // another visible rotation step.
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
     if (node.fixed === true) {
@@ -554,16 +716,13 @@ export function step(
     // Clamp the per-step displacement so a single large force cannot launch the
     // node across the canvas and diverge (audit fix); damping alone cannot.
     [node.vx, node.vy] = clampStep(
-      (node.vx + fx[i] / mass) * config.damping,
-      (node.vy + fy[i] / mass) * config.damping,
+      (node.vx + fx[i] / mass) * nodeDamping,
+      (node.vy + fy[i] / mass) * nodeDamping,
       effMax,
     );
-    node.x += node.vx;
-    node.y += node.vy;
-    energy += node.vx * node.vx + node.vy * node.vy;
   }
 
-  // Integrate the anchors with their own damping. A fixed (being dragged) or
+  // Compute anchor velocities with their own damping. A fixed (being dragged) or
   // pinned (user-placed) anchor holds still — the user's placement wins over the
   // physics — but images are still pulled toward it. Otherwise it drifts toward
   // its images' centroid, repelled by the other anchors.
@@ -575,13 +734,30 @@ export function step(
       continue;
     }
     [anchor.vx, anchor.vy] = clampStep(
-      ((anchor.vx ?? 0) + afx[a]) * config.anchorDamping,
-      ((anchor.vy ?? 0) + afy[a]) * config.anchorDamping,
+      ((anchor.vx ?? 0) + afx[a]) * anchorDamping,
+      ((anchor.vy ?? 0) + afy[a]) * anchorDamping,
       effMax,
     );
-    anchor.x += anchor.vx;
-    anchor.y += anchor.vy;
-    energy += anchor.vx * anchor.vx + anchor.vy * anchor.vy;
+  }
+
+  if (config.cancelRotation === true) cancelRigidRotation(nodes, anchors);
+
+  // Advance positions only after the global angular null mode is removed, then
+  // report the residual kinetic energy that actually changes semantic geometry.
+  let energy = 0;
+  for (const node of nodes) {
+    if (node.fixed === true) continue;
+    node.x += node.vx;
+    node.y += node.vy;
+    energy += node.vx * node.vx + node.vy * node.vy;
+  }
+  for (const anchor of anchors) {
+    if (anchor.fixed === true || anchor.pinned === true) continue;
+    const vx = anchor.vx ?? 0;
+    const vy = anchor.vy ?? 0;
+    anchor.x += vx;
+    anchor.y += vy;
+    energy += vx * vx + vy * vy;
   }
   return energy;
 }

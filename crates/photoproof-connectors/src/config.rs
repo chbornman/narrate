@@ -36,6 +36,8 @@ pub enum ConfigError {
         field: &'static str,
         message: String,
     },
+    #[error("could not serialize config TOML: {0}")]
+    Serialize(#[from] toml::ser::Error),
 }
 
 /// A successfully parsed config plus its unknown-key warnings.
@@ -59,6 +61,54 @@ pub fn from_toml_str(input: &str) -> Result<LoadedConfig, ConfigError> {
         config,
         unknown_keys,
     })
+}
+
+/// The four local model seams exposed in Settings. Keeping this typed prevents
+/// a UI label or manifest role from becoming an arbitrary TOML path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSelection {
+    Llm,
+    Asr,
+    VisualEmbedder,
+    TextEmbedder,
+}
+
+/// Update one selected model while retaining every other known or unknown
+/// config key. The resulting document is parsed through the full schema before
+/// it can be persisted, so a Settings click can never write an invalid live
+/// control file.
+pub fn with_selected_model(
+    input: &str,
+    selection: ModelSelection,
+    model_id: &str,
+) -> Result<String, ConfigError> {
+    let mut document = if input.trim().is_empty() {
+        toml::Table::new()
+    } else {
+        input.parse::<toml::Table>()?
+    };
+    let path: &[&str] = match selection {
+        ModelSelection::Llm => &["llm"],
+        ModelSelection::Asr => &["asr"],
+        ModelSelection::VisualEmbedder => &["embedder"],
+        ModelSelection::TextEmbedder => &["embedder", "text"],
+    };
+    let mut table = &mut document;
+    for key in path {
+        let value = table
+            .entry((*key).to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        table = value
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::InvalidValue {
+                field: "config",
+                message: format!("`{}` must be a table", path.join(".")),
+            })?;
+    }
+    table.insert("model".into(), toml::Value::String(model_id.into()));
+    let serialized = toml::to_string_pretty(&document)?;
+    from_toml_str(&serialized)?;
+    Ok(serialized)
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]

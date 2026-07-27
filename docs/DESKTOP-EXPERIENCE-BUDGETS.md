@@ -13,11 +13,17 @@ that platform/fixture; source constants alone are not measurements.
 | Managed task acknowledgement during quit | <= 3,000 ms | `state.rs`; managed-task shutdown/phase tests |
 | Hardware capability probe | <= 20,000 ms | helper-process timeout/kill/reap tests |
 | Grid folder-list p99, 24-image deterministic corpus | <= 25 ms | `pp_bench grid-list`; `scripts/tune-check.sh` |
+| Grid folder-list p99, 20k catalog rows | <= 75 ms | `scripts/scale-check.sh` CI tier |
+| Grid folder-list p99, 100k catalog rows | <= 350 ms | `scripts/scale-check.sh --tier founder` |
+| Activity publication racing folder list, 20k images / 100k pass rows | max(counter p99, list p99) <= 250 ms | `pp_bench activity-contention`; CI tier |
+| Activity publication racing folder list, 100k images / 500k pass rows | max(counter p99, list p99) <= 900 ms | `pp_bench activity-contention`; founder tier |
 | Preview generation p99, 24-image deterministic corpus | <= 100 ms/image | `pp_bench preview-generate`; cumulative stage histogram |
 | Warm thumbnail-file serve p99, 24-image deterministic corpus | <= 5 ms | `pp_bench preview-serve`; `scripts/tune-check.sh` |
 | Warm installed protocol thumbnail p99 | <= 2 ms | release-only ignored `preview_serve_latency`; installed receipt pending |
 | Ingest progress publication while changing | <= 400 ms | fake-clock `progress_cadence_is_immediate_then_coalesced_at_400ms` |
 | Grid fling request growth, 50k items / 60 frames | <= frames x pool; < 25k total | `fling-load-budget.test.ts` |
+| Full-snapshot transforms, 20k / 100k items | p99 <= 100 / 500 ms | `catalog-snapshot-scale.test.ts`; ordinary Vitest |
+| Full-snapshot transforms, 250k items | p99 <= 1,500 ms | founder-tier Vitest |
 | Diversify fold p99, 20k items | <= 25 ms | `journey-performance.test.ts`; committed baseline |
 | Closed-form graph layout p99, 20k nodes / 8 topics | <= 250 ms | `journey-performance.test.ts`; committed baseline |
 | Lexical search-as-you-type | < 100 ms | core search latency/plan suites; installed journey monitor |
@@ -35,6 +41,57 @@ histograms for queue claim, EXIF, preview total, decode, RAW extraction,
 resize, encode, artifact write, and database record phases. Its p50/p95/p99
 values are conservative bucket upper bounds; this gives preview generation a
 release-safe live baseline instead of retaining unbounded per-photo samples.
+
+## Catalog scale tiers
+
+The scale harness separates catalog mechanics from media throughput:
+
+- `--catalog-fixture` inserts canonical image, path, thumbnail-artifact, and
+  ingest-pass rows into a disposable database. It exercises the real schema,
+  triggers, `list_folder`, activity projection, and shared database lane
+  without writing 100k fake JPEG payloads.
+- `activity-contention` races one activity-counter publication against one
+  folder listing per turn. A barrier prevents either thread from manufacturing
+  lock starvation by immediately starting the next turn.
+- The frontend receipt pays the current full-snapshot capture-date sort, two
+  hash projections, RAW+JPEG stack construction, and unit projection. It does
+  not include IPC JSON parsing, Svelte invalidation, DOM, image decode, GPU
+  upload, or paint.
+
+The ceilings are regression guardrails derived from the July 27 local audit,
+not aspirational frame budgets. Before the incremental-catalog work, direct
+local measurements were approximately 34.5 ms p99 for a 20k catalog listing
+and 302 ms p99 for a 100k generated-catalog listing; the exact 500k-pass
+activity query took about 418 ms. Pure frontend transforms measured
+approximately 12 ms at 20k, 83 ms at 100k, and 240 ms at 250k. The committed
+ceilings leave portability/JIT/load slack while still rejecting a new
+quadratic path. Tighten them only from repeated clean receipts on every
+supported runner.
+
+Final combined-tree receipts on the July 27 Linux x86_64 founder machine:
+
+| Tier | Grid-list p99 | Counter/list contention p99 | Projection rows verified |
+|---|---:|---:|---:|
+| CI, 20k images / 100k pass rows | 32.45 ms | 34.39 ms | 100,000 / 100,000 |
+| Founder, 100k images / 500k pass rows | 222.27 ms | 318.77 ms | 500,000 / 500,000 |
+
+The contention number includes time waiting for the same catalog lane, which is
+why it is the relevant progress-publication guard rather than the counter's
+isolated lookup time. The harness asserts the projection's summed counters
+equal every seeded pass row before accepting a timing receipt.
+
+These fixtures do **not** prove RAW extraction, high-resolution decode,
+filesystem traversal, network-volume behavior, webview paint, memory pressure,
+or GPU-provider throughput. Synthetic catalog numbers must never be reported
+as photographs-per-second.
+
+The first corrected 2,000-RAW NVMe receipt settled 3,990 jobs with zero queue
+errors in 160.8 seconds (12.4 files/s), with 2.46 GiB peak RSS and an unchanged
+source fingerprint. It proves invalid Fujifilm containers settle honestly; it
+does not prove a speedup because earlier diagnostic receipts completed in
+117-125 seconds. Preview work remains embedded-preview extraction plus CPU
+JPEG decode, SIMD resize, and WebP encode. Device-total NVIDIA memory is not
+preview-provider evidence, and no GPU preview claim is made.
 
 ## Resource and memory bounds
 
@@ -84,10 +141,28 @@ runs must record idle and peak RSS for each mode beside the platform receipts.
 
 ```text
 scripts/tune-check.sh
+scripts/scale-check.sh
+scripts/scale-check.sh --tier founder
+node scripts/real-library-soak.mjs --source /homenas/iris_images/RAW --receipts /tmp/photoproof-soak-dry-receipts --tier dry
 cargo test -p photoproof-desktop --release --test preview_serve_latency -- --ignored --nocapture
-cd apps/desktop && bunx vitest run tests/fling-load-budget.test.ts
+cd apps/desktop && bunx vitest run tests/fling-load-budget.test.ts tests/catalog-snapshot-scale.test.ts
 cd apps/desktop && npm run bundle:smoke
 ```
+
+The remaining real-library soak is an installed-app receipt, not a headless
+substitute: ingest at least 50k mixed RAW+JPEG files from the founder's actual
+storage while repeatedly fling-scrolling, opening Look, zooming to 1:1,
+annotating, changing folders, pausing/resuming, and sleeping/waking the host.
+Record first-card time, final settle time, counter/list/preview journey
+percentiles, stale/dropped preview requests, idle and peak RSS/VRAM, database
+busy time, errors, and provider/fallback truth. Repeat on local NVMe and the
+intended NAS/removable-volume class. A passing catalog scale check is necessary
+but cannot replace this soak.
+
+The repeatable inventory/copy/headless portion and spreadsheet receipt format
+are implemented by `scripts/real-library-soak.mjs`; its immutable-source
+contract, tier commands, installed-runner adapter, and manual remainder are in
+`docs/REAL-LIBRARY-SOAK.md`.
 
 Machine receipts belong in release artifacts or `docs/releases/`; do not
 replace them with hand-edited pass labels.

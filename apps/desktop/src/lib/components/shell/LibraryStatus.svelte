@@ -125,7 +125,11 @@
                  {issue.title} - {issue.summary}
               </div>
             {/each}
-            <button class="health-settings" type="button" onclick={() => void ipc.openSettingsWindow()}>
+            <button
+              class="health-settings"
+              type="button"
+              onclick={() => void ipc.openSettingsWindow("system")}
+            >
               Open health settings
             </button>
           </div>

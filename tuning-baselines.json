@@ -14,6 +14,18 @@
     "graph_static_layout_p99_ms": 250,
     "iterations": 12
   },
+  "frontend_catalog_snapshots": {
+    "_comment": "Portable guardrails for the pure transforms currently paid when a full folder snapshot reaches the grid: capture-date sort, hash projections, and RAW+JPEG stack construction. The 20k and 100k cases run in ordinary Vitest; 250k is opt-in with PHOTOPROOF_SCALE_TIER=founder. Local RTX-5080-host baselines before the incremental-catalog packet were approximately 12 ms at 20k, 83 ms at 100k, and 240 ms at 250k (median, excluding IPC JSON parsing, Svelte invalidation, DOM, image decode, and paint). The ceilings deliberately allow large cross-runner/JIT variance while still catching accidental quadratic work. They are guardrails, not installed-frame-time claims.",
+    "items_20k": 20000,
+    "items_100k": 100000,
+    "items_250k": 250000,
+    "iterations_20k": 6,
+    "iterations_100k": 4,
+    "iterations_250k": 3,
+    "p99_20k_ms": 100,
+    "p99_100k_ms": 500,
+    "p99_250k_ms": 1500
+  },
   "ingest": {
     "_comment": "Synthetic ingest throughput (pp-bench ingest --files 24 --edge 512). files_per_s is HIGHER-IS-BETTER; the guard fails only if it drops below baseline * (1 - tolerance). tolerance is GENEROUS (0.15 = allow a 15% slowdown) AND DOCUMENTED-WHY: ingest throughput is dominated by JPEG decode/resize/encode + hashing on the host CPU, so it swings with machine speed, core count, thermal state, and concurrent load. A tight threshold would red-flag a slower CI runner or a busy laptop, not a real regression. 15% is wide enough to absorb that machine/load variance while still catching a genuine algorithmic slowdown (e.g. an accidental O(n^2) or a dropped parallel pass), which shows up as a multiples-of-15% cliff, not a few-percent drift. The baseline value is host-specific by nature: regenerate it on the machine the guard will run on (`make tune-baseline`).",
     "edge": 512,

@@ -74,6 +74,7 @@ import type {
   BootstrapStatus,
   CollectionDto,
   DuplicateGroupDto,
+  FolderDelta,
   FolderNode,
   IngestStatus,
   RootDto,
@@ -94,15 +95,15 @@ import { GridSlice } from "./grid.svelte";
 import { LookSlice } from "./look.svelte";
 import { InspectorSlice } from "./inspector.svelte";
 
-/** Debounce window for the version-driven mid-scan grid re-list (Seam 1,
- * ARCHITECTURE-CONTRACTS.md step 3). The grid now re-lists when the backend's
+/** Debounce window for the version-driven mid-scan folder-delta catch-up
+ * (Seam 1, ARCHITECTURE-CONTRACTS.md step 3). The grid catches up when the backend's
  * `imagesVersion` ADVANCES (a NEW image committed) rather than on a wall-clock
  * poll; a fast scan bumps the version many times per second, so we coalesce a
- * burst into ONE list_folder. WHY 300 ms: short enough that a new image appears
+ * burst into ONE revisioned request. WHY 300 ms: short enough that a new image appears
  * in the grid promptly (well inside the old 2 s throttle's responsiveness), long
- * enough that a flurry of inserts collapses to a single re-list instead of
- * hammering list_folder. The running→idle settle edge re-lists once more,
- * immediately and un-debounced, so the final state is exact. */
+ * enough that a flurry of inserts collapses to one delta instead of repeatedly
+ * serializing the whole folder. The running→idle settle edge still performs one
+ * exact full reconcile, immediately and un-debounced. */
 export const INGEST_RELIST_DEBOUNCE_MS = 300;
 
 /** Watchdog deadline for the optimistic `ingestExpecting` bridge
@@ -1249,6 +1250,8 @@ export class Ui {
     this.grid.sort = prefs.loadSort(rootId, folder);
     this.grid.sel = sel.EMPTY;
     this.grid.setItems(items);
+    this.folderRevision = 0;
+    if (this.shell.ingest.running) this.grid.beginStableIngest();
     this.tree = tree;
     prefs.saveLastFolder(rootId, folder);
     await this.reportScope();
@@ -1264,6 +1267,7 @@ export class Ui {
     this.clearQueryInput();
     this.grid.rootId = null;
     this.grid.folder = "";
+    this.folderRevision = 0;
     this.grid.sel = sel.EMPTY;
     const load = ++this.gridLoad;
     const items = (await ipc.listCollectionMembers(id)) ?? [];
@@ -1372,7 +1376,16 @@ export class Ui {
     const load = ++this.gridLoad;
     const items = await ipc.listFolder(this.grid.rootId, this.grid.folder);
     if (load === this.gridLoad) {
-      this.grid.setItems(items);
+      if (this.shell.ingest.running) {
+        this.grid.beginStableIngest();
+        const present = new Set(items.map((item) => item.hash));
+        const removed = this.grid.rawItems
+          .filter((item) => !present.has(item.hash))
+          .map((item) => item.hash);
+        this.grid.applyItemDelta(items, removed);
+      } else {
+        this.grid.setItems(items);
+      }
       // Same U1 seam as the collection arm: this feeder skips reportScope, so
       // the lens caches must be revalidated against the fresh item set here.
       this.refreshLensesIfScopeChanged();
@@ -1388,6 +1401,10 @@ export class Ui {
    * Starts -1 so the first real status (version ≥ 0) always seeds a baseline
    * without a spurious re-list. */
   private lastImagesVersion = -1;
+  /** Last durable catalog revision applied to the current folder. Scope
+   * changes reset it to zero, which deliberately asks the backend for a
+   * complete reset snapshot before continuing with compact deltas. */
+  private folderRevision = 0;
   /** Pending debounce timer for the version-driven re-list (coalesces a burst
    * of `imagesVersion` advances into one list_folder; see
    * INGEST_RELIST_DEBOUNCE_MS). `ReturnType<typeof setTimeout>` is `number` in
@@ -1411,6 +1428,7 @@ export class Ui {
     const prevImagesVersion = this.lastImagesVersion;
     this.shell.ingest = status;
     if (this.grid.rootId === null) return;
+    if (status.running && !wasRunning) this.grid.beginStableIngest();
     // Seam 1: re-list when, and only when, the image-set version advanced past
     // what the grid last rendered. Seed the baseline on the first event (or any
     // event before the version moved) so we never re-list on no change.
@@ -1427,6 +1445,7 @@ export class Ui {
         this.relistTimer = null;
       }
       await this.refreshItems();
+      this.grid.endStableIngest();
     }
   }
 
@@ -1439,8 +1458,48 @@ export class Ui {
     if (this.relistTimer !== null) clearTimeout(this.relistTimer);
     this.relistTimer = setTimeout(() => {
       this.relistTimer = null;
-      void this.refreshItems();
+      void this.refreshFolderDelta();
     }, INGEST_RELIST_DEBOUNCE_MS);
+  }
+
+  /** Catch the open folder up to the backend's durable catalog revision.
+   * Missed events and compacted history return `reset=true`; even that reset is
+   * applied as an in-place diff while ingest is active so existing cells do not
+   * jump. The settle edge above still performs one full exact reconcile for
+   * metadata changes that do not alter folder membership. */
+  private async refreshFolderDelta() {
+    const scope = this.gridScope;
+    if (scope.kind !== "folder" || this.grid.rootId === null) return;
+    const load = ++this.gridLoad;
+    let delta: FolderDelta;
+    try {
+      delta = await ipc.listFolderDelta(scope.rootId, scope.folder, this.folderRevision);
+    } catch {
+      // Compatibility/recovery floor: a backend that cannot provide its
+      // revisioned change feed still gets the exact snapshot path.
+      if (load === this.gridLoad) await this.refreshItems();
+      return;
+    }
+    // Several non-Tauri/component-test harnesses intentionally return null for
+    // commands they do not model. Treat that like the compatibility floor
+    // above rather than letting a test-only mock masquerade as a delta.
+    if (delta === null) {
+      if (load === this.gridLoad) await this.refreshItems();
+      return;
+    }
+    if (load !== this.gridLoad) return;
+    this.grid.beginStableIngest();
+    if (delta.reset) {
+      const present = new Set(delta.upserts.map((item) => item.hash));
+      const removed = this.grid.rawItems
+        .filter((item) => !present.has(item.hash))
+        .map((item) => item.hash);
+      this.grid.applyItemDelta(delta.upserts, removed);
+    } else {
+      this.grid.applyItemDelta(delta.upserts, delta.removedHashes);
+    }
+    this.folderRevision = delta.toRevision;
+    this.refreshLensesIfScopeChanged();
   }
 
   async applySelection(next: sel.SelState) {

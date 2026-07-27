@@ -369,6 +369,23 @@ pub fn runtime_download_model(
     Ok(publish_runtime_status(&app, &handle, app.runtime.status()))
 }
 
+/// Settings → Models: make an installed alternative the active model for its
+/// role. RuntimeHost validates compatibility, commits config.toml, and applies
+/// the new supervisor/embedder plan before this snapshot is published.
+#[tauri::command]
+pub fn runtime_select_model(
+    app: S<'_>,
+    handle: AppHandle,
+    model_id: String,
+) -> CmdResult<RuntimeStatus> {
+    let app = app.inner().clone();
+    let _permit = super::admit(&app, "app.runtime-select-model", CommandClass::Mutation)?;
+    app.runtime
+        .select_model(&model_id)
+        .map_err(CmdError::Invalid)?;
+    Ok(publish_runtime_status(&app, &handle, app.runtime.status()))
+}
+
 /// Settings → remove a model's weights.
 #[tauri::command]
 pub async fn runtime_remove_model(
@@ -621,13 +638,21 @@ pub async fn force_reembed(app: S<'_>) -> CmdResult<usize> {
 
 /// The settings window (UI §2.4): one modest separate window.
 #[tauri::command]
-pub fn open_settings_window(handle: AppHandle) -> CmdResult<()> {
+pub fn open_settings_window(handle: AppHandle, tab: Option<String>) -> CmdResult<()> {
+    let tab =
+        tab.filter(|tab| matches!(tab.as_str(), "library" | "appearance" | "models" | "system"));
     if let Some(existing) = handle.get_webview_window("settings") {
+        if let Some(tab) = tab {
+            let _ = existing.emit("settings-tab-requested", tab);
+        }
         let _ = existing.set_focus();
         return Ok(());
     }
+    let settings_url = tab
+        .map(|tab| format!("settings.html?tab={tab}"))
+        .unwrap_or_else(|| "settings.html".into());
     let builder =
-        WebviewWindowBuilder::new(&handle, "settings", WebviewUrl::App("settings.html".into()))
+        WebviewWindowBuilder::new(&handle, "settings", WebviewUrl::App(settings_url.into()))
             .title("Settings")
             .inner_size(620.0, 700.0)
             .min_inner_size(480.0, 480.0)

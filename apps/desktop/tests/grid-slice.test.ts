@@ -288,6 +288,68 @@ describe("mid-ingest re-sort keeps IDENTITY, not indexes (founder dogfood, June 
   });
 });
 
+describe("incremental ingest keeps the rendered order calm", () => {
+  const dated = (relPath: string, ts: string): GridItem => ({
+    ...item(relPath),
+    captureTs: ts,
+  });
+
+  it("updates in place, appends arrivals, and sorts exactly once at settle", () => {
+    const g = new GridSlice();
+    g.setItems([item("a.jpg"), item("b.jpg"), item("c.jpg")]);
+    g.beginStableIngest();
+
+    g.applyItemDelta(
+      [
+        dated("a.jpg", "2026-06-01T00:00:00Z"),
+        dated("b.jpg", "2026-06-02T00:00:00Z"),
+        dated("c.jpg", "2026-06-03T00:00:00Z"),
+        dated("d.jpg", "2026-06-04T00:00:00Z"),
+      ],
+      [],
+    );
+    expect(g.items.map((i) => i.fileName)).toEqual([
+      "a.jpg",
+      "b.jpg",
+      "c.jpg",
+      "d.jpg",
+    ]);
+
+    g.endStableIngest();
+    expect(g.items.map((i) => i.fileName)).toEqual([
+      "d.jpg",
+      "c.jpg",
+      "b.jpg",
+      "a.jpg",
+    ]);
+  });
+
+  it("removes vanished hashes and preserves focused-image identity", () => {
+    const g = new GridSlice();
+    g.setItems([item("a.jpg"), item("b.jpg"), item("c.jpg")]);
+    g.setSelection({ order: ["h:b.jpg"], focus: 1, anchor: 1 });
+    g.beginStableIngest();
+    g.applyItemDelta([item("d.jpg")], ["h:a.jpg"]);
+    expect(g.items.map((i) => i.fileName)).toEqual(["b.jpg", "c.jpg", "d.jpg"]);
+    expect(g.activeHash).toBe("h:b.jpg");
+  });
+
+  it("an explicit user sort takes effect immediately and becomes the new stable order", () => {
+    const g = new GridSlice();
+    g.setItems([item("c.jpg"), item("a.jpg"), item("b.jpg")]);
+    g.beginStableIngest();
+    g.setSort("filename");
+    expect(g.items.map((i) => i.fileName)).toEqual(["a.jpg", "b.jpg", "c.jpg"]);
+    g.applyItemDelta([item("aa.jpg")], []);
+    expect(g.items.map((i) => i.fileName)).toEqual([
+      "a.jpg",
+      "b.jpg",
+      "c.jpg",
+      "aa.jpg",
+    ]);
+  });
+});
+
 describe("focusNav: scroll-into-view keys on USER moves only (scroll stability)", () => {
   it("bumps on setSelection, never on a re-list's focus remap", () => {
     const g = new GridSlice();

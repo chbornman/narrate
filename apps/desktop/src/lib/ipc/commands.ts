@@ -35,6 +35,7 @@ import type {
   ImagePathsDto,
   IndicatorState,
   IngestStatus,
+  FolderDelta,
   JournalEntryDto,
   OperationReceipt,
   PreviewCacheStatsDto,
@@ -53,6 +54,7 @@ import type {
   UpdateStatus,
 } from "../types/dto";
 import type { Filter, FusionWeights, SearchResults } from "../types/search";
+import type { SettingsTab } from "../settings/tabs";
 
 const performanceBatcher = createPerformanceBatcher(
   tauriInvoke as <T>(
@@ -501,6 +503,8 @@ export const folderTree = (rootId: string) =>
   invoke<FolderNode[]>("folder_tree", { rootId });
 export const listFolder = (rootId: string, folder: string) =>
   invoke<GridItem[]>("list_folder", { rootId, folder });
+export const listFolderDelta = (rootId: string, folder: string, sinceRevision: number) =>
+  invoke<FolderDelta>("list_folder_delta", { rootId, folder, sinceRevision });
 
 // -- collections (RETRIEVAL §10, B71 — rail Collections tab, P7.3 store) -----
 
@@ -671,6 +675,9 @@ export const runtimeAcceptLicense = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_accept_license", { modelId });
 export const runtimeDownloadModel = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_download_model", { modelId });
+/** Activate an installed, compatible alternative for its model role. */
+export const runtimeSelectModel = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_select_model", { modelId });
 /** D3: cancel a queued or in-flight model download. Part files are kept,
  * so a later Download resumes instead of restarting; no error row. */
 export const runtimeCancelDownload = (modelId: string) =>
@@ -822,7 +829,8 @@ export const clearDwell = () => invoke<number>("clear_dwell");
 
 // -- window plumbing ----------------------------------------------------------
 
-export const openSettingsWindow = () => invoke<void>("open_settings_window");
+export const openSettingsWindow = (tab?: SettingsTab) =>
+  invoke<void>("open_settings_window", { tab: tab ?? null });
 /** macOS Tab lights-out (featureset §0 "hides ALL chrome"): the traffic
  * lights are NATIVE NSButtons (Overlay titlebar), outside the DOM region
  * gates — left visible they float over (and click-block) the chrome-less

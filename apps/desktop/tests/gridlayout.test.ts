@@ -88,6 +88,18 @@ describe("virtualizer window (UI §3.3: +1 screen overscan)", () => {
     expect(lastRow).toBeGreaterThanOrEqual(Math.ceil((scrollTop + 2 * vh) / g.rowH));
   });
 
+  it("distinguishes the true viewport from mounted overscan", () => {
+    const scrollTop = 10 * g.rowH;
+    const mounted = layout.visibleRange(g, scrollTop, vh, 10_000);
+    const viewport = layout.viewportRange(g, scrollTop, vh, 10_000);
+    expect(viewport.start).toBeGreaterThan(mounted.start);
+    expect(viewport.end).toBeLessThan(mounted.end);
+    expect(viewport.start).toBe(10 * g.cols);
+    expect(viewport.end - viewport.start).toBeLessThanOrEqual(
+      (layout.rowsPerPage(g, vh) + 1) * g.cols,
+    );
+  });
+
   it("the recycling pool always covers the window (ring stays collision-free)", () => {
     for (const target of [96, 160, 240, 320]) {
       const gg = layout.snap(1280, target, GAP, PAD);

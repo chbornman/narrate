@@ -71,7 +71,7 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
   }
   // A compute request: write the transferred mutable state + flags onto the
   // mirror, integrate, pack back, transfer home with the energy.
-  const { buffer, flags, heat, subSteps } = msg;
+  const { buffer, flags, heat, subSteps, generation } = msg;
   unpackMutable(buffer, nodes, anchors);
   unpackFlags(flags, nodes, anchors);
   // Heat is per-frame (the caller cools it), so fold it into the config copy the
@@ -82,7 +82,13 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
     energy = step(nodes, anchors, frameConfig);
   }
   packMutable(buffer, nodes, anchors);
-  const reply: SteppedMessage = { kind: "stepped", buffer, flags, energy };
+  const reply: SteppedMessage = {
+    kind: "stepped",
+    generation,
+    buffer,
+    flags,
+    energy,
+  };
   // Transfer the buffer + flags BACK so the main thread reuses the same backing
   // memory next frame (no per-frame allocation on either side).
   (self as unknown as Worker).postMessage(reply, [buffer.buffer, flags.buffer]);

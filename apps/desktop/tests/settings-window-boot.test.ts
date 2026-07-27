@@ -28,6 +28,8 @@ vi.mock("@tauri-apps/api/core", () => ({
           },
         ];
       case "runtime_status":
+      case "runtime_verify_model":
+      case "runtime_select_model":
         return {
           asrReady: false,
           llmReady: false,
@@ -102,6 +104,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: vi.fn(async () => {}),
   listen: vi.fn(async (event: string) => {
     if (backend.listenerFailures.has(event))
       throw new Error(`${event} subscription unavailable`);
@@ -135,7 +138,90 @@ beforeEach(() => {
   vi.mocked(invoke).mockClear();
 });
 
+async function openSettingsTab(name: "Library" | "Appearance" | "Models" | "System") {
+  await fireEvent.click(await screen.findByRole("tab", { name }));
+}
+
+const runtimeModelFixture = (
+  id: string,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  id,
+  role: "embedder",
+  defaultOffer: true,
+  advancedAvailable: false,
+  compatible: true,
+  compatibilityReason: "CPU-compatible model",
+  compatibleProviders: ["CPU"],
+  consumers: [],
+  state: "not-downloaded",
+  totalBytes: 100,
+  downloadedBytes: 0,
+  licenseName: "Fixture license",
+  licenseUrl: "https://example.test/license",
+  acceptanceRequired: false,
+  accepted: true,
+  error: null,
+  retryHint: null,
+  operation: null,
+  operationEvent: null,
+  registryError: null,
+  ...over,
+});
+
 describe("Settings window boot states", () => {
+  it("groups the long settings surface into keyboard-navigable tabs", async () => {
+    render(SettingsApp);
+
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual([
+      "Library",
+      "Appearance",
+      "Models",
+      "System",
+    ]);
+    expect(screen.getByRole("tab", { name: "Library" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("heading", { name: "Watched folders" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Models" })).toBeNull();
+
+    await openSettingsTab("Appearance");
+    expect(screen.getByRole("heading", { name: "Appearance" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Watched folders" })).toBeNull();
+
+    await fireEvent.keyDown(screen.getByRole("tab", { name: "Appearance" }), {
+      key: "ArrowRight",
+    });
+    expect(screen.getByRole("tab", { name: "Models" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("heading", { name: "Models" })).toBeTruthy();
+  });
+
+  it("explains background work in user-facing terms and exposes truthful toggle state", async () => {
+    render(SettingsApp);
+
+    expect(await screen.findByText("Background work")).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "Balanced - recommended" }),
+    ).toBeTruthy();
+    expect(
+      screen.getAllByRole("option", { name: "Watch without scanning" }),
+    ).toHaveLength(2);
+    expect(screen.getByText("Semantic search from notes")).toBeTruthy();
+    expect(screen.getByText("Visual search from photos")).toBeTruthy();
+    expect(
+      screen.getByText(/Photos on screen are generated and loaded before off-screen runway/),
+    ).toBeTruthy();
+
+    const automatic = screen
+      .getByText("Automatic background processing")
+      .closest(".row");
+    expect(automatic?.querySelector("button")?.getAttribute("aria-pressed")).toBe("true");
+    expect(automatic?.querySelector("button")?.textContent?.trim()).toBe("On");
+  });
+
   it("keeps successful sections usable through a partial failure and retry", async () => {
     backend.failures.add("runtime_status");
     render(SettingsApp);
@@ -149,6 +235,7 @@ describe("Settings window boot states", () => {
     await waitFor(() => {
       expect(screen.queryByText("Some settings are temporarily unavailable.")).toBeNull();
     });
+    await openSettingsTab("Models");
     expect(screen.getByText(/Hardware tier:/).textContent).toContain("Hardware tier: 1");
   });
 
@@ -177,6 +264,7 @@ describe("Settings window boot states", () => {
   it("keeps signed updates manual and requires exact-version confirmation", async () => {
     backend.updatesEnabled = true;
     render(SettingsApp);
+    await openSettingsTab("System");
 
     const check = await screen.findByRole("button", { name: "Check for updates" });
     await fireEvent.click(check);
@@ -193,6 +281,7 @@ describe("Settings window boot states", () => {
   it("labels journal portability honestly and requires confirmation for offline recovery", async () => {
     backend.savePath = "/backups/Photoproof Backup.ppbackup";
     render(SettingsApp);
+    await openSettingsTab("System");
 
     expect(
       await screen.findByText(/Journal export includes sidecars, collections, saved topic phrases/),
@@ -280,38 +369,12 @@ describe("Settings window boot states", () => {
   });
 
   it("renders every backend model lifecycle and compatibility case without frontend inference", async () => {
-    const model = (
-      id: string,
-      over: Record<string, unknown> = {},
-    ): Record<string, unknown> => ({
-      id,
-      role: "embedder",
-      defaultOffer: true,
-      advancedAvailable: false,
-      compatible: true,
-      compatibilityReason: "CPU-compatible model",
-      compatibleProviders: ["CPU"],
-      consumers: [],
-      state: "not-downloaded",
-      totalBytes: 100,
-      downloadedBytes: 0,
-      licenseName: "Fixture license",
-      licenseUrl: "https://example.test/license",
-      acceptanceRequired: false,
-      accepted: true,
-      error: null,
-      retryHint: null,
-      operation: null,
-      operationEvent: null,
-      registryError: null,
-      ...over,
-    });
     backend.runtimeModels = [
-      model("failed-model", {
+      runtimeModelFixture("failed-model", {
         state: "failed",
         error: "checksum mismatch",
       }),
-      model("cancelled-model", {
+      runtimeModelFixture("cancelled-model", {
         state: "cancelled",
         downloadedBytes: 25,
         operationEvent: {
@@ -322,7 +385,7 @@ describe("Settings window boot states", () => {
           error: null,
         },
       }),
-      model("installing-model", {
+      runtimeModelFixture("installing-model", {
         state: "installing",
         downloadedBytes: 100,
         operation: "installing",
@@ -334,13 +397,13 @@ describe("Settings window boot states", () => {
           error: null,
         },
       }),
-      model("retrying-model", {
+      runtimeModelFixture("retrying-model", {
         state: "downloading",
         downloadedBytes: 60,
         operation: "downloading",
         retryHint: "connection interrupted, retrying (attempt 2 of 4)",
       }),
-      model("provider-fallback-model", {
+      runtimeModelFixture("provider-fallback-model", {
         state: "installed",
         downloadedBytes: 100,
         compatibleProviders: ["CPU", "CUDA"],
@@ -358,12 +421,12 @@ describe("Settings window boot states", () => {
           },
         ],
       }),
-      model("advanced-model", {
+      runtimeModelFixture("advanced-model", {
         defaultOffer: false,
         advancedAvailable: true,
         compatibleProviders: ["CoreML"],
       }),
-      model("unsupported-model", {
+      runtimeModelFixture("unsupported-model", {
         defaultOffer: false,
         compatible: false,
         compatibilityReason: "requires a matching Metal/CoreML runtime",
@@ -373,13 +436,14 @@ describe("Settings window boot states", () => {
     ];
 
     render(SettingsApp);
+    await openSettingsTab("Models");
 
-    expect(await screen.findByText("failed-model")).toBeTruthy();
+    expect(await screen.findAllByText("failed-model")).toHaveLength(2);
     expect(screen.getByText(/checksum mismatch/)).toBeTruthy();
-    expect(screen.getByText("cancelled-model")).toBeTruthy();
-    expect(screen.getByText("installing-model")).toBeTruthy();
-    expect(screen.getByText("retrying-model")).toBeTruthy();
-    expect(screen.getByText(/downloading - 60%/)).toBeTruthy();
+    expect(screen.getAllByText("cancelled-model")).toHaveLength(2);
+    expect(screen.getAllByText("installing-model")).toHaveLength(2);
+    expect(screen.getAllByText("retrying-model")).toHaveLength(2);
+    expect(screen.getByText(/60% downloaded/)).toBeTruthy();
     expect(
       screen.getByText(/connection interrupted, retrying \(attempt 2 of 4\)/),
     ).toBeTruthy();
@@ -390,15 +454,16 @@ describe("Settings window boot states", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByText(/CUDA provider initialization failed/)).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: "Download" })).toHaveLength(2);
-    expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Resume download" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Pause" })).toHaveLength(2);
 
-    await fireEvent.click(screen.getByRole("button", { name: "Show other models" }));
-    expect(await screen.findByText("advanced-model")).toBeTruthy();
-    expect(screen.getByText("other compatible model")).toBeTruthy();
-    expect(screen.getByText(/compatible: CoreML/)).toBeTruthy();
-    expect(screen.getByText("unsupported-model")).toBeTruthy();
-    expect(screen.getByText("unavailable on this machine")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Show all model options" }));
+    expect(await screen.findAllByText("advanced-model")).toHaveLength(2);
+    expect(screen.getByText("Optional")).toBeTruthy();
+    expect(screen.getByText("CoreML")).toBeTruthy();
+    expect(screen.getAllByText("unsupported-model")).toHaveLength(2);
+    expect(screen.getByText("Unavailable")).toBeTruthy();
     expect(
       screen.getByText(/requires a matching Metal\/CoreML runtime/),
     ).toBeTruthy();
@@ -433,16 +498,52 @@ describe("Settings window boot states", () => {
       },
     };
     render(SettingsApp);
+    await openSettingsTab("Models");
 
     expect(
       await screen.findByText("Image search model needs verification"),
     ).toBeTruthy();
-    expect(screen.getByText("degraded")).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "Verify model" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("runtime_verify_model", {
         modelId: "clip",
+      });
+    });
+  });
+
+  it("groups models by expertise and activates an installed alternative", async () => {
+    backend.runtimeModels = [
+      runtimeModelFixture("small-understanding", {
+        role: "llm",
+        state: "installed",
+        downloadedBytes: 100,
+      }),
+      runtimeModelFixture("large-understanding", {
+        role: "llm-alt",
+        defaultOffer: false,
+        advancedAvailable: true,
+        state: "installed",
+        downloadedBytes: 100,
+      }),
+      runtimeModelFixture("annotation-embedder", {
+        role: "text-embedder",
+        state: "installed",
+        downloadedBytes: 100,
+      }),
+    ];
+
+    render(SettingsApp);
+    await openSettingsTab("Models");
+
+    expect(await screen.findByText("Photo understanding")).toBeTruthy();
+    expect(screen.getByText("Annotation search")).toBeTruthy();
+    expect(screen.getAllByText("In use")).toHaveLength(2);
+    await fireEvent.click(screen.getByRole("button", { name: "Use this model" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("runtime_select_model", {
+        modelId: "large-understanding",
       });
     });
   });

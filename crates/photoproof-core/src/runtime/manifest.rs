@@ -153,6 +153,8 @@ pub fn compiled_manifest() -> Manifest {
     // every enumerated file — never a hand-typed estimate.
     const DFN5B_REPO: &str = "hf:immich-app/ViT-H-14-378-quickgelu__dfn5b";
     const DFN5B_REVISION: &str = "a5925c6e44f6381544a7263296662135ff4df0ff";
+    const DFN5B_FP16_REPO: &str = "hf:chbornman/photoproof-dfn5b-clip-vit-h-14-378-fp16-onnx";
+    const DFN5B_FP16_REVISION: &str = "82b82b8d06339c1d052b3b08f10760517db31737";
     let dfn5b_files: Vec<FileEntry> = DFN5B_FILES
         .iter()
         .map(|(path, sha256, bytes)| pinned(DFN5B_REPO, DFN5B_REVISION, path, sha256, *bytes))
@@ -527,43 +529,41 @@ pub fn compiled_manifest() -> Manifest {
             // (COCO nDCG 0.8212 vs int8 0.8225). Selected on macOS when config names
             // this id; the int8 entry stays the CPU fallback.
             //
-            // STAGED, NOT OFFERED: this artifact is LOCALLY converted (the immich
-            // repo serves fp32, not this single-file fp16), so
-            // `local-fp16-convert` is deliberately rejected by `is_pinned` and the
-            // empty tier list keeps it out of consent/download offers. Dev and eval
-            // rigs may stage the files manually, but production must remain on the
-            // hosted int8 model until these exact bytes have an immutable hosted
-            // revision. Graduation requires BOTH replacing the revision and
-            // restoring appropriate tiers. The SHA-256 values and sizes below are
-            // the real local artifacts a future hosted copy must match.
+            // HOSTED EXPERIMENT, NOT A DEFAULT OFFER: the exact converted bytes are
+            // pinned at an immutable PhotoProof-owned Hugging Face revision, so an
+            // explicitly configured research rig can download and verify them.
+            // The empty tier list deliberately keeps this research-only Apple
+            // licensed derivative out of normal hardware offers and consent sums.
+            // Do not make it a product default without resolving that license.
             ModelEntry {
                 id: "ViT-H-14-378-quickgelu__dfn5b-fp16".into(),
                 role: "embedder".into(),
                 tiers: vec![],
                 license: License {
-                    name: "Apple Sample Code License (ASCL)".into(),
-                    url: "https://huggingface.co/immich-app/ViT-H-14-378-quickgelu__dfn5b".into(),
+                    name: "Apple Machine Learning Research Model License".into(),
+                    url: "https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-378/blob/main/LICENSE"
+                        .into(),
                     acceptance_required: true,
                 },
-                total_bytes: 1_265_962_399 + 708_726_647 + 3_642_073,
+                total_bytes: 1_265_962_357 + 708_726_624 + 3_642_073,
                 files: vec![
                     pinned(
-                        DFN5B_REPO,
-                        "local-fp16-convert",
+                        DFN5B_FP16_REPO,
+                        DFN5B_FP16_REVISION,
                         "visual/model.onnx",
-                        "e30e7613f2cdf1eda55fa685b467e1e04e261f20c5a15d22238682189e45ef99",
-                        1_265_962_399,
+                        "06554df33fe24cc603a64fe4e98617e6d3688d47aa24d0751898ebb488bba102",
+                        1_265_962_357,
                     ),
                     pinned(
-                        DFN5B_REPO,
-                        "local-fp16-convert",
+                        DFN5B_FP16_REPO,
+                        DFN5B_FP16_REVISION,
                         "textual/model.onnx",
-                        "f2cc1e79707f394373083d26abd6a51a039e319cb1bd47c65a47f3786ba368d2",
-                        708_726_647,
+                        "8617a89a4647d60a977d852b9897fc19d4894c2c05ff7a4b8061208343dd193c",
+                        708_726_624,
                     ),
                     pinned(
-                        DFN5B_REPO,
-                        "local-fp16-convert",
+                        DFN5B_FP16_REPO,
+                        DFN5B_FP16_REVISION,
                         "textual/tokenizer.json",
                         "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35",
                         3_642_073,
@@ -815,24 +815,28 @@ mod tests {
         );
     }
 
-    /// D8/P0: the locally converted fp16 bundle has valid hashes for eval rigs,
-    /// but no immutable hosted revision. It must stay in the manifest only as a
-    /// staged artifact: no public offer, no consent sum, and `is_pinned` false
-    /// so even the explicit download seam refuses it.
+    /// D8/P0: the converted fp16 bundle is now immutable and downloadable for
+    /// explicitly configured research rigs. Its research-only Apple license
+    /// keeps it out of normal hardware offers and consent sums.
     #[test]
-    fn fp16_clip_is_staged_unpinned_and_offered_at_no_tier() {
+    fn fp16_clip_is_hosted_pinned_and_offered_at_no_tier() {
         let m = compiled_manifest();
         let fp16 = m
             .model("ViT-H-14-378-quickgelu__dfn5b-fp16")
-            .expect("staged fp16 entry remains available to eval rigs");
+            .expect("hosted fp16 entry remains available to research rigs");
         assert_eq!(fp16.role, "embedder");
         assert!(
-            !fp16.is_pinned(),
-            "local-fp16-convert is not an immutable hosted pin"
+            fp16.is_pinned(),
+            "all fp16 files have immutable hosted revisions and real hashes"
         );
+        assert_eq!(fp16.total_bytes, 1_978_331_054);
+        assert!(fp16.files.iter().all(|file| {
+            file.repo == "hf:chbornman/photoproof-dfn5b-clip-vit-h-14-378-fp16-onnx"
+                && file.revision == "82b82b8d06339c1d052b3b08f10760517db31737"
+        }));
         assert!(
             fp16.tiers.is_empty(),
-            "staged artifact is not offered to any hardware tier"
+            "research-only artifact is not offered to any hardware tier"
         );
         for tier in [0, 1, 2] {
             assert!(

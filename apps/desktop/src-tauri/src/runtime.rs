@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use photoproof_connectors::config::{
-    AsrBackend, Config, EmbedderBackend, LlmBackend, TextEmbedderBackend, from_toml_str,
+    AsrBackend, Config, EmbedderBackend, LlmBackend, ModelSelection, TextEmbedderBackend,
+    from_toml_str, with_selected_model,
 };
 use photoproof_core::UtcMillis;
 use photoproof_core::runtime::{
@@ -957,6 +958,80 @@ impl RuntimeHost {
             self.apply_supervisor_plan();
         }
         Ok(ConfigReload { status, changed })
+    }
+
+    /// Settings → Models: persist one installed alternative as the configured
+    /// model for its functional seam, then converge the live runtime onto it.
+    /// Selection is deliberately narrower than editing config.toml: an
+    /// unavailable, incompatible, or incomplete model can never be activated
+    /// by a stale UI row.
+    pub fn select_model(&self, model_id: &str) -> Result<ConfigReload, String> {
+        self.require_model_mutation_authority()?;
+        let snapshot = self.status();
+        let row = snapshot
+            .models
+            .iter()
+            .find(|row| row.id == model_id)
+            .ok_or_else(|| format!("unknown model `{model_id}`"))?;
+        if row.state != "installed" {
+            return Err(format!(
+                "{} must finish downloading and verification before it can be selected",
+                model_id
+            ));
+        }
+        if !row.compatible {
+            return Err(format!(
+                "{} is not compatible with this machine: {}",
+                model_id, row.compatibility_reason
+            ));
+        }
+        if !row.default_offer && !row.advanced_available {
+            return Err(format!(
+                "{} is not available for the current hardware tier",
+                model_id
+            ));
+        }
+        if row.default_offer {
+            return Ok(ConfigReload {
+                status: snapshot
+                    .control_files
+                    .iter()
+                    .find(|status| status.name == "config")
+                    .cloned()
+                    .unwrap_or_else(|| control_status("config", None, Vec::new(), Vec::new())),
+                changed: false,
+            });
+        }
+        let manifest_model = self
+            .manifest
+            .model(model_id)
+            .ok_or_else(|| format!("unknown model `{model_id}`"))?;
+        let selection = match manifest_model.role.as_str() {
+            "llm" | "llm-alt" => ModelSelection::Llm,
+            "asr" => ModelSelection::Asr,
+            "embedder" => ModelSelection::VisualEmbedder,
+            "text-embedder" | "text-embedder-alt" => ModelSelection::TextEmbedder,
+            role => return Err(format!("model role `{role}` is not selectable")),
+        };
+        let path = self.app_data.join("config.toml");
+        let current = match std::fs::read_to_string(&path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(format!("could not read {}: {error}", path.display()));
+            }
+        };
+        let next = with_selected_model(&current, selection, model_id)
+            .map_err(|error| error.to_string())?;
+        {
+            let _control_guard = self
+                .control_file_gate
+                .lock()
+                .expect("runtime control-file gate");
+            save_control(&path, next.as_bytes())
+                .map_err(|error| format!("could not save {}: {error}", path.display()))?;
+        }
+        self.reload_config_checked()
     }
 
     fn manager(&self) -> DownloadManager {
@@ -3240,6 +3315,65 @@ mod tests {
         assert!(
             host.state.lock().unwrap().downloads.is_empty(),
             "the rejected rewrite must not leave queued work"
+        );
+    }
+
+    #[test]
+    fn selecting_an_installed_alternative_persists_and_replans_its_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[runtime]\ntier = 2\nvram_headroom_mb = 4096\n\n[llm]\nmodel = \"gemma-4-e2b-it-qat-q4_0\"\n",
+        )
+        .unwrap();
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        settle_capabilities(&host);
+        let model_id = "gemma-4-e4b-it-q4_k_m";
+        {
+            let _operation = host.model_registry.lock_operation();
+            host.model_registry
+                .commit_installed_locked(
+                    host.bus.clone(),
+                    model_id,
+                    photoproof_core::runtime::InstalledRecord {
+                        manifest_version: host.manifest.manifest_version,
+                        when: "2026-07-27T00:00:00Z".into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let changed = host.select_model(model_id).unwrap();
+        assert!(changed.changed);
+        let persisted =
+            from_toml_str(&std::fs::read_to_string(dir.path().join("config.toml")).unwrap())
+                .unwrap()
+                .config;
+        assert_eq!(persisted.llm.model, model_id);
+        assert_eq!(persisted.runtime.vram_headroom_mb, 4096);
+        assert!(
+            host.status()
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .unwrap()
+                .default_offer
+        );
+    }
+
+    #[test]
+    fn selecting_an_incomplete_alternative_is_rejected_without_config_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "[runtime]\ntier = 2\n";
+        std::fs::write(dir.path().join("config.toml"), original).unwrap();
+        let host = Arc::new(RuntimeHost::init(dir.path().to_path_buf()));
+        settle_capabilities(&host);
+
+        let error = host.select_model("gemma-4-e4b-it-q4_k_m").unwrap_err();
+        assert!(error.contains("finish downloading"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            original
         );
     }
 

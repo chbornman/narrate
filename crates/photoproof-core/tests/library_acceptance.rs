@@ -51,6 +51,7 @@ fn scaled(name: &str, default: usize) -> usize {
 #[derive(Default)]
 struct FakeExtractor {
     specs: Mutex<std::collections::HashMap<String, FakeSpec>>,
+    unsupported: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -69,6 +70,13 @@ impl FakeExtractor {
             .unwrap()
             .insert(file_name.to_owned(), spec);
     }
+
+    fn script_unsupported(&self, file_name: &str) {
+        self.unsupported
+            .lock()
+            .unwrap()
+            .insert(file_name.to_owned());
+    }
 }
 
 impl EmbeddedPreviewExtractor for FakeExtractor {
@@ -77,6 +85,11 @@ impl EmbeddedPreviewExtractor for FakeExtractor {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
+        if self.unsupported.lock().unwrap().contains(name) {
+            return Err(PreviewError::UnsupportedRaw(
+                "scripted unsupported container".into(),
+            ));
+        }
         let spec = self.specs.lock().unwrap().get(name).cloned();
         Ok(spec.map(|s| ExtractedPreview {
             image: DynamicImage::ImageRgb8(s.preview),
@@ -86,6 +99,33 @@ impl EmbeddedPreviewExtractor for FakeExtractor {
             preview_orientation: s.preview_orientation,
         }))
     }
+}
+
+#[test]
+fn unsupported_raw_preview_settles_as_skipped_without_queue_error() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    env.write("photos/damaged.raf", b"not a real RAF container");
+    env.extractor.script_unsupported("damaged.raf");
+    env.scan(&root);
+
+    let report = env.lib.process_queue(&QueueOptions::default()).unwrap();
+    assert_eq!(report.errors, 0);
+    assert_eq!(report.skipped, 1);
+
+    let conn = env.conn();
+    let (state, reason): (String, Option<String>) = conn
+        .query_row(
+            "SELECT state, error
+             FROM ingest_passes
+             WHERE pass_name = 'preview'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "skipped");
+    assert_eq!(reason.as_deref(), Some("unsupported-or-invalid-raw"));
 }
 
 struct Env {

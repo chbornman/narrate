@@ -61,6 +61,9 @@ export interface StaticMessage {
  * to the worker), so the main thread must not touch them until they return. */
 export interface ComputeMessage {
   kind: "compute";
+  /** Monotonic live-layout generation. A reply from an older generation returns
+   * its transferables but must not overwrite the newer node set. */
+  generation: number;
   buffer: Float64Array;
   flags: Uint8Array;
   heat: number;
@@ -79,6 +82,7 @@ export interface ReadyMessage {
  * same backing memory next frame (avoids re-allocating it every frame). */
 export interface SteppedMessage {
   kind: "stepped";
+  generation: number;
   buffer: Float64Array;
   flags: Uint8Array;
   energy: number;

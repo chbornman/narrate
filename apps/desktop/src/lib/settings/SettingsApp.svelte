@@ -1,19 +1,17 @@
 <script lang="ts">
   /**
-   * Settings (UI §2.4): one modest window, exactly four sections, nothing
-   * else in v1 — Watched folders · Microphone · Models · Export.
-   * Explicitly absent: appearance, keyboard remapping, per-folder options,
-   * cache tuning, telemetry, accounts.
-   *
-   * M1 renders the degraded RUNTIME contract: Microphone stays hidden until
-   * ASR is installed; Models shows the explainer.
+   * Settings (UI §2.4): one modest window grouped into four stable tabs:
+   * Library · Appearance · Models · System. The backend reads remain a single
+   * snapshot; tabs are only information architecture, so switching them is
+   * instant and never starts/repeats work.
    */
   // Lucide (BACKLOG "Adopt Lucide icons"): X for the window close; Unplug
   // for the offline-volume mark (Lucide ships no eject).
   import Unplug from "@lucide/svelte/icons/unplug";
   import X from "@lucide/svelte/icons/x";
   import { onMount } from "svelte";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import * as ipc from "../ipc/commands";
@@ -30,6 +28,12 @@
     SettingsBootController,
     type SettingsBootState,
   } from "./boot";
+  import {
+    SETTINGS_TABS,
+    parseSettingsTab,
+    settingsTabForHealthIssue,
+    type SettingsTab,
+  } from "./tabs";
   import { theme } from "../theme/theme-store.svelte";
   import { THEME_LABELS, THEME_MODES, type ThemeMode } from "../theme/theme";
   import { surround } from "../theme/surround-store.svelte";
@@ -41,6 +45,8 @@
     type SurroundLevel,
     type SurroundMode,
   } from "../theme/surround";
+  import { UI_ZOOM_STEPS, loadUiZoom, saveUiZoom } from "../state/prefs";
+  import ProgressBar from "../primitives/ProgressBar.svelte";
   import type {
     ApplicationHealth,
     ApplicationStateChanged,
@@ -55,6 +61,11 @@
   /** Bytes per GB (binary, matching the backend's 20 * 1024^3 default). The
    * 1:1 cache budget is edited in GB but stored/measured in bytes. */
   const BYTES_PER_GB = 1024 * 1024 * 1024;
+
+  function requestedSettingsTab(): SettingsTab {
+    if (typeof window === "undefined") return "library";
+    return parseSettingsTab(new URLSearchParams(window.location.search).get("tab"));
+  }
 
   /** Human-readable size for the cache readout: GB once past ~1 GB, MB below
    * (the 1:1 cache is large, but an empty/fresh cache should read "0 MB"
@@ -74,6 +85,114 @@
   function formatHealthTime(milliseconds: number | null): string {
     if (milliseconds === null) return "";
     return new Date(milliseconds).toLocaleString();
+  }
+
+  type ModelRow = RuntimeStatus["models"][number];
+  type ModelGroup = {
+    id: string;
+    title: string;
+    description: string;
+    roles: string[];
+  };
+
+  const MODEL_GROUPS: ModelGroup[] = [
+    {
+      id: "understanding",
+      title: "Photo understanding",
+      description: "Turns photographs and your words into structured notes.",
+      roles: ["llm", "llm-alt"],
+    },
+    {
+      id: "visual-search",
+      title: "Visual search",
+      description: "Connects photographs by appearance and visual meaning.",
+      roles: ["embedder"],
+    },
+    {
+      id: "annotation-search",
+      title: "Annotation search",
+      description: "Finds related language across notes and annotations.",
+      roles: ["text-embedder", "text-embedder-alt"],
+    },
+    {
+      id: "voice",
+      title: "Voice transcription",
+      description: "Transcribes spoken annotations during capture.",
+      roles: ["asr"],
+    },
+  ];
+
+  function modelIsSelected(model: ModelRow): boolean {
+    return model.defaultOffer || model.consumers.some((consumer) => consumer.desired);
+  }
+
+  function visibleModelsForGroup(group: ModelGroup, models: ModelRow[]): ModelRow[] {
+    return models.filter(
+      (model) =>
+        group.roles.includes(model.role) &&
+        (showOtherModels ||
+          modelIsSelected(model) ||
+          model.state === "installed" ||
+          model.operation !== null),
+    );
+  }
+
+  /** Manifest ids are durable machine keys, not good headings. Keep the exact
+   * id visible as secondary text while giving the common shipped models names
+   * a person can scan. Unknown future ids remain honest instead of blank. */
+  function modelDisplayName(id: string): string {
+    const names: Record<string, string> = {
+      "gemma-4-e2b-it-qat-q4_0": "Gemma 4 E2B",
+      "gemma-4-e2b-it-qat-q4_k_xl-mtp": "Gemma 4 E2B, accelerated",
+      "gemma-4-26b-a4b-it-qat-q4_k_xl-mtp": "Gemma 4 26B A4B",
+      "gemma-4-e4b-it-q4_k_m": "Gemma 4 E4B",
+      "nemotron-speech-streaming-en-0.6b-560ms-int8": "Nemotron Streaming Speech",
+      "nemotron-3.5-asr-streaming-0.6b-560ms-int8": "Nemotron 3.5 Streaming Speech",
+      "nemotron-3.5-asr-streaming-0.6b-parakeet": "Nemotron 3.5 Parakeet",
+      "ViT-H-14-378-quickgelu__dfn5b": "DFN5B Photo Search",
+      "ViT-H-14-378-quickgelu__dfn5b-fp16": "DFN5B Photo Search, GPU",
+      "embeddinggemma-300m-q8": "EmbeddingGemma",
+      "qwen3-embedding-0.6b-int8": "Qwen 3 Embedding",
+    };
+    return names[id] ?? id;
+  }
+
+  function modelPurpose(role: string): string {
+    if (role === "llm" || role === "llm-alt") return "Photo understanding and structured notes";
+    if (role === "asr") return "Voice transcription";
+    if (role === "embedder") return "Visual similarity and semantic photo search";
+    if (role === "text-embedder" || role === "text-embedder-alt") {
+      return "Semantic search across your annotations";
+    }
+    return "Local model";
+  }
+
+  function modelStateLabel(model: ModelRow): string {
+    if (model.operation === "queued") return "Queued";
+    if (model.operation === "downloading" || model.state === "downloading") {
+      return "Downloading";
+    }
+    if (model.operation === "verifying") return "Verifying";
+    if (model.operation === "installing") return "Installing";
+    if (model.state === "installed") return modelIsSelected(model) ? "In use" : "Ready";
+    if (model.state === "failed") return "Needs attention";
+    if (model.state === "cancelled") return "Paused";
+    if (model.state === "not-downloaded") return "Not downloaded";
+    if (model.state === "not-offered") return "Unavailable";
+    if (model.state === "unpinned") return "Coming later";
+    return model.state;
+  }
+
+  type ModelTone = "neutral" | "ready" | "working" | "warning" | "danger";
+
+  function modelTone(model: ModelRow): ModelTone {
+    if (model.operation !== null) return "working";
+    if (model.state === "installed") return "ready";
+    if (model.state === "failed" || model.error !== null) return "danger";
+    if (model.downloadedBytes > 0 || model.registryError !== null || model.state === "cancelled") {
+      return "warning";
+    }
+    return "neutral";
   }
 
   /** Same chrome split as Titlebar.svelte (UI §2.3): on macOS this window
@@ -112,9 +231,12 @@
     runtime = rt;
   }
   let settings = $state<AppSettings | null>(null);
+  let activeTab = $state<SettingsTab>(requestedSettingsTab());
+  let interfaceZoom = $state(loadUiZoom());
   let removeWarnFor = $state<string | null>(null);
   let modelRemoveWarnFor = $state<string | null>(null);
   let showOtherModels = $state(false);
+  let verifyAllNote = $state("");
   let addFolderPolicy = $state<
     "default" | "process-now" | "preview-only" | "process-later"
   >("default");
@@ -143,6 +265,36 @@
     error: string | null;
   }>({ label: null, pending: false, error: null });
   let retryAction: (() => Promise<void>) | null = null;
+
+  /** Installed models and real partial downloads are the only meaningful
+   * verify-all targets. Empty destination directories and untouched optional
+   * models contain no bytes to prove; active operations are already protected
+   * by their own lifecycle and must not be interrupted. */
+  const verifiableModels = $derived(
+    runtime?.models.filter(
+      (model) =>
+        model.operation === null &&
+        (model.state === "installed" || model.downloadedBytes > 0),
+    ) ?? [],
+  );
+  const activeTabInfo = $derived(
+    SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0],
+  );
+  const libraryHealthIssues = $derived(
+    (health?.issues ?? []).filter(
+      (issue) => settingsTabForHealthIssue(issue) === "library",
+    ),
+  );
+  const modelHealthIssues = $derived(
+    (health?.issues ?? []).filter(
+      (issue) => settingsTabForHealthIssue(issue) === "models",
+    ),
+  );
+  const systemHealthIssues = $derived(
+    (health?.issues ?? []).filter(
+      (issue) => settingsTabForHealthIssue(issue) === "system",
+    ),
+  );
 
   /** One mutation lane for the Settings window. Every product-state action
    * enters here, so rejected `void` handlers become a visible failed state,
@@ -202,6 +354,7 @@
   let disposed = false;
   const eventUnlisteners = new Map<string, UnlistenFn>();
   let listenerInstall: Promise<void> | null = null;
+  let tabRequestUnlisten: UnlistenFn | null = null;
   let applicationRevision = 0;
   let eventChannelsHealthy = false;
   const applicationRevisions = {
@@ -367,6 +520,18 @@
     void win.setTitle("Settings").catch((error) => {
       console.warn("could not set Settings window title", error);
     });
+    // A contextual entry point (currently Application health) can retarget an
+    // already-open Settings window. This navigation hint is intentionally not
+    // part of boot health: losing it must not make otherwise-usable settings
+    // look degraded.
+    void listen<string>("settings-tab-requested", (event) => {
+      activeTab = parseSettingsTab(event.payload);
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else tabRequestUnlisten = unlisten;
+      })
+      .catch(() => {});
     void Promise.allSettled([
       refresh(),
       refreshHealth(),
@@ -384,6 +549,8 @@
     });
     return () => {
       disposed = true;
+      tabRequestUnlisten?.();
+      tabRequestUnlisten = null;
       for (const unlisten of eventUnlisteners.values()) unlisten();
       eventUnlisteners.clear();
       void ipc.flushPerformance();
@@ -443,6 +610,14 @@
         case "verify-model":
           if (targetId === null) throw new Error("Model verification target is missing.");
           bootController.liveRuntime(await ipc.runtimeVerifyModel(targetId));
+          break;
+        case "download-model":
+          if (targetId === null) throw new Error("Model download target is missing.");
+          bootController.liveRuntime(await ipc.runtimeDownloadModel(targetId));
+          break;
+        case "accept-model-license":
+          if (targetId === null) throw new Error("Model license target is missing.");
+          bootController.liveRuntime(await ipc.runtimeAcceptLicense(targetId));
           break;
         case "rebuild-previews":
           if (targetId !== null) {
@@ -681,6 +856,13 @@
     });
   }
 
+  async function selectModel(modelId: string) {
+    await performAction("Changing active model", async () => {
+      bootController.liveRuntime(await ipc.runtimeSelectModel(modelId));
+      await refreshHealth();
+    });
+  }
+
   /** D3: stop a transfer; part files are kept so Download later resumes. */
   async function cancelDownload(modelId: string) {
     await performAction("Cancelling model download", async () => {
@@ -702,6 +884,40 @@
   async function verifyModel(modelId: string) {
     await performAction("Verifying model", async () => {
       bootController.liveRuntime(await ipc.runtimeVerifyModel(modelId));
+    });
+  }
+
+  async function verifyAllModels() {
+    // Snapshot once: a successful adoption changes the live row while the pass
+    // is running, but every model eligible when the user clicked still gets
+    // exactly one turn. Awaiting each command keeps multi-gigabyte hashing
+    // serial and reuses the backend's global model-operation authority.
+    const candidates = verifiableModels.map((model) => model.id);
+    verifyAllNote = "";
+    await performAction("Verifying all models", async () => {
+      let verified = 0;
+      const failures: string[] = [];
+      for (const modelId of candidates) {
+        try {
+          bootController.liveRuntime(await ipc.runtimeVerifyModel(modelId));
+          verified++;
+        } catch (error) {
+          failures.push(
+            `${modelId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      await refreshHealth();
+      const noun = verified === 1 ? "model" : "models";
+      verifyAllNote =
+        failures.length === 0
+          ? `Verified ${verified} ${noun}.`
+          : `Verified ${verified} ${noun}; ${failures.length} ${
+              failures.length === 1 ? "model needs" : "models need"
+            } attention.`;
+      if (failures.length > 0) {
+        throw new Error(failures.join("; "));
+      }
     });
   }
 
@@ -756,6 +972,17 @@
     theme.set(mode);
   }
 
+  async function setInterfaceZoom(factor: number) {
+    if (!(UI_ZOOM_STEPS as readonly number[]).includes(factor)) return;
+    interfaceZoom = factor;
+    saveUiZoom(factor);
+    // Apply immediately to this window and tell the main webview to adopt the
+    // same existing UI-zoom state. The event is a presentation preference,
+    // not backend product state, so no database/settings mutation is needed.
+    await getCurrentWebview().setZoom(factor);
+    await emit("interface-zoom-changed", factor);
+  }
+
   /** Background surround (D6) lives beside the theme: follow-theme derives the
    * image backdrop from the active light/dark theme; manual pins a level. Both
    * write the shared surround store, so the main window's data-surround follows
@@ -771,6 +998,24 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") void win.close();
+  }
+
+  function onTabKeydown(e: KeyboardEvent, index: number) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const last = SETTINGS_TABS.length - 1;
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? last
+          : e.key === "ArrowRight"
+            ? (index + 1) % SETTINGS_TABS.length
+            : (index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    activeTab = SETTINGS_TABS[next].id;
+    requestAnimationFrame(() =>
+      document.getElementById(`settings-tab-${activeTab}`)?.focus(),
+    );
   }
 </script>
 
@@ -826,16 +1071,58 @@
     </div>
   {/if}
 
+  <div class="settings-tabs" role="tablist" aria-label="Settings categories">
+    {#each SETTINGS_TABS as tab, index (tab.id)}
+      <button
+        id="settings-tab-{tab.id}"
+        class="settings-tab"
+        class:active={activeTab === tab.id}
+        type="button"
+        role="tab"
+        aria-selected={activeTab === tab.id}
+        aria-controls="settings-panel"
+        tabindex={activeTab === tab.id ? 0 : -1}
+        onclick={() => (activeTab = tab.id)}
+        onkeydown={(event) => onTabKeydown(event, index)}
+      >
+        {tab.label}
+      </button>
+    {/each}
+  </div>
+  <p class="tab-description">{activeTabInfo.description}</p>
+
   <div
+    id="settings-panel"
     class="settings-body"
     class:blocked={boot.phase === "fatal" || (boot.phase === "loading" && !boot.hasSnapshot)}
+    role="tabpanel"
+    aria-labelledby="settings-tab-{activeTab}"
     aria-busy={actionState.pending}
     inert={actionState.pending ||
       boot.phase === "fatal" ||
       (boot.phase === "loading" && !boot.hasSnapshot)}
   >
+  {#if libraryHealthIssues.length > 0}
+    <section hidden={activeTab !== "library"}>
+      <h2>Library needs attention</h2>
+      {#each libraryHealthIssues as issue (issue.id)}
+        <div class={`issue-row tone-${issue.blocking ? "danger" : "warning"}`}>
+          <div class="issue-content">
+            <div>
+              <strong>{issue.title}</strong>
+              <p>{issue.summary}</p>
+            </div>
+            <button disabled={actionState.pending} onclick={() => void runHealthAction(issue)}>
+              {issue.action.label}
+            </button>
+          </div>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
   <!-- 1. Watched folders -->
-  <section>
+  <section hidden={activeTab !== "library"}>
     <h2>Watched folders</h2>
     {#each roots as root (root.rootId)}
       <div class="row">
@@ -860,15 +1147,15 @@
       <button onclick={() => void addFolder()}>Add folder…</button>
       <select bind:value={addFolderPolicy} aria-label="Processing for next folder">
         <option value="default">Use saved default</option>
-        <option value="process-now">Process now</option>
-        <option value="preview-only">Previews only</option>
-        <option value="process-later">Process later</option>
+        <option value="process-now">Index, preview, and analyze</option>
+        <option value="preview-only">Index and build previews</option>
+        <option value="process-later">Watch without scanning</option>
       </select>
     </div>
     <div class="row pref">
-      <span class="name">Processing intensity</span>
+      <span class="name">Background work</span>
       <select
-        aria-label="Processing intensity"
+        aria-label="Background processing intensity"
         value={settings?.processingIntensity ?? "balanced"}
         onchange={(e) =>
           void setProcessingPolicy({
@@ -880,27 +1167,28 @@
                   : "balanced",
           })}
       >
-        <option value="eco">Eco</option>
-        <option value="balanced">Balanced</option>
-        <option value="max">Max</option>
+        <option value="eco">Eco - lowest resource use</option>
+        <option value="balanced">Balanced - recommended</option>
+        <option value="max">Maximum - fastest imports</option>
       </select>
     </div>
     <div class="row pref">
       <span class="name">
-        {settings?.processingPaused ? "Background processing paused" : "Background processing"}
+        Automatic background processing
       </span>
       <button
-        class:active={settings?.processingPaused}
+        aria-pressed={!(settings?.processingPaused ?? false)}
+        class:active={!(settings?.processingPaused ?? false)}
         onclick={() =>
           void setProcessingPolicy({ paused: !(settings?.processingPaused ?? false) })}
       >
-        {settings?.processingPaused ? "Resume" : "Pause"}
+        {settings?.processingPaused ? "Off" : "On"}
       </button>
     </div>
     <div class="row pref">
-      <span class="name">When adding a folder</span>
+      <span class="name">New folders</span>
       <select
-        aria-label="When adding a folder"
+        aria-label="Default processing for new folders"
         value={settings?.newRootPolicy ?? "process-now"}
         onchange={(e) =>
           void setProcessingPolicy({
@@ -912,41 +1200,44 @@
                 : "process-now",
           })}
       >
-        <option value="process-now">Process now</option>
-        <option value="preview-only">Previews only</option>
-        <option value="process-later">Process later</option>
+        <option value="process-now">Index, preview, and analyze</option>
+        <option value="preview-only">Index and build previews</option>
+        <option value="process-later">Watch without scanning</option>
       </select>
     </div>
     <div class="row pref">
-      <span class="name">Text embeddings</span>
+      <span class="name">Semantic search from notes</span>
       <button
-        class:active={settings?.deferTextEmbeddings}
+        aria-pressed={!(settings?.deferTextEmbeddings ?? false)}
+        class:active={!settings?.deferTextEmbeddings}
         onclick={() =>
           void setProcessingPolicy({
             deferTextEmbeddings: !(settings?.deferTextEmbeddings ?? false),
           })}
       >
-        {settings?.deferTextEmbeddings ? "Deferred" : "Enabled"}
+        {settings?.deferTextEmbeddings ? "Off" : "On"}
       </button>
     </div>
     <div class="row pref">
-      <span class="name">Image embeddings</span>
+      <span class="name">Visual search from photos</span>
       <button
-        class:active={settings?.deferImageEmbeddings}
+        aria-pressed={!(settings?.deferImageEmbeddings ?? false)}
+        class:active={!settings?.deferImageEmbeddings}
         onclick={() =>
           void setProcessingPolicy({
             deferImageEmbeddings: !(settings?.deferImageEmbeddings ?? false),
           })}
       >
-        {settings?.deferImageEmbeddings ? "Deferred" : "Enabled"}
+        {settings?.deferImageEmbeddings ? "Off" : "On"}
       </button>
     </div>
     <p class="helper">
-      Eco keeps one expensive lane active; Balanced allows two; Max uses up to
-      four. Pause leaves explicit 1:1 photo development available. “Process
-      later” registers and watches a new folder without walking its full tree.
-      “Previews only” indexes metadata and previews while model passes remain
-      pending. Embedding switches resume the same durable pass rows when enabled.
+      Balanced is recommended while you work. Maximum uses more CPU, memory, and
+      disk bandwidth to finish imports sooner. Pause stops automatic scanning,
+      preview building, and analysis; opening a photo can still build its 1:1
+      view. “Watch without scanning” notices future changes but does not walk
+      the folder yet. Turning semantic or visual search off preserves completed
+      work and resumes unfinished analysis when turned back on.
     </p>
     <!-- library behavior row (U6 stands: no new section) -->
     <div class="row pref">
@@ -983,7 +1274,7 @@
   <!-- 1b. Appearance (BACKLOG "Full interface themes"): the chrome theme.
        Segmented System / Light / Dark; the live chrome reflects it at once
        because this window paints data-theme from the same store. -->
-  <section>
+  <section hidden={activeTab !== "appearance"}>
     <h2>Appearance</h2>
     <div class="row pref">
       <span class="name">Theme</span>
@@ -1001,6 +1292,25 @@
     </div>
     <p class="helper">
       System follows your operating system's light or dark setting.
+    </p>
+    <div class="row pref">
+      <span class="name">Interface size</span>
+      <div class="segmented" role="radiogroup" aria-label="Interface size">
+        {#each UI_ZOOM_STEPS as factor (factor)}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={interfaceZoom === factor}
+            class:active={interfaceZoom === factor}
+            onclick={() => void setInterfaceZoom(factor)}
+          >
+            {Math.round(factor * 100)}%
+          </button>
+        {/each}
+      </div>
+    </div>
+    <p class="helper">
+      Changes text, controls, and panels across Photoproof without changing photo zoom.
     </p>
     <!-- Background surround (D6): the backdrop behind the photo. Follow theme
          derives it from the active light/dark theme; Manual pins a level. -->
@@ -1044,7 +1354,7 @@
        cost of full-res 1:1 develops. Thumbnails and display previews are
        small and always kept; only the big 1:1 artifacts get a budget. No
        em-dashes in copy (gate: check:emdash). -->
-  <section>
+  <section hidden={activeTab !== "library"}>
     <h2>Previews</h2>
     <div class="row pref">
       <span class="name">1:1 cache budget</span>
@@ -1065,6 +1375,11 @@
       least-recently-viewed ones are removed. Removing them is always safe:
       each one rebuilds the next time you view it, and your marks are never
       stored in a preview.
+    </p>
+    <p class="helper">
+      Thumbnails and fit-to-window previews are kept automatically. Photos on
+      screen are generated and loaded before off-screen runway, so there is no
+      worker-count or GPU switch to manage here.
     </p>
     <p class="helper">
       Clear 1:1 cache reclaims just the large full-resolution files; they
@@ -1098,7 +1413,7 @@
 
   <!-- 2. Microphone — hidden until ASR is installed (UI §2.4 / RUNTIME) -->
   {#if runtime?.asrReady}
-    <section>
+    <section hidden={activeTab !== "models"}>
       <h2>Microphone</h2>
       <!-- M2b packet: device picker, level meter, mic-enabled checkbox. -->
     </section>
@@ -1106,8 +1421,21 @@
 
   <!-- 3. Models (renders RUNTIME's contract: tier, per-model rows with
        resumable progress + license display, restart-runtime — §2.4) -->
-  <section>
+  <section hidden={activeTab !== "models"}>
     <h2>Models</h2>
+    {#each modelHealthIssues as issue (issue.id)}
+      <div class={`issue-row tone-${issue.blocking ? "danger" : "warning"}`}>
+        <div class="issue-content">
+          <div>
+            <strong>{issue.title}</strong>
+            <p>{issue.summary}</p>
+          </div>
+          <button disabled={actionState.pending} onclick={() => void runHealthAction(issue)}>
+            {issue.action.label}
+          </button>
+        </div>
+      </div>
+    {/each}
     {#if runtime !== null}
       <p class="dim">
         Hardware tier:
@@ -1168,111 +1496,167 @@
       {#if runtime.llmBlocked !== null}
         <p class="dim">Local LLM is unavailable: {runtime.llmBlocked}</p>
       {/if}
-      <button class="quiet" onclick={() => (showOtherModels = !showOtherModels)}>
-        {showOtherModels ? "Hide other models" : "Show other models"}
+      <button class="quiet model-options-toggle" onclick={() => (showOtherModels = !showOtherModels)}>
+        {showOtherModels ? "Hide optional models" : "Show all model options"}
       </button>
-      {#each runtime.models.filter(
-        (m) =>
-          m.defaultOffer ||
-          showOtherModels ||
-          m.state === "installed" ||
-          m.operation !== null,
-      ) as m (m.id)}
-        <div class="row">
-          <span class="name">
-            {m.id}
-            <span class="dim">
-              {m.defaultOffer
-                ? "recommended"
-                : m.advancedAvailable
-                  ? "other compatible model"
-                  : "unavailable on this machine"}
-            </span>
-          </span>
-          <span class="state">
-            {#if m.state === "downloading" || m.operation === "downloading"}
-              downloading - {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}%
-              <!-- D5: bytes + smoothed throughput beside the percent, from
-                   the same snapshots the percent already rides. -->
-              <span class="dim"
-                >{progressDetail(
-                  m.downloadedBytes,
-                  m.totalBytes,
-                  rates[m.id]?.bytesPerSec ?? null,
-                )}</span
-              >
-              <!-- Auto-retry of an interrupted transfer: still
-                   "downloading", never a terminal "failed" until the
-                   retry schedule is exhausted. -->
-              {#if m.retryHint !== null}
-                <span class="dim">- {m.retryHint}</span>
-              {/if}
-            {:else if m.operation !== null}
-              {m.operation}
-            {:else if m.state === "unpinned"}
-              <!-- B55 fail-closed: no verified pin yet (embedders until
-                   spike session 2) — pending, not a failure. -->
-              coming in a later build
-            {:else if m.state === "not-offered"}
-              unavailable - {m.compatibilityReason}
-            {:else}
-              {m.state}
-              {#if m.state === "installed" && modelRuntimeStatus(m) !== ""}
-                - {modelRuntimeStatus(m)}
-                {#if modelExecutionStatus(m) !== ""}
-                  <span class="dim">- {modelExecutionStatus(m)}</span>
-                {/if}
-                {#if modelRuntimeError(m) !== ""}
-                  <span class="dim">- {modelRuntimeError(m)}</span>
-                {/if}
-              {/if}
-            {/if}
-          </span>
-          {#if m.state === "not-downloaded" || m.state === "failed" || m.state === "cancelled"}
-            {#if m.acceptanceRequired && !m.accepted}
-              <button class="quiet" onclick={() => void acceptLicense(m.id)}>
-                Accept license
-              </button>
-            {:else}
-              <button class="quiet" onclick={() => void downloadModel(m.id)}>Download</button>
-            {/if}
-          {/if}
-          {#if m.state === "queued" || m.state === "downloading" || m.state === "verifying" || m.state === "installing"}
-            <!-- D3: cancel keeps the part files, so a later Download
-                 resumes from where this stopped. -->
-            <button class="quiet" onclick={() => void cancelDownload(m.id)}>Cancel</button>
-          {/if}
-          {#if m.state === "installed"}
-            <button class="quiet" onclick={() => void verifyModel(m.id)}>Verify</button>
-            <button class="quiet" onclick={() => (modelRemoveWarnFor = m.id)}>Remove</button>
-            {#if modelRemoveWarnFor === m.id}
-              <div class="inline-warn">
-                <span>The model is unloaded before its files are removed.</span>
-                <button onclick={() => void confirmRemoveModel(m.id)}>Remove</button>
-                <button class="quiet" onclick={() => (modelRemoveWarnFor = null)}>Keep</button>
+      <div class="model-groups">
+        {#each MODEL_GROUPS as group (group.id)}
+          {@const groupModels = visibleModelsForGroup(group, runtime.models)}
+          {#if groupModels.length > 0}
+            <div class="model-group">
+              <div class="model-group-heading">
+                <h3>{group.title}</h3>
+                <p>{group.description}</p>
               </div>
-            {/if}
+              {#each groupModels as m (m.id)}
+                <div class={`model-item tone-${modelTone(m)}`}>
+                  <header class="model-row-header">
+                    <div class="model-heading">
+                      <div class="model-title-line">
+                        <h4>{modelDisplayName(m.id)}</h4>
+                        {#if !modelIsSelected(m) && m.advancedAvailable}
+                          <span class="model-badge">Optional</span>
+                        {/if}
+                      </div>
+                      <code>{m.id}</code>
+                    </div>
+                    <span class={`model-status tone-${modelTone(m)}`}>
+                      <span class="status-dot"></span>
+                      {modelStateLabel(m)}
+                    </span>
+                  </header>
+
+                  <p class="model-purpose">{modelPurpose(m.role)}</p>
+
+                  <div class="model-meta">
+                    <span>{formatBytes(m.totalBytes)}</span>
+                    {#if m.compatibleProviders.length > 0}
+                      <span>{m.compatibleProviders.join(" + ")}</span>
+                    {/if}
+                    {#if m.acceptanceRequired}
+                      <span>{m.accepted ? "License accepted" : "License acceptance required"}</span>
+                    {/if}
+                  </div>
+
+                  {#if m.state === "downloading" || m.operation === "downloading"}
+                    <div class="model-progress">
+                      <div class="download-copy">
+                        <strong>
+                          {Math.floor((m.downloadedBytes / Math.max(m.totalBytes, 1)) * 100)}% downloaded
+                        </strong>
+                        <span>
+                          {progressDetail(
+                            m.downloadedBytes,
+                            m.totalBytes,
+                            rates[m.id]?.bytesPerSec ?? null,
+                          )}
+                        </span>
+                      </div>
+                      <ProgressBar
+                        label={`Download progress for ${m.id}`}
+                        max={Math.max(m.totalBytes, 1)}
+                        value={m.downloadedBytes}
+                      />
+                      {#if m.retryHint !== null}
+                        <span class="model-note">{m.retryHint}</span>
+                      {/if}
+                    </div>
+                  {:else if m.operation !== null}
+                    <p class="model-note">{modelStateLabel(m)} model files...</p>
+                  {/if}
+
+                  {#if m.state === "installed" && modelRuntimeStatus(m) !== ""}
+                    <div class="model-runtime">
+                      <span>{modelRuntimeStatus(m)}</span>
+                      {#if modelExecutionStatus(m) !== ""}
+                        <span>{modelExecutionStatus(m)}</span>
+                      {/if}
+                      {#if modelRuntimeError(m) !== ""}
+                        <span class="model-error">{modelRuntimeError(m)}</span>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  {#if m.state === "not-offered"}
+                    <p class="model-note">{m.compatibilityReason}</p>
+                  {/if}
+                  {#if m.error !== null && m.operation === null}
+                    <p class="model-error">{m.error}</p>
+                  {/if}
+                  {#if m.registryError !== null && m.operation === null}
+                    <p class="model-warning">{m.registryError}</p>
+                  {/if}
+
+                  <div class="model-actions">
+                    {#if m.state === "installed" && m.compatible && m.advancedAvailable && !modelIsSelected(m)}
+                      <button onclick={() => void selectModel(m.id)}>Use this model</button>
+                    {/if}
+                    {#if m.state === "not-downloaded" || m.state === "failed" || m.state === "cancelled"}
+                      {#if m.acceptanceRequired && !m.accepted}
+                        <button onclick={() => void acceptLicense(m.id)}>Accept license</button>
+                      {:else if m.downloadedBytes >= m.totalBytes && m.totalBytes > 0}
+                        <button onclick={() => void verifyModel(m.id)}>Verify files</button>
+                      {:else}
+                        <button onclick={() => void downloadModel(m.id)}>
+                          {m.downloadedBytes > 0 ? "Resume download" : "Download"}
+                        </button>
+                      {/if}
+                    {/if}
+                    {#if m.state === "queued" || m.state === "downloading" || m.state === "verifying" || m.state === "installing"}
+                      <!-- D3: cancel keeps the part files, so a later Download
+                           resumes from where this stopped. -->
+                      <button class="quiet" onclick={() => void cancelDownload(m.id)}>Pause</button>
+                    {/if}
+                    {#if m.state === "installed"}
+                      <button class="quiet" onclick={() => void verifyModel(m.id)}>Verify files</button>
+                      <button class="quiet" onclick={() => (modelRemoveWarnFor = m.id)}>Remove</button>
+                    {/if}
+                    {#if m.state !== "installed" && m.operation === null && m.downloadedBytes > 0}
+                      <button class="quiet" onclick={() => void discardPartial(m.id)}>
+                        Remove partial files
+                      </button>
+                    {/if}
+                  </div>
+
+                  {#if modelRemoveWarnFor === m.id}
+                    <div class="inline-warn model-confirm">
+                      <span>The model is unloaded before its files are removed.</span>
+                      <button onclick={() => void confirmRemoveModel(m.id)}>Remove</button>
+                      <button class="quiet" onclick={() => (modelRemoveWarnFor = null)}>Keep</button>
+                    </div>
+                  {/if}
+
+                  <footer class="model-footer">
+                    <a href={m.licenseUrl} target="_blank" rel="noreferrer">{m.licenseName}</a>
+                    {#if m.state !== "installed" && m.downloadedBytes > 0}
+                      <span>{formatBytes(m.downloadedBytes)} currently on disk</span>
+                    {/if}
+                  </footer>
+                </div>
+              {/each}
+            </div>
           {/if}
-          {#if m.state !== "installed" && m.operation === null && m.downloadedBytes > 0}
-            <button class="quiet" onclick={() => void verifyModel(m.id)}>Verify</button>
-            <button class="quiet" onclick={() => void discardPartial(m.id)}>
-              Discard partial
-            </button>
-          {/if}
-        </div>
-        <div class="row license">
-          <a href={m.licenseUrl} target="_blank" rel="noreferrer">{m.licenseName}</a>
-          {#if m.accepted}<span class="dim">accepted</span>{/if}
-          {#if m.state !== "installed" && m.downloadedBytes > 0}
-            <span class="dim">- {formatBytes(m.downloadedBytes)} on disk</span>
-          {/if}
-          {#if m.error !== null}<span class="dim">- {m.error}</span>{/if}
-          {#if m.registryError !== null}<span class="dim">- {m.registryError}</span>{/if}
-          {#if m.compatibleProviders.length > 0}
-            <span class="dim">- compatible: {m.compatibleProviders.join(", ")}</span>
-          {/if}
-        </div>
-      {/each}
+        {/each}
+      </div>
+      <div class="row model-maintenance">
+        <button
+          class="quiet"
+          disabled={actionState.pending || verifiableModels.length === 0}
+          onclick={() => void verifyAllModels()}
+        >
+          {actionState.pending && actionState.label === "Verifying all models"
+            ? "Verifying models..."
+            : "Verify all models"}
+        </button>
+        <span class="dim">
+          {verifiableModels.length === 0
+            ? "No installed or partial models to verify."
+            : `${verifiableModels.length} ${
+                verifiableModels.length === 1 ? "model" : "models"
+              } will be checked serially.`}
+        </span>
+      </div>
+      {#if verifyAllNote !== ""}<p class="dim">{verifyAllNote}</p>{/if}
       <!-- Both verbs complete invisibly when the status text happens not
            to change (founder dogfood, June 2026) — the AckButton makes the
            button itself say it landed. -->
@@ -1293,8 +1677,8 @@
     {/if}
   </section>
 
-  <section>
-    <h2>Application health</h2>
+  <section hidden={activeTab !== "system"}>
+    <h2>System health</h2>
     {#if health !== null}
       <p class="dim">
         Phase: {health.phase}. Build {health.diagnostics.buildVersion}.
@@ -1302,7 +1686,7 @@
           The previous launch did not complete a clean shutdown.
         {/if}
       </p>
-      {#each health.issues as issue (issue.id)}
+      {#each systemHealthIssues as issue (issue.id)}
         <div
           class="row health-row"
           class:health-blocking={issue.blocking}
@@ -1324,8 +1708,8 @@
           </button>
         </div>
       {/each}
-      {#if health.issues.length === 0}
-        <p class="dim">No degraded subsystems are currently reported.</p>
+      {#if systemHealthIssues.length === 0}
+        <p class="dim">No system issues are currently reported.</p>
       {/if}
       {#if health.diagnostics.error !== null}
         <p class="dim">Diagnostics: {health.diagnostics.error}</p>
@@ -1363,6 +1747,64 @@
               </span>
             </div>
           {/each}
+          <div class="row health-row">
+            <span class="name">preview requests / pool</span>
+            <span class="state">
+              {#if health.performance.previewProtocol.initialized}
+                {health.performance.previewProtocol.running}/{health.performance.previewProtocol.workers}
+                running
+              {:else}
+                not started
+              {/if}
+            </span>
+            <span class="dim">
+              queued {health.performance.previewProtocol.queued}/{health.performance.previewProtocol.queueCapacity},
+              peaks {health.performance.previewProtocol.peakRunning} running /
+              {health.performance.previewProtocol.peakQueued} queued
+            </span>
+          </div>
+          <div class="row health-row">
+            <span class="name">preview requests / interactive</span>
+            <span class="state">
+              wait p95 {formatLatency(health.performance.previewProtocol.interactive.queueWaitP95Ms)}
+            </span>
+            <span class="dim">
+              wait mean {formatLatency(health.performance.previewProtocol.interactive.meanQueueWaitMs)},
+              p50 {formatLatency(health.performance.previewProtocol.interactive.queueWaitP50Ms)},
+              p99 {formatLatency(health.performance.previewProtocol.interactive.queueWaitP99Ms)},
+              max {formatLatency(health.performance.previewProtocol.interactive.maxQueueWaitMs)};
+              service mean {formatLatency(health.performance.previewProtocol.interactive.meanServiceMs)},
+              p50 {formatLatency(health.performance.previewProtocol.interactive.serviceP50Ms)},
+              p95 {formatLatency(health.performance.previewProtocol.interactive.serviceP95Ms)},
+              p99 {formatLatency(health.performance.previewProtocol.interactive.serviceP99Ms)},
+              max {formatLatency(health.performance.previewProtocol.interactive.maxServiceMs)};
+              accepted {health.performance.previewProtocol.interactive.accepted.toLocaleString()},
+              completed {health.performance.previewProtocol.interactive.completed.toLocaleString()},
+              superseded {health.performance.previewProtocol.interactive.superseded.toLocaleString()},
+              overloaded {health.performance.previewProtocol.interactive.overloaded.toLocaleString()}
+            </span>
+          </div>
+          <div class="row health-row">
+            <span class="name">preview requests / thumbnail</span>
+            <span class="state">
+              wait p95 {formatLatency(health.performance.previewProtocol.thumbnail.queueWaitP95Ms)}
+            </span>
+            <span class="dim">
+              wait mean {formatLatency(health.performance.previewProtocol.thumbnail.meanQueueWaitMs)},
+              p50 {formatLatency(health.performance.previewProtocol.thumbnail.queueWaitP50Ms)},
+              p99 {formatLatency(health.performance.previewProtocol.thumbnail.queueWaitP99Ms)},
+              max {formatLatency(health.performance.previewProtocol.thumbnail.maxQueueWaitMs)};
+              service mean {formatLatency(health.performance.previewProtocol.thumbnail.meanServiceMs)},
+              p50 {formatLatency(health.performance.previewProtocol.thumbnail.serviceP50Ms)},
+              p95 {formatLatency(health.performance.previewProtocol.thumbnail.serviceP95Ms)},
+              p99 {formatLatency(health.performance.previewProtocol.thumbnail.serviceP99Ms)},
+              max {formatLatency(health.performance.previewProtocol.thumbnail.maxServiceMs)};
+              accepted {health.performance.previewProtocol.thumbnail.accepted.toLocaleString()},
+              completed {health.performance.previewProtocol.thumbnail.completed.toLocaleString()},
+              superseded {health.performance.previewProtocol.thumbnail.superseded.toLocaleString()},
+              overloaded {health.performance.previewProtocol.thumbnail.overloaded.toLocaleString()}
+            </span>
+          </div>
         </details>
       {/if}
     {:else if healthError !== null}
@@ -1383,7 +1825,7 @@
     </div>
   </section>
 
-  <section>
+  <section hidden={activeTab !== "system"}>
     <h2>Application updates</h2>
     {#if updates === null}
       <p class="dim">Loading update configuration...</p>
@@ -1450,7 +1892,7 @@
 
   <!-- 4. Export and full-state recovery. Journal export is the open-format
        portability path; .ppbackup is the exact installed-app state path. -->
-  <section>
+  <section hidden={activeTab !== "system"}>
     <h2>Export and recovery</h2>
     <p class="dim">
       Journal export includes sidecars, collections, saved topic phrases, and topic notes. A
@@ -1521,7 +1963,7 @@
        reset for the local, machine-observed dwell telemetry. The annotation
        journal (your own words/marks) is never touched. No em-dashes in the
        copy (gate: check:emdash). -->
-  <section>
+  <section hidden={activeTab !== "system"}>
     <h2>Attention data</h2>
     <p class="dim">
       The heatmap records where you put attention (what you open and mark),
@@ -1580,6 +2022,43 @@
     align-items: center;
     padding: 2px 6px;
   }
+  .settings-tabs {
+    position: sticky;
+    top: 28px;
+    z-index: 9;
+    display: flex;
+    gap: 2px;
+    margin: 0 -18px;
+    padding: 6px 18px 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--chrome);
+  }
+  .settings-tab {
+    position: relative;
+    min-width: 76px;
+    padding: 6px 10px 7px;
+    border: none;
+    border-radius: 4px 4px 0 0;
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .settings-tab:hover {
+    background: var(--bg-raised);
+    color: var(--text);
+  }
+  .settings-tab.active {
+    color: var(--text);
+    background: var(--bg-raised);
+  }
+  .settings-tab.active::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: -1px;
+    height: 2px;
+    background: var(--focus);
+  }
   .boot-state,
   .action-state {
     display: flex;
@@ -1612,6 +2091,34 @@
   .settings-body.blocked {
     opacity: 0.45;
   }
+  .tab-description {
+    margin: 8px 2px 0;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .issue-row {
+    margin: 8px 0 12px;
+    padding: 7px 0 7px 10px;
+    border-left: 2px solid var(--status-warning);
+  }
+  .issue-row.tone-danger {
+    border-left-color: var(--status-danger);
+  }
+  .issue-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+  .issue-content strong {
+    color: var(--text);
+    font-size: 12px;
+  }
+  .issue-content p {
+    margin: 3px 0 0;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
   /* The offline mark rides the text line — flex keeps it on the midline. */
   .state {
     display: inline-flex;
@@ -1622,6 +2129,9 @@
     margin-top: 18px;
     padding-top: 10px;
     border-top: 1px solid var(--chrome);
+  }
+  section[hidden] {
+    display: none;
   }
   h2 {
     font-size: 13px;
@@ -1704,11 +2214,191 @@
     font-size: 11px;
     color: var(--text-faint);
   }
-  .row.license {
-    margin: -4px 0 10px;
+  .model-options-toggle {
+    margin: 4px 0 2px;
+  }
+  .model-groups {
+    margin-top: 4px;
+  }
+  .model-group {
+    margin-top: 18px;
+  }
+  .model-group-heading {
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--chrome-strong);
+  }
+  .model-group-heading h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+  .model-group-heading p {
+    margin: 3px 0 0;
+    color: var(--text-dim);
     font-size: 11px;
   }
-  .row.license a {
+  .model-item {
+    padding: 13px 2px 11px;
+    border-bottom: 1px solid var(--chrome);
+  }
+  .model-row-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+  .model-heading {
+    min-width: 0;
+  }
+  .model-title-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+  }
+  .model-title-line h4 {
+    margin: 0;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 650;
+  }
+  .model-heading code {
+    display: block;
+    margin-top: 3px;
+    overflow: hidden;
     color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-badge {
+    color: var(--text-faint);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    line-height: 1.6;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .model-status {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-faint);
+  }
+  .model-status.tone-ready {
+    color: var(--status-ready);
+  }
+  .model-status.tone-ready .status-dot {
+    background: var(--status-ready);
+  }
+  .model-status.tone-working {
+    color: var(--status-working);
+  }
+  .model-status.tone-working .status-dot {
+    background: var(--status-working);
+  }
+  .model-status.tone-warning {
+    color: var(--status-warning);
+  }
+  .model-status.tone-warning .status-dot {
+    background: var(--status-warning);
+  }
+  .model-status.tone-danger {
+    color: var(--status-danger);
+  }
+  .model-status.tone-danger .status-dot {
+    background: var(--status-danger);
+  }
+  .model-purpose {
+    margin: 7px 0 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .model-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    color: var(--text-faint);
+    font-size: 11px;
+  }
+  .model-meta span:not(:last-child)::after {
+    content: "·";
+    margin-left: 5px;
+  }
+  .model-progress {
+    display: grid;
+    gap: 7px;
+    margin-top: 12px;
+    padding-left: 10px;
+    border-left: 2px solid var(--status-working);
+  }
+  .download-copy {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .download-copy strong {
+    color: var(--status-working);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .model-runtime {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+    color: var(--status-ready);
+    font-size: 11px;
+  }
+  .model-note,
+  .model-warning,
+  .model-error {
+    margin: 10px 0 0;
+    padding: 2px 0 2px 9px;
+    border-left: 2px solid currentColor;
+    font-size: 11px;
+  }
+  .model-note {
+    color: var(--text-dim);
+  }
+  .model-warning {
+    color: var(--status-warning);
+  }
+  .model-error {
+    color: var(--status-danger);
+  }
+  .model-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 12px;
+  }
+  .model-confirm {
+    margin: 10px 0 0;
+  }
+  .model-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+    color: var(--text-faint);
+    font-size: 10px;
+  }
+  .model-footer a {
+    color: var(--text-dim);
   }
 </style>

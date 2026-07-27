@@ -19,6 +19,7 @@
   import * as layout from "../../logic/gridlayout";
   import * as marquee from "../../logic/marquee";
   import * as stacks from "../../logic/stacks";
+  import { GridJourneyTracker } from "../../logic/gridjourney";
   import { infoStripHeight } from "../../logic/cellinfo";
   import { THUMB_STEPS } from "../../logic/sort";
   import { PreviewPrioritizer } from "../../logic/previewprioritize";
@@ -49,7 +50,37 @@
   const links = $derived(stacks.expandedLinks(ui.grid.stackModel, geom.cols));
   const totalHeight = $derived(layout.totalHeight(geom, units.length));
   const range = $derived(layout.visibleRange(geom, scrollTop, vh, units.length));
+  const viewportRange = $derived(layout.viewportRange(geom, scrollTop, vh, units.length));
   const poolSize = $derived(layout.poolSize(geom, vh));
+
+  // A viewport change is measured only after a short scroll quiet-window.
+  // First-paint means the first true-viewport <img> decoded; settle means every
+  // image in that measured viewport decoded. A three-minute ceiling records a
+  // failed settle instead of leaving a fresh-RAW journey silently unfinished.
+  const VIEWPORT_MEASURE_DEBOUNCE_MS = 120;
+  const VIEWPORT_MEASURE_TIMEOUT_MS = 180_000;
+  const viewportJourney = new GridJourneyTracker();
+  let viewportMeasurementGeneration = $state(0);
+  let viewportMeasureDebounce: ReturnType<typeof setTimeout> | undefined;
+  let viewportMeasureTimeout: ReturnType<typeof setTimeout> | undefined;
+
+  function recordGridEvents(
+    events: ReturnType<GridJourneyTracker["loaded"]>,
+  ) {
+    for (const event of events) {
+      ipc.recordPerformance(
+        "grid",
+        event.phase,
+        event.durationMs,
+        event.ok,
+        { itemCount: event.itemCount },
+      );
+    }
+  }
+
+  function onPreviewLoad(hash: string, generation: number) {
+    recordGridEvents(viewportJourney.loaded(hash, generation, performance.now()));
+  }
 
   interface Slot {
     key: number;
@@ -84,17 +115,40 @@
       // order; the thumb still heals off `previews-changed`. Never blocks the UI.
     });
   });
-  // `range` (visible window) and `units` (re-list / re-pair) drive this; the
-  // visible slice is the only scope the user is looking at, so we never
-  // prioritize an offscreen scope. A scope swap replaces `units`, producing a
-  // fresh window and a fresh send.
+  // Promote the TRUE viewport, not the mounted range: `range` includes a full
+  // screen of DOM overscan on each side. Those runway cells may load lazily,
+  // but they must never compete with what the user can see now. A scope swap
+  // replaces `units`, producing a fresh window and a fresh send.
   $effect(() => {
-    const visible = units.slice(range.start, range.end);
+    const visible = units.slice(viewportRange.start, viewportRange.end);
     prioritizer.notify(visible);
   });
   $effect(() => {
+    const visibleHashes = units
+      .slice(viewportRange.start, viewportRange.end)
+      .map((unit) => unit.primary.hash);
+    clearTimeout(viewportMeasureDebounce);
+    clearTimeout(viewportMeasureTimeout);
+    if (visibleHashes.length === 0) {
+      viewportJourney.cancel();
+      return;
+    }
+    viewportMeasureDebounce = setTimeout(() => {
+      const generation = viewportJourney.begin(visibleHashes, performance.now());
+      viewportMeasurementGeneration = generation;
+      viewportMeasureTimeout = setTimeout(() => {
+        recordGridEvents(viewportJourney.timeout(generation, performance.now()));
+      }, VIEWPORT_MEASURE_TIMEOUT_MS);
+    }, VIEWPORT_MEASURE_DEBOUNCE_MS);
+  });
+  $effect(() => {
     // Cancel the debounce + forget the last-sent set when the grid unmounts.
-    return () => prioritizer.reset();
+    return () => {
+      prioritizer.reset();
+      viewportJourney.cancel();
+      clearTimeout(viewportMeasureDebounce);
+      clearTimeout(viewportMeasureTimeout);
+    };
   });
 
   // ---- scroll anchor (featureset §1: position preserved) --------------------
@@ -324,6 +378,7 @@
       <div class="cell" style:transform="translate({pos.x + dx}px, {pos.y}px)">
         <Thumb
           hash={unit.primary.hash}
+          highPriority={s.idx >= viewportRange.start && s.idx < viewportRange.end}
           previewReady={unit.primary.previewReady ?? true}
           previewPing={ui.grid.previewPing}
           hasJournal={unit.primary.hasJournal}
@@ -337,6 +392,8 @@
           size={geom.cell}
           infoStrip={geom.info}
           intensity={ui.heatOn ? (ui.grid.intensity.get(unit.primary.hash) ?? 0) : 0}
+          measurementGeneration={viewportMeasurementGeneration}
+          onpreviewload={onPreviewLoad}
           onpointerselect={(e) => onThumbClick(unit.primary.hash, e)}
           onopen={onThumbOpen}
           onstacktoggle={() => onChevron(unit.primary.hash)}

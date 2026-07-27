@@ -197,18 +197,32 @@ impl ModelOperationRegistry {
 
             // Complete but unindexed model directories are deliberately not
             // adopted when the index itself was sound: that disagreement may
-            // be a crashed/abandoned install and requires Verify.
+            // be a crashed/abandoned install and requires Verify. Ignore an
+            // EMPTY directory entirely (download/bootstrap code may create the
+            // destination before transferring its first byte), and explain an
+            // actually-partial layout with the first missing/wrong artifact
+            // instead of the generic "absent from installed.json" message.
             for model in &manifest.models {
                 if !installed.contains_key(&model.id)
                     && models_dir.join(&model.id).is_dir()
                     && !disagreements.contains_key(&model.id)
                 {
-                    disagreements.insert(
-                        model.id.clone(),
-                        "model directory exists but is absent from installed.json; Verify to adopt \
-                         manifest-valid files or discard the partial download"
-                            .into(),
-                    );
+                    let downloaded = manager.downloaded_bytes(model);
+                    if downloaded == 0 {
+                        continue;
+                    }
+                    let detail = match verify_layout(&models_dir, model) {
+                        Ok(()) => {
+                            "model files are complete but not yet trusted; Verify model to validate \
+                             checksums and adopt them"
+                                .into()
+                        }
+                        Err(error) => format!(
+                            "partial model download: {error}; resume Download or discard the \
+                             partial files"
+                        ),
+                    };
+                    disagreements.insert(model.id.clone(), detail);
                 }
             }
         }
@@ -737,6 +751,42 @@ mod tests {
         let durable: BTreeMap<String, InstalledRecord> =
             serde_json::from_slice(&std::fs::read(models.join("installed.json")).unwrap()).unwrap();
         assert_eq!(durable, registry.installed());
+    }
+
+    #[test]
+    fn empty_unindexed_model_directory_is_not_a_health_disagreement() {
+        let temp = tempfile::tempdir().unwrap();
+        let models = temp.path().join("models");
+        std::fs::create_dir_all(models.join("good")).unwrap();
+        let manifest = manifest(b"immutable");
+        // A sound (but empty) index distinguishes this from missing-index
+        // recovery: the only filesystem evidence is the empty destination
+        // directory a downloader/bootstrap may create before its first byte.
+        std::fs::write(models.join("installed.json"), b"{}").unwrap();
+
+        let registry = ModelOperationRegistry::open(models, &manifest, RuntimeBus::new(), true);
+
+        assert_eq!(registry.partial_bytes("good"), 0);
+        assert_eq!(registry.disagreement("good"), None);
+    }
+
+    #[test]
+    fn partial_unindexed_model_names_the_missing_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let models = temp.path().join("models");
+        std::fs::create_dir_all(models.join("good")).unwrap();
+        // A final-path artifact proves this is real partial payload, but its
+        // wrong size makes the actionable layout failure deterministic.
+        std::fs::write(models.join("good/weights.bin"), b"short").unwrap();
+        std::fs::write(models.join("installed.json"), b"{}").unwrap();
+        let manifest = manifest(b"immutable");
+
+        let registry = ModelOperationRegistry::open(models, &manifest, RuntimeBus::new(), true);
+
+        let disagreement = registry.disagreement("good").unwrap();
+        assert!(disagreement.contains("partial model download"));
+        assert!(disagreement.contains("weights.bin"));
+        assert!(disagreement.contains("resume Download or discard"));
     }
 
     #[test]

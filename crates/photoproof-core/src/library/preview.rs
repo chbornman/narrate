@@ -74,6 +74,12 @@ pub enum PreviewError {
     /// Transient (§10.5): I/O, volume offline mid-read.
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    /// Permanent but ordinary: the extension names a RAW container that the
+    /// decoder cannot recognize or support. This is not queue corruption and
+    /// retrying cannot heal it, so the ingest loop settles it as `skipped`
+    /// while leaving the file indexed and visible with a placeholder.
+    #[error("unsupported raw: {0}")]
+    UnsupportedRaw(String),
     /// Permanent: corrupt file, unsupported variant.
     #[error("decode: {0}")]
     Decode(String),
@@ -1187,7 +1193,7 @@ impl EmbeddedPreviewExtractor for RawlerExtractor {
     fn extract(&self, path: &Path) -> Result<Option<ExtractedPreview>, PreviewError> {
         let source = rawler::rawsource::RawSource::new(path)?;
         let decoder = rawler::get_decoder(&source)
-            .map_err(|e| PreviewError::Decode(format!("rawler: {e}")))?;
+            .map_err(|e| PreviewError::UnsupportedRaw(format!("rawler: {e}")))?;
         let params = rawler::decoders::RawDecodeParams::default();
         let exif_orientation = decoder
             .raw_metadata(&source, &params)
@@ -1230,8 +1236,11 @@ impl EmbeddedPreviewExtractor for RawlerExtractor {
         let Some(image) = image else {
             return Ok(None);
         };
-        // Sensor dims via the dummy decode (no decompression).
-        let (raw_width, raw_height) = match rawler::decode_dummy(&source) {
+        // Sensor dims via the SAME decoder's dummy decode (no decompression).
+        // `rawler::decode_dummy` asks the global loader to identify and parse
+        // the container a second time. Reusing this decoder avoids that
+        // duplicate camera/container parse on every RAW preview.
+        let (raw_width, raw_height) = match decoder.raw_image(&source, &params, true) {
             Ok(raw) => (
                 u32::try_from(raw.width).ok(),
                 u32::try_from(raw.height).ok(),
@@ -1544,6 +1553,21 @@ mod tests {
         let tiff = synthetic_tiff(&[(b"definitely not jpeg data".to_vec(), None)]);
         let source = rawler::rawsource::RawSource::new_from_slice(&tiff);
         assert!(largest_chained_jpeg(&source).is_none());
+    }
+
+    #[test]
+    fn malformed_raw_container_is_classified_as_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("damaged.raf");
+        std::fs::write(&path, b"not a Fujifilm RAF container").unwrap();
+        let error = match RawlerExtractor.extract(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("malformed extension-based RAW was accepted"),
+        };
+        assert!(
+            matches!(error, PreviewError::UnsupportedRaw(_)),
+            "malformed extension-based RAWs must settle without a decode retry: {error}"
+        );
     }
 
     // ---- 1:1 full-decode cache policy (DESIGN-PREVIEW-POLICY.md) ----------

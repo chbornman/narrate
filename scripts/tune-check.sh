@@ -99,6 +99,14 @@ echo "tune-check: desktop preview-generation budget..." >&2
     --p99-budget-ms "$PREVIEW_GENERATE_P99_MS" \
     --label tune-check --out "$DESKTOP_JSONL" >/dev/null
 
+# Keep the direct catalog fixture and progress/list contention scenario alive
+# in the cheap guard. This is a contract smoke, not the 20k/100k scale claim;
+# scripts/scale-check.sh owns those tiered release measurements.
+echo "tune-check: catalog activity-contention contract smoke..." >&2
+"$BINDIR/pp_bench" activity-contention --catalog-fixture --files 1000 \
+    --passes-per-image 5 --iterations 3 --p99-budget-ms 100 \
+    --label tune-check-contract --out "$DESKTOP_JSONL" >/dev/null
+
 # Compare (or update). The comparator exits non-zero on a regression, which set
 # -e then propagates as this script's exit status — the gate.
 # shellcheck disable=SC2086

@@ -31,13 +31,17 @@
 //! are content-addressed, so every route carries the same immutable cache
 //! headers and the webview's own HTTP cache does the rest.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use photoproof_core::ContentHash;
 use photoproof_core::library::{
     ArtifactKind, ImageFormat, Library, artifact_path, existing_full_artifact, touch_full_artifact,
 };
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -189,9 +193,341 @@ pub fn respond_not_found() -> http::Response<Vec<u8>> {
         .expect("static response")
 }
 
-// ---- bounded serve pool (AUDIT-2026-07-07 F1) -------------------------------
+/// A bounded protocol queue refused or superseded this request before any
+/// filesystem/database work began. The response is deliberately not cached:
+/// mounted grid cells retry through their existing error/backoff path, while
+/// cells recycled away by a fling disappear without leaving stale work behind.
+pub fn respond_overloaded() -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(503)
+        .header("cache-control", "no-store")
+        .header("retry-after", "1")
+        .body(Vec::new())
+        .expect("static response")
+}
 
-type Job = Box<dyn FnOnce() + Send>;
+// ---- bounded priority serve pool --------------------------------------------
+
+/// Scheduling class for one protocol request.
+///
+/// Look's visible display/full-resolution ladder must not sit behind a burst of
+/// grid thumbnails. Micro/thumb requests are intentionally one lower class;
+/// within that class, overload keeps recent requests because they are most
+/// likely to belong to the viewport where a fling settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServePriority {
+    Interactive,
+    Thumbnail,
+}
+
+/// Outcome delivered exactly once to every submitted job. Keeping overload in
+/// the job callback matters for Tauri's one-shot responder: even an evicted
+/// request receives a prompt, explicit 503 instead of being silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeDisposition {
+    Execute,
+    Overloaded,
+}
+
+/// Classify a custom-protocol request from its content-addressed route.
+pub fn priority_for_path(path: &str) -> ServePriority {
+    match parse_path(path) {
+        Some((Route::Artifact(ArtifactKind::Micro | ArtifactKind::Thumb), _)) => {
+            ServePriority::Thumbnail
+        }
+        // The displayed Look image and every deeper source rung are
+        // interactive. Invalid paths are cheap 404s and are kept out of the
+        // thumbnail replacement policy.
+        Some((Route::Artifact(ArtifactKind::Display), _))
+        | Some((Route::Original | Route::Embedded | Route::FullDecode, _))
+        | None => ServePriority::Interactive,
+    }
+}
+
+/// The backend artifact-cache outcome observable at this protocol boundary.
+///
+/// Webview HTTP-cache hits never invoke this handler, so this must not claim
+/// to measure that cache. Micro/thumb/display and full-decode routes do read a
+/// content-addressed backend artifact: 2xx is a hit and 404 is a miss. Original
+/// files and on-demand embedded RAW extraction are not artifact-cache reads.
+/// "Stale" is impossible here because artifact URLs are immutable by hash.
+pub fn backend_cache_status(
+    path: &str,
+    status: http::StatusCode,
+) -> Option<crate::performance::CacheStatus> {
+    match parse_path(path) {
+        Some((Route::Artifact(_), _)) | Some((Route::FullDecode, _)) => {
+            if status.is_success() {
+                Some(crate::performance::CacheStatus::Hit)
+            } else if status == http::StatusCode::NOT_FOUND {
+                Some(crate::performance::CacheStatus::Miss)
+            } else {
+                None
+            }
+        }
+        Some((Route::Original | Route::Embedded, _)) | None => None,
+    }
+}
+
+type JobCallback = Box<dyn FnOnce(ServeDisposition) + Send>;
+
+struct Job {
+    priority: ServePriority,
+    enqueued_at: Instant,
+    callback: JobCallback,
+}
+
+struct ServeQueue {
+    interactive: VecDeque<Job>,
+    thumbnails: VecDeque<Job>,
+    closed: bool,
+}
+
+impl ServeQueue {
+    fn len(&self) -> usize {
+        self.interactive.len() + self.thumbnails.len()
+    }
+
+    fn next(&mut self) -> Option<Job> {
+        self.interactive
+            .pop_front()
+            .or_else(|| self.thumbnails.pop_front())
+    }
+}
+
+struct SharedQueue {
+    state: Mutex<ServeQueue>,
+    ready: Condvar,
+    capacity: usize,
+    metrics: ServeMetrics,
+}
+
+#[derive(Default)]
+struct PriorityMetrics {
+    accepted: AtomicU64,
+    completed: AtomicU64,
+    overloaded: AtomicU64,
+    superseded: AtomicU64,
+    queue_wait_ns: AtomicU64,
+    max_queue_wait_ns: AtomicU64,
+    queue_wait_histogram: LatencyHistogram,
+    service_ns: AtomicU64,
+    max_service_ns: AtomicU64,
+    service_histogram: LatencyHistogram,
+}
+
+// Conservative upper bounds. The final bucket uses the observed maximum so
+// even pathological stalls remain finite and truthful in Application Health.
+const LATENCY_BUCKET_UPPER_NS: [u64; 21] = [
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_000_000,
+    5_000_000,
+    10_000_000,
+    25_000_000,
+    50_000_000,
+    100_000_000,
+    250_000_000,
+    500_000_000,
+    1_000_000_000,
+    2_000_000_000,
+    5_000_000_000,
+    10_000_000_000,
+    60_000_000_000,
+    u64::MAX,
+];
+
+struct LatencyHistogram {
+    buckets: [AtomicU64; LATENCY_BUCKET_UPPER_NS.len()],
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    fn record(&self, duration_ns: u64) {
+        let bucket = LATENCY_BUCKET_UPPER_NS
+            .partition_point(|upper| duration_ns > *upper)
+            .min(LATENCY_BUCKET_UPPER_NS.len() - 1);
+        // Publish total/max updates made before this sample is visible to an
+        // Acquire snapshot of the bucket.
+        self.buckets[bucket].fetch_add(1, Ordering::Release);
+    }
+
+    fn percentile_ms(&self, quantile: f64, observed_max_ns: u64) -> Option<f64> {
+        let counts = self
+            .buckets
+            .each_ref()
+            .map(|bucket| bucket.load(Ordering::Acquire));
+        let total = counts.iter().copied().sum::<u64>();
+        if total == 0 {
+            return None;
+        }
+        let rank = (quantile * total as f64).ceil().max(1.0) as u64;
+        let mut cumulative = 0u64;
+        for (index, count) in counts.into_iter().enumerate() {
+            cumulative = cumulative.saturating_add(count);
+            if cumulative >= rank {
+                let upper_ns = LATENCY_BUCKET_UPPER_NS[index];
+                let conservative_ns = if upper_ns == u64::MAX {
+                    observed_max_ns
+                } else {
+                    upper_ns
+                };
+                return Some(conservative_ns as f64 / 1_000_000.0);
+            }
+        }
+        Some(observed_max_ns as f64 / 1_000_000.0)
+    }
+}
+
+#[derive(Default)]
+struct ServeMetrics {
+    interactive: PriorityMetrics,
+    thumbnail: PriorityMetrics,
+    queued: AtomicUsize,
+    peak_queued: AtomicUsize,
+    running: AtomicUsize,
+    peak_running: AtomicUsize,
+}
+
+impl ServeMetrics {
+    fn priority(&self, priority: ServePriority) -> &PriorityMetrics {
+        match priority {
+            ServePriority::Interactive => &self.interactive,
+            ServePriority::Thumbnail => &self.thumbnail,
+        }
+    }
+
+    fn set_queued(&self, queued: usize) {
+        self.queued.store(queued, Ordering::Relaxed);
+        self.peak_queued.fetch_max(queued, Ordering::Relaxed);
+    }
+
+    fn started(&self, job: &Job) -> u64 {
+        let wait_ns = duration_ns(job.enqueued_at.elapsed());
+        let running = self.running.fetch_add(1, Ordering::Relaxed) + 1;
+        self.peak_running.fetch_max(running, Ordering::Relaxed);
+        wait_ns
+    }
+
+    fn completed(&self, priority: ServePriority, queue_wait_ns: u64, service: Duration) {
+        let metrics = self.priority(priority);
+        let service_ns = duration_ns(service);
+        metrics
+            .queue_wait_ns
+            .fetch_add(queue_wait_ns, Ordering::Relaxed);
+        metrics
+            .max_queue_wait_ns
+            .fetch_max(queue_wait_ns, Ordering::Relaxed);
+        metrics.queue_wait_histogram.record(queue_wait_ns);
+        metrics.service_ns.fetch_add(service_ns, Ordering::Relaxed);
+        metrics
+            .max_service_ns
+            .fetch_max(service_ns, Ordering::Relaxed);
+        metrics.service_histogram.record(service_ns);
+        // Release publishes both latency samples before completion is visible.
+        metrics.completed.fetch_add(1, Ordering::Release);
+        self.running.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// Low-overhead, process-lifetime request accounting for one scheduling class.
+/// Queue wait spans admission to worker dequeue. Service spans the worker-held
+/// callback, including byte serving, the existing local telemetry append, and
+/// resolving Tauri's responder—the time that actually occupies pool capacity.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServePrioritySnapshot {
+    pub accepted: u64,
+    pub completed: u64,
+    pub overloaded: u64,
+    pub superseded: u64,
+    pub mean_queue_wait_ms: f64,
+    pub queue_wait_p50_ms: Option<f64>,
+    pub queue_wait_p95_ms: Option<f64>,
+    pub queue_wait_p99_ms: Option<f64>,
+    pub max_queue_wait_ms: f64,
+    pub mean_service_ms: f64,
+    pub service_p50_ms: Option<f64>,
+    pub service_p95_ms: Option<f64>,
+    pub service_p99_ms: Option<f64>,
+    pub max_service_ms: f64,
+}
+
+impl ServePrioritySnapshot {
+    fn load(metrics: &PriorityMetrics) -> Self {
+        let completed = metrics.completed.load(Ordering::Acquire);
+        let mean_ms = |total_ns: u64| {
+            if completed == 0 {
+                0.0
+            } else {
+                total_ns as f64 / completed as f64 / 1_000_000.0
+            }
+        };
+        let max_queue_wait_ns = metrics.max_queue_wait_ns.load(Ordering::Relaxed);
+        let max_service_ns = metrics.max_service_ns.load(Ordering::Relaxed);
+        Self {
+            accepted: metrics.accepted.load(Ordering::Relaxed),
+            completed,
+            overloaded: metrics.overloaded.load(Ordering::Relaxed),
+            superseded: metrics.superseded.load(Ordering::Relaxed),
+            mean_queue_wait_ms: mean_ms(metrics.queue_wait_ns.load(Ordering::Relaxed)),
+            queue_wait_p50_ms: metrics
+                .queue_wait_histogram
+                .percentile_ms(0.50, max_queue_wait_ns),
+            queue_wait_p95_ms: metrics
+                .queue_wait_histogram
+                .percentile_ms(0.95, max_queue_wait_ns),
+            queue_wait_p99_ms: metrics
+                .queue_wait_histogram
+                .percentile_ms(0.99, max_queue_wait_ns),
+            max_queue_wait_ms: max_queue_wait_ns as f64 / 1_000_000.0,
+            mean_service_ms: mean_ms(metrics.service_ns.load(Ordering::Relaxed)),
+            service_p50_ms: metrics
+                .service_histogram
+                .percentile_ms(0.50, max_service_ns),
+            service_p95_ms: metrics
+                .service_histogram
+                .percentile_ms(0.95, max_service_ns),
+            service_p99_ms: metrics
+                .service_histogram
+                .percentile_ms(0.99, max_service_ns),
+            max_service_ms: max_service_ns as f64 / 1_000_000.0,
+        }
+    }
+}
+
+/// Scheduler truth surfaced through Application Health. Counters are
+/// process-lifetime totals; current gauges and peaks cover queued callbacks
+/// and actively occupied fixed workers.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServePoolSnapshot {
+    pub initialized: bool,
+    pub workers: usize,
+    pub queue_capacity: usize,
+    pub queued: usize,
+    pub peak_queued: usize,
+    pub running: usize,
+    pub peak_running: usize,
+    pub interactive: ServePrioritySnapshot,
+    pub thumbnail: ServePrioritySnapshot,
+}
 
 /// Fixed-size worker pool the `photoproof://` protocol registration runs
 /// `serve` on.
@@ -200,52 +536,85 @@ type Job = Box<dyn FnOnce() + Send>;
 /// fling-scroll over a large grid burst dozens-to-hundreds of transient OS
 /// threads, every one doing blocking `std::fs::read` — all competing for the
 /// filesystem and (on the /original, /embedded, and /full-decode routes) the
-/// library's db lock. A fixed pool turns that burst into a FIFO queue:
-/// thread count stays constant, requests keep their arrival order (the
-/// viewport-first ordering the frontend already establishes server-side),
-/// and backpressure is the queue — not the OS scheduler.
+/// library's db lock. The first fix made the workers fixed but left their FIFO
+/// queue unbounded, so obsolete fling requests could still delay the settled
+/// viewport and Look.
+///
+/// This pool bounds both resources. Interactive Look routes always dequeue
+/// before thumbnails. When the queue is full, a new thumbnail supersedes the
+/// oldest queued thumbnail (latest viewport approximation); an interactive
+/// request also displaces the oldest queued thumbnail. If the queue is full of
+/// interactive work, the new request receives overload instead. Running jobs
+/// are never interrupted, preserving response correctness.
 pub struct ServePool {
-    tx: mpsc::Sender<Job>,
+    shared: Arc<SharedQueue>,
     workers: usize,
 }
 
 impl ServePool {
     fn new(workers: usize) -> Self {
-        let (tx, rx) = mpsc::channel::<Job>();
-        // The workers share one receiver behind a mutex (std::sync::mpsc is
-        // single-consumer). Only the DEQUEUE is serialized: the guard drops
-        // at the end of the match arm, before the job runs, so the jobs
-        // themselves execute in parallel across the pool.
-        let rx = Arc::new(Mutex::new(rx));
+        // Sixteen queued reads per worker absorbs ordinary layout churn while
+        // placing a hard ceiling under a sustained fling. The process pool is
+        // clamped to 2..8 workers, so this is 32..128 queued callbacks.
+        Self::new_with_capacity(workers, workers.saturating_mul(16).max(1))
+    }
+
+    fn new_with_capacity(workers: usize, capacity: usize) -> Self {
+        assert!(workers > 0, "protocol pool needs at least one worker");
+        assert!(capacity > 0, "protocol queue needs at least one slot");
+        let shared = Arc::new(SharedQueue {
+            state: Mutex::new(ServeQueue {
+                interactive: VecDeque::new(),
+                thumbnails: VecDeque::new(),
+                closed: false,
+            }),
+            ready: Condvar::new(),
+            capacity,
+            metrics: ServeMetrics::default(),
+        });
         for i in 0..workers {
-            let rx = Arc::clone(&rx);
+            let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name(format!("pp-protocol-{i}"))
                 .spawn(move || {
                     loop {
-                        let job = match rx.lock() {
-                            Ok(guard) => guard.recv(),
-                            // Poisoned dequeue lock: unreachable short of a
-                            // panic inside `recv` itself; bail rather than
-                            // spin on a broken pool.
-                            Err(_) => break,
+                        let job = {
+                            let Ok(mut queue) = shared.state.lock() else {
+                                break;
+                            };
+                            loop {
+                                if let Some(job) = queue.next() {
+                                    shared.metrics.set_queued(queue.len());
+                                    break Some(job);
+                                }
+                                if queue.closed {
+                                    break None;
+                                }
+                                let Ok(next) = shared.ready.wait(queue) else {
+                                    break None;
+                                };
+                                queue = next;
+                            }
                         };
                         match job {
-                            // catch_unwind so one panicking request cannot
-                            // permanently shrink the FIXED pool — a leaked
-                            // worker here is capacity lost for the whole
-                            // process lifetime.
-                            Ok(job) => {
-                                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                            Some(job) => {
+                                let queue_wait_ns = shared.metrics.started(&job);
+                                let priority = job.priority;
+                                let started = Instant::now();
+                                finish_callback(job.callback, ServeDisposition::Execute);
+                                shared.metrics.completed(
+                                    priority,
+                                    queue_wait_ns,
+                                    started.elapsed(),
+                                );
                             }
-                            // Channel closed (pool dropped): workers retire.
-                            Err(_) => break,
+                            None => break,
                         }
                     }
                 })
                 .expect("spawn photoproof protocol worker");
         }
-        Self { tx, workers }
+        Self { shared, workers }
     }
 
     /// The bound itself — the number of worker threads. Exposed so the
@@ -255,15 +624,112 @@ impl ServePool {
         self.workers
     }
 
-    /// Queue a request job. Never blocks the caller (the webview's protocol
-    /// thread): the channel is unbounded, so a burst QUEUES instead of
-    /// spawning — the bounded resource is threads, which is what F1 was
-    /// leaking. Send only fails if every worker retired, impossible while
-    /// the static pool is alive (jobs are unwind-caught); dropping the job
-    /// then lets the responder surface Tauri's default failure.
-    pub fn run(&self, job: impl FnOnce() + Send + 'static) {
-        let _ = self.tx.send(Box::new(job));
+    /// Maximum number of requests waiting behind the fixed workers.
+    pub fn queue_capacity(&self) -> usize {
+        self.shared.capacity
     }
+
+    pub fn snapshot(&self) -> ServePoolSnapshot {
+        let metrics = &self.shared.metrics;
+        ServePoolSnapshot {
+            initialized: true,
+            workers: self.workers,
+            queue_capacity: self.shared.capacity,
+            queued: metrics.queued.load(Ordering::Relaxed),
+            peak_queued: metrics.peak_queued.load(Ordering::Relaxed),
+            running: metrics.running.load(Ordering::Relaxed),
+            peak_running: metrics.peak_running.load(Ordering::Relaxed),
+            interactive: ServePrioritySnapshot::load(&metrics.interactive),
+            thumbnail: ServePrioritySnapshot::load(&metrics.thumbnail),
+        }
+    }
+
+    /// Submit a request without waiting for filesystem/database serve work.
+    ///
+    /// The callback always runs exactly once: on a worker with `Execute`, or
+    /// promptly inline with `Overloaded` when this request (or an older queued
+    /// thumbnail it supersedes) cannot remain queued. Production overload
+    /// callbacks only resolve the lightweight Tauri responder.
+    pub fn run(
+        &self,
+        priority: ServePriority,
+        job: impl FnOnce(ServeDisposition) + Send + 'static,
+    ) {
+        let mut incoming = Some(Job {
+            priority,
+            enqueued_at: Instant::now(),
+            callback: Box::new(job),
+        });
+        let (rejected, superseded) = match self.shared.state.lock() {
+            Ok(mut queue) if !queue.closed => {
+                let displaced = if queue.len() >= self.shared.capacity {
+                    // Both a newer thumbnail and interactive work supersede
+                    // the oldest still-queued thumbnail. Never evict an
+                    // interactive request in favor of thumbnail work.
+                    queue.thumbnails.pop_front()
+                } else {
+                    None
+                };
+                if queue.len() < self.shared.capacity {
+                    let job = incoming.take().expect("incoming job present");
+                    self.shared
+                        .metrics
+                        .priority(job.priority)
+                        .accepted
+                        .fetch_add(1, Ordering::Relaxed);
+                    match priority {
+                        ServePriority::Interactive => queue.interactive.push_back(job),
+                        ServePriority::Thumbnail => queue.thumbnails.push_back(job),
+                    }
+                    self.shared.metrics.set_queued(queue.len());
+                    self.shared.ready.notify_one();
+                }
+                let superseded = displaced.is_some();
+                (displaced.or(incoming), superseded)
+            }
+            // A poisoned/closed pool must still resolve Tauri's responder.
+            _ => (incoming, false),
+        };
+        if let Some(job) = rejected {
+            let metrics = self.shared.metrics.priority(job.priority);
+            if superseded {
+                // An accepted queued thumbnail was displaced by newer work.
+                metrics.superseded.fetch_add(1, Ordering::Relaxed);
+            } else {
+                // The incoming request could not be admitted.
+                metrics.overloaded.fetch_add(1, Ordering::Relaxed);
+            }
+            finish_callback(job.callback, ServeDisposition::Overloaded);
+        }
+    }
+}
+
+impl Drop for ServePool {
+    fn drop(&mut self) {
+        if let Ok(mut queue) = self.shared.state.lock() {
+            queue.closed = true;
+            // Resolve callbacks that will never reach a worker.
+            let mut rejected: Vec<_> = queue.interactive.drain(..).collect();
+            rejected.extend(queue.thumbnails.drain(..));
+            self.shared.metrics.set_queued(0);
+            self.shared.ready.notify_all();
+            drop(queue);
+            for job in rejected {
+                self.shared
+                    .metrics
+                    .priority(job.priority)
+                    .superseded
+                    .fetch_add(1, Ordering::Relaxed);
+                finish_callback(job.callback, ServeDisposition::Overloaded);
+            }
+        }
+    }
+}
+
+fn finish_callback(job: JobCallback, disposition: ServeDisposition) {
+    // One panicking request (including an overload responder) cannot shrink a
+    // fixed pool or prevent another displaced callback from resolving.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(disposition)));
 }
 
 /// The process-wide pool the protocol registration in `lib.rs` drives — and
@@ -271,25 +737,50 @@ impl ServePool {
 /// concurrent requests through, so the test locks in exactly the mechanism
 /// that ships.
 pub fn serve_pool() -> &'static ServePool {
-    static POOL: OnceLock<ServePool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        // Sized to core count, clamped to [2, 8]: serve is blocking-I/O
-        // dominated (fs::read of small cached WebPs), so a few threads
-        // saturate the disk and more only add FS + db-lock contention. The
-        // floor of 2 keeps a slow /embedded extraction from head-of-line
-        // blocking every thumb on tiny machines; the cap of 8 stops
-        // many-core desktops from re-creating the F1 stampede at pool size.
-        let n = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(4)
-            .clamp(2, 8);
-        ServePool::new(n)
-    })
+    SERVE_POOL.get_or_init(|| ServePool::new(configured_workers()))
+}
+
+/// Read scheduler health without causing Settings/Application Health to start
+/// the worker threads before the first real protocol request.
+pub fn serve_pool_snapshot() -> ServePoolSnapshot {
+    SERVE_POOL.get().map_or_else(
+        || {
+            let workers = configured_workers();
+            ServePoolSnapshot {
+                initialized: false,
+                workers,
+                queue_capacity: workers * 16,
+                queued: 0,
+                peak_queued: 0,
+                running: 0,
+                peak_running: 0,
+                interactive: ServePrioritySnapshot::load(&PriorityMetrics::default()),
+                thumbnail: ServePrioritySnapshot::load(&PriorityMetrics::default()),
+            }
+        },
+        ServePool::snapshot,
+    )
+}
+
+static SERVE_POOL: OnceLock<ServePool> = OnceLock::new();
+
+fn configured_workers() -> usize {
+    // Sized to core count, clamped to [2, 8]: serve is blocking-I/O dominated
+    // (fs::read of small cached WebPs), so a few threads saturate the disk and
+    // more only add FS + db-lock contention. The floor of 2 keeps a slow
+    // /embedded extraction from head-of-line blocking every thumb on tiny
+    // machines; the cap of 8 stops many-core desktops from re-creating the F1
+    // stampede at pool size.
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .clamp(2, 8)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     use photoproof_core::library::{
         EmbeddedPreviewExtractor, ExtractedPreview, FakeVolumeProbe, LibraryOptions,
@@ -300,6 +791,230 @@ mod tests {
 
     fn hash() -> ContentHash {
         ContentHash::from_bytes_of(b"x")
+    }
+
+    #[test]
+    fn route_priority_keeps_look_ahead_of_grid_thumbnails() {
+        let h = hash();
+        for route in ["micro", "thumb"] {
+            assert_eq!(
+                priority_for_path(&format!("/{route}/{}", h.as_str())),
+                ServePriority::Thumbnail
+            );
+        }
+        for route in ["display", "original", "embedded", "full-decode"] {
+            assert_eq!(
+                priority_for_path(&format!("/{route}/{}", h.as_str())),
+                ServePriority::Interactive
+            );
+        }
+        assert_eq!(
+            priority_for_path("/invalid/not-a-hash"),
+            ServePriority::Interactive
+        );
+    }
+
+    #[test]
+    fn overload_response_is_retryable_and_never_cached() {
+        let response = respond_overloaded();
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert!(response.body().is_empty());
+    }
+
+    #[test]
+    fn cache_status_only_describes_backend_artifact_routes() {
+        let h = hash();
+        for route in ["micro", "thumb", "display", "full-decode"] {
+            let path = format!("/{route}/{}", h.as_str());
+            assert_eq!(
+                backend_cache_status(&path, http::StatusCode::OK),
+                Some(crate::performance::CacheStatus::Hit)
+            );
+            assert_eq!(
+                backend_cache_status(&path, http::StatusCode::NOT_FOUND),
+                Some(crate::performance::CacheStatus::Miss)
+            );
+            assert_eq!(
+                backend_cache_status(&path, http::StatusCode::SERVICE_UNAVAILABLE),
+                None
+            );
+        }
+        for route in ["original", "embedded"] {
+            assert_eq!(
+                backend_cache_status(&format!("/{route}/{}", h.as_str()), http::StatusCode::OK),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn latency_histogram_is_empty_until_a_request_completes() {
+        let snapshot = ServePrioritySnapshot::load(&PriorityMetrics::default());
+        assert_eq!(snapshot.queue_wait_p50_ms, None);
+        assert_eq!(snapshot.queue_wait_p95_ms, None);
+        assert_eq!(snapshot.queue_wait_p99_ms, None);
+        assert_eq!(snapshot.service_p50_ms, None);
+        assert_eq!(snapshot.service_p95_ms, None);
+        assert_eq!(snapshot.service_p99_ms, None);
+    }
+
+    #[test]
+    fn latency_histogram_reports_conservative_tail_bounds() {
+        let histogram = LatencyHistogram::default();
+        for duration_ns in [1, 20_000, 600_000, 20_000_000_000] {
+            histogram.record(duration_ns);
+        }
+        assert_eq!(histogram.percentile_ms(0.50, 20_000_000_000), Some(0.025));
+        assert_eq!(
+            histogram.percentile_ms(0.95, 20_000_000_000),
+            Some(60_000.0)
+        );
+        assert_eq!(
+            histogram.percentile_ms(0.99, 20_000_000_000),
+            Some(60_000.0)
+        );
+
+        let overflow = LatencyHistogram::default();
+        overflow.record(61_000_000_000);
+        assert_eq!(
+            overflow.percentile_ms(0.99, 61_000_000_000),
+            Some(61_000.0),
+            "the open-ended bucket reports the observed maximum, not infinity"
+        );
+    }
+
+    /// Occupy the sole worker until the test releases it, making the queued
+    /// ordering/overload behavior deterministic rather than timing-based.
+    fn block_only_worker(pool: &ServePool) -> mpsc::Sender<()> {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        pool.run(ServePriority::Interactive, move |disposition| {
+            assert_eq!(disposition, ServeDisposition::Execute);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker started blocker");
+        release_tx
+    }
+
+    #[test]
+    fn full_thumbnail_queue_supersedes_oldest_work_with_latest() {
+        let pool = ServePool::new_with_capacity(1, 2);
+        let release = block_only_worker(&pool);
+        let (done_tx, done_rx) = mpsc::channel();
+
+        for id in 1..=3 {
+            let done_tx = done_tx.clone();
+            pool.run(ServePriority::Thumbnail, move |disposition| {
+                done_tx.send((id, disposition)).unwrap();
+            });
+        }
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (1, ServeDisposition::Overloaded),
+            "the oldest queued thumbnail is the stale fling work"
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (2, ServeDisposition::Execute)
+        );
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (3, ServeDisposition::Execute)
+        );
+        let snapshot = pool.snapshot();
+        assert_eq!(snapshot.queue_capacity, 2);
+        assert_eq!(snapshot.queued, 0);
+        assert_eq!(snapshot.peak_queued, 2);
+        assert_eq!(snapshot.running, 0);
+        assert_eq!(snapshot.peak_running, 1);
+        assert_eq!(snapshot.thumbnail.accepted, 3);
+        assert_eq!(snapshot.thumbnail.completed, 2);
+        assert_eq!(snapshot.thumbnail.superseded, 1);
+        assert_eq!(snapshot.thumbnail.overloaded, 0);
+        assert!(snapshot.thumbnail.queue_wait_p50_ms.is_some());
+        assert!(snapshot.thumbnail.queue_wait_p95_ms.is_some());
+        assert!(snapshot.thumbnail.queue_wait_p99_ms.is_some());
+        assert!(snapshot.thumbnail.service_p50_ms.is_some());
+        assert!(snapshot.thumbnail.service_p95_ms.is_some());
+        assert!(snapshot.thumbnail.service_p99_ms.is_some());
+        assert!(snapshot.thumbnail.max_queue_wait_ms > 0.0);
+        assert!(snapshot.thumbnail.max_service_ms > 0.0);
+    }
+
+    #[test]
+    fn interactive_request_displaces_thumbnail_and_runs_first() {
+        let pool = ServePool::new_with_capacity(1, 2);
+        let release = block_only_worker(&pool);
+        let (done_tx, done_rx) = mpsc::channel();
+
+        for id in 1..=2 {
+            let done_tx = done_tx.clone();
+            pool.run(ServePriority::Thumbnail, move |disposition| {
+                done_tx.send((id, disposition)).unwrap();
+            });
+        }
+        let done_interactive = done_tx.clone();
+        pool.run(ServePriority::Interactive, move |disposition| {
+            done_interactive.send((9, disposition)).unwrap();
+        });
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (1, ServeDisposition::Overloaded)
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (9, ServeDisposition::Execute),
+            "Look work must dequeue before the remaining thumbnail"
+        );
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (2, ServeDisposition::Execute)
+        );
+        let snapshot = pool.snapshot();
+        assert_eq!(snapshot.interactive.accepted, 2);
+        assert_eq!(snapshot.interactive.completed, 2);
+        assert_eq!(snapshot.thumbnail.accepted, 2);
+        assert_eq!(snapshot.thumbnail.completed, 1);
+        assert_eq!(snapshot.thumbnail.superseded, 1);
+    }
+
+    #[test]
+    fn thumbnail_cannot_displace_a_full_interactive_queue() {
+        let pool = ServePool::new_with_capacity(1, 1);
+        let release = block_only_worker(&pool);
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let interactive_tx = done_tx.clone();
+        pool.run(ServePriority::Interactive, move |disposition| {
+            interactive_tx.send((1, disposition)).unwrap();
+        });
+        pool.run(ServePriority::Thumbnail, move |disposition| {
+            done_tx.send((2, disposition)).unwrap();
+        });
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (2, ServeDisposition::Overloaded)
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (1, ServeDisposition::Execute)
+        );
+        let snapshot = pool.snapshot();
+        assert_eq!(snapshot.thumbnail.accepted, 0);
+        assert_eq!(snapshot.thumbnail.completed, 0);
+        assert_eq!(snapshot.thumbnail.overloaded, 1);
+        assert_eq!(snapshot.thumbnail.superseded, 0);
     }
 
     #[test]

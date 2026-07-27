@@ -254,9 +254,14 @@ export class ShellSlice {
     prefs.saveUiZoom(this.uiZoom);
   }
 
+  setUiZoom(factor: number) {
+    if (!(prefs.UI_ZOOM_STEPS as readonly number[]).includes(factor)) return;
+    this.uiZoom = factor;
+    prefs.saveUiZoom(factor);
+  }
+
   resetUiZoom() {
-    this.uiZoom = 1;
-    prefs.saveUiZoom(1);
+    this.setUiZoom(1);
   }
 
   /** Switch the rail tab (pointer on the tab strip). Keyboard focus stays

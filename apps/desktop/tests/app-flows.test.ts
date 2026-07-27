@@ -9,11 +9,12 @@
  * and the rail's add-root picker flow (founder dogfood, rounds 1+2).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GridItem, RootDto, ScopeView } from "../src/lib/types/dto";
+import type { FolderDelta, GridItem, RootDto, ScopeView } from "../src/lib/types/dto";
 
 const ipcLog = vi.hoisted(() => ({
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   failAddRoot: false,
+  folderDelta: null as FolderDelta | null,
 }));
 
 /** The OS folder picker (rail "Add folder…"): null = user cancelled. */
@@ -62,6 +63,16 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "list_roots":
       case "list_archived_roots":
         return [];
+      case "list_folder_delta":
+        return (
+          ipcLog.folderDelta ?? {
+            fromRevision: Number(args?.sinceRevision ?? 0),
+            toRevision: Number(args?.sinceRevision ?? 0) + 1,
+            reset: false,
+            upserts: [],
+            removedHashes: [],
+          }
+        );
       case "ingest_status":
         return { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0 };
       case "search":
@@ -127,6 +138,7 @@ let ui: Ui;
 beforeEach(() => {
   ipcLog.calls.length = 0;
   ipcLog.failAddRoot = false;
+  ipcLog.folderDelta = null;
   dialog.nextDir = null;
   localStorage.clear();
   ui = new Ui();
@@ -484,7 +496,7 @@ describe("ingest empty-state honesty (founder incident, June 2026)", () => {
   });
 });
 
-describe("mid-scan grid re-list — Seam 1 imagesVersion handshake (P2)", () => {
+describe("mid-scan incremental grid catch-up — Seam 1 imagesVersion handshake", () => {
   // The grid moved off the old 2 s wall-clock throttle + App.svelte's redundant
   // setInterval onto the `imagesVersion` data-version contract: re-list when,
   // and only when, the image-set version ADVANCES (a NEW image committed),
@@ -512,11 +524,11 @@ describe("mid-scan grid re-list — Seam 1 imagesVersion handshake (P2)", () => 
     journalVersion: 0,
   });
 
-  it("re-lists when imagesVersion advances (debounced) and NOT on an unrelated event", async () => {
+  it("requests a folder delta when imagesVersion advances and does no work on an unrelated event", async () => {
     const ui2 = new Ui();
     ui2.grid.rootId = "R1";
     ui2.grid.folder = "";
-    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder").length;
+    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder_delta").length;
     const before = calls();
 
     // First event seeds the baseline version — no re-list on a first sighting.
@@ -538,11 +550,11 @@ describe("mid-scan grid re-list — Seam 1 imagesVersion handshake (P2)", () => 
     expect(calls()).toBe(before + 1); // unchanged: no false refresh
   });
 
-  it("coalesces a burst of advances into ONE re-list", async () => {
+  it("coalesces a burst of advances into one delta request", async () => {
     const ui2 = new Ui();
     ui2.grid.rootId = "R1";
     ui2.grid.folder = "";
-    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder").length;
+    const calls = () => ipcLog.calls.filter((c) => c.cmd === "list_folder_delta").length;
     const before = calls();
 
     await ui2.onIngestProgress(status({ running: true, imagesVersion: 0 })); // seed
@@ -552,6 +564,26 @@ describe("mid-scan grid re-list — Seam 1 imagesVersion handshake (P2)", () => 
     expect(calls()).toBe(before); // all coalesced, still pending
     await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS);
     expect(calls()).toBe(before + 1); // the burst collapsed to a single re-list
+  });
+
+  it("applies delta upserts without replacing the stable ingest order", async () => {
+    const ui2 = new Ui();
+    ui2.grid.rootId = "R1";
+    ui2.grid.folder = "";
+    ui2.grid.setItems([item("a"), item("b")]);
+    ipcLog.folderDelta = {
+      fromRevision: 0,
+      toRevision: 7,
+      reset: false,
+      upserts: [item("c")],
+      removedHashes: [],
+    };
+
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 0 }));
+    await ui2.onIngestProgress(status({ running: true, imagesVersion: 1 }));
+    await vi.advanceTimersByTimeAsync(INGEST_RELIST_DEBOUNCE_MS);
+    expect(ui2.grid.items.map((entry) => entry.hash)).toEqual(["a", "b", "c"]);
+    expect(lastCall("list_folder_delta")?.args?.sinceRevision).toBe(0);
   });
 
   it("the running→idle edge re-lists immediately and cancels any pending debounce", async () => {

@@ -96,11 +96,30 @@ pub struct HealthAction {
 pub struct PerformanceHealth {
     pub journeys: crate::performance::PerformanceSnapshot,
     pub ingest_stages: Vec<IngestStagePerformance>,
+    pub preview_protocol: crate::protocol::ServePoolSnapshot,
+    /// Fixed-label shared-catalog timings. `.wait` series measure only mutex
+    /// acquisition; `.operation` begins after the SQLite lane is held.
+    pub catalog_lanes: Vec<CatalogLanePerformance>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStagePerformance {
+    pub stage: &'static str,
+    pub count: u64,
+    pub total_ms: f64,
+    pub mean_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogLanePerformance {
+    /// Closed, compile-time vocabulary such as `folder_list.wait`; never a
+    /// path, root id, hash, SQL string, or other user-derived value.
     pub stage: &'static str,
     pub count: u64,
     pub total_ms: f64,
@@ -419,11 +438,27 @@ fn build_application_health(
         repair_integrity,
         performance: PerformanceHealth {
             journeys,
+            preview_protocol: crate::protocol::serve_pool_snapshot(),
             ingest_stages: app
                 .library
                 .metrics_snapshot()
                 .into_iter()
                 .map(|stage| IngestStagePerformance {
+                    stage: stage.stage,
+                    count: stage.count,
+                    total_ms: stage.total_ms,
+                    mean_ms: stage.mean_ms,
+                    p50_ms: stage.p50_ms,
+                    p95_ms: stage.p95_ms,
+                    p99_ms: stage.p99_ms,
+                    max_ms: stage.max_ms,
+                })
+                .collect(),
+            catalog_lanes: app
+                .library
+                .catalog_metrics_snapshot()
+                .into_iter()
+                .map(|stage| CatalogLanePerformance {
                     stage: stage.stage,
                     count: stage.count,
                     total_ms: stage.total_ms,
@@ -915,26 +950,42 @@ fn runtime_issues(observed_at_ms: u64, runtime: &RuntimeStatus, issues: &mut Vec
     for model in runtime
         .models
         .iter()
-        .filter(|model| model.error.is_some() || model.registry_error.is_some())
+        // A pre-existing partial-layout disagreement remains useful registry
+        // history while Download is repairing it. It is not a current health
+        // failure during the active queued/download/verify/install lifecycle:
+        // surfacing both at once produced the contradictory UI
+        // "downloading" + "needs verification / Resume download".
+        .filter(|model| {
+            model.operation.is_none() && (model.error.is_some() || model.registry_error.is_some())
+        })
     {
         let error = model
             .registry_error
             .clone()
             .or_else(|| model.error.clone())
             .expect("filtered model error");
+        let title = if model.state == "installed" {
+            format!("{} needs verification", model.id)
+        } else if model.downloaded_bytes > 0 {
+            format!("{} download is incomplete", model.id)
+        } else {
+            format!("{} download failed", model.id)
+        };
         issues.push(HealthIssue {
             id: format!("model:{}", model.id),
             subsystem: "models",
-            title: format!("{} needs verification", model.id),
+            title,
             blocking: false,
             summary: error.clone(),
             last_error: Some(error),
             last_error_at_ms: Some(observed_at_ms),
-            action: HealthAction {
-                kind: "verify-model",
-                label: "Verify model",
-                target_id: Some(model.id.clone()),
-            },
+            action: model_recovery_action(
+                &model.id,
+                &model.state,
+                model.downloaded_bytes,
+                model.acceptance_required,
+                model.accepted,
+            ),
         });
     }
 
@@ -961,6 +1012,42 @@ fn runtime_issues(observed_at_ms: u64, runtime: &RuntimeStatus, issues: &mut Vec
             last_error_at_ms: Some(observed_at_ms),
             action: restore_defaults_action(&control.name),
         });
+    }
+}
+
+fn model_recovery_action(
+    model_id: &str,
+    state: &str,
+    downloaded_bytes: u64,
+    acceptance_required: bool,
+    accepted: bool,
+) -> HealthAction {
+    if acceptance_required && !accepted {
+        HealthAction {
+            kind: "accept-model-license",
+            label: if downloaded_bytes > 0 {
+                "Accept license to resume"
+            } else {
+                "Accept model license"
+            },
+            target_id: Some(model_id.into()),
+        }
+    } else if state == "installed" {
+        HealthAction {
+            kind: "verify-model",
+            label: "Verify model",
+            target_id: Some(model_id.into()),
+        }
+    } else {
+        HealthAction {
+            kind: "download-model",
+            label: if downloaded_bytes > 0 {
+                "Resume download"
+            } else {
+                "Download model"
+            },
+            target_id: Some(model_id.into()),
+        }
     }
 }
 
@@ -1265,6 +1352,22 @@ mod tests {
     }
 
     #[test]
+    fn partial_model_health_resumes_download_instead_of_verifying_missing_files() {
+        let gated = model_recovery_action("large-model", "failed", 14_000_000_000, true, false);
+        assert_eq!(gated.kind, "accept-model-license");
+        assert_eq!(gated.label, "Accept license to resume");
+
+        let action = model_recovery_action("large-model", "failed", 14_000_000_000, true, true);
+        assert_eq!(action.kind, "download-model");
+        assert_eq!(action.label, "Resume download");
+        assert_eq!(action.target_id.as_deref(), Some("large-model"));
+
+        let installed = model_recovery_action("ready-model", "installed", 42, false, false);
+        assert_eq!(installed.kind, "verify-model");
+        assert_eq!(installed.label, "Verify model");
+    }
+
+    #[test]
     fn health_inventory_keeps_archived_roots_without_reporting_them_unhealthy() {
         let dir = tempfile::tempdir().unwrap();
         let app_data = dir.path().join("app");
@@ -1272,6 +1375,7 @@ mod tests {
         std::fs::create_dir_all(&photos).unwrap();
         let app = crate::state::App::init(app_data.clone()).unwrap();
         let root_id = app.library.register_root(&photos, None).unwrap();
+        app.library.list_folder(&root_id, "").unwrap();
         app.library.archive_root(&root_id).unwrap();
         let performance =
             crate::performance::PerformanceMonitor::new(app_data.join("performance-test.jsonl"));
@@ -1297,6 +1401,30 @@ mod tests {
                 .iter()
                 .all(|issue| issue.id != format!("root:{root_id}"))
         );
+        let folder_wait = health
+            .performance
+            .catalog_lanes
+            .iter()
+            .find(|series| series.stage == "folder_list.wait")
+            .expect("catalog wait timing is part of Application Health");
+        let folder_operation = health
+            .performance
+            .catalog_lanes
+            .iter()
+            .find(|series| series.stage == "folder_list.operation")
+            .expect("catalog operation timing is part of Application Health");
+        assert_eq!(folder_wait.count, 1);
+        assert_eq!(folder_operation.count, 1);
+        assert_eq!(
+            health.performance.preview_protocol.queue_capacity,
+            health.performance.preview_protocol.workers * 16
+        );
+        assert!(health.performance.preview_protocol.workers >= 2);
+        assert!(health.performance.preview_protocol.workers <= 8);
+        assert!(folder_wait.p50_ms.is_finite());
+        assert!(folder_wait.p95_ms.is_finite());
+        assert!(folder_wait.p99_ms.is_finite());
+        assert!(folder_wait.max_ms.is_finite());
     }
 
     #[test]

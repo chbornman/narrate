@@ -36,6 +36,7 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 | `PLAN-DESKTOP-FOUNDATION.md` | Active packet and proof map for the July 26 desktop-foundation program: A01-A26, linked integrity/runtime work, dependency order, and completion evidence. |
 | `DESKTOP-CHAOS-MATRIX.md` | Executable A25 lifecycle/failure matrix, invariant map, latest local counts, and native drills that fixtures cannot replace. |
 | `DESKTOP-EXPERIENCE-BUDGETS.md` | A26 numeric gates, structured journey-monitoring contract, fixture ledger, and remaining real-device receipts. |
+| `REAL-LIBRARY-SOAK.md` | Immutable-source real-media staging, repeatable headless/installed-compatible loops, RSS/GPU receipts, and spreadsheet progress tracking. |
 | `DESKTOP-RELEASE.md` | Installed bundle, sidecar, signing, updater, staged-rollout, and rollback contract plus current release evidence. |
 | `AUDIT-FRONTEND-COUPLING.md` | Frontend implicit-seam / staleness audit: the 5 interaction axes (viewMode × scope × search-lane × capture × escape) swept for the visualizer bug class, anchored CONFIRMED/SUSPECTED, ending in the P1-P7 fix packet (tracked in `BACKLOG.md`). |
 | `DESIGN-DEDUP-AND-SIMILARITY.md` | Wide-think + cited SOTA research for similarity grouping, near-dup dedup, and the "duplication-tolerance" hide-for-variety slider: the three-tier model (BLAKE3 / perceptual hash / CLIP), diverse-subset algorithms over the existing kNN graph, burst grouping, and adjacent use cases. |

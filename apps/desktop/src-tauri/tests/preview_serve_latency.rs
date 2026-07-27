@@ -2,8 +2,8 @@
 //! the `photoproof://` protocol — /thumb/<hash> over a temp library holding
 //! 1k thumb artifacts, measured shuffled cold and warm, plus a 200-way
 //! concurrency case fired through the SAME bounded serve pool the protocol
-//! registration in lib.rs uses (locking in the F1 fix: a fixed worker pool,
-//! not a transient OS thread per request).
+//! registration in lib.rs uses (locking in fixed workers, bounded queued
+//! callbacks, and explicit overload completion).
 //!
 //! `#[ignore]`d, matching the search_latency.rs idiom: run it in release:
 //!
@@ -162,13 +162,11 @@ fn thumb_serve_latency_p50_p99_cold_and_warm() {
     }
 }
 
-/// F1's regression guard: 200 concurrent /thumb serves fired through the
-/// SAME `protocol::serve_pool()` the lib.rs registration uses. This pins
-/// (a) the shipping mechanism is a FIXED pool — the worker bound is asserted
-/// directly, so a return to unbounded per-request spawn fails here — and
-/// (b) `protocol::serve` is sound and timely under 200-way submission:
-/// every request answers 200 with the full payload, inside a generous
-/// wall-clock budget.
+/// Regression guard: 200 concurrent /thumb serves fired through the SAME
+/// `protocol::serve_pool()` the lib.rs registration uses. The worker and
+/// queue bounds are asserted directly. Every callback must resolve promptly:
+/// executed requests answer 200 with the full payload, while requests
+/// superseded under overload are surfaced explicitly rather than leaked.
 #[test]
 #[ignore = "builds a 1k-artifact preview cache; run in release with --ignored"]
 fn two_hundred_concurrent_serves_stay_bounded_and_timely() {
@@ -184,6 +182,12 @@ fn two_hundred_concurrent_serves_stay_bounded_and_timely() {
         "serve pool must stay a small fixed size, got {}",
         pool.workers()
     );
+    assert_eq!(
+        pool.queue_capacity(),
+        pool.workers() * 16,
+        "the process queue must remain a small worker-relative bound"
+    );
+    let metrics_before = pool.snapshot();
 
     // Warm the slots so the wall-clock number measures pool throughput,
     // not first-touch noise.
@@ -191,7 +195,7 @@ fn two_hundred_concurrent_serves_stay_bounded_and_timely() {
         protocol::serve(&lib, &format!("/thumb/{}", h.as_str()));
     }
 
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<(u16, usize)>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<(protocol::ServeDisposition, u16, usize)>();
     let t0 = Instant::now();
     for h in shuffled(&hashes, 0xF1F1_F1F1_F1F1_F1F1)
         .into_iter()
@@ -199,33 +203,90 @@ fn two_hundred_concurrent_serves_stay_bounded_and_timely() {
     {
         let lib = Arc::clone(&lib);
         let tx = done_tx.clone();
-        pool.run(move || {
-            let resp = protocol::serve(&lib, &format!("/thumb/{}", h.as_str()));
+        pool.run(protocol::ServePriority::Thumbnail, move |disposition| {
+            let resp = if disposition == protocol::ServeDisposition::Execute {
+                protocol::serve(&lib, &format!("/thumb/{}", h.as_str()))
+            } else {
+                protocol::respond_overloaded()
+            };
             // A send failure means the collector already gave up; nothing
             // useful to do from a worker.
-            let _ = tx.send((resp.status().as_u16(), resp.body().len()));
+            let _ = tx.send((disposition, resp.status().as_u16(), resp.body().len()));
         });
     }
     drop(done_tx); // collector's recv ends when the last job's clone drops
 
     let mut completed = 0usize;
+    let mut executed = 0usize;
+    let mut overloaded = 0usize;
     // Timeout instead of a bare recv: a wedged pool must fail the test, not
     // hang the suite.
-    while let Ok((status, len)) = done_rx.recv_timeout(Duration::from_secs(30)) {
-        assert_eq!(status, 200, "every concurrent serve must succeed");
-        assert_eq!(len, THUMB_BYTES, "full payload under concurrency");
+    while let Ok((disposition, status, len)) = done_rx.recv_timeout(Duration::from_secs(30)) {
+        match disposition {
+            protocol::ServeDisposition::Execute => {
+                assert_eq!(status, 200, "executed serves must succeed");
+                assert_eq!(len, THUMB_BYTES, "full payload under concurrency");
+                executed += 1;
+            }
+            protocol::ServeDisposition::Overloaded => {
+                assert_eq!(status, 503, "superseded serves report overload");
+                assert_eq!(len, 0, "overload carries no image body");
+                overloaded += 1;
+            }
+        }
         completed += 1;
         if completed == CONCURRENT {
             break;
         }
     }
     let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    assert_eq!(completed, CONCURRENT, "all queued serves must complete");
+    assert_eq!(
+        completed, CONCURRENT,
+        "all submitted callbacks must resolve"
+    );
+    // The callback sends its receipt immediately before the worker records
+    // service completion. Wait for that deliberately post-callback accounting
+    // edge without sleeping or relying on scheduler timing.
+    let metrics_deadline = Instant::now() + Duration::from_secs(2);
+    let metrics_after = loop {
+        let snapshot = pool.snapshot();
+        if snapshot.running == 0
+            && snapshot.thumbnail.completed - metrics_before.thumbnail.completed == executed as u64
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < metrics_deadline,
+            "protocol metrics did not settle after callbacks resolved"
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(metrics_after.queued, 0);
+    assert_eq!(metrics_after.running, 0);
+    assert_eq!(
+        metrics_after.thumbnail.accepted - metrics_before.thumbnail.accepted
+            + metrics_after.thumbnail.overloaded
+            - metrics_before.thumbnail.overloaded,
+        CONCURRENT as u64,
+        "every submission is either accepted or rejected at admission"
+    );
+    assert_eq!(
+        metrics_after.thumbnail.completed - metrics_before.thumbnail.completed,
+        executed as u64
+    );
+    assert_eq!(
+        metrics_after.thumbnail.superseded - metrics_before.thumbnail.superseded,
+        overloaded as u64
+    );
+    assert!(metrics_after.thumbnail.mean_queue_wait_ms.is_finite());
+    assert!(metrics_after.thumbnail.mean_service_ms.is_finite());
 
     println!(
-        "{CONCURRENT} concurrent thumb serves through the {}-worker pool: \
-         {wall_ms:.2} ms wall ({:.3} ms/serve amortized)",
+        "{CONCURRENT} concurrent thumb callbacks through the {}-worker / \
+         {}-queued pool: {executed} served, {overloaded} superseded, \
+         {wall_ms:.2} ms wall ({:.3} ms/callback amortized)",
         pool.workers(),
+        pool.queue_capacity(),
         wall_ms / CONCURRENT as f64
     );
 

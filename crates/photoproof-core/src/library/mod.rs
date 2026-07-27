@@ -86,7 +86,7 @@ pub(crate) enum ActivePathMatch {
 }
 
 use crate::id::{ContentHash, UtcMillis};
-use crate::metrics::{PipelineMetrics, StageSnapshot};
+use crate::metrics::{CatalogMetrics, PipelineMetrics, StageSnapshot};
 use crate::store::StoreError;
 
 pub type VolumeId = String;
@@ -263,6 +263,8 @@ pub struct Library {
     debug_log: Mutex<Vec<String>>,
     /// Ingest-stage timings (BACKLOG "measured, not vibes" — first slice).
     metrics: PipelineMetrics,
+    /// Shared SQLite catalog-lane wait/operation timings for fixed hot paths.
+    catalog_metrics: CatalogMetrics,
     /// Monotonic, in-memory image-set version (Seam 1, sibling of
     /// `PpvecStore::vectors_version`). Bumped on every committed change to
     /// the ACTIVE image↔path set — new image, supersede, relink/reactivate,
@@ -346,6 +348,7 @@ impl Library {
             clock: MonotonicMillis::new(),
             debug_log: Mutex::new(Vec::new()),
             metrics: PipelineMetrics::default(),
+            catalog_metrics: CatalogMetrics::default(),
             images_version: AtomicU64::new(0),
         };
         if recovered > 0 {
@@ -524,6 +527,11 @@ impl Library {
     /// Cumulative ingest-stage timings (debug panel; BACKLOG metrics).
     pub fn metrics_snapshot(&self) -> Vec<StageSnapshot> {
         self.metrics.snapshot()
+    }
+
+    /// Cumulative fixed-label catalog-lane wait and operation timings.
+    pub fn catalog_metrics_snapshot(&self) -> Vec<StageSnapshot> {
+        self.catalog_metrics.snapshot()
     }
 
     // -----------------------------------------------------------------------
@@ -2479,6 +2487,44 @@ impl Library {
             .max_concurrency
             .unwrap_or_else(|| pool.current_num_threads())
             .clamp(1, pool.current_num_threads().max(1));
+        let mut total = QueueReport::default();
+        // A one-thread Rayon pool cannot host both `scope`'s producer closure
+        // and its spawned consumer: the producer fills the bounded channel and
+        // waits forever while the only pool thread is the producer itself.
+        // Run the identical claim -> work contract serially at width 1. This is
+        // also cheaper than constructing channels for Eco/single-core work.
+        if width == 1 {
+            loop {
+                if opts.is_cancelled() {
+                    total.cancelled = true;
+                    break;
+                }
+                if let Some(max) = opts.max_items
+                    && total.processed >= max
+                {
+                    break;
+                }
+                let claimed = self
+                    .metrics
+                    .queue_claim
+                    .time(|| -> Result<_, LibraryError> {
+                        let waiting = std::time::Instant::now();
+                        let conn = self.db.lock().expect("poisoned");
+                        self.catalog_metrics
+                            .queue_claim_wait
+                            .record(waiting.elapsed());
+                        self.catalog_metrics
+                            .queue_claim_operation
+                            .time(|| Ok(claim(&conn, self.now())?))
+                    })?;
+                let Some(item) = claimed else { break };
+                total.processed += 1;
+                let mut local = QueueReport::default();
+                work(self, &item, &mut local)?;
+                total.absorb(&local);
+            }
+            return Ok(total);
+        }
         // BOUNDED for backpressure: capacity == pool width keeps peak in-flight
         // decoded frames at ~2*width (width queued + width being worked), the
         // old wave's worst case, so a slow stage cannot grow an unbounded queue
@@ -2489,7 +2535,6 @@ impl Library {
         let (report_tx, report_rx) =
             std::sync::mpsc::channel::<Result<QueueReport, LibraryError>>();
         let work_rx = std::sync::Mutex::new(work_rx);
-        let mut total = QueueReport::default();
         // A claim-time DB error aborts the drain (drain-level plumbing failure,
         // unlike a per-item pass failure which is RECORDED). Captured here and
         // returned after the in-flight items finish.
@@ -2544,8 +2589,14 @@ impl Library {
                     .metrics
                     .queue_claim
                     .time(|| -> Result<_, LibraryError> {
+                        let waiting = std::time::Instant::now();
                         let conn = self.db.lock().expect("poisoned");
-                        Ok(claim(&conn, self.now())?)
+                        self.catalog_metrics
+                            .queue_claim_wait
+                            .record(waiting.elapsed());
+                        self.catalog_metrics
+                            .queue_claim_operation
+                            .time(|| Ok(claim(&conn, self.now())?))
                     });
                 let item = match claimed {
                     Ok(Some(item)) => item,
@@ -2767,6 +2818,17 @@ impl Library {
             .time(|| self.extractor.extract(abs))
         {
             Ok(x) => x,
+            Err(PreviewError::UnsupportedRaw(reason)) => {
+                tracing::warn!(
+                    hash = %item.image_hash,
+                    error = %reason,
+                    "RAW container unsupported or invalid; preview skipped"
+                );
+                let conn = self.db.lock().expect("poisoned");
+                ingest::mark_skipped(&conn, item, "unsupported-or-invalid-raw", self.now())?;
+                report.skipped += 1;
+                return Ok(());
+            }
             Err(e) => return self.fail_preview(item, e, report),
         };
         let now = self.now();
@@ -2904,10 +2966,16 @@ impl Library {
                 break;
             }
             let item = {
+                let waiting = std::time::Instant::now();
                 let conn = self.db.lock().expect("poisoned");
+                self.catalog_metrics
+                    .queue_claim_wait
+                    .record(waiting.elapsed());
                 // Full-RAW decode reads the original file: require an online path
                 // so an offline volume does not churn the queue.
-                ingest::claim_next_of(&conn, self.now(), &allowed, true)?
+                self.catalog_metrics
+                    .queue_claim_operation
+                    .time(|| ingest::claim_next_of(&conn, self.now(), &allowed, true))?
             };
             let Some(item) = item else { break };
             report.processed += 1;
@@ -3016,6 +3084,9 @@ impl Library {
         preview::write_full_decode_artifact(&self.cache_dir, &item.image_hash, &developed)
             .map_err(|e| match e {
                 PreviewError::Io(io) => LibraryError::Io(io),
+                PreviewError::UnsupportedRaw(reason) => {
+                    LibraryError::Watch(format!("full-decode unsupported raw: {reason}"))
+                }
                 PreviewError::Decode(d) => LibraryError::Watch(format!("full-decode encode: {d}")),
             })?;
         let artifacts =
@@ -3134,8 +3205,58 @@ impl Library {
     pub fn active_pass_counters(
         &self,
     ) -> Result<std::collections::BTreeMap<(String, i64), PassCounters>, LibraryError> {
+        let waiting = std::time::Instant::now();
         let conn = self.db.lock().expect("poisoned");
-        Ok(ingest::active_pass_counters(&conn)?)
+        self.catalog_metrics.activity_wait.record(waiting.elapsed());
+        self.catalog_metrics
+            .activity_operation
+            .time(|| Ok(ingest::active_pass_counters(&conn)?))
+    }
+
+    /// Fixed-cardinality ingest failure groups for benchmarks and health
+    /// receipts. Raw error strings can contain decoder details and must not
+    /// become metric labels; this deliberately emits only a coarse category
+    /// plus normalized format/subtype tokens.
+    pub fn ingest_error_summary(&self) -> Result<Vec<IngestErrorSummary>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT p.pass_name, p.error, i.format, i.raw_subtype
+             FROM ingest_passes p
+             JOIN images i ON i.image_hash = p.image_hash
+             WHERE p.state = 'error'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut grouped =
+            std::collections::BTreeMap::<(String, String, String, Option<String>), u64>::new();
+        for row in rows {
+            let (pass, error, format, raw_subtype) = row?;
+            let key = (
+                metric_token(&pass),
+                ingest_error_category(error.as_deref()).to_owned(),
+                metric_token(&format),
+                raw_subtype.as_deref().map(metric_token),
+            );
+            *grouped.entry(key).or_default() += 1;
+        }
+        Ok(grouped
+            .into_iter()
+            .map(
+                |((pass, category, format, raw_subtype), count)| IngestErrorSummary {
+                    pass,
+                    category,
+                    format,
+                    raw_subtype,
+                    count,
+                },
+            )
+            .collect())
     }
 
     // -----------------------------------------------------------------------
@@ -3579,75 +3700,123 @@ impl Library {
         root_id: &str,
         folder: &str,
     ) -> Result<Vec<FolderImage>, LibraryError> {
-        let root = self
-            .root(root_id)?
-            .ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
-        // Volume-relative prefix images in the folder must carry.
-        let mut prefix = String::new();
-        if !root.rel_path.is_empty() {
-            prefix.push_str(&root.rel_path);
-            prefix.push('/');
-        }
-        if !folder.is_empty() {
-            prefix.push_str(folder);
-            prefix.push('/');
-        }
-        let root_prefix_len = if root.rel_path.is_empty() {
-            0
-        } else {
-            root.rel_path.len() + 1
-        };
+        let waiting = std::time::Instant::now();
         let conn = self.db.lock().expect("poisoned");
-        // has_journal: the dulled-red dot is evidence of *annotations* —
-        // words OR marks (B34: `has_text OR has_strokes`). Rating keys must
-        // produce "no visual change to any thumbnail" (UI §3.7), so a
-        // rating-only journal does not light the dot.
-        let mut stmt = conn.prepare_cached(
-            "SELECT p.rel_path, p.image_hash, i.capture_ts, i.first_ingested_at,
-                    COALESCE(s.has_text, 0) OR COALESCE(s.has_strokes, 0) AS has_journal,
-                    r.rating,
-                    NOT EXISTS (
-                      SELECT 1 FROM paths p2
-                      JOIN volumes v2 ON v2.volume_id = p2.volume_id
-                      WHERE p2.image_hash = p.image_hash
-                        AND p2.state = 'active' AND v2.state = 'online'
-                    ) AS offline,
-                    EXISTS (
-                      SELECT 1 FROM preview_artifacts pa
-                      WHERE pa.image_hash = p.image_hash AND pa.kind = 'thumb'
-                    ) AS preview_ready
-             FROM paths p
-             JOIN images i ON i.image_hash = p.image_hash
-             LEFT JOIN image_journal_stats s ON s.image_hash = p.image_hash
-             LEFT JOIN image_ratings r ON r.image_hash = p.image_hash
-             WHERE p.root_id = ?1 AND p.state = 'active'
-               AND substr(p.rel_path, 1, length(?2)) = ?2
-               AND instr(substr(p.rel_path, length(?2) + 1), '/') = 0
-             ORDER BY p.rel_path",
-        )?;
-        let rows = stmt.query_map(params![root_id, prefix], |r| {
-            let rel: String = r.get(0)?;
-            let hash: String = r.get(1)?;
-            let root_relative = rel.get(root_prefix_len..).unwrap_or("").to_owned();
-            let file_name = root_relative
-                .rsplit('/')
-                .next()
-                .unwrap_or(&root_relative)
-                .to_owned();
-            Ok(FolderImage {
-                hash: ContentHash::from_hex(&hash).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                file_name,
-                rel_path: root_relative,
-                root_id: Some(root_id.to_owned()),
-                capture_ts: r.get(2)?,
-                first_ingested_at: r.get(3)?,
-                has_journal: r.get::<_, i64>(4)? != 0,
-                rating: r.get::<_, Option<i64>>(5)?.map(|v| v as u8),
-                offline: r.get::<_, i64>(6)? != 0,
-                preview_ready: r.get::<_, i64>(7)? != 0,
+        self.catalog_metrics
+            .folder_list_wait
+            .record(waiting.elapsed());
+        self.catalog_metrics.folder_list_operation.time(|| {
+            let root_rel_path: Option<String> = conn
+                .query_row(
+                    "SELECT rel_path FROM roots WHERE root_id = ?1",
+                    params![root_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let root_rel_path =
+                root_rel_path.ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+            list_folder_on(&conn, root_id, folder, &root_rel_path)
+        })
+    }
+
+    /// Revisioned, folder-scoped grid catch-up.
+    ///
+    /// `since_revision = 0` requests an initial full snapshot. A full snapshot
+    /// is also returned when the caller's cursor is ahead of this database
+    /// (restart/restore) or older than the bounded durable history. Otherwise
+    /// only hashes touched in this root's direct-child folder are resolved
+    /// against the same SQLite snapshot, so missed desktop events are safe:
+    /// each response advances to an exact `to_revision`.
+    pub fn list_folder_delta(
+        &self,
+        root_id: &str,
+        folder: &str,
+        since_revision: u64,
+    ) -> Result<FolderDelta, LibraryError> {
+        let waiting = std::time::Instant::now();
+        let mut conn = self.db.lock().expect("poisoned");
+        self.catalog_metrics
+            .folder_delta_wait
+            .record(waiting.elapsed());
+        self.catalog_metrics.folder_delta_operation.time(|| {
+            let root_rel_path: Option<String> = conn
+                .query_row(
+                    "SELECT rel_path FROM roots WHERE root_id = ?1",
+                    params![root_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let root_rel_path =
+                root_rel_path.ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+            let tx = conn.transaction()?;
+            let head: i64 = tx.query_row(
+                "SELECT revision FROM folder_change_clock WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            let oldest: Option<i64> =
+                tx.query_row("SELECT MIN(revision) FROM folder_change_log", [], |row| {
+                    row.get(0)
+                })?;
+            let since = i64::try_from(since_revision).ok();
+            let reset = match since {
+                None => true,
+                Some(0) => true,
+                Some(value) if value > head => true,
+                Some(value) if value < head => oldest.is_none_or(|floor| value < floor - 1),
+                Some(_) => false,
+            };
+
+            let from_revision = since_revision;
+            let to_revision = u64::try_from(head).unwrap_or(0);
+            if reset {
+                let upserts = list_folder_on(&tx, root_id, folder, &root_rel_path)?;
+                tx.commit()?;
+                return Ok(FolderDelta {
+                    from_revision,
+                    to_revision,
+                    reset: true,
+                    upserts,
+                    removed_hashes: Vec::new(),
+                });
+            }
+
+            let since = since.expect("validated non-reset revision");
+            let prefix = folder_volume_prefix(&root_rel_path, folder);
+            let mut changed_stmt = tx.prepare_cached(
+                "SELECT DISTINCT image_hash
+                 FROM folder_change_log
+                 WHERE revision > ?1 AND revision <= ?2 AND root_id = ?3
+                   AND substr(rel_path, 1, length(?4)) = ?4
+                   AND instr(substr(rel_path, length(?4) + 1), '/') = 0
+                 ORDER BY image_hash",
+            )?;
+            let changed = changed_stmt
+                .query_map(params![since, head, root_id, prefix], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(changed_stmt);
+
+            let upserts =
+                list_changed_folder_images_on(&tx, root_id, folder, &root_rel_path, &changed)?;
+            let present: std::collections::BTreeSet<&str> =
+                upserts.iter().map(|item| item.hash.as_str()).collect();
+            let removed_hashes = changed
+                .into_iter()
+                .filter(|hash| !present.contains(hash.as_str()))
+                .map(|hash| ContentHash::from_hex(&hash))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| LibraryError::Invalid("invalid hash in folder change log".into()))?;
+            tx.commit()?;
+            Ok(FolderDelta {
+                from_revision,
+                to_revision,
+                reset: false,
+                upserts,
+                removed_hashes,
             })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
     }
 
     /// Badge rows for an explicit hash list — the collection-members grid
@@ -3796,6 +3965,150 @@ impl Library {
 /// `CLOCK_SHIFT_TOLERANCE_NS` — same magnitude, different rule; the two
 /// must be free to diverge.
 const COARSE_MTIME_TOLERANCE_NS: i64 = 2 * 1_000_000_000;
+
+fn folder_volume_prefix(root_rel_path: &str, folder: &str) -> String {
+    let mut prefix = String::new();
+    if !root_rel_path.is_empty() {
+        prefix.push_str(root_rel_path);
+        prefix.push('/');
+    }
+    if !folder.is_empty() {
+        prefix.push_str(folder);
+        prefix.push('/');
+    }
+    prefix
+}
+
+fn folder_image_row(
+    row: &rusqlite::Row<'_>,
+    root_id: &str,
+    root_prefix_len: usize,
+) -> rusqlite::Result<FolderImage> {
+    let rel: String = row.get(0)?;
+    let hash: String = row.get(1)?;
+    let root_relative = rel.get(root_prefix_len..).unwrap_or("").to_owned();
+    let file_name = root_relative
+        .rsplit('/')
+        .next()
+        .unwrap_or(&root_relative)
+        .to_owned();
+    Ok(FolderImage {
+        hash: ContentHash::from_hex(&hash).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        file_name,
+        rel_path: root_relative,
+        root_id: Some(root_id.to_owned()),
+        capture_ts: row.get(2)?,
+        first_ingested_at: row.get(3)?,
+        has_journal: row.get::<_, i64>(4)? != 0,
+        rating: row.get::<_, Option<i64>>(5)?.map(|value| value as u8),
+        offline: row.get::<_, i64>(6)? != 0,
+        preview_ready: row.get::<_, i64>(7)? != 0,
+    })
+}
+
+const FOLDER_IMAGE_SELECT: &str = "
+    SELECT p.rel_path, p.image_hash, i.capture_ts, i.first_ingested_at,
+           COALESCE(s.has_text, 0) OR COALESCE(s.has_strokes, 0) AS has_journal,
+           r.rating,
+           NOT EXISTS (
+             SELECT 1 FROM paths p2
+             JOIN volumes v2 ON v2.volume_id = p2.volume_id
+             WHERE p2.image_hash = p.image_hash
+               AND p2.state = 'active' AND v2.state = 'online'
+           ) AS offline,
+           EXISTS (
+             SELECT 1 FROM preview_artifacts pa
+             WHERE pa.image_hash = p.image_hash AND pa.kind = 'thumb'
+           ) AS preview_ready
+    FROM paths p
+    JOIN images i ON i.image_hash = p.image_hash
+    LEFT JOIN image_journal_stats s ON s.image_hash = p.image_hash
+    LEFT JOIN image_ratings r ON r.image_hash = p.image_hash";
+
+fn list_folder_on(
+    conn: &Connection,
+    root_id: &str,
+    folder: &str,
+    root_rel_path: &str,
+) -> Result<Vec<FolderImage>, LibraryError> {
+    let prefix = folder_volume_prefix(root_rel_path, folder);
+    let root_prefix_len = if root_rel_path.is_empty() {
+        0
+    } else {
+        root_rel_path.len() + 1
+    };
+    // has_journal: the dulled-red dot is evidence of annotations (words OR
+    // marks). A rating-only journal deliberately does not light the dot.
+    let sql = format!(
+        "{FOLDER_IMAGE_SELECT}
+         WHERE p.root_id = ?1 AND p.state = 'active'
+           AND substr(p.rel_path, 1, length(?2)) = ?2
+           AND instr(substr(p.rel_path, length(?2) + 1), '/') = 0
+         ORDER BY p.rel_path"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![root_id, prefix], |row| {
+        folder_image_row(row, root_id, root_prefix_len)
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn list_changed_folder_images_on(
+    conn: &Connection,
+    root_id: &str,
+    folder: &str,
+    root_rel_path: &str,
+    changed_hashes: &[String],
+) -> Result<Vec<FolderImage>, LibraryError> {
+    if changed_hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+    const HASHES_PER_QUERY: usize = 400;
+    let prefix = folder_volume_prefix(root_rel_path, folder);
+    let root_prefix_len = if root_rel_path.is_empty() {
+        0
+    } else {
+        root_rel_path.len() + 1
+    };
+    let mut images = Vec::new();
+    for chunk in changed_hashes.chunks(HASHES_PER_QUERY) {
+        let placeholders = (3..chunk.len() + 3)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "{FOLDER_IMAGE_SELECT}
+             WHERE p.root_id = ?1 AND p.state = 'active'
+               AND substr(p.rel_path, 1, length(?2)) = ?2
+               AND instr(substr(p.rel_path, length(?2) + 1), '/') = 0
+               AND p.image_hash IN ({placeholders})
+             ORDER BY p.rel_path"
+        );
+        let mut values = Vec::with_capacity(chunk.len() + 2);
+        values.push(rusqlite::types::Value::Text(root_id.to_owned()));
+        values.push(rusqlite::types::Value::Text(prefix.clone()));
+        values.extend(chunk.iter().cloned().map(rusqlite::types::Value::Text));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+            folder_image_row(row, root_id, root_prefix_len)
+        })?;
+        images.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    images.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    Ok(images)
+}
+
+/// A folder snapshot or a revisioned set of changes since a prior snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderDelta {
+    pub from_revision: u64,
+    pub to_revision: u64,
+    /// Full-snapshot fallback. When true, replace the folder with `upserts`;
+    /// `removed_hashes` is empty.
+    pub reset: bool,
+    pub upserts: Vec<FolderImage>,
+    pub removed_hashes: Vec<ContentHash>,
+}
 
 /// One grid row of [`Library::list_folder`] (UI §3.5 badge data).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4098,6 +4411,52 @@ pub struct QueueReport {
     /// `previews-changed` payload (thumbs that exhausted their 404 retry
     /// budget heal off it; the journal-changed seam, applied to previews).
     pub completed_previews: Vec<ContentHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct IngestErrorSummary {
+    pub pass: String,
+    pub category: String,
+    pub format: String,
+    pub raw_subtype: Option<String>,
+    pub count: u64,
+}
+
+fn ingest_error_category(error: Option<&str>) -> &'static str {
+    let error = error.unwrap_or_default().to_ascii_lowercase();
+    if error.starts_with("io:") || error.starts_with("volume-offline") {
+        "io"
+    } else if error.starts_with("decode:") {
+        "decode"
+    } else if error.starts_with("embedder:") {
+        "embedder"
+    } else if error.starts_with("vector-store:") {
+        "vector-store"
+    } else if error == "missing-image-row" {
+        "missing-image"
+    } else if error == "no-worker" {
+        "no-worker"
+    } else if error == "decode-panic" {
+        "decode-panic"
+    } else if error.contains("geometry disagreement") {
+        "geometry"
+    } else {
+        "other"
+    }
+}
+
+fn metric_token(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if !normalized.is_empty()
+        && normalized.len() <= 32
+        && normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        normalized
+    } else {
+        "other".to_owned()
+    }
 }
 
 impl QueueReport {
@@ -4484,6 +4843,22 @@ fn sync_service_hint(dir: &Path) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ingest_error_metrics_are_coarse_and_tokens_are_bounded() {
+        assert_eq!(
+            ingest_error_category(Some("decode: decoder detail /private/path.raw")),
+            "decode"
+        );
+        assert_eq!(
+            ingest_error_category(Some("io: permission denied /private/path.raw")),
+            "io"
+        );
+        assert_eq!(ingest_error_category(Some("unexpected detail")), "other");
+        assert_eq!(metric_token("ARW"), "arw");
+        assert_eq!(metric_token("/private/path.raw"), "other");
+        assert_eq!(metric_token(&"x".repeat(33)), "other");
+    }
+
     fn test_root(root_id: &str, state: &str) -> RootRecord {
         RootRecord {
             root_id: root_id.into(),
@@ -4821,6 +5196,29 @@ mod tests {
             max_inside.load(std::sync::atomic::Ordering::SeqCst) <= ceiling,
             "configured ceiling must bound simultaneous decoded work"
         );
+    }
+
+    #[test]
+    fn pipeline_single_worker_ceiling_drains_without_deadlock() {
+        let (_tmp, lib) = pipeline_test_library();
+        let queue = std::sync::Mutex::new(synthetic_items(16).into());
+        let opts = QueueOptions {
+            max_concurrency: Some(1),
+            ..QueueOptions::default()
+        };
+        let report = lib
+            .run_pipeline(
+                &opts,
+                worker_pool(),
+                draining_claim(&queue),
+                |_lib, _item, local| {
+                    local.done += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(report.processed, 16);
+        assert_eq!(report.done, 16);
     }
 
     /// (b) NO LOSS / NO DOUBLE-PROCESSING: every claimed item is handled

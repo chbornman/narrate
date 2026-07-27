@@ -33,6 +33,10 @@ export class GridSlice {
   rawItems = $state<GridItem[]>([]);
   sort = $state<SortMode>("capture-desc");
   thumbStep = $state(1);
+  /** Hash order frozen while background ingest lands incremental batches.
+   * Existing cells retain their relative position; genuinely new hashes append.
+   * `null` means ordinary user-selected sorting applies. */
+  private ingestStableOrder = $state<string[] | null>(null);
 
   // -- selection (focus ≡ active — logic/selection.ts) ---------------------------
   sel = $state<sel.SelState>(sel.EMPTY);
@@ -105,7 +109,27 @@ export class GridSlice {
   // scope contained those items. `null` (filter off) is the identity, so the
   // default path is byte-identical to before the feature.
   shownItems = $derived(filterDiversify(this.rawItems, this.diversifyHiddenHashes));
-  items = $derived(sortItems(this.shownItems, this.sort, this.intensity));
+  items = $derived.by(() => {
+    if (this.ingestStableOrder === null) {
+      return sortItems(this.shownItems, this.sort, this.intensity);
+    }
+    // O(n), not O(n log n): resolve the frozen hash order against current
+    // records so metadata/preview-ready upserts land without re-sorting the
+    // library. Any hash absent from the order is a new arrival and appends.
+    const byHash = new Map(this.shownItems.map((item) => [item.hash, item]));
+    const ordered: GridItem[] = [];
+    for (const hash of this.ingestStableOrder) {
+      const item = byHash.get(hash);
+      if (item !== undefined) {
+        ordered.push(item);
+        byHash.delete(hash);
+      }
+    }
+    for (const item of this.shownItems) {
+      if (byHash.delete(item.hash)) ordered.push(item);
+    }
+    return ordered;
+  });
   itemHashes = $derived(this.items.map((i) => i.hash));
   /** Unsorted SCOPE hashes (rawItems order) — the heat fetch keys off these so
    * the `attention` sort can reorder by the result without a fetch cycle. The
@@ -166,7 +190,57 @@ export class GridSlice {
    * (hidden alts follow their display member; vanished hashes drop). */
   setItems(items: GridItem[]) {
     const prevActive = this.activeHash;
+    this.ingestStableOrder = null;
     this.rawItems = items;
+    this.fixupSelection(prevActive);
+  }
+
+  /** Freeze the currently rendered order for an ingest run. Background
+   * metadata changes and new arrivals must not reshuffle the viewport. */
+  beginStableIngest() {
+    if (this.ingestStableOrder === null) {
+      this.ingestStableOrder = this.items.map((item) => item.hash);
+    }
+  }
+
+  /** Release the ingest order and apply the requested sort exactly once. */
+  endStableIngest() {
+    this.ingestStableOrder = null;
+  }
+
+  /** Apply one folder-scoped delta without replacing the full array from IPC.
+   * Existing records update in place, removals disappear, and new records
+   * append to the stable ingest order. */
+  applyItemDelta(upserts: readonly GridItem[], removedHashes: readonly string[]) {
+    if (upserts.length === 0 && removedHashes.length === 0) return;
+    const prevActive = this.activeHash;
+    const removed = new Set(removedHashes);
+    const next = this.rawItems.filter((item) => !removed.has(item.hash));
+    const indexes = new Map(next.map((item, index) => [item.hash, index]));
+    for (const item of upserts) {
+      const index = indexes.get(item.hash);
+      if (index === undefined) {
+        indexes.set(item.hash, next.length);
+        next.push(item);
+      } else {
+        next[index] = item;
+      }
+    }
+
+    if (this.ingestStableOrder !== null) {
+      const present = new Set(next.map((item) => item.hash));
+      const order = this.ingestStableOrder.filter((hash) => present.has(hash));
+      const ordered = new Set(order);
+      for (const item of upserts) {
+        if (!ordered.has(item.hash) && present.has(item.hash)) {
+          ordered.add(item.hash);
+          order.push(item.hash);
+        }
+      }
+      this.ingestStableOrder = order;
+    }
+
+    this.rawItems = next;
     this.fixupSelection(prevActive);
   }
 
@@ -184,6 +258,13 @@ export class GridSlice {
   }
 
   setSort(mode: SortMode) {
+    // An explicit user sort remains immediate even during ingest. Re-freeze
+    // that newly requested order so subsequent background deltas stay calm.
+    if (this.ingestStableOrder !== null) {
+      this.ingestStableOrder = sortItems(this.shownItems, mode, this.intensity).map(
+        (item) => item.hash,
+      );
+    }
     this.sort = mode;
     if (this.rootId !== null) prefs.saveSort(this.rootId, this.folder, mode);
   }

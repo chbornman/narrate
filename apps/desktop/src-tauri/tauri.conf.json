@@ -9,6 +9,11 @@
     "beforeBuildCommand": "npm run build:bundle",
     "frontendDist": "../dist"
   },
+  "plugins": {
+    "updater": {
+      "pubkey": ""
+    }
+  },
   "app": {
     "windows": [
       {

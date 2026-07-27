@@ -82,6 +82,7 @@
     DEFAULT_NEIGHBOR_REST_LENGTH,
     expandSuperNode,
     isAtRest,
+    nextSettleCount,
     REHEAT_START,
     ringAnchors,
     screenToSim,
@@ -90,6 +91,7 @@
     simToScreen,
     step,
     subStepsForHeat,
+    symmetrizeNeighborEdges,
     type ForceConfig,
     type ImageNode,
     type TopicAnchor,
@@ -141,6 +143,9 @@
   // append lands at the END, keeping the ring's seed order stable (a new anchor
   // does not reshuffle the existing ones; ringAnchors seeds end-stably).
   let topics = $derived(ui.topics.map((t) => t.phrase).reverse());
+  /** Stable semantic key for the derived topic list. The store may replace its
+   * array with equivalent snapshot data; that must not trigger a relayout. */
+  const topicKey = (): string => topics.join("\u0000");
   let topicInput = $state("");
   let suggestions = $state<ipc.TopicSuggestion[]>([]);
   /** v2 note-grounded auto-topics (k-means cluster labels) for the rail. These
@@ -411,10 +416,18 @@
    * not post another until it returns, which is exactly the pipeline - the main
    * thread is free to draw frame N-1 while the worker computes frame N. */
   let computeInFlight = false;
+  /** Invalidates an in-flight worker frame whenever interaction or recompute
+   * starts a newer layout epoch. Old transferables are reclaimed but their
+   * positions are never unpacked over newer state. */
+  let simGeneration = 0;
   /** The settle-frame counter (mirrors the inline loop's `cool`): a few quiet
    * frames must pass before we stop posting compute, guarding an early-zero on
    * the opening frame. Lives at this scope so the worker reply handler reads it. */
   let settleCount = 0;
+  /** True only after the live physics loop has observed sustained, genuinely
+   * imperceptible motion. Unmount snapshots are saved only in this state, so a
+   * half-computed graph can never reopen frozen and wait for a click to wake it. */
+  let layoutSettled = false;
 
   // -- per-topic INFLUENCE FIELD (founder, June 2026) -------------------------
   // A soft colored glow behind the nodes showing each topic's "power level"
@@ -554,6 +567,9 @@
       // The live reheat multiplier on the attraction terms; cooled each frame in
       // the rAF loop back toward the 1.0 steady state.
       heat,
+      // Absolute canvas rotation is not semantic information. Project it out
+      // and add cooled damping so the graph converges instead of orbiting.
+      cancelRotation: true,
     };
   }
 
@@ -577,7 +593,10 @@
    * the effect re-fetches only when the live version moves past this. -1 = never
    * rendered, so the first advance (or a degraded restore) always refreshes. */
   let lastVectorsVersion = -1;
-  let vectorRefreshAt = 0;
+  /** Graph-local vector refresh generation. The library-wide write counter can
+   * jump dozens of times in one ingest burst; only the debounced refresh below
+   * advances this layout input once. */
+  let vectorRefreshGeneration = 0;
   let vectorRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   function clearVectorRefresh() {
@@ -588,29 +607,26 @@
   }
 
   function refetchForLandedVectors() {
-    vectorRefreshAt = performance.now();
     // A refused scope has nothing cached to evict (recompute never fetched); skip
     // the delete (the cache key is scope-relative) and let recompute re-confirm
     // the refusal calmly.
     const sc = scope();
     if (sc !== null) affinityCache.delete(topics, sc, alpha);
+    vectorRefreshGeneration++;
     void recompute();
   }
 
-  /** Throttle the refetch: fire immediately if we are outside the window, else
-   * arm a single trailing timer for the remainder, so continuous embedding fills
-   * the graph in at ~1/interval and an isolated write refreshes at once. */
+  /** Debounce the refetch until the vector-write burst goes quiet. Re-seeding
+   * every second during a long embed made the graph jump continuously and
+   * generated dozens of identical affinity misses. The final write still
+   * refreshes promptly, but intermediate library-wide counter noise does no
+   * visible work. */
   function scheduleVectorRefresh() {
-    const since = performance.now() - vectorRefreshAt;
-    if (since >= VECTOR_REFRESH_THROTTLE_MS) {
-      clearVectorRefresh();
+    if (vectorRefreshTimer !== null) clearTimeout(vectorRefreshTimer);
+    vectorRefreshTimer = setTimeout(() => {
+      vectorRefreshTimer = null;
       refetchForLandedVectors();
-    } else if (vectorRefreshTimer === null) {
-      vectorRefreshTimer = setTimeout(() => {
-        vectorRefreshTimer = null;
-        refetchForLandedVectors();
-      }, VECTOR_REFRESH_THROTTLE_MS - since);
-    }
+    }, VECTOR_REFRESH_THROTTLE_MS);
   }
 
   /** Fetch (or reuse the scope-cached) semantic-neighbor graph and SET each
@@ -626,13 +642,19 @@
    * Cached on SCOPE ONLY: the k-NN graph depends on the scope's image set, not
    * on the topic set or alpha, so this is reused across a topic add / blend move
    * without a refetch. */
-  async function applyNeighbors(sc: ipc.GraphScope) {
+  async function applyNeighbors(
+    sc: ipc.GraphScope,
+    targetNodes: ImageNode[],
+    vectorsVersion: number,
+    targetLod: boolean,
+    generation: number,
+  ) {
     const started = performance.now();
     // LOD super-nodes never carry semantic edges (see above): clear any stale
     // list and skip the fetch entirely.
-    if (lodActive) {
-      for (const n of nodes) n.neighbors = undefined;
-      return;
+    if (targetLod) {
+      for (const n of targetNodes) n.neighbors = undefined;
+      return false;
     }
     // Key the k-NN cache on scope AND the vectors-version this recompute is
     // laying out against (B2): the cached graph is HASH-addressed raw neighbor
@@ -642,9 +664,9 @@
     // is missing their k-NN edges. Folding the version in makes a post-ingest
     // recompute fetch a FRESH graph instead of reusing the pre-ingest one, while
     // a topic/alpha change at the same version still reuses it (neighbors do not
-    // depend on topics or blend). `lastVectorsVersion` is set by recompute()
-    // immediately before this call, so it is the version this layout belongs to.
-    const key = `${scopeKey(sc)}|v=${lastVectorsVersion}`;
+    // depend on topics or blend). The version is passed explicitly so an older
+    // async request cannot accidentally key or mutate a newer layout.
+    const key = `${scopeKey(sc)}|v=${vectorsVersion}`;
     let graph = neighborCache.get(key);
     const cacheStatus = graph === undefined ? "miss" : "hit";
     if (graph === undefined) {
@@ -657,12 +679,27 @@
       }
       neighborCache.set(key, graph);
     }
+    ipc.recordPerformance("graph", "read", performance.now() - started, true, {
+      itemCount: graph.length,
+      cacheStatus,
+    });
+    // A topic/scope/blend/vector refresh superseded this request while the
+    // backend was reading. The result remains safe in the hash-addressed cache,
+    // but it must never mutate or reheat the newer live graph.
+    if (
+      generation !== performanceGeneration ||
+      nodes !== targetNodes ||
+      !componentAlive
+    )
+      return false;
     // Map hash -> index over the CURRENT node set, so neighbor edges resolve to
     // array indices the (hash-free) sim + worker can apply directly.
     const indexOf = new Map<string, number>();
-    for (let i = 0; i < nodes.length; i++) indexOf.set(nodes[i].hash, i);
+    for (let i = 0; i < targetNodes.length; i++)
+      indexOf.set(targetNodes[i].hash, i);
     const byHash = new Map(graph.map((g) => [g.hash, g.neighbors]));
-    for (const node of nodes) {
+    let hasEdges = false;
+    for (const node of targetNodes) {
       const raw = byHash.get(node.hash);
       if (raw === undefined || raw.length === 0) {
         node.neighbors = undefined;
@@ -673,29 +710,80 @@
         const j = indexOf.get(nb.hash);
         // Drop a neighbor not in the current node set (it dropped out of scope)
         // and the self-edge a k-NN can emit.
-        if (j === undefined || nodes[j] === node) continue;
+        if (j === undefined || targetNodes[j] === node) continue;
         edges.push({ i: j, w: nb.weight });
       }
       node.neighbors = edges.length > 0 ? edges : undefined;
+      if (edges.length > 0) hasEdges = true;
     }
-    ipc.recordPerformance("graph", "read", performance.now() - started, true, {
-      itemCount: graph.length,
-      cacheStatus,
-    });
+    if (hasEdges) symmetrizeNeighborEdges(targetNodes);
+    return hasEdges;
   }
 
   // -- affinity fetch + (re)seed ----------------------------------------------
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
   let performanceGeneration = 0;
+  let recomputePromise: Promise<void> | null = null;
+  let componentAlive = true;
+  let lastRequestedRecomputeKey: string | null = null;
   let settleJourney:
     | { generation: number; started: number; itemCount: number }
     | null = null;
 
-  async function recompute() {
-    const journeyStarted = performance.now();
-    const journeyGeneration = ++performanceGeneration;
+  /** Coalesce all layout requests into one current computation. Callers only
+   * advance the desired generation; a single drain runs at a time and stale
+   * async results are discarded after every backend wait. */
+  function recompute(): Promise<void> {
     const sc = scope();
+    const requestKey =
+      sc === null
+        ? `refused|${topicKey()}|a=${alpha}|fl=${fullLibrary}`
+        : `${scopeKey(sc)}|${topicKey()}|a=${alpha}|fl=${fullLibrary}|vr=${vectorRefreshGeneration}`;
+    // Reactive store snapshots can replace arrays/objects with semantically
+    // identical values. Ignore those duplicate notifications at the boundary;
+    // one input generation should produce exactly one affinity/layout request.
+    if (requestKey === lastRequestedRecomputeKey)
+      return recomputePromise ?? Promise.resolve();
+    lastRequestedRecomputeKey = requestKey;
+    performanceGeneration++;
+    if (recomputePromise === null) {
+      recomputePromise = drainRecomputes().finally(() => {
+        recomputePromise = null;
+        // A request can arrive after the drain's final condition but before its
+        // promise cleanup. Start one more drain so that edge cannot lose work.
+        if (componentAlive && appliedGeneration !== performanceGeneration)
+          void recomputeWithoutAdvancing();
+      });
+    }
+    return recomputePromise;
+  }
+
+  let appliedGeneration = 0;
+
+  function recomputeWithoutAdvancing(): Promise<void> {
+    if (recomputePromise === null) {
+      recomputePromise = drainRecomputes().finally(() => {
+        recomputePromise = null;
+        if (componentAlive && appliedGeneration !== performanceGeneration)
+          void recomputeWithoutAdvancing();
+      });
+    }
+    return recomputePromise;
+  }
+
+  async function drainRecomputes() {
+    while (componentAlive && appliedGeneration !== performanceGeneration) {
+      const generation = performanceGeneration;
+      await recomputeGeneration(generation);
+      appliedGeneration = generation;
+    }
+  }
+
+  async function recomputeGeneration(journeyGeneration: number) {
+    const journeyStarted = performance.now();
+    const sc = scope();
+    const requestedVectorsVersion = ui.shell.ingest.vectorsVersion;
     // The scope refused (no folder/collection source, no result-set variant to
     // name): show the calm refusal affordance instead of computing over the WHOLE
     // library by accident. We clear the layout + readiness so the view reads
@@ -709,16 +797,18 @@
       nodeCount = 0;
       visualReady = false;
       annotationReady = false;
+      layoutSettled = true;
       draw();
       return;
     }
     refused = false;
     loading = true;
+    layoutSettled = false;
     scaleNote = null;
     // Keep the reactive watchers' keys in sync REGARDLESS of what triggered this
     // recompute (mount, alpha, scope, or a topic change), so the $effects do not
     // fire a duplicate recompute for the set/blend we are about to lay out.
-    lastTopicKey = topics.join(" ");
+    lastTopicKey = topicKey();
     lastAlpha = alpha;
     lastFullLibrary = fullLibrary;
     // recompute() calls refreshOverlay() itself below, so record the overlay key
@@ -762,14 +852,20 @@
       itemCount: report.images.length,
       cacheStatus: cached === undefined ? "miss" : "hit",
     });
+    // A newer request landed while affinities were being read. Keep the safe
+    // cache fill, but do not let this older generation replace visible state.
+    if (journeyGeneration !== performanceGeneration || !componentAlive) return;
     visualReady = report.visual_ready;
     annotationReady = report.annotation_ready;
     // Seam 1: record the vector-store version this layout was computed against, so
     // the `vectorsVersion` effect re-fetches only when NEW vectors land past this
     // point (not on every ingest tick). A still-missing half fills in on the next
     // advance; a fully-ready view simply stops moving the marker forward.
-    lastVectorsVersion = ui.shell.ingest.vectorsVersion;
-    clearVectorRefresh();
+    lastVectorsVersion = requestedVectorsVersion;
+    // A newer write during the affinity read owns a trailing refresh timer; do
+    // not clear it and silently mark that unseen generation as rendered.
+    if (ui.shell.ingest.vectorsVersion === requestedVectorsVersion)
+      clearVectorRefresh();
 
     affinity = new Map(report.images.map((i) => [i.image_hash, i.scores.map((s) => s.affinity)]));
     const hashes = report.images.map((i) => i.image_hash);
@@ -809,14 +905,6 @@
       { itemCount: nodes.length },
     );
     nodeCount = nodes.length;
-
-    // SEMANTIC-NEIGHBOR attraction: resolve each full-detail node's k-NN edges
-    // to indices into THIS node set so the sim (and worker) pull alike photos
-    // together. Cached on scope only (neighbors don't change with topic/alpha),
-    // and a no-op in LOD mode. Resilient: an un-embedded scope just leaves the
-    // layout on topic attraction. Done BEFORE the staticDirty/restartLoop below
-    // so the worker's static resync carries the neighbors with the new node set.
-    await applyNeighbors(sc);
 
     // A fresh node set (scope/topic/alpha change): drop stale PENDING thumb
     // requests so the new layout's nearest nodes load first. Already-loaded
@@ -864,6 +952,26 @@
           },
         );
       });
+    });
+
+    // Semantic neighbors ENRICH the already-painted graph. They are intentionally
+    // outside the first-paint critical path: a slow k-NN read can no longer hold
+    // the canvas blank. If still current when it lands, resync the worker and
+    // reheat once so the added springs find their equilibrium.
+    const targetNodes = nodes;
+    const vectorsVersion = lastVectorsVersion;
+    const targetLod = lodActive;
+    void applyNeighbors(
+      sc,
+      targetNodes,
+      vectorsVersion,
+      targetLod,
+      journeyGeneration,
+    ).then((applied) => {
+      if (!applied) return;
+      staticDirty = true;
+      reheat();
+      restartLoop();
     });
   }
 
@@ -1088,27 +1196,18 @@
   // -- the physics loop (worker-driven, inline fallback) ----------------------
   // The loop has the SAME shape on both paths: per frame, advance
   // subStepsForHeat(heat) sim sub-steps, cool the heat one frame, draw, then
-  // stop once the layout is at rest AND the reheat has fully cooled (a fresh
+  // stop once the layout is genuinely at rest AND the reheat has fully cooled (a fresh
   // recompute or a drag restarts it). On the WORKER path the sim sub-steps run
   // off-thread; on the FALLBACK path they run inline exactly as v1.
 
   /** Shared idle predicate: the layout is at rest, the reheat has fully cooled,
    * and a few settle frames have passed (guarding an early-zero opening frame).
    *
-   * ANNEALING termination (visualizer audit, June 2026): the per-step clamp is
-   * now HEAT-TIED inside step() — once the reheat has cooled (heat -> 1) the
-   * clamp sits at ANNEAL_FLOOR, so any residual motion is bounded to a fraction
-   * of a sim-px per step (sub-perceptual, looks at rest). On a FRUSTRATED dense
-   * semantic-neighbor graph the springs never truly force-balance, so the strict
-   * per-body energy gate would never trip and the loop ran forever (the founder's
-   * "big blob spinning, never settles"). We RELAX the gate to terminate on the
-   * heat schedule, which ALWAYS cools: settle once the reheat is fully cooled and
-   * a few settle frames have passed. A LENIENT per-body energy bound stays as a
-   * guard so we never declare rest mid-snap, but it is generous enough that the
-   * frozen-clamp residual jitter clears it. Heat always reaching 1 guarantees
-   * termination. Runs on BOTH the inline and worker paths (both call this); the
-   * clamp is derived inside step() from heat, which the worker already receives,
-   * so no new worker plumbing is needed. */
+   * Termination is motion-based, not elapsed-time based. Cooling only reduces
+   * the force/clamp schedule; it cannot declare the graph settled. The pure
+   * quiet-frame helper resets the counter whenever motion rises above the
+   * imperceptible threshold, so a frustrated graph keeps integrating instead of
+   * freezing suddenly at the end of a fixed cooling period. */
   function isSettled(energy: number): boolean {
     // Pure rest predicate (forcegraph.ts isAtRest). A drag in progress is NEVER
     // at rest -- keep ticking + redrawing so the node under the cursor cannot
@@ -1120,7 +1219,7 @@
       bodies: nodes.length + anchors.length,
       heat,
       settleCount,
-      dragging: dragging !== null || draggingAnchor !== null,
+      dragging: moved && (dragging !== null || draggingAnchor !== null),
     });
   }
 
@@ -1129,6 +1228,8 @@
    * recompute point the design calls for. */
   function onSettled() {
     cancelAnimationFrame(raf);
+    raf = 0;
+    layoutSettled = true;
     if (
       settleJourney !== null &&
       settleJourney.generation === performanceGeneration
@@ -1191,6 +1292,7 @@
     packFlags(flagBuf, nodes, anchors);
     const msg: ComputeMessage = {
       kind: "compute",
+      generation: simGeneration,
       buffer: mutBuf,
       flags: flagBuf,
       heat,
@@ -1208,26 +1310,43 @@
    * buffers, write the new positions back onto the live state, cool the heat,
    * draw, and either stop (settled) or post the next compute (continue the
    * pipeline on the next rAF so draws stay paced to the display). */
-  function onWorkerStepped(buffer: Float64Array, flags: Uint8Array, energy: number) {
+  function onWorkerStepped(
+    generation: number,
+    buffer: Float64Array,
+    flags: Uint8Array,
+    energy: number,
+  ) {
     computeInFlight = false;
     mutBuf = buffer;
     flagBuf = flags;
+    if (generation !== simGeneration) {
+      // The current graph changed while this frame was off-thread. Reclaim the
+      // buffers, then repack/resync from current state on the next display frame.
+      raf = requestAnimationFrame(() => postCompute());
+      return;
+    }
     // Write the worker's integrated positions back onto the live objects. A body
     // the user is actively DRAGGING is re-asserted from the live drag position
     // below, so an in-flight compute never tugs the grabbed body off the cursor.
     unpackMutable(buffer, nodes, anchors);
-    if (dragging !== null) {
+    if (moved && dragging !== null) {
       // The drag handler keeps writing dragging.x/y live; honor that over the
       // (one-frame-stale) value the worker echoed back for the held node.
       dragging.vx = 0;
       dragging.vy = 0;
     }
-    if (draggingAnchor !== null) {
+    if (moved && draggingAnchor !== null) {
       draggingAnchor.vx = 0;
       draggingAnchor.vy = 0;
     }
-    settleCount++;
     heat = coolHeat(heat);
+    settleCount = nextSettleCount({
+      energy,
+      bodies: nodes.length + anchors.length,
+      heat,
+      settleCount,
+      dragging: moved && (dragging !== null || draggingAnchor !== null),
+    });
     draw();
     if (isSettled(energy)) {
       onSettled();
@@ -1241,7 +1360,10 @@
 
   function restartLoop() {
     cancelAnimationFrame(raf);
+    raf = 0;
+    simGeneration++;
     settleCount = 0;
+    layoutSettled = false;
     // WORKER PATH: kick the pipeline. If a compute is mid-flight its reply will
     // continue the loop with the now-current (reheated / re-dragged) state, so we
     // only post a fresh one when the worker is idle.
@@ -1267,7 +1389,13 @@
       // ticking even if the energy momentarily dips, so a reheat fully plays out.
       heat = coolHeat(heat);
       draw();
-      settleCount++;
+      settleCount = nextSettleCount({
+        energy,
+        bodies: nodes.length + anchors.length,
+        heat,
+        settleCount,
+        dragging: moved && (dragging !== null || draggingAnchor !== null),
+      });
       // Stop ticking once the layout is at rest AND the reheat has fully cooled
       // (saves battery); a fresh recompute or a drag restarts it.
       if (isSettled(energy)) {
@@ -1871,6 +1999,9 @@
   /** Background pan in progress: the screen point and the pan offset at the
    * moment of pointer-down, so move() can apply the raw delta to panX/panY. */
   let panning: { startX: number; startY: number; panX0: number; panY0: number } | null = null;
+  /** Press origin for node/anchor gestures. Physics starts only after this
+   * crosses MOVE_THRESHOLD; a normal click never fixes a body or wakes the sim. */
+  let dragPress: { startX: number; startY: number } | null = null;
   /** Whether the current drag actually MOVED (past a small threshold). A
    * press-release that did not move is a CLICK (scope-to-topic / open Look);
    * a move is a drag (pin the anchor / reposition the node). */
@@ -1943,14 +2074,14 @@
   function onPointerDown(e: PointerEvent) {
     const [sx, sy] = localXY(e);
     moved = false;
+    dragPress = null;
     // Anchors hit-test first (drawn on top). A press on an anchor begins an
     // anchor drag; a release without movement still scopes to that topic.
     const anchor = pickAnchor(sx, sy);
     if (anchor) {
       draggingAnchor = anchor;
-      anchor.fixed = true; // hold it under the pointer during the drag
+      dragPress = { startX: sx, startY: sy };
       canvasEl?.setPointerCapture(e.pointerId);
-      restartLoop();
       return;
     }
     // Then GHOST anchors (soft topics), below real anchors but above nodes: a
@@ -1966,9 +2097,8 @@
     const node = pickNode(sx, sy);
     if (node) {
       dragging = node;
-      node.fixed = true;
+      dragPress = { startX: sx, startY: sy };
       canvasEl?.setPointerCapture(e.pointerId);
-      restartLoop();
       return;
     }
     // Empty canvas: begin a background pan (the gesture the founder was missing).
@@ -2032,18 +2162,34 @@
     }
     const [x, y] = fromScreen(sx, sy);
     if (draggingAnchor) {
+      if (!moved) {
+        const dx = sx - (dragPress?.startX ?? sx);
+        const dy = sy - (dragPress?.startY ?? sy);
+        if (Math.hypot(dx, dy) <= MOVE_THRESHOLD) return;
+        moved = true;
+        draggingAnchor.fixed = true;
+        reheat();
+        restartLoop();
+      }
       draggingAnchor.x = x;
       draggingAnchor.y = y;
-      moved = true;
       // Keep the sim HOT while dragging so neighbours follow the moved anchor
       // (at cooled heat the anneal clamp pins them to sub-pixel = sluggish).
       reheat();
       return;
     }
     if (dragging) {
+      if (!moved) {
+        const dx = sx - (dragPress?.startX ?? sx);
+        const dy = sy - (dragPress?.startY ?? sy);
+        if (Math.hypot(dx, dy) <= MOVE_THRESHOLD) return;
+        moved = true;
+        dragging.fixed = true;
+        reheat();
+        restartLoop();
+      }
       dragging.x = x;
       dragging.y = y;
-      moved = true;
       reheat();
     }
   }
@@ -2082,6 +2228,7 @@
       const anchor = draggingAnchor;
       anchor.fixed = false;
       draggingAnchor = null;
+      dragPress = null;
       canvasEl?.releasePointerCapture(e.pointerId);
       const quick = performance.now() - downAt < 250;
       if (!moved && quick) {
@@ -2104,6 +2251,7 @@
     const node = dragging;
     node.fixed = false;
     dragging = null;
+    dragPress = null;
     canvasEl?.releasePointerCapture(e.pointerId);
     // A quick press-release with little movement is a CLICK. On a LOD super-node
     // a click EXPANDS it into its members. On a single image a FIRST click
@@ -2307,6 +2455,10 @@
    * this same view (and no new vectors since) restores instantly. Called on
    * unmount; keyed at the vectors-version this layout was built against. */
   function saveSnapshot() {
+    // Never label a still-computing or still-moving graph as settled. Keeping
+    // the prior valid slot is safer than restoring a half-finished layout that
+    // appears frozen until some later click happens to wake the loop.
+    if (!layoutSettled || recomputePromise !== null || computeInFlight) return;
     const snap: GraphSnapshot = {
       alpha,
       fullLibrary,
@@ -2381,6 +2533,7 @@
     // Restore COOLED: the layout is already settled, so we open at rest (no
     // gratuitous reheat that would re-ooze a view that is already in place).
     heat = 1;
+    layoutSettled = true;
     lodActive = snap.lodActive;
     imageTotal = snap.imageTotal;
     nodeCount = snap.nodeCount;
@@ -2397,7 +2550,7 @@
     // The reactive watchers' keys must reflect the restored view so a spurious
     // topic / alpha / fullLibrary $effect does not fire a needless recompute
     // right after the restore (which would re-ooze a view already in place).
-    lastTopicKey = topics.join(" ");
+    lastTopicKey = topicKey();
     lastAlpha = alpha;
     lastFullLibrary = fullLibrary;
     // The overlay was restored from the snapshot; record its key so the overlay
@@ -2433,7 +2586,12 @@
             return;
           }
           // A computed frame: reclaim the buffers, apply positions, continue.
-          onWorkerStepped(msg.buffer, msg.flags, msg.energy);
+          onWorkerStepped(
+            msg.generation,
+            msg.buffer,
+            msg.flags,
+            msg.energy,
+          );
         };
         // A worker error must not freeze the Visualizer: drop back to the inline
         // loop (the layout keeps moving on the main thread).
@@ -2499,7 +2657,10 @@
       if (tuning !== null) alpha = tuning.alpha_default;
       lastAlpha = alpha;
       lastFullLibrary = fullLibrary;
-      await loadSuggestions();
+      // Suggestions (including the optional LLM path) are header enrichment,
+      // not graph data. Start them concurrently so they never gate affinities or
+      // the first image paint.
+      void loadSuggestions();
       await recompute();
     })();
     return () => {
@@ -2507,6 +2668,8 @@
       // THEN tear down the live loop. The module caches (thumbs/affinity) and
       // the snapshot persist; only this instance's rAF + repaint hook detach.
       saveSnapshot();
+      componentAlive = false;
+      performanceGeneration++;
       thumbRepaint = null;
       cancelAnimationFrame(raf);
       cancelAnimationFrame(panRaf);
@@ -2580,7 +2743,7 @@
   // covers the initial set, and tuning===null means we are pre-load).
   let lastTopicKey = "";
   $effect(() => {
-    const key = topics.join("");
+    const key = topicKey();
     untrack(() => {
       if (tuning !== null && key !== lastTopicKey) {
         lastTopicKey = key;

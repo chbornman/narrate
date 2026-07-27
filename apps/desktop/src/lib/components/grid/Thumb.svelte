@@ -24,6 +24,7 @@
 
   let {
     hash,
+    highPriority = true,
     previewReady = true,
     previewPing,
     hasJournal,
@@ -37,12 +38,18 @@
     size,
     infoStrip,
     intensity = 0,
+    measurementGeneration = 0,
+    onpreviewload,
     onpointerselect,
     onopen,
     onstacktoggle,
     oncontextmenu,
   }: {
     hash: string;
+    /** True only when the cell intersects the real viewport. Mounted
+     * one-screen overscan is useful rendering runway, but its image fetch is
+     * speculative and must not compete with pixels the user can see. */
+    highPriority?: boolean;
     /** A thumb artifact exists (GridItem.previewReady): only then is the
      * protocol URL requested at all — mid-scan on a network volume, eager
      * requests are thousands of doomed 404 round-trips (founder, SMB,
@@ -69,6 +76,10 @@
      * scaled by this. 0 (the default, and the tint-off case) renders nothing,
      * so the shimmer/badges are undisturbed. */
     intensity?: number;
+    /** Monotone viewport-measurement generation. A new value makes an
+     * already-decoded recycled image report readiness to the current journey. */
+    measurementGeneration?: number;
+    onpreviewload?: (hash: string, generation: number) => void;
     onpointerselect: (e: MouseEvent) => void;
     onopen: () => void;
     onstacktoggle: () => void;
@@ -184,6 +195,16 @@
     return () => clearTimeout(retryTimer);
   });
 
+  // Report decoded pixels, including an image that was already warm when a
+  // new viewport journey began. The generation lets Grid reject late recycled
+  // slot events without persisting hashes in the metrics sink.
+  $effect(() => {
+    const generation = measurementGeneration;
+    if (generation > 0 && highPriority && loaded && onpreviewload !== undefined) {
+      onpreviewload(hash, generation);
+    }
+  });
+
   // previews-changed: this image's artifact just landed (the backend
   // writes it BEFORE emitting). Reload immediately with a fresh retry
   // budget — a capped 404 loop otherwise blanked the cell until restart
@@ -276,7 +297,8 @@
         {src}
         alt=""
         draggable="false"
-        loading="eager"
+        loading={highPriority ? "eager" : "lazy"}
+        fetchpriority={highPriority ? "high" : "low"}
         decoding="async"
         class:loaded
         onload={() => {

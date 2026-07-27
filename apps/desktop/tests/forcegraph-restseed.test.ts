@@ -18,6 +18,7 @@ import {
   annealedMaxStep,
   DEFAULT_MAX_STEP,
   isAtRest,
+  nextSettleCount,
   REHEAT_START,
   REST_ENERGY_PER_BODY,
   SETTLE_FRAMES,
@@ -58,6 +59,46 @@ describe("isAtRest — drag holds the sim awake (c8087d9)", () => {
     // Energy just over the bar fails at either scale.
     expect(isAtRest({ ...perBody, bodies: 5, energy: 5 * REST_ENERGY_PER_BODY })).toBe(false);
     expect(isAtRest({ ...perBody, bodies: 5000, energy: 5000 * REST_ENERGY_PER_BODY })).toBe(false);
+  });
+});
+
+describe("nextSettleCount — sustained motion, not elapsed frames", () => {
+  const quiet = {
+    energy: 0,
+    bodies: 100,
+    heat: SETTLED_HEAT,
+    dragging: false,
+  };
+
+  it("increments only consecutive genuinely quiet frames", () => {
+    expect(nextSettleCount({ ...quiet, settleCount: 7 })).toBe(8);
+  });
+
+  it("resets after visible motion instead of accumulating a time cutoff", () => {
+    expect(
+      nextSettleCount({
+        ...quiet,
+        settleCount: SETTLE_FRAMES,
+        energy: REST_ENERGY_PER_BODY * quiet.bodies,
+      }),
+    ).toBe(0);
+  });
+
+  it("resets while hot or dragging", () => {
+    expect(
+      nextSettleCount({
+        ...quiet,
+        settleCount: 12,
+        heat: REHEAT_START,
+      }),
+    ).toBe(0);
+    expect(
+      nextSettleCount({
+        ...quiet,
+        settleCount: 12,
+        dragging: true,
+      }),
+    ).toBe(0);
   });
 });
 

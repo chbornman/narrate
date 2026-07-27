@@ -149,4 +149,14 @@ describe("Thumb at a micro-tier size (rendered)", () => {
     const { container } = render(Thumb, props({ size: 320 }));
     expect(imgEl(container).getAttribute("src")).toBe(thumbUrl(HASH));
   });
+
+  it("keeps the true viewport eager/high and mounted overscan lazy/low", () => {
+    const visible = render(Thumb, props({ highPriority: true }));
+    expect(imgEl(visible.container).getAttribute("loading")).toBe("eager");
+    expect(imgEl(visible.container).getAttribute("fetchpriority")).toBe("high");
+
+    const overscan = render(Thumb, props({ highPriority: false }));
+    expect(imgEl(overscan.container).getAttribute("loading")).toBe("lazy");
+    expect(imgEl(overscan.container).getAttribute("fetchpriority")).toBe("low");
+  });
 });

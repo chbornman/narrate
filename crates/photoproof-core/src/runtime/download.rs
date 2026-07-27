@@ -98,6 +98,11 @@ pub enum DownloadError {
     /// settings/debug panel (§5.2).
     #[error("checksum mismatch for {file} after automatic re-fetch")]
     ChecksumFailed { file: String },
+    /// Verify is diagnostic and never fabricates missing bytes. Name the
+    /// artifact and direct the user to the resumable download lane instead of
+    /// leaking `io: No such file or directory`.
+    #[error("required model file is missing: {file}; resume Download to fetch it")]
+    MissingFile { file: String },
     /// B55 fail-closed PRE-FLIGHT: a manifest entry still carrying the
     /// UNPINNED placeholder (all-zero sha / UNPINNED revision) is refused
     /// BEFORE any byte moves — embedder entries stay in this state until
@@ -280,7 +285,15 @@ impl DownloadManager {
                 });
             }
             let path = self.models_dir.join(&model.id).join(&file.path);
-            let metadata = std::fs::metadata(&path)?;
+            let metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(DownloadError::MissingFile {
+                        file: file.path.clone(),
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
             if metadata.len() != file.bytes
                 || sha256_file_cancellable(&path, cancel)? != file.sha256.to_lowercase()
             {

@@ -625,11 +625,580 @@ CREATE TABLE IF NOT EXISTS topic_notes ( -- append-only, like collection_notes
 );
 "#;
 
+/// Rebuildable catalog projections for high-frequency desktop reads.
+///
+/// `active_ingest_pass_counts` replaces a correlated scan of every
+/// `ingest_passes` row on each 400 ms progress tick. The small
+/// `active_ingest_images` membership table preserves the exact root-lifecycle
+/// predicate used by queue claiming, while triggers make all existing write
+/// paths (including crash recovery and direct SQL maintenance) transactional.
+///
+/// `folder_change_log` is a bounded, durable catch-up journal. Its revision is
+/// global so a client can carry one opaque cursor; rows retain root + path so a
+/// folder command can filter direct children without broad invalidation.
+const CATALOG_PROJECTIONS_SCHEMA_SQL: &str = r#"
+-- user_version may be lowered to simulate an older app. Active projections
+-- are derived, so replay rebuilds them from canonical queue/path/root rows.
+-- Drop only their triggers first; the encompassing migration transaction
+-- makes the rebuild + trigger recreation atomic.
+DROP TRIGGER IF EXISTS active_ingest_image_added;
+DROP TRIGGER IF EXISTS active_ingest_image_removed;
+DROP TRIGGER IF EXISTS active_ingest_pass_eligibility;
+DROP TRIGGER IF EXISTS active_ingest_pass_inserted;
+DROP TRIGGER IF EXISTS active_ingest_pass_deleted;
+DROP TRIGGER IF EXISTS active_ingest_pass_updated;
+DROP TRIGGER IF EXISTS active_ingest_image_inserted;
+DROP TRIGGER IF EXISTS active_ingest_image_deleted;
+DROP TRIGGER IF EXISTS active_ingest_path_inserted;
+DROP TRIGGER IF EXISTS active_ingest_path_deleted;
+DROP TRIGGER IF EXISTS active_ingest_path_updated;
+DROP TRIGGER IF EXISTS active_ingest_root_inserted;
+DROP TRIGGER IF EXISTS active_ingest_root_deleted;
+DROP TRIGGER IF EXISTS active_ingest_root_state_updated;
+
+CREATE TABLE IF NOT EXISTS active_ingest_images (
+  image_hash TEXT PRIMARY KEY
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS active_ingest_pass_counts (
+  pass_name    TEXT NOT NULL,
+  pass_version INTEGER NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','running','done','error','skipped')),
+  count        INTEGER NOT NULL CHECK (count > 0),
+  PRIMARY KEY (pass_name, pass_version, state)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS folder_change_clock (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  revision  INTEGER NOT NULL CHECK (revision >= 0)
+) STRICT;
+INSERT OR IGNORE INTO folder_change_clock(singleton, revision) VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS folder_change_log (
+  revision  INTEGER NOT NULL,
+  root_id   TEXT NOT NULL,
+  rel_path  TEXT NOT NULL,
+  image_hash TEXT NOT NULL,
+  PRIMARY KEY (revision, root_id, rel_path, image_hash)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS folder_changes_by_scope
+  ON folder_change_log(root_id, rel_path, revision);
+
+-- The zero-root exception is part of the ingest contract: isolated ingest
+-- fixtures and authored/session text work remain active before any root exists.
+DELETE FROM active_ingest_pass_counts;
+DELETE FROM active_ingest_images;
+INSERT INTO active_ingest_images(image_hash)
+SELECT i.image_hash
+FROM images i
+WHERE NOT EXISTS (SELECT 1 FROM roots)
+   OR EXISTS (
+        SELECT 1
+        FROM paths p
+        LEFT JOIN roots r ON r.root_id = p.root_id
+        WHERE p.image_hash = i.image_hash
+          AND p.state = 'active'
+          AND (p.root_id IS NULL OR r.state = 'active')
+      );
+
+INSERT INTO active_ingest_pass_counts(pass_name, pass_version, state, count)
+SELECT ip.pass_name, ip.pass_version, ip.state, COUNT(*)
+FROM ingest_passes ip
+JOIN active_ingest_images ai ON ai.image_hash = ip.image_hash
+GROUP BY ip.pass_name, ip.pass_version, ip.state;
+
+-- Membership changes fan existing passes into/out of the tiny aggregate.
+CREATE TRIGGER active_ingest_image_added
+AFTER INSERT ON active_ingest_images
+BEGIN
+  INSERT INTO active_ingest_pass_counts(pass_name, pass_version, state, count)
+  SELECT pass_name, pass_version, state, COUNT(*)
+  FROM ingest_passes
+  WHERE image_hash = NEW.image_hash
+  GROUP BY pass_name, pass_version, state
+  ON CONFLICT(pass_name, pass_version, state)
+  DO UPDATE SET count = count + excluded.count;
+END;
+
+CREATE TRIGGER active_ingest_image_removed
+BEFORE DELETE ON active_ingest_images
+BEGIN
+  DELETE FROM active_ingest_pass_counts
+  WHERE count <= (
+    SELECT COUNT(*) FROM ingest_passes ip
+    WHERE ip.image_hash = OLD.image_hash
+      AND ip.pass_name = active_ingest_pass_counts.pass_name
+      AND ip.pass_version = active_ingest_pass_counts.pass_version
+      AND ip.state = active_ingest_pass_counts.state
+  )
+    AND EXISTS (
+      SELECT 1 FROM ingest_passes ip
+      WHERE ip.image_hash = OLD.image_hash
+        AND ip.pass_name = active_ingest_pass_counts.pass_name
+        AND ip.pass_version = active_ingest_pass_counts.pass_version
+        AND ip.state = active_ingest_pass_counts.state
+    );
+  UPDATE active_ingest_pass_counts
+  SET count = count - (
+    SELECT COUNT(*) FROM ingest_passes ip
+    WHERE ip.image_hash = OLD.image_hash
+      AND ip.pass_name = active_ingest_pass_counts.pass_name
+      AND ip.pass_version = active_ingest_pass_counts.pass_version
+      AND ip.state = active_ingest_pass_counts.state
+  )
+  WHERE EXISTS (
+    SELECT 1 FROM ingest_passes ip
+    WHERE ip.image_hash = OLD.image_hash
+      AND ip.pass_name = active_ingest_pass_counts.pass_name
+      AND ip.pass_version = active_ingest_pass_counts.pass_version
+      AND ip.state = active_ingest_pass_counts.state
+  );
+END;
+
+-- Pass mutations are O(1) aggregate adjustments. UPDATE handles even the
+-- unusual direct-SQL case where a row changes its complete primary identity.
+CREATE TRIGGER active_ingest_pass_eligibility
+BEFORE INSERT ON ingest_passes
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT NEW.image_hash
+  WHERE NOT EXISTS (SELECT 1 FROM roots)
+     OR EXISTS (
+          SELECT 1 FROM paths p
+          LEFT JOIN roots r ON r.root_id = p.root_id
+          WHERE p.image_hash = NEW.image_hash AND p.state = 'active'
+            AND (p.root_id IS NULL OR r.state = 'active')
+        );
+END;
+
+CREATE TRIGGER active_ingest_pass_inserted
+AFTER INSERT ON ingest_passes
+WHEN EXISTS (SELECT 1 FROM active_ingest_images WHERE image_hash = NEW.image_hash)
+BEGIN
+  INSERT INTO active_ingest_pass_counts(pass_name, pass_version, state, count)
+  VALUES (NEW.pass_name, NEW.pass_version, NEW.state, 1)
+  ON CONFLICT(pass_name, pass_version, state)
+  DO UPDATE SET count = count + 1;
+END;
+
+CREATE TRIGGER active_ingest_pass_deleted
+AFTER DELETE ON ingest_passes
+WHEN EXISTS (SELECT 1 FROM active_ingest_images WHERE image_hash = OLD.image_hash)
+BEGIN
+  DELETE FROM active_ingest_pass_counts
+  WHERE pass_name = OLD.pass_name AND pass_version = OLD.pass_version
+    AND state = OLD.state AND count = 1;
+  UPDATE active_ingest_pass_counts
+  SET count = count - 1
+  WHERE pass_name = OLD.pass_name AND pass_version = OLD.pass_version
+    AND state = OLD.state AND count > 1;
+END;
+
+CREATE TRIGGER active_ingest_pass_updated
+AFTER UPDATE OF image_hash, pass_name, pass_version, state ON ingest_passes
+WHEN OLD.image_hash <> NEW.image_hash
+  OR OLD.pass_name <> NEW.pass_name
+  OR OLD.pass_version <> NEW.pass_version
+  OR OLD.state <> NEW.state
+BEGIN
+  DELETE FROM active_ingest_pass_counts
+  WHERE pass_name = OLD.pass_name AND pass_version = OLD.pass_version
+    AND state = OLD.state AND count = 1
+    AND EXISTS (
+      SELECT 1 FROM active_ingest_images WHERE image_hash = OLD.image_hash
+    );
+  UPDATE active_ingest_pass_counts
+  SET count = count - 1
+  WHERE pass_name = OLD.pass_name AND pass_version = OLD.pass_version
+    AND state = OLD.state
+    AND count > 1
+    AND EXISTS (
+      SELECT 1 FROM active_ingest_images WHERE image_hash = OLD.image_hash
+    );
+  INSERT INTO active_ingest_pass_counts(pass_name, pass_version, state, count)
+  SELECT NEW.pass_name, NEW.pass_version, NEW.state, 1
+  WHERE EXISTS (
+    SELECT 1 FROM active_ingest_images WHERE image_hash = NEW.image_hash
+  )
+  ON CONFLICT(pass_name, pass_version, state)
+  DO UPDATE SET count = count + 1;
+END;
+
+CREATE TRIGGER active_ingest_image_inserted
+AFTER INSERT ON images
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT NEW.image_hash
+  WHERE NOT EXISTS (SELECT 1 FROM roots)
+     OR EXISTS (
+          SELECT 1 FROM paths p
+          LEFT JOIN roots r ON r.root_id = p.root_id
+          WHERE p.image_hash = NEW.image_hash AND p.state = 'active'
+            AND (p.root_id IS NULL OR r.state = 'active')
+        );
+END;
+
+CREATE TRIGGER active_ingest_image_deleted
+BEFORE DELETE ON images
+BEGIN
+  DELETE FROM active_ingest_images WHERE image_hash = OLD.image_hash;
+END;
+
+-- Re-evaluate only the image(s) touched by a path mutation. INSERT-before-
+-- DELETE ordering ensures duplicate active paths never transiently remove an
+-- otherwise eligible image.
+CREATE TRIGGER active_ingest_path_inserted
+AFTER INSERT ON paths
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT NEW.image_hash
+  WHERE NOT EXISTS (SELECT 1 FROM roots)
+     OR EXISTS (
+          SELECT 1 FROM paths p
+          LEFT JOIN roots r ON r.root_id = p.root_id
+          WHERE p.image_hash = NEW.image_hash AND p.state = 'active'
+            AND (p.root_id IS NULL OR r.state = 'active')
+        );
+  DELETE FROM active_ingest_images
+  WHERE image_hash = NEW.image_hash
+    AND EXISTS (SELECT 1 FROM roots)
+    AND NOT EXISTS (
+      SELECT 1 FROM paths p
+      LEFT JOIN roots r ON r.root_id = p.root_id
+      WHERE p.image_hash = NEW.image_hash AND p.state = 'active'
+        AND (p.root_id IS NULL OR r.state = 'active')
+    );
+END;
+
+CREATE TRIGGER active_ingest_path_deleted
+AFTER DELETE ON paths
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT OLD.image_hash
+  WHERE NOT EXISTS (SELECT 1 FROM roots)
+     OR EXISTS (
+          SELECT 1 FROM paths p
+          LEFT JOIN roots r ON r.root_id = p.root_id
+          WHERE p.image_hash = OLD.image_hash AND p.state = 'active'
+            AND (p.root_id IS NULL OR r.state = 'active')
+        );
+  DELETE FROM active_ingest_images
+  WHERE image_hash = OLD.image_hash
+    AND EXISTS (SELECT 1 FROM roots)
+    AND NOT EXISTS (
+      SELECT 1 FROM paths p
+      LEFT JOIN roots r ON r.root_id = p.root_id
+      WHERE p.image_hash = OLD.image_hash AND p.state = 'active'
+        AND (p.root_id IS NULL OR r.state = 'active')
+    );
+END;
+
+CREATE TRIGGER active_ingest_path_updated
+AFTER UPDATE OF image_hash, root_id, state ON paths
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT candidate.image_hash
+  FROM (SELECT OLD.image_hash AS image_hash
+        UNION SELECT NEW.image_hash AS image_hash) AS candidate
+  WHERE NOT EXISTS (SELECT 1 FROM roots)
+     OR EXISTS (
+          SELECT 1 FROM paths p
+          LEFT JOIN roots r ON r.root_id = p.root_id
+          WHERE p.image_hash = candidate.image_hash AND p.state = 'active'
+            AND (p.root_id IS NULL OR r.state = 'active')
+        );
+  DELETE FROM active_ingest_images
+  WHERE image_hash IN (OLD.image_hash, NEW.image_hash)
+    AND EXISTS (SELECT 1 FROM roots)
+    AND NOT EXISTS (
+      SELECT 1 FROM paths p
+      LEFT JOIN roots r ON r.root_id = p.root_id
+      WHERE p.image_hash = active_ingest_images.image_hash
+        AND p.state = 'active'
+        AND (p.root_id IS NULL OR r.state = 'active')
+    );
+END;
+
+-- Root creation/deletion changes the zero-root exception globally; lifecycle
+-- updates affect only images claimed by that root. These operations are rare,
+-- so exact transactional reconciliation is preferable to a stale counter.
+CREATE TRIGGER active_ingest_root_inserted
+AFTER INSERT ON roots
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT i.image_hash FROM images i
+  WHERE EXISTS (
+    SELECT 1 FROM paths p
+    LEFT JOIN roots r ON r.root_id = p.root_id
+    WHERE p.image_hash = i.image_hash AND p.state = 'active'
+      AND (p.root_id IS NULL OR r.state = 'active')
+  );
+  DELETE FROM active_ingest_images
+  WHERE NOT EXISTS (
+    SELECT 1 FROM paths p
+    LEFT JOIN roots r ON r.root_id = p.root_id
+    WHERE p.image_hash = active_ingest_images.image_hash
+      AND p.state = 'active'
+      AND (p.root_id IS NULL OR r.state = 'active')
+  );
+END;
+
+CREATE TRIGGER active_ingest_root_deleted
+AFTER DELETE ON roots
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT candidate.image_hash FROM (
+    SELECT image_hash FROM images
+    UNION
+    SELECT image_hash FROM ingest_passes
+  ) AS candidate
+  WHERE NOT EXISTS (SELECT 1 FROM roots)
+     OR EXISTS (
+          SELECT 1 FROM paths p
+          LEFT JOIN roots r ON r.root_id = p.root_id
+          WHERE p.image_hash = candidate.image_hash AND p.state = 'active'
+            AND (p.root_id IS NULL OR r.state = 'active')
+        );
+  DELETE FROM active_ingest_images
+  WHERE EXISTS (SELECT 1 FROM roots)
+    AND NOT EXISTS (
+      SELECT 1 FROM paths p
+      LEFT JOIN roots r ON r.root_id = p.root_id
+      WHERE p.image_hash = active_ingest_images.image_hash
+        AND p.state = 'active'
+        AND (p.root_id IS NULL OR r.state = 'active')
+    );
+END;
+
+CREATE TRIGGER active_ingest_root_state_updated
+AFTER UPDATE OF state ON roots
+WHEN OLD.state <> NEW.state
+BEGIN
+  INSERT OR IGNORE INTO active_ingest_images(image_hash)
+  SELECT DISTINCT p.image_hash FROM paths p
+  WHERE p.root_id = NEW.root_id
+    AND (
+      NOT EXISTS (SELECT 1 FROM roots)
+      OR EXISTS (
+        SELECT 1 FROM paths eligible
+        LEFT JOIN roots r ON r.root_id = eligible.root_id
+        WHERE eligible.image_hash = p.image_hash
+          AND eligible.state = 'active'
+          AND (eligible.root_id IS NULL OR r.state = 'active')
+      )
+    );
+  DELETE FROM active_ingest_images
+  WHERE image_hash IN (SELECT image_hash FROM paths WHERE root_id = NEW.root_id)
+    AND EXISTS (SELECT 1 FROM roots)
+    AND NOT EXISTS (
+      SELECT 1 FROM paths eligible
+      LEFT JOIN roots r ON r.root_id = eligible.root_id
+      WHERE eligible.image_hash = active_ingest_images.image_hash
+        AND eligible.state = 'active'
+        AND (eligible.root_id IS NULL OR r.state = 'active')
+    );
+END;
+
+-- Folder change journal. A single trigger invocation owns one revision even
+-- when it invalidates many paths; consumers coalesce repeated hashes.
+CREATE TRIGGER IF NOT EXISTS folder_change_path_inserted
+AFTER INSERT ON paths
+WHEN NEW.state = 'active' AND NEW.root_id IS NOT NULL
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT revision, NEW.root_id, NEW.rel_path, NEW.image_hash
+  FROM folder_change_clock WHERE singleton = 1;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_path_deleted
+AFTER DELETE ON paths
+WHEN OLD.state = 'active' AND OLD.root_id IS NOT NULL
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT revision, OLD.root_id, OLD.rel_path, OLD.image_hash
+  FROM folder_change_clock WHERE singleton = 1;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_path_updated
+AFTER UPDATE OF image_hash, root_id, rel_path, state ON paths
+WHEN OLD.image_hash <> NEW.image_hash OR OLD.root_id IS NOT NEW.root_id
+  OR OLD.rel_path <> NEW.rel_path OR OLD.state <> NEW.state
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT revision, OLD.root_id, OLD.rel_path, OLD.image_hash
+  FROM folder_change_clock
+  WHERE singleton = 1 AND OLD.state = 'active' AND OLD.root_id IS NOT NULL;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT revision, NEW.root_id, NEW.rel_path, NEW.image_hash
+  FROM folder_change_clock
+  WHERE singleton = 1 AND NEW.state = 'active' AND NEW.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_image_updated
+AFTER UPDATE OF capture_ts, first_ingested_at ON images
+WHEN OLD.capture_ts IS NOT NEW.capture_ts
+  OR OLD.first_ingested_at <> NEW.first_ingested_at
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, NEW.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = NEW.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_preview_inserted
+AFTER INSERT ON preview_artifacts
+WHEN NEW.kind = 'thumb'
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, NEW.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = NEW.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_preview_deleted
+AFTER DELETE ON preview_artifacts
+WHEN OLD.kind = 'thumb'
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, OLD.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = OLD.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_journal_stats_inserted
+AFTER INSERT ON image_journal_stats
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, NEW.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = NEW.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_journal_stats_updated
+AFTER UPDATE OF has_text, has_strokes ON image_journal_stats
+WHEN OLD.has_text <> NEW.has_text OR OLD.has_strokes <> NEW.has_strokes
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, NEW.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = NEW.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_journal_stats_deleted
+AFTER DELETE ON image_journal_stats
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, OLD.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = OLD.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_rating_inserted
+AFTER INSERT ON image_ratings
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, NEW.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = NEW.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_rating_updated
+AFTER UPDATE OF rating ON image_ratings
+WHEN OLD.rating <> NEW.rating
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, NEW.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = NEW.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_rating_deleted
+AFTER DELETE ON image_ratings
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, OLD.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.image_hash = OLD.image_hash
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_volume_state_updated
+AFTER UPDATE OF state ON volumes
+WHEN OLD.state <> NEW.state
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, p.root_id, p.rel_path, p.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.volume_id = NEW.volume_id
+    AND p.state = 'active' AND p.root_id IS NOT NULL;
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS folder_change_root_state_updated
+AFTER UPDATE OF state ON roots
+WHEN OLD.state <> NEW.state
+BEGIN
+  UPDATE folder_change_clock SET revision = revision + 1 WHERE singleton = 1;
+  INSERT OR IGNORE INTO folder_change_log(revision, root_id, rel_path, image_hash)
+  SELECT c.revision, NEW.root_id, p.rel_path, p.image_hash
+  FROM folder_change_clock c JOIN paths p
+  WHERE c.singleton = 1 AND p.root_id = NEW.root_id AND p.state = 'active';
+  DELETE FROM folder_change_log
+  WHERE revision <= (SELECT revision - 100000 FROM folder_change_clock WHERE singleton = 1);
+END;
+"#;
+
 /// The highest `user_version` this build knows how to produce. Bump this in
 /// lockstep with the last `if version < N` block below. It is the upper bound
 /// the downgrade guard enforces: a DB stamped higher than this was written by a
 /// newer app and must not be opened by this one.
-pub(crate) const CURRENT_VERSION: i64 = 16;
+pub(crate) const CURRENT_VERSION: i64 = 17;
 
 /// Deterministic recovery artifact written before an existing database is
 /// upgraded. The source version is part of the name so a later application
@@ -1015,6 +1584,17 @@ fn migrate_inner(
         }
         migration_version(&tx, 16, &mut boundary, after_statement)?;
     }
+    if version < 17 {
+        let mut boundary = 0;
+        migration_program(
+            &tx,
+            17,
+            &mut boundary,
+            CATALOG_PROJECTIONS_SCHEMA_SQL,
+            after_statement,
+        )?;
+        migration_version(&tx, 17, &mut boundary, after_statement)?;
+    }
     tx.commit()?;
     Ok(version)
 }
@@ -1033,8 +1613,35 @@ mod tests {
     }
 
     fn recreate_pre_v14_roots(conn: &Connection) {
+        // This helper starts from today's schema, then faithfully reconstructs
+        // a v13 database. Remove v17 projections/triggers first: a real v13
+        // database cannot contain them, and their root references would
+        // correctly prevent the simulated v14 table rebuild.
+        let projection_triggers = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master
+                     WHERE type = 'trigger'
+                       AND (name LIKE 'active_ingest_%'
+                            OR name LIKE 'folder_change_%')",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        for trigger in projection_triggers {
+            conn.execute_batch(&format!("DROP TRIGGER \"{trigger}\""))
+                .unwrap();
+        }
         conn.execute_batch(
-            "DROP TABLE roots;
+            "DROP TABLE IF EXISTS folder_change_log;
+             DROP TABLE IF EXISTS folder_change_clock;
+             DROP TABLE IF EXISTS active_ingest_pass_counts;
+             DROP TABLE IF EXISTS active_ingest_images;
+             DROP TABLE roots;
              CREATE TABLE roots (
                root_id TEXT PRIMARY KEY,
                volume_id TEXT NOT NULL REFERENCES volumes(volume_id),
@@ -1125,6 +1732,9 @@ mod tests {
         }
         if version >= 15 {
             conn.execute_batch(TOPIC_NOTES_SCHEMA_SQL).unwrap();
+        }
+        if version >= 17 {
+            conn.execute_batch(CATALOG_PROJECTIONS_SCHEMA_SQL).unwrap();
         }
         run_pragma(&conn, &format!("PRAGMA user_version = {version}")).unwrap();
         conn
@@ -1448,6 +2058,114 @@ mod tests {
             [],
         )
         .expect("live v14+ schema admits archived");
+    }
+
+    /// user_version regression is an established recovery simulation: replay
+    /// must preserve authored rows while rebuilding v17's derived projection
+    /// exactly, and it must retain the durable folder catch-up cursor/history.
+    #[test]
+    fn v17_rerun_rebuilds_projection_and_preserves_truth_and_folder_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let hash = "71".repeat(32);
+        conn.execute_batch(
+            "INSERT INTO collections
+               (id, name, description, status, created_ts, updated_ts)
+             VALUES ('collection-survivor', 'Survivor', '', 'active', 'x', 'x');
+             INSERT INTO volumes
+               (volume_id, state, first_seen_at, last_seen_at)
+             VALUES ('v17-volume', 'online', 'x', 'x');
+             INSERT INTO roots
+               (root_id, volume_id, rel_path, state, created_at)
+             VALUES ('v17-root', 'v17-volume', 'photos', 'active', 'x');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO images(image_hash, byte_size, format, first_ingested_at)
+             VALUES (?1, 1, 'jpeg', 'x')",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paths
+               (path_id, image_hash, volume_id, root_id, rel_path, size,
+                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('v17-path', ?1, 'v17-volume', 'v17-root',
+                     'photos/a.jpg', 1, 1, 'active', 'x', 'x')",
+            [&hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ingest_passes
+               (image_hash, pass_name, pass_version, state, priority, attempts,
+                enqueued_at)
+             VALUES (?1, 'preview', 1, 'pending', 2, 0, 'x')",
+            [&hash],
+        )
+        .unwrap();
+        let before_folder: (i64, i64) = conn
+            .query_row(
+                "SELECT c.revision, COUNT(l.revision)
+                 FROM folder_change_clock c
+                 LEFT JOIN folder_change_log l ON 1 = 1
+                 WHERE c.singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count FROM active_ingest_pass_counts
+                 WHERE pass_name = 'preview' AND pass_version = 1
+                   AND state = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+
+        // Prove replay actually rebuilds rather than merely tolerating the
+        // objects: damage the derived count, then lower only the schema stamp.
+        conn.execute("DELETE FROM active_ingest_pass_counts", [])
+            .unwrap();
+        run_pragma(&conn, "PRAGMA user_version = 16").unwrap();
+        assert_eq!(migrate(&conn).unwrap(), 16);
+
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM collections WHERE id = 'collection-survivor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "Survivor");
+        assert_eq!(
+            conn.query_row(
+                "SELECT count FROM active_ingest_pass_counts
+                 WHERE pass_name = 'preview' AND pass_version = 1
+                   AND state = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        let after_folder: (i64, i64) = conn
+            .query_row(
+                "SELECT c.revision, COUNT(l.revision)
+                 FROM folder_change_clock c
+                 LEFT JOIN folder_change_log l ON 1 = 1
+                 WHERE c.singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after_folder, before_folder);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION);
     }
 
     /// A database stamped NEWER than this build supports (a downgrade) is refused

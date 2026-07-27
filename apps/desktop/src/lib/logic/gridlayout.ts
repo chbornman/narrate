@@ -72,6 +72,29 @@ export function rowsPerPage(g: GridGeometry, viewportH: number): number {
  * covers the maximal window — so the value lives in exactly one place. */
 const OVERSCAN_SCREENS = 1;
 
+/** The cells that actually intersect the viewport — no overscan.
+ *
+ * Keep this separate from [`visibleRange`]: mounted cells include a screen of
+ * runway on both sides for smooth scrolling, but preview generation and fetch
+ * priority must describe what the user can see NOW. Treating the whole mounted
+ * window as visible eagerly requests three screens and lets speculative work
+ * compete with the final viewport after a fling.
+ */
+export function viewportRange(
+  g: GridGeometry,
+  scrollTop: number,
+  viewportH: number,
+  count: number,
+): { start: number; end: number } {
+  const rows = totalRows(g, count);
+  const startRow = Math.min(rows, Math.max(0, Math.floor(scrollTop / g.rowH)));
+  const endRow = Math.min(
+    rows,
+    Math.max(startRow, Math.ceil((scrollTop + viewportH) / g.rowH)),
+  );
+  return { start: Math.min(count, startRow * g.cols), end: Math.min(count, endRow * g.cols) };
+}
+
 /** Mounted index window: visible rows + OVERSCAN_SCREENS screens above
  * and below (UI §3.3). */
 export function visibleRange(

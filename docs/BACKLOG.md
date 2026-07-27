@@ -7,6 +7,93 @@ loop. The vision filter applies to every line (reviewing/processing = core;
 managing = off-thesis). Shipped items move to LANDED.md verbatim — only open
 work lives here.
 
+## Core-quality stabilization packet - 2026-07-27
+
+Active packet. Scope is deliberately closed to correctness, responsiveness,
+preview throughput, convergence, and clear control of existing behavior. No
+new product features graduate while this packet is open.
+
+Packet exit requires all of the following:
+
+- [x] **RAW preview correctness and honest settlement**
+  - Valid Fujifilm RAF files must produce previews; unsupported or invalid RAW
+    containers must settle once as skipped, remain indexed, and never hold the
+    activity loop in error/retry.
+  - Current evidence: all 10 valid X-Pro3 RAF samples preview; the eight
+    repeatable failures are byte-for-byte source matches but lack the required
+    `FUJIFILMCCD-RAW` header and are also rejected by ExifTool/file. The
+    unsupported-container settlement and same-decoder dimension read are built
+    and focused-test green. The 2k-RAW repeat passed with 3,990 queue jobs
+    settled, zero queue errors, and an unchanged `/homenas` source fingerprint.
+
+- [~] **Preview generation throughput, measured by stage**
+  - Track RAW extraction, original decode, resize, encode, artifact write,
+    database record, queue wait, service time, RSS, and errors separately.
+  - Reuse one RAW decoder parse for preview metadata/dimensions. Keep the
+    SIMD CPU resize and measured libwebp effort. Do not add a GPU preview path
+    unless an end-to-end corpus receipt beats the CPU path after upload/readback
+    and fallback costs.
+  - Current 25-RAW NVMe worker sweep: approximately 3.1 images/s at 1-2
+    workers, 7.9-8.6 at 4, 14.5-14.6 at 8, and 16.5 at 12. Repeat with RSS and
+    installed-app responsiveness before changing cross-platform defaults. The
+    first corrected 2k-RAW run took 160.8 seconds (12.4 files/s, 2.46 GiB peak
+    RSS), slower than the earlier 117-125 second receipts; correctness is
+    proven, but an end-to-end throughput improvement is not yet proven.
+
+- [~] **Request discipline and viewport-first behavior**
+  - Visible cells outrank overscan; speculative thumbnail work is replaceable;
+    queues are bounded; overload is explicit; stale/recycled image results
+    cannot repaint the wrong cell; cache rebuilds do not create unbounded 404
+    retry traffic.
+  - Deterministic scheduler/fling tests are built. Installed rapid-scroll,
+    cache-clear, and preview-rebuild journey receipts remain.
+
+- [~] **Application convergence and cycling audit**
+  - Exercise cold boot/retry, add/rescan, ingest progress, folder deltas,
+    metadata re-sort, scroll anchoring, Grid to Look to Grid, pause/resume,
+    settings propagation, cache rebuild, sleep/resume, offline/online volume,
+    and clean shutdown.
+  - Pass means stale async responses are fenced, refreshes coalesce, the same
+    photograph remains anchored, every managed task reaches a terminal state,
+    and no settled screen resumes work without a new revision/event.
+  - Graph-loop slice delivered 2026-07-27: suggestions and semantic-neighbor
+    reads no longer block the first image paint; affinity recomputes are
+    single-flight, semantically deduplicated, and discard stale generations;
+    off-thread physics replies carry a layout generation; vector-write bursts
+    refresh once after quiet; clicks do not wake physics unless they become
+    real drags; settling requires consecutive imperceptible-motion frames; and
+    unfinished layouts are never persisted as settled snapshots. Focused force,
+    worker-parity, and graph-store tests plus Svelte diagnostics pass. Remaining
+    acceptance is a clean-process dogfood receipt (not an HMR session) covering
+    cold open, autonomous settle, click stability, drag reheat, close/reopen,
+    and a live vector-write burst.
+  - Live dogfood follow-up: sparse k-NN edges are now normalized to undirected
+    equal-and-opposite semantic pulls; the interactive integrator projects out
+    whole-layout angular velocity (absolute graph rotation carries no meaning)
+    and increases physical damping after the hot organizing phase. Relative
+    node motion remains live and must still clear the consecutive low-motion
+    settle gate. Regression fixtures pin asymmetric-edge normalization, rigid
+    rotation cancellation, preserved radial motion, and live orbit removal.
+
+- [x] **Settings that describe outcomes rather than implementation**
+  - Processing intensity, automatic work, new-folder policy, semantic search,
+    visual search, and preview cache controls must say what runs, what pauses,
+    what remains interactive, what is preserved, and the recommended default.
+  - User-facing copy/toggle state is built; the focused Settings suite passes
+    9/9 and Svelte check passes with zero errors or warnings. No worker-count or
+    GPU switch is planned; those remain automatic implementation policy.
+
+- [~] **Scale and regression closeout**
+  - Zero-error 2k real-RAW repeat, then the installed mixed-media/interaction
+    soak; 20k/100k/250k catalog gates; full Rust/frontend/clippy/build gate;
+    final machine receipt and remaining-risk update in
+    `DESKTOP-EXPERIENCE-BUDGETS.md` and `REAL-LIBRARY-SOAK.md`.
+  - The 2k RAW run, Rust workspace gate, 1,263-test frontend suite, production
+    UI build, tuning guard, 100k catalog/backend gate, and 250k frontend
+    transform gate pass. Remaining closeout is the installed mixed-media and
+    interaction soak, including rapid scroll/cache rebuild and lifecycle
+    journeys.
+
 ## Desktop application foundation audit - 2026-07-26
 
 Read-only sweep of startup, shutdown, background work, roots/volumes,

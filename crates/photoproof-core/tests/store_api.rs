@@ -1063,7 +1063,13 @@ fn v5_migration_restores_has_text_on_pre_p41_databases() {
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(
-            "ALTER TABLE image_journal_stats DROP COLUMN has_text;
+            "-- A real v4 database predates the v17 folder-change triggers.
+             -- Remove those future objects before restoring the historical
+             -- table shape; migration 17 recreates them on reopen.
+             DROP TRIGGER IF EXISTS folder_change_journal_stats_inserted;
+             DROP TRIGGER IF EXISTS folder_change_journal_stats_updated;
+             DROP TRIGGER IF EXISTS folder_change_journal_stats_deleted;
+             ALTER TABLE image_journal_stats DROP COLUMN has_text;
              PRAGMA user_version = 4;",
         )
         .unwrap();

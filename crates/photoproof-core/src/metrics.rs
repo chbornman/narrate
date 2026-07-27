@@ -158,6 +158,39 @@ impl PipelineMetrics {
     }
 }
 
+/// Fixed-cardinality catalog-lane timings for the operations that dominate
+/// interactive ingest/browse traffic. Each operation has two independent
+/// series: time blocked on the library's shared SQLite connection mutex, and
+/// time executing after the lane was acquired. Labels are compile-time
+/// constants and never contain root ids, paths, hashes, or other user data.
+#[derive(Debug, Default)]
+pub struct CatalogMetrics {
+    pub activity_wait: StageStat,
+    pub activity_operation: StageStat,
+    pub folder_list_wait: StageStat,
+    pub folder_list_operation: StageStat,
+    pub folder_delta_wait: StageStat,
+    pub folder_delta_operation: StageStat,
+    pub queue_claim_wait: StageStat,
+    pub queue_claim_operation: StageStat,
+}
+
+impl CatalogMetrics {
+    pub fn snapshot(&self) -> Vec<StageSnapshot> {
+        vec![
+            self.activity_wait.snapshot("activity.wait"),
+            self.activity_operation.snapshot("activity.operation"),
+            self.folder_list_wait.snapshot("folder_list.wait"),
+            self.folder_list_operation.snapshot("folder_list.operation"),
+            self.folder_delta_wait.snapshot("folder_delta.wait"),
+            self.folder_delta_operation
+                .snapshot("folder_delta.operation"),
+            self.queue_claim_wait.snapshot("queue_claim.wait"),
+            self.queue_claim_operation.snapshot("queue_claim.operation"),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +251,42 @@ mod tests {
         dedup.dedup();
         assert_eq!(names.len(), 9);
         assert_eq!(names, dedup);
+    }
+
+    #[test]
+    fn catalog_snapshot_is_fixed_cardinality_and_separates_wait_from_operation() {
+        let metrics = CatalogMetrics::default();
+        metrics.folder_list_wait.record(Duration::from_millis(2));
+        metrics
+            .folder_list_operation
+            .record(Duration::from_millis(7));
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.len(), 8);
+        let names = snapshot.iter().map(|stage| stage.stage).collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "activity.wait",
+                "activity.operation",
+                "folder_list.wait",
+                "folder_list.operation",
+                "folder_delta.wait",
+                "folder_delta.operation",
+                "queue_claim.wait",
+                "queue_claim.operation",
+            ]
+        );
+        let wait = snapshot
+            .iter()
+            .find(|stage| stage.stage == "folder_list.wait")
+            .unwrap();
+        let operation = snapshot
+            .iter()
+            .find(|stage| stage.stage == "folder_list.operation")
+            .unwrap();
+        assert_eq!(wait.count, 1);
+        assert_eq!(wait.p50_ms, 2.048);
+        assert_eq!(operation.count, 1);
+        assert_eq!(operation.p95_ms, 8.192);
     }
 }

@@ -72,6 +72,19 @@ pub struct GridItem {
     pub preview_ready: bool,
 }
 
+/// Revisioned folder catch-up. `reset` means `upserts` is a complete
+/// replacement snapshot; otherwise apply upserts/removals and retain the
+/// returned `toRevision` as the next cursor.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDelta {
+    pub from_revision: u64,
+    pub to_revision: u64,
+    pub reset: bool,
+    pub upserts: Vec<GridItem>,
+    pub removed_hashes: Vec<String>,
+}
+
 /// CAPTURE §11 `ScopeView`: what the indicator renders.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

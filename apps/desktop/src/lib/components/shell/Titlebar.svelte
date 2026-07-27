@@ -28,6 +28,7 @@
   import Search from "@lucide/svelte/icons/search";
   import Info from "@lucide/svelte/icons/info";
   import List from "@lucide/svelte/icons/list";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
   import Minus from "@lucide/svelte/icons/minus";
   import Square from "@lucide/svelte/icons/square";
   import X from "@lucide/svelte/icons/x";
@@ -119,6 +120,14 @@
       {@attach tooltip({ actionId: "open-inspector", verb: "Journal", arg: "journal" })}
       ><List size={14} /></button
     >
+    <button
+      class="chrome"
+      aria-label="Settings"
+      onclick={() => perform("open-settings")}
+      {@attach tooltip({ actionId: "open-settings" })}
+    >
+      <Settings2 size={14} />
+    </button>
     {#if !mac}
       <div class="controls">
         <button aria-label="Minimize" onclick={() => void win.minimize()}><Minus size={14} /></button>
@@ -174,6 +183,13 @@
     pointer-events: none;
   }
   .center :global(.pill) {
+    pointer-events: auto;
+  }
+  /* Popover is a fixed descendant of this pointer-transparent centering
+   * wrapper. Re-enable hit testing for the floating surface too; otherwise
+   * the pill can open it, but the pointer can never enter or click it and the
+   * hover-close timer wins immediately. */
+  .center :global(.popover) {
     pointer-events: auto;
   }
   .cluster {

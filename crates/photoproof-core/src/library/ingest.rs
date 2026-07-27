@@ -680,20 +680,12 @@ pub fn pass_counters(conn: &Connection) -> rusqlite::Result<BTreeMap<(String, i6
 pub fn active_pass_counters(
     conn: &Connection,
 ) -> rusqlite::Result<BTreeMap<(String, i64), PassCounters>> {
-    pass_counters_where(
-        conn,
-        "WHERE (
-           NOT EXISTS (SELECT 1 FROM roots)
-           OR EXISTS (
-             SELECT 1
-             FROM paths eligible
-             LEFT JOIN roots eligible_root ON eligible_root.root_id = eligible.root_id
-             WHERE eligible.image_hash = ingest_passes.image_hash
-               AND eligible.state = 'active'
-               AND (eligible.root_id IS NULL OR eligible_root.state = 'active')
-           )
-         )",
-    )
+    let mut stmt = conn.prepare_cached(
+        "SELECT pass_name, pass_version, state, count
+         FROM active_ingest_pass_counts
+         ORDER BY pass_name, pass_version, state",
+    )?;
+    counters_from_rows(&mut stmt)
 }
 
 fn pass_counters_where(
@@ -706,6 +698,12 @@ fn pass_counters_where(
              {predicate}
              GROUP BY pass_name, pass_version, state"
     ))?;
+    counters_from_rows(&mut stmt)
+}
+
+fn counters_from_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+) -> rusqlite::Result<BTreeMap<(String, i64), PassCounters>> {
     let mut map: BTreeMap<(String, i64), PassCounters> = BTreeMap::new();
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -1411,5 +1409,187 @@ mod tests {
             repended, 2,
             "exactly the done + transient-skip rows re-pended"
         );
+    }
+
+    fn scanned_active_pass_counters(conn: &Connection) -> BTreeMap<(String, i64), PassCounters> {
+        pass_counters_where(
+            conn,
+            "WHERE (
+               NOT EXISTS (SELECT 1 FROM roots)
+               OR EXISTS (
+                 SELECT 1
+                 FROM paths eligible
+                 LEFT JOIN roots eligible_root
+                   ON eligible_root.root_id = eligible.root_id
+                 WHERE eligible.image_hash = ingest_passes.image_hash
+                   AND eligible.state = 'active'
+                   AND (eligible.root_id IS NULL
+                        OR eligible_root.state = 'active')
+               )
+             )",
+        )
+        .unwrap()
+    }
+
+    /// The maintained desktop projection must remain byte-for-byte equivalent
+    /// to the old full scan across direct SQL state changes and root lifecycle
+    /// transitions. Trigger ownership is intentional: crash recovery, repair,
+    /// and tests all mutate the queue without one privileged Rust wrapper.
+    #[test]
+    fn active_counter_projection_matches_scan_through_lifecycle_and_state_changes() {
+        let (_tmp, conn) = setup();
+        let ts = UtcMillis::now().to_rfc3339();
+        let live = "51".repeat(32);
+        let resting = "52".repeat(32);
+        conn.execute_batch(
+            "INSERT INTO volumes
+               (volume_id, state, first_seen_at, last_seen_at)
+             VALUES ('projection-volume', 'online', 'x', 'x');
+             INSERT INTO roots
+               (root_id, volume_id, rel_path, state, created_at)
+             VALUES ('projection-live', 'projection-volume', 'live', 'active', 'x');
+             INSERT INTO roots
+               (root_id, volume_id, rel_path, state, created_at)
+             VALUES ('projection-resting', 'projection-volume', 'resting', 'archived', 'x');",
+        )
+        .unwrap();
+        for hash in [&live, &resting] {
+            conn.execute(
+                "INSERT INTO images
+                   (image_hash, byte_size, format, first_ingested_at)
+                 VALUES (?1, 1, 'jpeg', ?2)",
+                params![hash, ts],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO paths
+               (path_id, image_hash, volume_id, root_id, rel_path, size,
+                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('projection-p-live', ?1, 'projection-volume',
+                     'projection-live', 'live/a.jpg', 1, 1, 'active', ?3, ?3),
+                    ('projection-p-resting', ?2, 'projection-volume',
+                     'projection-resting', 'resting/b.jpg', 1, 1, 'active', ?3, ?3)",
+            params![live, resting, ts],
+        )
+        .unwrap();
+        for (hash, pass, state) in [
+            (&live, "preview", "pending"),
+            (&live, "exif", "done"),
+            (&resting, "preview", "error"),
+        ] {
+            conn.execute(
+                "INSERT INTO ingest_passes
+                   (image_hash, pass_name, pass_version, state, priority,
+                    attempts, enqueued_at)
+                 VALUES (?1, ?2, 1, ?3, 2, 0, ?4)",
+                params![hash, pass, state, ts],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+
+        conn.execute(
+            "UPDATE ingest_passes SET state = 'running'
+             WHERE image_hash = ?1 AND pass_name = 'preview'",
+            [&live],
+        )
+        .unwrap();
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+
+        conn.execute(
+            "UPDATE roots SET state = 'archived'
+             WHERE root_id = 'projection-live'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+        assert!(active_pass_counters(&conn).unwrap().is_empty());
+
+        conn.execute(
+            "UPDATE roots SET state = 'active'
+             WHERE root_id = 'projection-resting'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+
+        conn.execute(
+            "UPDATE paths SET state = 'stale', stale_reason = 'deleted'
+             WHERE path_id = 'projection-p-resting'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+        conn.execute(
+            "UPDATE paths SET state = 'active', stale_reason = NULL
+             WHERE path_id = 'projection-p-resting'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+
+        conn.execute(
+            "DELETE FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'preview'",
+            [&resting],
+        )
+        .unwrap();
+        assert_eq!(
+            active_pass_counters(&conn).unwrap(),
+            scanned_active_pass_counters(&conn)
+        );
+    }
+
+    /// A realistic row count proves the hot read is independent of queue
+    /// cardinality: direct fixture inserts flow through the same production
+    /// triggers and collapse to one aggregate row.
+    #[test]
+    fn active_counter_projection_collapses_large_queue() {
+        let (_tmp, conn) = setup();
+        conn.execute_batch(
+            "BEGIN;
+             WITH RECURSIVE ids(n) AS (
+               SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 20000
+             )
+             INSERT INTO images(image_hash, byte_size, format, first_ingested_at)
+             SELECT printf('%064x', n), 1, 'jpeg', 'x' FROM ids;
+             INSERT INTO ingest_passes
+               (image_hash, pass_name, pass_version, state, priority, attempts,
+                enqueued_at)
+             SELECT image_hash, 'preview', 1, 'pending', 2, 0, 'x'
+             FROM images;
+             COMMIT;",
+        )
+        .unwrap();
+
+        let counters = active_pass_counters(&conn).unwrap();
+        assert_eq!(counters[&("preview".into(), 1)].pending, 20_000);
+        let projection_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM active_ingest_pass_counts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projection_rows, 1);
     }
 }

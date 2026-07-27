@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateToSuperNodes,
+  cancelRigidRotation,
   coolHeat,
   DEFAULT_NEIGHBOR_ATTRACTION,
   expandSuperNode,
@@ -23,11 +24,100 @@ import {
   simulate,
   step,
   subStepsForHeat,
+  symmetrizeNeighborEdges,
   type ForceConfig,
   type ImageNode,
   type TopicAnchor,
   type ViewTransform,
 } from "../src/lib/logic/forcegraph";
+
+describe("semantic graph convergence projections", () => {
+  it("turns asymmetric k-NN storage into equal bidirectional forces", () => {
+    const nodes: ImageNode[] = [
+      {
+        hash: "a",
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        affinity: [],
+        neighbors: [{ i: 1, w: 0.7 }],
+      },
+      {
+        hash: "b",
+        x: 20,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        affinity: [],
+      },
+      {
+        hash: "c",
+        x: 40,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        affinity: [],
+        neighbors: [{ i: 1, w: 0.9 }],
+      },
+    ];
+
+    expect(symmetrizeNeighborEdges(nodes)).toBe(2);
+    expect(nodes[0].neighbors).toEqual([{ i: 1, w: 0.7 }]);
+    expect(nodes[1].neighbors).toEqual([
+      { i: 0, w: 0.7 },
+      { i: 2, w: 0.9 },
+    ]);
+    expect(nodes[2].neighbors).toEqual([{ i: 1, w: 0.9 }]);
+  });
+
+  it("removes meaningless whole-layout rotation but preserves radial motion", () => {
+    const rotating: ImageNode[] = [
+      { hash: "r", x: 10, y: 0, vx: 0, vy: 2, affinity: [] },
+      { hash: "l", x: -10, y: 0, vx: 0, vy: -2, affinity: [] },
+    ];
+    const omega = cancelRigidRotation(rotating, []);
+    expect(omega).toBeCloseTo(0.2, 10);
+    expect(rotating[0].vx).toBeCloseTo(0, 10);
+    expect(rotating[0].vy).toBeCloseTo(0, 10);
+    expect(rotating[1].vx).toBeCloseTo(0, 10);
+    expect(rotating[1].vy).toBeCloseTo(0, 10);
+
+    const radial: ImageNode[] = [
+      { hash: "r", x: 10, y: 0, vx: 2, vy: 0, affinity: [] },
+      { hash: "l", x: -10, y: 0, vx: -2, vy: 0, affinity: [] },
+    ];
+    expect(cancelRigidRotation(radial, [])).toBeCloseTo(0, 10);
+    expect(radial[0].vx).toBe(2);
+    expect(radial[1].vx).toBe(-2);
+  });
+
+  it("the live integrator removes an orbit without moving semantic geometry", () => {
+    const nodes: ImageNode[] = [
+      { hash: "r", x: 10, y: 0, vx: 0, vy: 2, affinity: [] },
+      { hash: "l", x: -10, y: 0, vx: 0, vy: -2, affinity: [] },
+    ];
+    const noForces: ForceConfig = {
+      attraction: 0,
+      repulsion: 0,
+      damping: 1,
+      centering: 0,
+      ringRadius: 0,
+      anchorAttraction: 0,
+      anchorRepulsion: 0,
+      anchorDamping: 1,
+      cancelRotation: true,
+      maxStep: Infinity,
+      heat: 1,
+    };
+
+    expect(step(nodes, [], noForces)).toBeCloseTo(0, 10);
+    expect(nodes.map(({ x, y }) => [x, y])).toEqual([
+      [10, 0],
+      [-10, 0],
+    ]);
+  });
+});
 
 // Baseline config with the anchor forces OFF (anchorAttraction 0), so the image
 // physics tests below pin the v1 FIXED-anchor behavior exactly — the

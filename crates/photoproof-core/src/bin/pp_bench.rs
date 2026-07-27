@@ -11,6 +11,11 @@
 //!            [--source /path/to/real/folder] [--out bench-results.jsonl]
 //!   pp-bench grid-list --files 2000 --iterations 100
 //!            [--p99-budget-ms 50] [--out bench-results.jsonl]
+//!   pp-bench grid-list --catalog-fixture --files 100000 --iterations 20
+//!            [--p99-budget-ms 350] [--out bench-results.jsonl]
+//!   pp-bench activity-contention --catalog-fixture --files 100000
+//!            [--passes-per-image 5] [--iterations 20]
+//!            [--p99-budget-ms 900] [--out bench-results.jsonl]
 //!   pp-bench preview-serve --files 2000 --iterations 10
 //!            [--p99-budget-ms 10] [--out bench-results.jsonl]
 //!   pp-bench preview-generate --files 2000
@@ -25,6 +30,11 @@
 //!   the source files are only ever read. (No marker is ever written:
 //!   the bench probe reports its volume as a system root, which
 //!   maybe_write_marker skips by rule, plus read-only belt.)
+//! - --catalog-fixture: seed catalog rows directly into the disposable bench
+//!   database. This makes 20k/100k listing and activity-counter measurements
+//!   quick and reproducible without generating 100k fake image payloads. It
+//!   measures catalog/query/UI-scale work only and is not an ingest, decode,
+//!   preview-generation, RAW-throughput, filesystem, or IPC claim.
 //!
 //! Output schema (one JSON object per line, schema=2):
 //!   { schema, ts, label, scenario, mode, files, bytes,
@@ -52,6 +62,7 @@ use photoproof_core::library::{
 enum Scenario {
     Ingest,
     GridList,
+    ActivityContention,
     PreviewGenerate,
     PreviewServe,
 }
@@ -61,6 +72,7 @@ impl Scenario {
         match value {
             Some("ingest") => Some(Self::Ingest),
             Some("grid-list") => Some(Self::GridList),
+            Some("activity-contention") => Some(Self::ActivityContention),
             Some("preview-generate") => Some(Self::PreviewGenerate),
             Some("preview-serve") => Some(Self::PreviewServe),
             _ => None,
@@ -71,6 +83,7 @@ impl Scenario {
         match self {
             Self::Ingest => "ingest",
             Self::GridList => "grid-list",
+            Self::ActivityContention => "activity-contention",
             Self::PreviewGenerate => "preview-generate",
             Self::PreviewServe => "preview-serve",
         }
@@ -78,8 +91,9 @@ impl Scenario {
 }
 
 fn usage() -> &'static str {
-    "usage: pp-bench <ingest|grid-list|preview-generate|preview-serve> \
+    "usage: pp-bench <ingest|grid-list|activity-contention|preview-generate|preview-serve> \
      [--files N] [--edge PX] [--source DIR] [--iterations N] \
+     [--catalog-fixture] [--passes-per-image N] \
      [--p99-budget-ms N] [--label S] [--out FILE]"
 }
 
@@ -92,6 +106,8 @@ fn main() {
     let mut files: usize = 500;
     let mut edge: u32 = 3000;
     let mut source: Option<PathBuf> = None;
+    let mut catalog_fixture = false;
+    let mut passes_per_image: usize = 5;
     let mut iterations: usize = 100;
     let mut p99_budget_ms: Option<f64> = None;
     let mut label = String::from("");
@@ -103,6 +119,8 @@ fn main() {
             "--files" => files = val().parse().expect("--files N"),
             "--edge" => edge = val().parse().expect("--edge PX"),
             "--source" => source = Some(PathBuf::from(val())),
+            "--catalog-fixture" => catalog_fixture = true,
+            "--passes-per-image" => passes_per_image = val().parse().expect("--passes-per-image N"),
             "--iterations" => iterations = val().parse().expect("--iterations N"),
             "--p99-budget-ms" => p99_budget_ms = Some(val().parse().expect("--p99-budget-ms N")),
             "--label" => label = val(),
@@ -113,15 +131,39 @@ fn main() {
             }
         }
     }
+    if catalog_fixture && source.is_some() {
+        eprintln!("--catalog-fixture and --source are mutually exclusive");
+        std::process::exit(2);
+    }
+    if catalog_fixture && !matches!(scenario, Scenario::GridList | Scenario::ActivityContention) {
+        eprintln!("--catalog-fixture is only valid for grid-list or activity-contention");
+        std::process::exit(2);
+    }
+    if matches!(scenario, Scenario::ActivityContention) && !catalog_fixture {
+        eprintln!("activity-contention requires --catalog-fixture");
+        std::process::exit(2);
+    }
+    if passes_per_image == 0 || passes_per_image > CATALOG_PASS_NAMES.len() {
+        eprintln!(
+            "--passes-per-image must be between 1 and {}",
+            CATALOG_PASS_NAMES.len()
+        );
+        std::process::exit(2);
+    }
 
     // No tempfile dependency in the bin path: a pid-unique dir under the
     // OS tempdir, best-effort removed at the end (a crash leaves only
     // bench litter the OS tempdir policy reaps).
     let tmp = std::env::temp_dir().join(format!("pp-bench-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("bench tempdir");
-    let (root_dir, mode) = match &source {
-        Some(dir) => (dir.clone(), "source"),
-        None => {
+    let (root_dir, mode) = match (&source, catalog_fixture) {
+        (_, true) => {
+            let dir = tmp.join("catalog-root");
+            std::fs::create_dir_all(&dir).expect("catalog root");
+            (dir, "catalog-synthetic")
+        }
+        (Some(dir), false) => (dir.clone(), "source"),
+        (None, false) => {
             let dir = tmp.join("corpus");
             std::fs::create_dir_all(&dir).expect("corpus dir");
             eprintln!("generating {files} synthetic JPEGs ({edge}px long edge)…");
@@ -168,16 +210,34 @@ fn main() {
     // measures setup itself; grid-list and preview-serve deliberately begin
     // only after the queue has settled so their numbers describe steady-state
     // interaction rather than fixture construction.
-    let t0 = Instant::now();
-    let scan = lib.scan_root(&root, &ScanOptions::default()).expect("scan");
-    let scan_ms = t0.elapsed().as_millis() as u64;
+    let setup_started = Instant::now();
+    let (scan_ms, drain_ms, total_ms, file_count, queue_done, queue_errors) = if catalog_fixture {
+        let fixture_passes = if matches!(scenario, Scenario::ActivityContention) {
+            passes_per_image
+        } else {
+            0
+        };
+        seed_catalog_fixture(&tmp.join("photoproof.db"), &root, files, fixture_passes);
+        (0, 0, 0, files, 0, 0)
+    } else {
+        let t0 = Instant::now();
+        let scan = lib.scan_root(&root, &ScanOptions::default()).expect("scan");
+        let scan_ms = t0.elapsed().as_millis() as u64;
 
-    let t1 = Instant::now();
-    let report = lib.process_queue(&QueueOptions::default()).expect("drain");
-    let drain_ms = t1.elapsed().as_millis() as u64;
-    let total_ms = t0.elapsed().as_millis() as u64;
-
-    let file_count = scan.files_seen;
+        let t1 = Instant::now();
+        let report = lib.process_queue(&QueueOptions::default()).expect("drain");
+        let drain_ms = t1.elapsed().as_millis() as u64;
+        let total_ms = t0.elapsed().as_millis() as u64;
+        (
+            scan_ms,
+            drain_ms,
+            total_ms,
+            scan.files_seen,
+            report.done,
+            report.errors,
+        )
+    };
+    let fixture_setup_ms = setup_started.elapsed().as_millis() as u64;
     let bytes: u64 = walk_bytes(&root_dir);
     let (line, observed_p99) = match scenario {
         Scenario::Ingest => {
@@ -199,9 +259,12 @@ fn main() {
                     )
                 })
                 .collect();
+            let error_groups =
+                serde_json::to_string(&lib.ingest_error_summary().expect("ingest error summary"))
+                    .expect("serialize ingest error summary");
             (
                 format!(
-                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"ingest","mode":"{}","files":{},"bytes":{},"scan_ms":{},"drain_ms":{},"total_ms":{},"queue_done":{},"queue_errors":{},"files_per_s":{:.1},"mb_per_s":{:.1},"stages":[{}],"host":{}}}"#,
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"ingest","mode":"{}","files":{},"bytes":{},"scan_ms":{},"drain_ms":{},"total_ms":{},"queue_done":{},"queue_errors":{},"error_groups":{},"files_per_s":{:.1},"mb_per_s":{:.1},"stages":[{}],"host":{}}}"#,
                     rfc3339_now(),
                     label.replace('"', "'"),
                     mode,
@@ -210,8 +273,9 @@ fn main() {
                     scan_ms,
                     drain_ms,
                     total_ms,
-                    report.done,
-                    report.errors,
+                    queue_done,
+                    queue_errors,
+                    error_groups,
                     file_count as f64 / secs,
                     bytes as f64 / 1_000_000.0 / secs,
                     stages.join(","),
@@ -233,19 +297,100 @@ fn main() {
             let (p50, p99, max) = latency_summary(&mut samples);
             (
                 format!(
-                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"grid-list","mode":"{}","files":{},"rows":{},"iterations":{},"p50_ms":{:.4},"p99_ms":{:.4},"max_ms":{:.4},"host":{}}}"#,
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"grid-list","mode":"{}","files":{},"rows":{},"iterations":{},"fixture_setup_ms":{},"p50_ms":{:.4},"p99_ms":{:.4},"max_ms":{:.4},"host":{}}}"#,
                     rfc3339_now(),
                     label.replace('"', "'"),
                     mode,
                     file_count,
                     rows,
                     iterations,
+                    fixture_setup_ms,
                     p50,
                     p99,
                     max,
                     host_json(),
                 ),
                 Some(p99),
+            )
+        }
+        Scenario::ActivityContention => {
+            let counter_lib = Arc::clone(&lib);
+            // One counter publication races one folder read per turn. The
+            // finish barrier prevents the counter thread from immediately
+            // reacquiring the shared database lane and manufacturing
+            // starvation that the desktop's 400 ms publication cadence does
+            // not produce.
+            let turn_start = Arc::new(std::sync::Barrier::new(2));
+            let turn_finish = Arc::new(std::sync::Barrier::new(2));
+            let counter_start = Arc::clone(&turn_start);
+            let counter_finish = Arc::clone(&turn_finish);
+            let counter_thread = std::thread::spawn(move || {
+                let mut samples = Vec::with_capacity(iterations);
+                let mut rows = 0usize;
+                let mut counted_pass_rows = 0u64;
+                for _ in 0..iterations {
+                    counter_start.wait();
+                    let started = Instant::now();
+                    let counters = counter_lib
+                        .active_pass_counters()
+                        .expect("active pass counters");
+                    samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                    rows = counters.len();
+                    counted_pass_rows = counters
+                        .values()
+                        .map(|count| {
+                            count.pending + count.running + count.done + count.error + count.skipped
+                        })
+                        .sum();
+                    std::hint::black_box(counters);
+                    counter_finish.wait();
+                }
+                (samples, rows, counted_pass_rows)
+            });
+            let mut list_samples = Vec::with_capacity(iterations);
+            let mut rows = 0usize;
+            for _ in 0..iterations {
+                turn_start.wait();
+                let started = Instant::now();
+                let listed = lib.list_folder(&root, "").expect("list folder");
+                list_samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                rows = listed.len();
+                std::hint::black_box(listed);
+                turn_finish.wait();
+            }
+            let (mut counter_samples, counter_groups, counted_pass_rows) =
+                counter_thread.join().expect("counter thread");
+            let expected_pass_rows = file_count.saturating_mul(passes_per_image) as u64;
+            assert_eq!(
+                counted_pass_rows, expected_pass_rows,
+                "activity projection lost fixture pass rows"
+            );
+            let (list_p50, list_p99, list_max) = latency_summary(&mut list_samples);
+            let (counter_p50, counter_p99, counter_max) = latency_summary(&mut counter_samples);
+            let observed = list_p99.max(counter_p99);
+            (
+                format!(
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"activity-contention","mode":"{}","files":{},"pass_rows":{},"counted_pass_rows":{},"rows":{},"counter_groups":{},"iterations":{},"fixture_setup_ms":{},"counter_p50_ms":{:.4},"counter_p99_ms":{:.4},"counter_max_ms":{:.4},"list_p50_ms":{:.4},"list_p99_ms":{:.4},"list_max_ms":{:.4},"p99_ms":{:.4},"host":{}}}"#,
+                    rfc3339_now(),
+                    label.replace('"', "'"),
+                    mode,
+                    file_count,
+                    expected_pass_rows,
+                    counted_pass_rows,
+                    rows,
+                    counter_groups,
+                    iterations,
+                    fixture_setup_ms,
+                    counter_p50,
+                    counter_p99,
+                    counter_max,
+                    list_p50,
+                    list_p99,
+                    list_max,
+                    observed,
+                    host_json(),
+                ),
+                Some(observed),
             )
         }
         Scenario::PreviewGenerate => {
@@ -263,7 +408,7 @@ fn main() {
                     file_count,
                     bytes,
                     preview.count,
-                    report.errors,
+                    queue_errors,
                     preview.p50_ms,
                     preview.p95_ms,
                     preview.p99_ms,
@@ -335,6 +480,117 @@ fn main() {
         );
         std::process::exit(1);
     }
+}
+
+const CATALOG_PASS_NAMES: [&str; 5] = [
+    "essential",
+    "preview",
+    "raw-decode",
+    "image-embedding",
+    "text-embedding",
+];
+
+/// Populate only the disposable catalog database, not the filesystem. Direct
+/// SQL is intentional: creating 100k encoded JPEG payloads would turn a query
+/// scale gate into a decode/disk-capacity benchmark. The rows use the canonical
+/// production tables and therefore exercise schema triggers/projections too.
+fn seed_catalog_fixture(database: &Path, root_id: &str, files: usize, passes_per_image: usize) {
+    let mut conn = rusqlite::Connection::open(database).expect("open catalog fixture database");
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .expect("enable fixture foreign keys");
+    let volume_id: String = conn
+        .query_row(
+            "SELECT volume_id FROM roots WHERE root_id = ?1",
+            [root_id],
+            |row| row.get(0),
+        )
+        .expect("fixture root volume");
+    let tx = conn.transaction().expect("begin catalog fixture");
+    {
+        let mut insert_image = tx
+            .prepare_cached(
+                "INSERT INTO images
+                   (image_hash, byte_size, format, pixel_width, pixel_height,
+                    exif_orientation, capture_ts, first_ingested_at)
+                 VALUES (?1, 24000000, 'jpeg', 6000, 4000, 1, ?2, ?3)",
+            )
+            .expect("prepare fixture image");
+        let mut insert_path = tx
+            .prepare_cached(
+                "INSERT INTO paths
+                   (path_id, image_hash, volume_id, root_id, rel_path, size,
+                    mtime_ns, state, first_seen_at, last_verified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 24000000, ?6, 'active', ?7, ?7)",
+            )
+            .expect("prepare fixture path");
+        let mut insert_preview = tx
+            .prepare_cached(
+                "INSERT INTO preview_artifacts
+                   (image_hash, kind, source, width, height, bytes, format,
+                    needs_full_decode, generator_version, generated_at)
+                 VALUES (?1, 'thumb', 'original', 512, 341, 32000, 'webp',
+                         0, 3, ?2)",
+            )
+            .expect("prepare fixture preview");
+        let mut insert_pass = tx
+            .prepare_cached(
+                "INSERT INTO ingest_passes
+                   (image_hash, pass_name, pass_version, model_id, state,
+                    priority, attempts, error, enqueued_at, started_at,
+                    completed_at, not_before)
+                 VALUES (?1, ?2, 1, NULL, ?3, 2, 0, NULL, ?4,
+                         CASE WHEN ?3 IN ('running','done') THEN ?4 END,
+                         CASE WHEN ?3 IN ('done','skipped') THEN ?4 END,
+                         NULL)",
+            )
+            .expect("prepare fixture pass");
+        let states = ["pending", "running", "done", "error", "skipped"];
+        for i in 0..files {
+            let ordinal = i + 1;
+            let hash = format!("{ordinal:064x}");
+            let captured = format!(
+                "2025-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                i / 31 % 12 + 1,
+                i % 28 + 1,
+                i % 24,
+                i / 24 % 60,
+                i / (24 * 60) % 60
+            );
+            let added = format!("2026-01-01T00:{:02}:{:02}Z", i / 60 % 60, i % 60);
+            let path_id = format!("bench-path-{ordinal:09}");
+            let rel_path = format!("bench_{ordinal:09}.jpg");
+            insert_image
+                .execute(rusqlite::params![hash, captured, added])
+                .expect("insert fixture image");
+            insert_path
+                .execute(rusqlite::params![
+                    path_id,
+                    hash,
+                    volume_id,
+                    root_id,
+                    rel_path,
+                    ordinal as i64,
+                    added
+                ])
+                .expect("insert fixture path");
+            if i % 8 != 0 {
+                insert_preview
+                    .execute(rusqlite::params![hash, added])
+                    .expect("insert fixture preview");
+            }
+            for pass_index in 0..passes_per_image {
+                insert_pass
+                    .execute(rusqlite::params![
+                        hash,
+                        CATALOG_PASS_NAMES[pass_index],
+                        states[(i + pass_index) % states.len()],
+                        added
+                    ])
+                    .expect("insert fixture pass");
+            }
+        }
+    }
+    tx.commit().expect("commit catalog fixture");
 }
 
 fn latency_summary(samples: &mut [f64]) -> (f64, f64, f64) {

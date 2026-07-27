@@ -129,6 +129,17 @@ export interface GridItem {
   previewReady?: boolean;
 }
 
+/** Revisioned, folder-scoped catalog catch-up. `reset` means `upserts` is the
+ * complete current folder snapshot; otherwise the two arrays are a coalesced
+ * delta since `fromRevision`. */
+export interface FolderDelta {
+  fromRevision: number;
+  toRevision: number;
+  reset: boolean;
+  upserts: GridItem[];
+  removedHashes: string[];
+}
+
 export type ScopeKind = "single" | "multi" | "session";
 
 export interface ScopeView {
@@ -437,6 +448,8 @@ export interface ApplicationHealth {
         | "retry-repair"
         | "redetect-runtime"
         | "verify-model"
+        | "download-model"
+        | "accept-model-license"
         | "rebuild-previews"
         | "restore-controls"
         | "reveal-logs";
@@ -625,7 +638,30 @@ export interface ApplicationHealth {
    * stage histograms. Optional for older fixtures; current backends send it. */
   performance?: {
     journeys: import("../performance").PerformanceSnapshot;
+    previewProtocol: {
+      initialized: boolean;
+      workers: number;
+      queueCapacity: number;
+      queued: number;
+      peakQueued: number;
+      running: number;
+      peakRunning: number;
+      interactive: PreviewProtocolPriorityMetrics;
+      thumbnail: PreviewProtocolPriorityMetrics;
+    };
     ingestStages: {
+      stage: string;
+      count: number;
+      totalMs: number;
+      meanMs: number;
+      p50Ms: number;
+      p95Ms: number;
+      p99Ms: number;
+      maxMs: number;
+    }[];
+    /** Fixed-label shared SQLite catalog timings. `.wait` measures mutex
+     * acquisition; `.operation` starts after the lane is held. */
+    catalogLanes: {
       stage: string;
       count: number;
       totalMs: number;
@@ -638,6 +674,23 @@ export interface ApplicationHealth {
   };
   ingest: IngestStatus;
   runtime: RuntimeStatus;
+}
+
+export interface PreviewProtocolPriorityMetrics {
+  accepted: number;
+  completed: number;
+  overloaded: number;
+  superseded: number;
+  meanQueueWaitMs: number;
+  queueWaitP50Ms: number | null;
+  queueWaitP95Ms: number | null;
+  queueWaitP99Ms: number | null;
+  maxQueueWaitMs: number;
+  meanServiceMs: number;
+  serviceP50Ms: number | null;
+  serviceP95Ms: number | null;
+  serviceP99Ms: number | null;
+  maxServiceMs: number;
 }
 
 /** Minimal process-open result. This remains queryable even when the full

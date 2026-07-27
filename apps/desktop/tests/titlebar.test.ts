@@ -9,7 +9,7 @@
  * stubs platform/userAgent BEFORE mounting.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render } from "@testing-library/svelte";
+import { fireEvent, render, waitFor } from "@testing-library/svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({
   // list_roots feeds an {#each}; everything else in these suites is
@@ -33,6 +33,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 import Titlebar from "../src/lib/components/shell/Titlebar.svelte";
 import SettingsApp from "../src/lib/settings/SettingsApp.svelte";
+import { invoke } from "@tauri-apps/api/core";
 import { isMac } from "../src/lib/logic/platform";
 import { ui } from "../src/lib/state/app.svelte";
 import type { ApplicationHealth } from "../src/lib/types/dto";
@@ -49,6 +50,7 @@ function stubNavigator(platform: string, userAgent: string) {
 
 beforeEach(() => {
   document.body.innerHTML = "";
+  vi.mocked(invoke).mockClear();
 });
 
 afterEach(() => {
@@ -103,6 +105,16 @@ describe("Titlebar platform chrome", () => {
     expect(queryByLabelText("Maximize")).not.toBeNull();
     expect(queryByLabelText("Close")).not.toBeNull();
     expect(container.querySelector(".traffic-inset")).toBeNull();
+  });
+
+  it("keeps Settings globally reachable from the titlebar", async () => {
+    stubNavigator("Linux x86_64", LINUX_UA);
+    const rendered = render(Titlebar, { title: "shoots" });
+
+    await fireEvent.click(rendered.getByLabelText("Settings"));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("open_settings_window", { tab: null });
+    });
   });
 
   it("settings window: macOS drops the custom close and insets the drag strip; Linux keeps it", () => {
@@ -172,6 +184,35 @@ describe("Titlebar platform chrome", () => {
     const rendered = render(Titlebar, { title: "shoots", health });
     expect(rendered.getByText("Health action required")).not.toBeNull();
     expect(rendered.container.querySelector(".pill.blocked")).not.toBeNull();
+  });
+
+  it("keeps the health popover actionable and opens the System settings tab", async () => {
+    stubNavigator("Linux x86_64", LINUX_UA);
+    const health = {
+      issues: [
+        {
+          id: "model:clip",
+          subsystem: "models",
+          title: "Image search model needs verification",
+          blocking: false,
+          summary: "Partial files need attention.",
+          lastError: null,
+          lastErrorAtMs: null,
+          action: {
+            kind: "verify-model",
+            label: "Verify model",
+            targetId: "clip",
+          },
+        },
+      ],
+    } as ApplicationHealth;
+    const rendered = render(Titlebar, { title: "shoots", health });
+
+    await fireEvent.pointerEnter(rendered.container.querySelector(".libstatus")!);
+    await fireEvent.click(rendered.getByRole("button", { name: "Open health settings" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("open_settings_window", { tab: "system" });
+    });
   });
 
   it("the bar itself stays a drag region on both platforms", () => {

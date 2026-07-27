@@ -238,6 +238,28 @@ fn second_checksum_failure_surfaces_instead_of_looping() {
     assert!(!manager.is_installed("test-model"));
 }
 
+#[test]
+fn verify_names_a_missing_artifact_and_directs_the_user_to_download() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(50_000, 1);
+    let model = model_with(&server, vec![("visual/model.onnx", &payload)], false);
+    let dir = tempfile::tempdir().unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+
+    let error = manager
+        .verify_model(&model, &NO_CANCEL)
+        .expect_err("verify cannot adopt a model whose artifact is absent");
+
+    assert!(matches!(
+        &error,
+        DownloadError::MissingFile { file } if file == "visual/model.onnx"
+    ));
+    assert_eq!(
+        error.to_string(),
+        "required model file is missing: visual/model.onnx; resume Download to fetch it"
+    );
+}
+
 /// A quit that lands between the last byte and the verify leaves a
 /// byte-COMPLETE part (founder dogfood, June 2026). A Range resume from
 /// EOF draws 416 from real CDNs and the retry loop can never finish —

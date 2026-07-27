@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 use super::{S, run_blocking};
 use crate::command_work::CommandClass;
 use crate::convergence::StateDomain;
-use crate::dto::{AddRootOutcome, FolderNode, GridItem, IngestStatus, RootDto};
+use crate::dto::{AddRootOutcome, FolderDelta, FolderNode, GridItem, IngestStatus, RootDto};
 use crate::error::{CmdError, CmdResult};
 use crate::managed_tasks::{SpawnTaskError, TaskPriority};
 use crate::pump;
@@ -658,6 +658,41 @@ pub async fn list_folder(app: S<'_>, root_id: String, folder: String) -> CmdResu
         let items = app.library.list_folder(&root_id, &folder)?;
         Ok(items.into_iter().map(grid_item).collect())
     })
+    .await
+}
+
+/// Revisioned folder catch-up with a full-snapshot fallback. This is the
+/// missed-event-safe companion to `list_folder`: callers retain `toRevision`
+/// and request only folder-scoped changes on later ingest notifications.
+#[tauri::command]
+pub async fn list_folder_delta(
+    app: S<'_>,
+    root_id: String,
+    folder: String,
+    since_revision: u64,
+) -> CmdResult<FolderDelta> {
+    let app = app.inner().clone();
+    run_blocking(
+        app,
+        "library.list-folder-delta",
+        CommandClass::Read,
+        move |app| {
+            let delta = app
+                .library
+                .list_folder_delta(&root_id, &folder, since_revision)?;
+            Ok(FolderDelta {
+                from_revision: delta.from_revision,
+                to_revision: delta.to_revision,
+                reset: delta.reset,
+                upserts: delta.upserts.into_iter().map(grid_item).collect(),
+                removed_hashes: delta
+                    .removed_hashes
+                    .into_iter()
+                    .map(|hash| hash.as_str().to_owned())
+                    .collect(),
+            })
+        },
+    )
     .await
 }
 

@@ -16,12 +16,23 @@ body {
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
-  /* Native widgetry (select popups, scrollbars) follows the dark chrome —
-   * CSS can't reach the popup list itself, only the scheme can. */
-  color-scheme: dark;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Native widgetry (especially WebKit's out-of-process select popup and
+ * scrollbars) cannot be themed fully with option CSS; it follows
+ * `color-scheme`. Keep this on the ROOT, where theme.ts also writes its
+ * pre-mount inline value. A hard-coded value on body used to override the
+ * inherited light scheme, leaving dropdown popups dark inside the light app. */
+html,
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
 }
 
 #app {

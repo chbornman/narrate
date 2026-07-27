@@ -4,7 +4,7 @@
 # half — NOT in the per-commit gate (the deep real-model checks are
 # founder-machine), but the cheap synthetic guard below runs anywhere.
 
-.PHONY: fmt lint test gate tune-check tune-baseline
+.PHONY: fmt lint test gate tune-check tune-baseline scale-check scale-check-founder soak-harness-test
 
 # The standing per-commit gate (BUILD-LOOP.md).
 fmt:
@@ -29,3 +29,14 @@ tune-check:
 # human reviews + commits the new reference when an intended improvement lands).
 tune-baseline:
 	scripts/tune-check.sh --update-baseline
+
+# Bounded 20k catalog + 20k/100k frontend scale gates. The founder tier raises
+# SQLite to 100k and enables the optional 250k frontend transform receipt.
+scale-check:
+	scripts/scale-check.sh
+
+scale-check-founder:
+	scripts/scale-check.sh --tier founder
+
+soak-harness-test:
+	node --test scripts/real-library-soak.test.mjs

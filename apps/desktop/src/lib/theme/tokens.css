@@ -45,6 +45,17 @@
   --station-mic: #d64545;
   --station-error: #d79a3a;
   --station-working: #5a7fa0;
+  /* Semantic status color is reserved for operational state. These tokens
+   * make dense surfaces such as Models scannable without turning ordinary
+   * chrome, labels, or decoration into a rainbow. */
+  --status-ready: #62ad7d;
+  --status-ready-bg: rgba(98, 173, 125, 0.12);
+  --status-working: #6f9fc9;
+  --status-working-bg: rgba(111, 159, 201, 0.14);
+  --status-warning: #d09a45;
+  --status-warning-bg: rgba(208, 154, 69, 0.13);
+  --status-danger: #c96868;
+  --status-danger-bg: rgba(201, 104, 104, 0.12);
   --font:
     system-ui,
     -apple-system,
@@ -82,6 +93,14 @@
   --station-mic: #d64545;
   --station-error: #d79a3a;
   --station-working: #5a7fa0;
+  --status-ready: #62ad7d;
+  --status-ready-bg: rgba(98, 173, 125, 0.12);
+  --status-working: #6f9fc9;
+  --status-working-bg: rgba(111, 159, 201, 0.14);
+  --status-warning: #d09a45;
+  --status-warning-bg: rgba(208, 154, 69, 0.13);
+  --status-danger: #c96868;
+  --status-danger-bg: rgba(201, 104, 104, 0.12);
 }
 
 /* LIGHT theme (BACKLOG "Full interface themes"): light chrome + grays. The
@@ -112,6 +131,14 @@
   --station-mic: #c23434;
   --station-error: #b87b20;
   --station-working: #41698c;
+  --status-ready: #287846;
+  --status-ready-bg: rgba(40, 120, 70, 0.1);
+  --status-working: #356f9f;
+  --status-working-bg: rgba(53, 111, 159, 0.1);
+  --status-warning: #9a6519;
+  --status-warning-bg: rgba(154, 101, 25, 0.1);
+  --status-danger: #a33f3f;
+  --status-danger-bg: rgba(163, 63, 63, 0.09);
 }
 
 /* D6: image-surround luminance levels. Each block retunes the surround

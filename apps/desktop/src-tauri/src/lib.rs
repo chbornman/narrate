@@ -160,8 +160,10 @@ pub fn run() {
         // fallback, if it misbehaves, is manual save/restore in
         // commands/app.rs keyed off the same RunEvent hooks.
         //
-        // GEOMETRY ONLY — two flags are deliberately stripped from the
-        // default StateFlags::all():
+        // NORMAL GEOMETRY ONLY: remember the last non-maximized size and
+        // position, but never restore a transient presentation state.
+        //
+        // Four default flags are deliberately excluded:
         // - DECORATIONS: decoration state is owned per-platform by
         //   config/code (macOS keeps native Overlay chrome, Windows/Linux
         //   run undecorated) and is toggled live by Tab lights-out. Any
@@ -172,11 +174,15 @@ pub fn run() {
         // - FULLSCREEN: shell.svelte.ts owns fullscreen as frontend state
         //   (starts false); a disk-restored fullscreen window would desync
         //   the F toggle on first press.
+        // - MAXIMIZED: restoring it made every later launch look fullscreen
+        //   after one maximized close. The plugin still preserves the last
+        //   normal SIZE/POSITION while maximized, so opening is predictable
+        //   without forgetting the user's chosen geometry.
+        // - VISIBLE: startup visibility is application lifecycle state, not
+        //   user window geometry.
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    StateFlags::all() & !(StateFlags::DECORATIONS | StateFlags::FULLSCREEN),
-                )
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
                 .with_denylist(&["settings"])
                 .build(),
         )
@@ -197,14 +203,17 @@ pub fn run() {
                 .app_handle()
                 .try_state::<Arc<performance::PerformanceMonitor>>()
                 .map(|monitor| Arc::clone(monitor.inner()));
-            // AUDIT-2026-07-07 F1: a FIXED pool instead of a thread per
-            // request. A fling-scroll bursts dozens-to-hundreds of thumb
-            // requests; spawning an OS thread for each flooded the FS and
-            // the db lock. The pool queues the burst FIFO on ~core-count
-            // workers (the bound's WHY lives on protocol::serve_pool). The
-            // no-library window (before setup manages App) still answers
-            // 404 through the same path.
-            protocol::serve_pool().run(move || {
+            // Fixed workers plus a bounded, route-priority queue: visible
+            // Look/display requests pass queued grid thumbnails, and a fling
+            // supersedes its oldest still-queued thumbnails instead of
+            // growing work without limit. The no-library window (before
+            // setup manages App) still answers 404 through the same path.
+            let priority = protocol::priority_for_path(&path);
+            protocol::serve_pool().run(priority, move |disposition| {
+                if disposition == protocol::ServeDisposition::Overloaded {
+                    responder.respond(protocol::respond_overloaded());
+                    return;
+                }
                 let started = std::time::Instant::now();
                 let response = match library {
                     Some(lib) => protocol::serve(&lib, &path),
@@ -219,11 +228,7 @@ pub fn run() {
                         ok,
                         Some(1),
                         Some(response.body().len() as u64),
-                        Some(if ok {
-                            performance::CacheStatus::Hit
-                        } else {
-                            performance::CacheStatus::Miss
-                        }),
+                        protocol::backend_cache_status(&path, response.status()),
                     );
                 }
                 responder.respond(response);
@@ -437,6 +442,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::prioritize_previews,
         commands::library::folder_tree,
         commands::library::list_folder,
+        commands::library::list_folder_delta,
         commands::library::list_images,
         commands::library::ingest_status,
         commands::health::application_health,
@@ -456,6 +462,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::runtime_consent,
         commands::app::runtime_accept_license,
         commands::app::runtime_download_model,
+        commands::app::runtime_select_model,
         commands::app::runtime_remove_model,
         commands::app::runtime_verify_model,
         commands::app::runtime_discard_partial,
@@ -558,6 +565,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::prioritize_previews,
         commands::library::folder_tree,
         commands::library::list_folder,
+        commands::library::list_folder_delta,
         commands::library::list_images,
         commands::library::ingest_status,
         commands::health::application_health,
@@ -577,6 +585,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::runtime_consent,
         commands::app::runtime_accept_license,
         commands::app::runtime_download_model,
+        commands::app::runtime_select_model,
         commands::app::runtime_remove_model,
         commands::app::runtime_verify_model,
         commands::app::runtime_discard_partial,

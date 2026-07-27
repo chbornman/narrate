@@ -79,6 +79,22 @@ make tune-baseline         # regenerate the baseline after an INTENDED change
   the new reference. The ingest baseline is host-specific; regenerate it on the
   machine the guard will run on.
 
+## Catalog scale guard
+
+Preview/catalog scheduling changes also run the tiered release harness:
+
+```
+make scale-check              # 20k SQLite catalog; 20k + 100k frontend
+make scale-check-founder      # 100k SQLite catalog; adds 250k frontend
+```
+
+The SQLite fixture contains canonical catalog/pass rows but no image payloads,
+so it is fast and reproducible and cannot be cited as RAW or filesystem
+throughput. The CI tier gates folder listing and progress/list contention; the
+frontend tests gate the full-snapshot sort/hash/stack transforms. Exact budgets,
+commands, exclusions, and the remaining installed 50k mixed-media soak live in
+`docs/DESKTOP-EXPERIENCE-BUDGETS.md`.
+
 **Spec discipline:** agents implement the spec as written. Ambiguities are
 resolved by the reading most consistent with the integrity invariants,
 implemented, and *flagged* — never silently "improved." Spec changes go
