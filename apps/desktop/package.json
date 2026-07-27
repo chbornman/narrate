@@ -35,7 +35,7 @@
     "@testing-library/svelte": "^5",
     "@tsconfig/svelte": "^5",
     "@types/node": "^26.1.1",
-    "jsdom": "^26",
+    "jsdom": "^30",
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",
