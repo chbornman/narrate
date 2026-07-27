@@ -1,5 +1,19 @@
 {
-  "_comment": "Metric-regression baselines for `make tune-check` (the DESIGN-TUNING-LOOP.md defense half). COMMITTED REFERENCE VALUES, regenerable: `make tune-baseline` (= scripts/tune-check.sh --update-baseline) re-runs the cheap synthetic benches and rewrites this file, so when an INTENDED improvement lands the founder refreshes the baseline deliberately (K14: the machine proposes, the human commits the new reference). The guard runs pp-retrieval-eval --synthetic (deterministic IR metrics over a 3-image in-process corpus, no models, no real DB) and pp-bench ingest (small --files synthetic ingest) and fails if any metric regresses past its tolerance. Run it locally before a perf- or ranking-touching change; the cheap synthetic form is CI-able on any machine (zero setup).",
+  "_comment": "Metric-regression baselines for `make tune-check` (the DESIGN-TUNING-LOOP.md defense half). COMMITTED REFERENCE VALUES, regenerable: `make tune-baseline` (= scripts/tune-check.sh --update-baseline) re-runs the cheap synthetic benches and rewrites this file, so when an INTENDED improvement lands the founder refreshes the baseline deliberately (K14: the machine proposes, the human commits the new reference). The guard runs pp-retrieval-eval --synthetic, pp-bench ingest, and hard upper-bound grid-list/preview-serve interaction gates. Run it locally before a perf- or ranking-touching change; the cheap synthetic form is CI-able on any machine (zero setup).",
+  "desktop": {
+    "_comment": "A26/T2 deterministic interaction ceilings over the same 24-file, 512px synthetic corpus. These are intentionally generous cross-runner upper bounds, not host-specific aspirational baselines: grid listing must stay below 25ms p99 and a warm thumbnail file serve below 5ms p99. Unlike throughput trends, exceeding either ceiling fails tune-check.",
+    "grid_list_p99_ms": 25,
+    "iterations": 30,
+    "preview_generate_p99_ms": 100,
+    "preview_serve_p99_ms": 5
+  },
+  "frontend_journeys": {
+    "_comment": "Deterministic main-thread ceilings exercised by apps/desktop/tests/journey-performance.test.ts. These protect the graph's O(N) closed-form layout and the grid's set-backed Diversify fold against accidental superlinear regressions. Real-webview render, worker round-trip, first-paint, and settle percentiles are recorded by the installed structured performance monitor; these headless numbers are portable CI defenses, not claims about GPU paint time.",
+    "diversify_filter_p99_ms": 25,
+    "graph_items": 20000,
+    "graph_static_layout_p99_ms": 250,
+    "iterations": 12
+  },
   "ingest": {
     "_comment": "Synthetic ingest throughput (pp-bench ingest --files 24 --edge 512). files_per_s is HIGHER-IS-BETTER; the guard fails only if it drops below baseline * (1 - tolerance). tolerance is GENEROUS (0.15 = allow a 15% slowdown) AND DOCUMENTED-WHY: ingest throughput is dominated by JPEG decode/resize/encode + hashing on the host CPU, so it swings with machine speed, core count, thermal state, and concurrent load. A tight threshold would red-flag a slower CI runner or a busy laptop, not a real regression. 15% is wide enough to absorb that machine/load variance while still catching a genuine algorithmic slowdown (e.g. an accidental O(n^2) or a dropped parallel pass), which shows up as a multiples-of-15% cliff, not a few-percent drift. The baseline value is host-specific by nature: regenerate it on the machine the guard will run on (`make tune-baseline`).",
     "edge": 512,
@@ -7,7 +21,7 @@
     "files_per_s": 137.9,
     "tolerance": 0.15
   },
-  "schema": 1,
+  "schema": 2,
   "search": {
     "_comment": "Synthetic retrieval-eval (pp-retrieval-eval --synthetic). The fixture is deterministic and the keyword rig ranks every answer first, so these are 1.0 on a healthy rig on EVERY machine. tolerance is ABSOLUTE: a metric may not drop below baseline - tolerance. 0.02 matches the spec's stated geometry tolerance and is tight because the number is machine-independent: any drop here means a real ranking/fusion regression, not noise.",
     "k": 10,

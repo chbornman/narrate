@@ -140,7 +140,10 @@ fn ingest_throughput(n: usize) {
             .lib
             .process_queue(&QueueOptions {
                 cancel: None,
+                additional_cancel: None,
                 max_items: Some(64),
+                max_concurrency: None,
+                excluded_embedding_root_ids: Vec::new(),
             })
             .unwrap();
         if first_1k_s.is_none() {

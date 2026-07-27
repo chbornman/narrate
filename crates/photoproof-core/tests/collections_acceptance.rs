@@ -92,6 +92,82 @@ fn create_rename_status_and_list() {
 }
 
 #[test]
+fn create_with_images_commits_metadata_and_members_as_one_record() {
+    let env = Env::new();
+    let c = env.open();
+    let now = ts("2026-06-01T10:00:00.000Z");
+    let (a, b) = (hash(0xa1), hash(0xb2));
+
+    let rec = c
+        .create_with_images("Baked", "topic provenance", &[a.clone(), b.clone(), a], now)
+        .unwrap();
+    assert_eq!(rec.member_count, 2, "duplicate input is one open member");
+    assert_eq!(c.list().unwrap(), vec![rec.clone()]);
+    assert_eq!(c.current_members(&rec.id).unwrap(), vec![hash(0xa1), b]);
+}
+
+#[test]
+fn create_with_images_member_failure_rolls_back_collection_row() {
+    let env = Env::new();
+    let c = env.open();
+    let injector = rusqlite::Connection::open(&env.db).unwrap();
+    injector
+        .execute_batch(
+            "CREATE TRIGGER inject_collection_member_failure
+             BEFORE INSERT ON collection_members
+             BEGIN
+               SELECT RAISE(ABORT, 'injected collection member failure');
+             END;",
+        )
+        .unwrap();
+
+    let result = c.create_with_images(
+        "Must Roll Back",
+        "never committed",
+        &[hash(0xaa)],
+        ts("2026-06-01T10:00:00.000Z"),
+    );
+    assert!(matches!(result, Err(CollectionsError::Sqlite(_))));
+    assert!(
+        c.list().unwrap().is_empty(),
+        "member failure rolls back the collection metadata too"
+    );
+    let collection_rows: i64 = injector
+        .query_row("SELECT COUNT(*) FROM collections", [], |row| row.get(0))
+        .unwrap();
+    let member_rows: i64 = injector
+        .query_row("SELECT COUNT(*) FROM collection_members", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!((collection_rows, member_rows), (0, 0));
+}
+
+#[test]
+fn member_read_surfaces_corrupt_hash_instead_of_returning_a_partial_set() {
+    let env = Env::new();
+    let c = env.open();
+    let now = ts("2026-06-01T10:00:00.000Z");
+    let rec = c
+        .create_with_images("Read Truth", "", &[hash(0xaa)], now)
+        .unwrap();
+    let injector = rusqlite::Connection::open(&env.db).unwrap();
+    injector
+        .execute(
+            "INSERT INTO collection_members
+               (collection_id, image_hash, added_ts, removed_ts)
+             VALUES (?1, 'not-a-content-hash', ?2, NULL)",
+            rusqlite::params![rec.id, now.to_rfc3339()],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        c.current_members(&rec.id),
+        Err(CollectionsError::Invalid(detail)) if detail.contains("stored image_hash")
+    ));
+}
+
+#[test]
 fn membership_is_evented_with_queryable_history() {
     let env = Env::new();
     let c = env.open();

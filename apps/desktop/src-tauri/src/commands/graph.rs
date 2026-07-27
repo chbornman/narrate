@@ -17,7 +17,6 @@
 
 use std::time::Instant;
 
-use photoproof_connectors::OrtEmbedder;
 use photoproof_connectors::embedder::Embedder;
 use photoproof_connectors::vector_store::{VecKind, VecSpace};
 use photoproof_core::retrieval::KnnGraph;
@@ -28,7 +27,9 @@ use photoproof_core::tuning::{GraphTuning, tuning};
 use rusqlite::OpenFlags;
 use serde::{Deserialize, Serialize};
 
-use super::S;
+use super::{S, run_blocking};
+use crate::command_work::CommandClass;
+use crate::embedders::EmbedderProxy;
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -155,42 +156,46 @@ pub async fn topic_affinities(
 ) -> CmdResult<AffinityReport> {
     let app = app.inner().clone();
     let alpha = alpha.unwrap_or_else(|| tuning().graph.alpha_default);
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let scope_started = Instant::now();
-        let hashes = enumerate_scope(&app, &scope)?;
-        let scope_ms = scope_started.elapsed().as_millis();
+    run_blocking(
+        app,
+        "graph.topic-affinities",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let scope_started = Instant::now();
+            let hashes = enumerate_scope(app, &scope)?;
+            let scope_ms = scope_started.elapsed().as_millis();
 
-        // The ready embedders (or None ⇒ a degraded half that contributes 0).
-        let text = app.runtime.embedders.text();
-        let clip = app.runtime.embedders.clip();
+            // The ready embedders (or None ⇒ a degraded half that contributes 0).
+            let text = app.runtime.embedders.text();
+            let clip = app.runtime.embedders.clip();
 
-        let affinity_started = Instant::now();
-        let report = topic::topic_affinities::<OrtEmbedder, OrtEmbedder>(
-            &hashes,
-            &topics,
-            alpha,
-            app.vectors.as_ref(),
-            text.as_deref(),
-            clip.as_deref(),
-        );
-        // The scale-spike telemetry: surface where it struggles (DESIGN — do
-        // not silently cap; LOG where it falls over, at what N).
-        tracing::info!(
-            scope = ?scope,
-            images = hashes.len(),
-            topics = topics.len(),
-            alpha,
-            visual_ready = report.visual_ready,
-            annotation_ready = report.annotation_ready,
-            scope_enum_ms = scope_ms,
-            affinity_scan_ms = affinity_started.elapsed().as_millis(),
-            "topic_affinities computed"
-        );
-        Ok(report)
-    })
+            let affinity_started = Instant::now();
+            let report = topic::topic_affinities::<EmbedderProxy, EmbedderProxy>(
+                &hashes,
+                &topics,
+                alpha,
+                app.vectors.as_ref(),
+                text.as_deref(),
+                clip.as_deref(),
+            );
+            // The scale-spike telemetry: surface where it struggles (DESIGN — do
+            // not silently cap; LOG where it falls over, at what N).
+            tracing::info!(
+                scope = ?scope,
+                images = hashes.len(),
+                topics = topics.len(),
+                alpha,
+                visual_ready = report.visual_ready,
+                annotation_ready = report.annotation_ready,
+                scope_enum_ms = scope_ms,
+                affinity_scan_ms = affinity_started.elapsed().as_millis(),
+                "topic_affinities computed"
+            );
+            Ok(report)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `suggest_topics(scope)` (DESIGN-SEMANTIC-GRAPH.md, v1): cheap candidate
@@ -200,52 +205,56 @@ pub async fn topic_affinities(
 #[tauri::command]
 pub async fn suggest_topics(app: S<'_>, scope: GraphScope) -> CmdResult<Vec<TopicSuggestion>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let hashes = enumerate_scope(&app, &scope)?;
+    run_blocking(
+        app,
+        "graph.suggest-topics",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let hashes = enumerate_scope(app, &scope)?;
 
-        // The scope's note prose, mined for recurring n-grams. A fresh
-        // read-only connection over the shared WAL db (the debug-readq pattern):
-        // a short read-only projection has no business holding any write lock.
-        let note_texts = {
-            let db_path = app.app_data.join("photoproof.db");
-            let conn = rusqlite::Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|e| CmdError::Invalid(format!("open notes read: {e}")))?;
-            topic::scope_note_texts(&conn, &hashes)
-                .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?
-        };
+            // The scope's note prose, mined for recurring n-grams. A fresh
+            // read-only connection over the shared WAL db (the debug-readq pattern):
+            // a short read-only projection has no business holding any write lock.
+            let note_texts = {
+                let db_path = app.app_data.join("photoproof.db");
+                let conn = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(|e| CmdError::Invalid(format!("open notes read: {e}")))?;
+                topic::scope_note_texts(&conn, &hashes)
+                    .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?
+            };
 
-        // Collection names + how many of the scope's images each contains (the
-        // overlap is the chip's strength). A collection with no scope overlap is
-        // not a relevant suggestion, so it is dropped.
-        let scope_set: std::collections::HashSet<&str> =
-            hashes.iter().map(String::as_str).collect();
-        let mut collection_names: Vec<(String, usize)> = Vec::new();
-        if let Ok(list) = app.collections.list() {
-            for c in list {
-                let overlap = app
-                    .collections
-                    .current_members(&c.id)
-                    .map(|members| {
-                        members
-                            .iter()
-                            .filter(|h| scope_set.contains(h.as_str()))
-                            .count()
-                    })
-                    .unwrap_or(0);
-                if overlap > 0 {
-                    collection_names.push((c.name, overlap));
+            // Collection names + how many of the scope's images each contains (the
+            // overlap is the chip's strength). A collection with no scope overlap is
+            // not a relevant suggestion, so it is dropped.
+            let scope_set: std::collections::HashSet<&str> =
+                hashes.iter().map(String::as_str).collect();
+            let mut collection_names: Vec<(String, usize)> = Vec::new();
+            if let Ok(list) = app.collections.list() {
+                for c in list {
+                    let overlap = app
+                        .collections
+                        .current_members(&c.id)
+                        .map(|members| {
+                            members
+                                .iter()
+                                .filter(|h| scope_set.contains(h.as_str()))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    if overlap > 0 {
+                        collection_names.push((c.name, overlap));
+                    }
                 }
             }
-        }
 
-        Ok(topic::suggest_topics(&note_texts, &collection_names))
-    })
+            Ok(topic::suggest_topics(&note_texts, &collection_names))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Which embedding space `cluster_topics` clusters over. ANNOTATION
@@ -293,77 +302,81 @@ pub async fn cluster_topics(
 ) -> CmdResult<Vec<ClusterTopic>> {
     let app = app.inner().clone();
     let space = space.unwrap_or_default();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let started = Instant::now();
-        let hashes = enumerate_scope(&app, &scope)?;
-        let g = tuning().graph;
+    run_blocking(
+        app,
+        "graph.cluster-topics",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let started = Instant::now();
+            let hashes = enumerate_scope(app, &scope)?;
+            let g = tuning().graph;
 
-        // Resolve the clustering space's model id: prefer the loaded embedder
-        // (matches the live write path), else fall back to any stored row's
-        // model so an embedded library clusters even with models unloaded.
-        let vec_kind = space.vec_kind();
-        let active_model = match space {
-            ClusterSpace::Annotation => app
-                .runtime
-                .embedders
-                .text()
-                .map(|e| e.model_id().to_owned()),
-            ClusterSpace::Clip => app
-                .runtime
-                .embedders
-                .clip()
-                .map(|e| e.model_id().to_owned()),
-        };
-        let model_id = match active_model {
-            Some(m) => Some(m),
-            None => app
+            // Resolve the clustering space's model id: prefer the loaded embedder
+            // (matches the live write path), else fall back to any stored row's
+            // model so an embedded library clusters even with models unloaded.
+            let vec_kind = space.vec_kind();
+            let active_model = match space {
+                ClusterSpace::Annotation => app
+                    .runtime
+                    .embedders
+                    .text()
+                    .map(|e| e.model_id().to_owned()),
+                ClusterSpace::Clip => app
+                    .runtime
+                    .embedders
+                    .clip()
+                    .map(|e| e.model_id().to_owned()),
+            };
+            let model_id = match active_model {
+                Some(m) => Some(m),
+                None => app
+                    .vectors
+                    .any_model_id(vec_kind)
+                    .map_err(|e| CmdError::Invalid(format!("cluster model lookup: {e}")))?,
+            };
+            // No model id ⇒ the space is empty (un-embedded) ⇒ an empty rail.
+            let Some(model_id) = model_id else {
+                return Ok(Vec::new());
+            };
+
+            let vectors = app
                 .vectors
-                .any_model_id(vec_kind)
-                .map_err(|e| CmdError::Invalid(format!("cluster model lookup: {e}")))?,
-        };
-        // No model id ⇒ the space is empty (un-embedded) ⇒ an empty rail.
-        let Some(model_id) = model_id else {
-            return Ok(Vec::new());
-        };
+                .read_image_vectors(VecSpace { vec_kind, model_id }, &hashes)
+                .map_err(|e| CmdError::Invalid(format!("cluster vector read: {e}")))?;
 
-        let vectors = app
-            .vectors
-            .read_image_vectors(VecSpace { vec_kind, model_id }, &hashes)
-            .map_err(|e| CmdError::Invalid(format!("cluster vector read: {e}")))?;
+            // Per-image note text for labeling (read-only projection over the WAL db,
+            // the same pattern suggest_topics uses).
+            let notes_by_hash = {
+                let db_path = app.app_data.join("photoproof.db");
+                let conn = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(|e| CmdError::Invalid(format!("open notes read: {e}")))?;
+                topic::scope_note_texts_by_hash(&conn, &hashes)
+                    .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?
+            };
 
-        // Per-image note text for labeling (read-only projection over the WAL db,
-        // the same pattern suggest_topics uses).
-        let notes_by_hash = {
-            let db_path = app.app_data.join("photoproof.db");
-            let conn = rusqlite::Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|e| CmdError::Invalid(format!("open notes read: {e}")))?;
-            topic::scope_note_texts_by_hash(&conn, &hashes)
-                .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?
-        };
-
-        let clusters = topic::cluster_topics(
-            &vectors,
-            &notes_by_hash,
-            k,
-            g.cluster_k_min as usize,
-            g.cluster_k_max as usize,
-        );
-        tracing::info!(
-            scope = ?scope,
-            images = hashes.len(),
-            embedded = vectors.len(),
-            clusters = clusters.len(),
-            cluster_ms = started.elapsed().as_millis(),
-            "cluster_topics computed"
-        );
-        Ok(clusters)
-    })
+            let clusters = topic::cluster_topics(
+                &vectors,
+                &notes_by_hash,
+                k,
+                g.cluster_k_min as usize,
+                g.cluster_k_max as usize,
+            );
+            tracing::info!(
+                scope = ?scope,
+                images = hashes.len(),
+                embedded = vectors.len(),
+                clusters = clusters.len(),
+                cluster_ms = started.elapsed().as_millis(),
+                "cluster_topics computed"
+            );
+            Ok(clusters)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `graph_neighbors(scope, k?)`: the sparse semantic k-NN graph the visualizer's
@@ -392,10 +405,10 @@ pub async fn graph_neighbors(
 ) -> CmdResult<Vec<ImageNeighbors>> {
     let app = app.inner().clone();
     let k = k.unwrap_or(6);
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "graph.neighbors", CommandClass::Read, move |app| {
         app.touch()?;
         let started = Instant::now();
-        let hashes = enumerate_scope(&app, &scope)?;
+        let hashes = enumerate_scope(app, &scope)?;
 
         // Resolve the CLIP image space's model id exactly like cluster_topics:
         // the loaded embedder when present, else any stored row's model.
@@ -462,7 +475,6 @@ pub async fn graph_neighbors(
         Ok(merged)
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Merge the CLIP and annotation k-NN graphs into the layout's edge set: for a
@@ -543,29 +555,33 @@ impl TopicLlm for WiredTopicLlm {
 #[tauri::command]
 pub async fn suggest_topics_llm(app: S<'_>, scope: GraphScope) -> CmdResult<LlmSuggestions> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let hashes = enumerate_scope(&app, &scope)?;
-        let note_texts = {
-            let db_path = app.app_data.join("photoproof.db");
-            let conn = rusqlite::Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|e| CmdError::Invalid(format!("open notes read: {e}")))?;
-            topic::scope_note_texts(&conn, &hashes)
-                .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?
-        };
-        // None connector ⇒ the honest Unavailable state. When the Gemma connector
-        // lands, pass `Some(&llm)` here and the rail will surface its themes.
-        Ok(topic::suggest_topics_llm::<WiredTopicLlm>(
-            None,
-            &note_texts,
-            8,
-        ))
-    })
+    run_blocking(
+        app,
+        "graph.suggest-topics-llm",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let hashes = enumerate_scope(app, &scope)?;
+            let note_texts = {
+                let db_path = app.app_data.join("photoproof.db");
+                let conn = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(|e| CmdError::Invalid(format!("open notes read: {e}")))?;
+                topic::scope_note_texts(&conn, &hashes)
+                    .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?
+            };
+            // None connector ⇒ the honest Unavailable state. When the Gemma connector
+            // lands, pass `Some(&llm)` here and the rail will surface its themes.
+            Ok(topic::suggest_topics_llm::<WiredTopicLlm>(
+                None,
+                &note_texts,
+                8,
+            ))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `graph_tuning()` — the GraphTuning knobs the frontend force sim reads (the

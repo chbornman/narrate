@@ -4,9 +4,12 @@
 //! pragmas). The truth tables are rebuildable only from sidecars; the
 //! derived tables are rebuildable from the truth tables.
 
-use std::path::Path;
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, DatabaseName, OpenFlags, Transaction, TransactionBehavior};
 
 use super::StoreError;
 
@@ -628,6 +631,46 @@ CREATE TABLE IF NOT EXISTS topic_notes ( -- append-only, like collection_notes
 /// newer app and must not be opened by this one.
 pub(crate) const CURRENT_VERSION: i64 = 16;
 
+/// Deterministic recovery artifact written before an existing database is
+/// upgraded. The source version is part of the name so a later application
+/// upgrade cannot overwrite the backup from an earlier schema transition.
+fn pre_upgrade_backup_path(db_path: &Path, from_version: i64) -> PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push(format!(
+        ".pre-upgrade-v{from_version}-to-v{CURRENT_VERSION}.bak"
+    ));
+    PathBuf::from(name)
+}
+
+/// Copy the pre-migration snapshot with SQLite's online-backup API, then
+/// independently open and integrity-check it before any schema statement is
+/// allowed to run. The caller already holds BEGIN IMMEDIATE on its migration
+/// connection, preventing any writer from changing the database; backup uses a
+/// sibling read-only connection because SQLite does not permit the backup API
+/// to read from the same connection while it owns a write transaction.
+fn write_verified_pre_upgrade_backup(db_path: &Path, from_version: i64) -> Result<(), StoreError> {
+    let backup_path = pre_upgrade_backup_path(db_path, from_version);
+    let source = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    source.backup(DatabaseName::Main, &backup_path, None)?;
+
+    let backup = Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity: String = backup.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(StoreError::Corrupt(format!(
+            "pre-upgrade backup {} failed integrity_check: {integrity}",
+            backup_path.display()
+        )));
+    }
+    let backup_version: i64 = backup.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if backup_version != from_version {
+        return Err(StoreError::Corrupt(format!(
+            "pre-upgrade backup {} has schema version {backup_version}, expected {from_version}",
+            backup_path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Create or upgrade the schema (versioned by `user_version`). Returns the
 /// version found before any migration ran, so the caller can trigger
 /// post-migration recomputes (the schema layer cannot run folds).
@@ -637,74 +680,220 @@ pub(crate) const CURRENT_VERSION: i64 = 16;
 /// ladder only moves forward, so opening it would silently operate on a
 /// partially-understood schema. We surface `IncompatibleVersion` instead.
 pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    migrate_inner(conn, None, &mut |_, _| Ok(()))
+}
+
+/// The normal on-disk migration entry point. Existing databases get a verified
+/// recovery artifact before their first schema statement; fresh databases do
+/// not need a backup.
+pub(crate) fn migrate_with_backup(conn: &Connection, db_path: &Path) -> Result<i64, StoreError> {
+    migrate_inner(conn, Some(db_path), &mut |_, _| Ok(()))
+}
+
+/// Split a migration program at SQLite statement boundaries using SQLite's own
+/// parser. A hand-written semicolon splitter is not safe here: several schema
+/// programs contain trigger bodies (and future SQL may contain quoted
+/// semicolons). `sqlite3_complete` answers whether a prefix ends a complete SQL
+/// statement without preparing or mutating the database.
+fn complete_sql_statements(sql: &str) -> Result<Vec<&str>, StoreError> {
+    let mut statements = Vec::new();
+    let mut start = 0;
+
+    for (semicolon, _) in sql.match_indices(';') {
+        let end = semicolon + 1;
+        let candidate = &sql[start..end];
+        let c_sql = CString::new(candidate).map_err(|_| {
+            StoreError::Corrupt("migration SQL contains an embedded NUL byte".into())
+        })?;
+        // SAFETY: `c_sql` is a live, NUL-terminated C string for the duration
+        // of this call. sqlite3_complete only reads it and retains no pointer.
+        let is_complete = unsafe { rusqlite::ffi::sqlite3_complete(c_sql.as_ptr()) != 0 };
+        if is_complete {
+            statements.push(candidate);
+            start = end;
+        }
+    }
+
+    if !sql[start..].trim().is_empty() {
+        return Err(StoreError::Corrupt(
+            "migration SQL has an unterminated trailing statement".into(),
+        ));
+    }
+    Ok(statements)
+}
+
+/// Execute a semicolon-terminated SQL program one SQLite statement at a time.
+/// Keeping the encompassing transaction unchanged means any injected failure
+/// rolls every earlier statement back, while exposing every internal statement
+/// boundary to the migration fault harness.
+fn migration_program(
+    tx: &Transaction<'_>,
+    version: i64,
+    boundary: &mut usize,
+    sql: &str,
+    after_statement: &mut dyn FnMut(i64, usize) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    for statement in complete_sql_statements(sql)? {
+        tx.execute_batch(statement)?;
+        *boundary += 1;
+        after_statement(version, *boundary)?;
+    }
+    Ok(())
+}
+
+/// Execute one explicitly-delimited migration statement. Unlike
+/// `migration_program`, this accepts SQL without a trailing semicolon.
+fn migration_statement(
+    tx: &Transaction<'_>,
+    version: i64,
+    boundary: &mut usize,
+    sql: &str,
+    after_statement: &mut dyn FnMut(i64, usize) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    tx.execute_batch(sql)?;
+    *boundary += 1;
+    after_statement(version, *boundary)
+}
+
+fn migration_version(
+    tx: &Transaction<'_>,
+    version: i64,
+    boundary: &mut usize,
+    after_statement: &mut dyn FnMut(i64, usize) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    run_pragma(tx, &format!("PRAGMA user_version = {version}"))?;
+    *boundary += 1;
+    after_statement(version, *boundary)
+}
+
+/// Run the whole forward ladder under one SQLite writer reservation. Reading
+/// `user_version` happens *after* BEGIN IMMEDIATE, so two processes that race
+/// to open an old database serialize: the waiter re-reads the version after
+/// the winner commits and does not replay stale migration decisions.
+///
+/// `after_statement` is a no-op in production. Tests use it to simulate a
+/// process failure after every literal SQLite statement and `user_version`
+/// advance.
+fn migrate_inner(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    after_statement: &mut dyn FnMut(i64, usize) -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > CURRENT_VERSION {
         return Err(StoreError::IncompatibleVersion {
             found: version,
             supported: CURRENT_VERSION,
         });
     }
+    if version > 0
+        && version < CURRENT_VERSION
+        && let Some(path) = db_path
+    {
+        write_verified_pre_upgrade_backup(path, version)?;
+    }
     if version < 1 {
-        conn.execute_batch(SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 1")?;
+        let mut boundary = 0;
+        migration_program(&tx, 1, &mut boundary, SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 1, &mut boundary, after_statement)?;
     }
     if version < 2 {
-        conn.execute_batch(SIDECARS_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 2")?;
+        let mut boundary = 0;
+        migration_program(&tx, 2, &mut boundary, SIDECARS_SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 2, &mut boundary, after_statement)?;
     }
     if version < 3 {
-        conn.execute_batch(LIBRARY_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 3")?;
+        let mut boundary = 0;
+        migration_program(&tx, 3, &mut boundary, LIBRARY_SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 3, &mut boundary, after_statement)?;
     }
     if version < 4 {
-        conn.execute_batch(SEARCH_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 4")?;
+        let mut boundary = 0;
+        migration_program(&tx, 4, &mut boundary, SEARCH_SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 4, &mut boundary, after_statement)?;
     }
     if version < 5 {
+        let mut boundary = 0;
         // v5: `image_journal_stats.has_text` (B37). Fresh databases get the
         // column from the v1 DDL; databases created before P4.1 need the
         // ALTER. Values are recomputed by the caller (EventStore::open runs
         // rebuild_derived when migrating from 1..5) — the DEFAULT here is a
         // placeholder, never trusted.
-        let has_column: bool = conn.query_row(
+        let has_column: bool = tx.query_row(
             "SELECT count(*) > 0 FROM pragma_table_info('image_journal_stats')
              WHERE name = 'has_text'",
             [],
             |r| r.get(0),
         )?;
         if !has_column {
-            conn.execute_batch(
+            migration_statement(
+                &tx,
+                5,
+                &mut boundary,
                 "ALTER TABLE image_journal_stats
                  ADD COLUMN has_text INTEGER NOT NULL DEFAULT 0",
+                after_statement,
             )?;
         }
-        run_pragma(conn, "PRAGMA user_version = 5")?;
+        migration_version(&tx, 5, &mut boundary, after_statement)?;
     }
     if version < 6 {
-        conn.execute_batch(CAPTURE_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 6")?;
+        let mut boundary = 0;
+        migration_program(&tx, 6, &mut boundary, CAPTURE_SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 6, &mut boundary, after_statement)?;
     }
     if version < 7 {
-        conn.execute_batch(RETRIEVAL_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 7")?;
+        let mut boundary = 0;
+        migration_program(&tx, 7, &mut boundary, RETRIEVAL_SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 7, &mut boundary, after_statement)?;
     }
     if version < 8 {
-        conn.execute_batch(RETRIEVAL_FIXES_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 8")?;
+        let mut boundary = 0;
+        migration_program(
+            &tx,
+            8,
+            &mut boundary,
+            RETRIEVAL_FIXES_SCHEMA_SQL,
+            after_statement,
+        )?;
+        migration_version(&tx, 8, &mut boundary, after_statement)?;
     }
     if version < 9 {
-        conn.execute_batch(COLLECTIONS_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 9")?;
+        let mut boundary = 0;
+        migration_program(
+            &tx,
+            9,
+            &mut boundary,
+            COLLECTIONS_SCHEMA_SQL,
+            after_statement,
+        )?;
+        migration_version(&tx, 9, &mut boundary, after_statement)?;
     }
     if version < 10 {
-        conn.execute_batch(SUMMARIES_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 10")?;
+        let mut boundary = 0;
+        migration_program(
+            &tx,
+            10,
+            &mut boundary,
+            SUMMARIES_SCHEMA_SQL,
+            after_statement,
+        )?;
+        migration_version(&tx, 10, &mut boundary, after_statement)?;
     }
     if version < 11 {
-        conn.execute_batch(SUMMARIES_FIXES_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 11")?;
+        let mut boundary = 0;
+        migration_program(
+            &tx,
+            11,
+            &mut boundary,
+            SUMMARIES_FIXES_SCHEMA_SQL,
+            after_statement,
+        )?;
+        migration_version(&tx, 11, &mut boundary, after_statement)?;
     }
     if version < 12 {
+        let mut boundary = 0;
         // v12: the attention/engagement heatmap. The `image_dwell` telemetry
         // table, plus `image_journal_stats.stroke_count` (the heatmap's small
         // stroke factor — `has_strokes` already carries presence). Fresh
@@ -713,29 +902,35 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
         // recompute (EventStore::open runs rebuild_derived when migrating)
         // backfills the value — the DEFAULT here is a placeholder, never
         // trusted.
-        conn.execute_batch(HEATMAP_SCHEMA_SQL)?;
-        let has_column: bool = conn.query_row(
+        migration_program(&tx, 12, &mut boundary, HEATMAP_SCHEMA_SQL, after_statement)?;
+        let has_column: bool = tx.query_row(
             "SELECT count(*) > 0 FROM pragma_table_info('image_journal_stats')
              WHERE name = 'stroke_count'",
             [],
             |r| r.get(0),
         )?;
         if !has_column {
-            conn.execute_batch(
+            migration_statement(
+                &tx,
+                12,
+                &mut boundary,
                 "ALTER TABLE image_journal_stats
                  ADD COLUMN stroke_count INTEGER NOT NULL DEFAULT 0",
+                after_statement,
             )?;
         }
-        run_pragma(conn, "PRAGMA user_version = 12")?;
+        migration_version(&tx, 12, &mut boundary, after_statement)?;
     }
     if version < 13 {
+        let mut boundary = 0;
         // v13: manual topics (DESIGN-TOPICS-COLLECTIONS.md). A saved phrase
         // table only — a topic's images are always computed affinity, never
         // stored membership (that is what distinguishes it from a collection).
-        conn.execute_batch(TOPICS_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 13")?;
+        migration_program(&tx, 13, &mut boundary, TOPICS_SCHEMA_SQL, after_statement)?;
+        migration_version(&tx, 13, &mut boundary, after_statement)?;
     }
     if version < 14 {
+        let mut boundary = 0;
         // v14: the root 'archived' lifecycle state (folder-tree improvements).
         // SQLite cannot widen a column CHECK in place, so the constraint is
         // rebuilt the canonical way: build the new table, copy rows, swap. The
@@ -744,7 +939,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
         // image hash, never the root) are wholly untouched. Guarded by a column
         // probe so a fresh DB (already carrying the widened CHECK from the v1
         // DDL) skips the rebuild.
-        let already_widened: bool = conn.query_row(
+        let already_widened: bool = tx.query_row(
             // The fresh-DDL `roots` table's CHECK text contains 'archived';
             // the pre-v14 one does not. sqlite_master holds the creating SQL.
             "SELECT count(*) > 0 FROM sqlite_master
@@ -753,7 +948,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
             |r| r.get(0),
         )?;
         if !already_widened {
-            conn.execute_batch(
+            let statements = [
                 "CREATE TABLE roots_v14 (
                    root_id       TEXT PRIMARY KEY,
                    volume_id     TEXT NOT NULL REFERENCES volumes(volume_id),
@@ -763,26 +958,37 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
                                    CHECK (state IN ('active','archived','removed')),
                    created_at TEXT NOT NULL, removed_at TEXT,
                    UNIQUE (volume_id, rel_path)
-                 );
-                 INSERT INTO roots_v14
+                 )",
+                "INSERT INTO roots_v14
                    SELECT root_id, volume_id, rel_path, display_name, state,
                           created_at, removed_at
-                   FROM roots;
-                 DROP TABLE roots;
-                 ALTER TABLE roots_v14 RENAME TO roots;",
-            )?;
+                   FROM roots",
+                "DROP TABLE roots",
+                "ALTER TABLE roots_v14 RENAME TO roots",
+            ];
+            for statement in statements {
+                migration_statement(&tx, 14, &mut boundary, statement, after_statement)?;
+            }
         }
-        run_pragma(conn, "PRAGMA user_version = 14")?;
+        migration_version(&tx, 14, &mut boundary, after_statement)?;
     }
     if version < 15 {
+        let mut boundary = 0;
         // v15: the per-topic note log (topic_notes), mirroring collection_notes
         // (user_version 9). A topic gets an append-only running note keyed to
         // its id; this adds the table only, never touching how topic membership
         // /affinity is computed (still always read-time, never stored).
-        conn.execute_batch(TOPIC_NOTES_SCHEMA_SQL)?;
-        run_pragma(conn, "PRAGMA user_version = 15")?;
+        migration_program(
+            &tx,
+            15,
+            &mut boundary,
+            TOPIC_NOTES_SCHEMA_SQL,
+            after_statement,
+        )?;
+        migration_version(&tx, 15, &mut boundary, after_statement)?;
     }
     if version < 16 {
+        let mut boundary = 0;
         // v16: the Tier-1 near-dup perceptual hash (DESIGN-DEDUP-AND-SIMILARITY
         // .md §"Tier 1"). A single nullable INTEGER column on `images`, holding
         // a derived/rebuildable 64-bit dHash — modeled on the EXIF subset and
@@ -792,17 +998,24 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
         // DDL; older DBs need the ALTER, so it is guarded by a column probe like
         // v5's `has_text` and v12's `stroke_count`. NULL means "not yet hashed":
         // the preview pass fills it on next ingest, and a backfill can re-pend.
-        let has_column: bool = conn.query_row(
+        let has_column: bool = tx.query_row(
             "SELECT count(*) > 0 FROM pragma_table_info('images')
              WHERE name = 'perceptual_hash'",
             [],
             |r| r.get(0),
         )?;
         if !has_column {
-            conn.execute_batch("ALTER TABLE images ADD COLUMN perceptual_hash INTEGER")?;
+            migration_statement(
+                &tx,
+                16,
+                &mut boundary,
+                "ALTER TABLE images ADD COLUMN perceptual_hash INTEGER",
+                after_statement,
+            )?;
         }
-        run_pragma(conn, "PRAGMA user_version = 16")?;
+        migration_version(&tx, 16, &mut boundary, after_statement)?;
     }
+    tx.commit()?;
     Ok(version)
 }
 
@@ -810,17 +1023,16 @@ pub(crate) fn migrate(conn: &Connection) -> Result<i64, StoreError> {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::sync::{Arc, Barrier};
 
-    /// The v14 migration widens `roots.state` to admit 'archived' by rebuilding
-    /// the table, and it must do so NON-DESTRUCTIVELY: a pre-v14 database's
-    /// rows survive verbatim, and the new state is accepted afterwards.
-    #[test]
-    fn v14_widens_roots_state_check_and_preserves_rows() {
+    fn pre_v14_connection() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // Stand up the schema, then recreate `roots` in its PRE-v14 shape (the
-        // narrow CHECK) so we exercise the table-rebuild branch a real upgrade
-        // would take.
         migrate(&conn).unwrap();
+        recreate_pre_v14_roots(&conn);
+        conn
+    }
+
+    fn recreate_pre_v14_roots(conn: &Connection) {
         conn.execute_batch(
             "DROP TABLE roots;
              CREATE TABLE roots (
@@ -832,13 +1044,153 @@ mod tests {
                created_at TEXT NOT NULL, removed_at TEXT,
                UNIQUE (volume_id, rel_path)
              );
-             INSERT INTO volumes (volume_id, state, first_seen_at, last_seen_at)
+             INSERT OR IGNORE INTO volumes
+               (volume_id, state, first_seen_at, last_seen_at)
                VALUES ('vol1', 'offline', 'x', 'x');
-             INSERT INTO roots (root_id, volume_id, rel_path, display_name, state, created_at)
-               VALUES ('r1', 'vol1', 'photos', 'Photos', 'active', 'x');",
+             INSERT INTO roots
+               (root_id, volume_id, rel_path, display_name, state, created_at)
+               VALUES ('r1', 'vol1', 'photos', 'Photos', 'active', 'x');
+             PRAGMA user_version = 13;",
         )
         .unwrap();
-        run_pragma(&conn, "PRAGMA user_version = 13").unwrap();
+    }
+
+    /// Build a representative database at each historical version by applying
+    /// the migration batches that existed up to that point. The four schema
+    /// details whose fresh-install DDL has since moved ahead of the historical
+    /// ladder are explicitly restored to their old shapes.
+    fn historical_connection(version: i64) -> Connection {
+        assert!((0..=CURRENT_VERSION).contains(&version));
+        let conn = Connection::open_in_memory().unwrap();
+        if version >= 1 {
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            if version < 5 {
+                conn.execute_batch("ALTER TABLE image_journal_stats DROP COLUMN has_text")
+                    .unwrap();
+            }
+        }
+        if version >= 2 {
+            conn.execute_batch(SIDECARS_SCHEMA_SQL).unwrap();
+        }
+        if version >= 3 {
+            let library_sql = if version < 16 {
+                LIBRARY_SCHEMA_SQL
+                    .replace(
+                        "  first_ingested_at TEXT NOT NULL,",
+                        "  first_ingested_at TEXT NOT NULL",
+                    )
+                    .replace(
+                        "  perceptual_hash   INTEGER                    -- 64-bit dHash, or NULL if unhashed\n",
+                        "",
+                    )
+            } else {
+                LIBRARY_SCHEMA_SQL.to_owned()
+            };
+            conn.execute_batch(&library_sql).unwrap();
+            if version < 14 {
+                recreate_pre_v14_roots(&conn);
+            }
+        }
+        if version >= 4 {
+            conn.execute_batch(SEARCH_SCHEMA_SQL).unwrap();
+        }
+        if version >= 6 {
+            conn.execute_batch(CAPTURE_SCHEMA_SQL).unwrap();
+        }
+        if version >= 7 {
+            conn.execute_batch(RETRIEVAL_SCHEMA_SQL).unwrap();
+        }
+        if version >= 8 {
+            conn.execute_batch(RETRIEVAL_FIXES_SCHEMA_SQL).unwrap();
+        }
+        if version >= 9 {
+            conn.execute_batch(COLLECTIONS_SCHEMA_SQL).unwrap();
+        }
+        if version >= 10 {
+            conn.execute_batch(SUMMARIES_SCHEMA_SQL).unwrap();
+        }
+        if version >= 11 {
+            conn.execute_batch(SUMMARIES_FIXES_SCHEMA_SQL).unwrap();
+        }
+        if version >= 12 {
+            conn.execute_batch(HEATMAP_SCHEMA_SQL).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE image_journal_stats
+                 ADD COLUMN stroke_count INTEGER NOT NULL DEFAULT 0",
+            )
+            .unwrap();
+        }
+        if version >= 13 {
+            conn.execute_batch(TOPICS_SCHEMA_SQL).unwrap();
+        }
+        if version >= 15 {
+            conn.execute_batch(TOPIC_NOTES_SCHEMA_SQL).unwrap();
+        }
+        run_pragma(&conn, &format!("PRAGMA user_version = {version}")).unwrap();
+        conn
+    }
+
+    fn schema_fingerprint(conn: &Connection) -> (i64, Vec<(String, String, String, String)>) {
+        let version = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT type, name, tbl_name, coalesce(sql, '')
+                 FROM sqlite_master
+                 WHERE name NOT LIKE 'sqlite_%'
+                 ORDER BY type, name",
+            )
+            .unwrap();
+        let objects = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (version, objects)
+    }
+
+    fn assert_pre_v14_state(conn: &Connection) {
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 13);
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT rel_path, display_name FROM roots WHERE root_id = 'r1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("photos".into(), "Photos".into()));
+        let staging_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'roots_v14'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(staging_tables, 0);
+        let widened: bool = conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'roots' AND sql LIKE '%archived%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!widened, "rollback must restore the pre-v14 CHECK");
+    }
+
+    /// The v14 migration widens `roots.state` to admit 'archived' by rebuilding
+    /// the table, and it must do so NON-DESTRUCTIVELY: a pre-v14 database's
+    /// rows survive verbatim, and the new state is accepted afterwards.
+    #[test]
+    fn v14_widens_roots_state_check_and_preserves_rows() {
+        let conn = pre_v14_connection();
 
         // 'archived' is rejected by the narrow CHECK before the migration.
         assert!(
@@ -876,6 +1228,226 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, CURRENT_VERSION);
+    }
+
+    /// Every statement boundary in the destructive-looking v14 table rebuild
+    /// is crash-safe. An injected failure drops the enclosing transaction,
+    /// restoring the old table, row, CHECK constraint, and user_version; the
+    /// next launch can then run the same migration to completion.
+    #[test]
+    fn v14_statement_failures_roll_back_and_resume() {
+        for fail_after in 1..=5 {
+            let conn = pre_v14_connection();
+            let err = migrate_inner(&conn, None, &mut |version, statement| {
+                if version == 14 && statement == fail_after {
+                    Err(StoreError::Corrupt(format!(
+                        "injected failure after v14 statement {statement}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("injected failure"),
+                "unexpected failure at statement {fail_after}: {err}"
+            );
+            assert_pre_v14_state(&conn);
+
+            let from = migrate(&conn).unwrap();
+            assert_eq!(from, 13);
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, CURRENT_VERSION);
+            let row: (String, String) = conn
+                .query_row(
+                    "SELECT rel_path, display_name FROM roots WHERE root_id = 'r1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(row, ("photos".into(), "Photos".into()));
+        }
+    }
+
+    #[test]
+    fn sqlite_statement_splitter_keeps_trigger_bodies_atomic() {
+        let sql = "
+            CREATE TABLE t (value INTEGER);
+            CREATE TRIGGER t_guard BEFORE DELETE ON t
+            BEGIN
+              SELECT RAISE(ABORT, 'no; delete');
+              SELECT 1;
+            END;
+            INSERT INTO t VALUES (1);
+        ";
+        let statements = complete_sql_statements(sql).unwrap();
+        assert_eq!(statements.len(), 3);
+        assert!(statements[1].contains("SELECT 1;"));
+
+        let conn = Connection::open_in_memory().unwrap();
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+        for statement in statements {
+            tx.execute_batch(statement).unwrap();
+        }
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT value FROM t", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(complete_sql_statements("CREATE TABLE unfinished (").is_err());
+    }
+
+    /// Every historical migration's literal SQLite statement boundaries are
+    /// failure-injectable, including each statement formerly hidden inside an
+    /// `execute_batch` program and each `user_version` advance. A failure must
+    /// restore the exact prior sqlite_master + version, and an immediate retry
+    /// must resume all the way to head.
+    #[test]
+    fn every_migration_statement_and_version_boundary_rolls_back_then_resumes() {
+        let statement_count = |sql| complete_sql_statements(sql).unwrap().len();
+        let boundary_counts = [
+            (1, statement_count(SCHEMA_SQL) + 1),
+            (2, statement_count(SIDECARS_SCHEMA_SQL) + 1),
+            (3, statement_count(LIBRARY_SCHEMA_SQL) + 1),
+            (4, statement_count(SEARCH_SCHEMA_SQL) + 1),
+            (5, 2),
+            (6, statement_count(CAPTURE_SCHEMA_SQL) + 1),
+            (7, statement_count(RETRIEVAL_SCHEMA_SQL) + 1),
+            (8, statement_count(RETRIEVAL_FIXES_SCHEMA_SQL) + 1),
+            (9, statement_count(COLLECTIONS_SCHEMA_SQL) + 1),
+            (10, statement_count(SUMMARIES_SCHEMA_SQL) + 1),
+            (11, statement_count(SUMMARIES_FIXES_SCHEMA_SQL) + 1),
+            (12, statement_count(HEATMAP_SCHEMA_SQL) + 2),
+            (13, statement_count(TOPICS_SCHEMA_SQL) + 1),
+            (14, 5),
+            (15, statement_count(TOPIC_NOTES_SCHEMA_SQL) + 1),
+            (16, 2),
+        ];
+
+        for (target, count) in boundary_counts {
+            for fail_after in 1..=count {
+                let prior = target - 1;
+                let conn = historical_connection(prior);
+                let before = schema_fingerprint(&conn);
+                let error = migrate_inner(&conn, None, &mut |version, boundary| {
+                    if version == target && boundary == fail_after {
+                        Err(StoreError::Corrupt(format!(
+                            "injected v{target} boundary {boundary}"
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("injected"),
+                    "v{target} boundary {fail_after} did not reach its failpoint: {error}"
+                );
+                assert_eq!(
+                    schema_fingerprint(&conn),
+                    before,
+                    "v{target} boundary {fail_after} must roll back schema and version"
+                );
+
+                assert_eq!(
+                    migrate(&conn).unwrap(),
+                    prior,
+                    "v{target} boundary {fail_after} must resume from the old version"
+                );
+                let (version, _) = schema_fingerprint(&conn);
+                assert_eq!(version, CURRENT_VERSION);
+                let integrity: String = conn
+                    .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(integrity, "ok");
+            }
+        }
+    }
+
+    /// BEGIN IMMEDIATE is the cross-connection migration mutex: racing openers
+    /// both succeed, exactly one observes/upgrades v13, and the waiter re-reads
+    /// CURRENT_VERSION only after the winner commits.
+    #[test]
+    fn concurrent_migrators_serialize_and_recheck_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        {
+            let conn = open_connection(&path).unwrap();
+            migrate(&conn).unwrap();
+            recreate_pre_v14_roots(&conn);
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = open_connection(&path).unwrap();
+                    barrier.wait();
+                    migrate_with_backup(&conn, &path)
+                })
+            })
+            .collect();
+        let mut observed: Vec<i64> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect();
+        observed.sort_unstable();
+        assert_eq!(observed, vec![13, CURRENT_VERSION]);
+
+        let conn = open_connection(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION);
+        let rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM roots WHERE root_id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    /// An on-disk historical database is copied and independently verified
+    /// before migration. The recovery artifact remains at v13 with its data
+    /// and narrow CHECK while the live database advances.
+    #[test]
+    fn on_disk_upgrade_writes_verified_pre_upgrade_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        {
+            let conn = open_connection(&path).unwrap();
+            migrate(&conn).unwrap();
+            recreate_pre_v14_roots(&conn);
+        }
+
+        {
+            let conn = open_connection(&path).unwrap();
+            assert_eq!(migrate_with_backup(&conn, &path).unwrap(), 13);
+        }
+
+        let backup_path = pre_upgrade_backup_path(&path, 13);
+        assert!(backup_path.is_file());
+        let backup =
+            Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_pre_v14_state(&backup);
+
+        let live = open_connection(&path).unwrap();
+        let live_version: i64 = live
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(live_version, CURRENT_VERSION);
+        live.execute(
+            "UPDATE roots SET state = 'archived' WHERE root_id = 'r1'",
+            [],
+        )
+        .expect("live v14+ schema admits archived");
     }
 
     /// A database stamped NEWER than this build supports (a downgrade) is refused

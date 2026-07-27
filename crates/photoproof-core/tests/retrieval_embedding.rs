@@ -14,7 +14,7 @@ mod common;
 
 use photoproof_connectors::embedder::Embedder;
 use photoproof_connectors::mock::MockEmbedder;
-use photoproof_connectors::vector_store::{VecKind, VecSpace, VectorStore};
+use photoproof_connectors::vector_store::{VecKey, VecKind, VecSpace, VecUnit, VectorStore};
 use photoproof_core::library::{EmbeddingRig, QueueOptions};
 use photoproof_core::retrieval::{ChunkContext, PpvecStore, chunk_folded_text, inputs_hash};
 use photoproof_core::{ContentHash, EventDraft, RemarkSource};
@@ -304,6 +304,98 @@ fn passes_drain_per_configured_embedder() {
     assert_eq!(
         rig.count("SELECT COUNT(*) FROM vectors WHERE vec_kind = 'image_clip' AND deleted = 0"),
         3
+    );
+}
+
+#[test]
+fn retained_image_summary_text_rebuilds_one_idempotent_dense_row() {
+    let rig = Rig::new();
+    let image = &rig.hashes[0];
+    let text_only: EmbeddingRig<'_, MockEmbedder, MockEmbedder> = EmbeddingRig {
+        text: Some(&rig.text),
+        clip: None,
+        vectors: &rig.store,
+    };
+    rig.env
+        .lib
+        .process_embedding_queue(&text_only, &QueueOptions::default())
+        .unwrap();
+    assert_eq!(
+        rig.pass_state(image, "text-embedding"),
+        "done",
+        "fixture starts from a library whose original text backfill completed"
+    );
+
+    let first = "Mist over the harbor; she keeps returning to the quiet frames.";
+    rig.env
+        .conn()
+        .execute(
+            "INSERT INTO derived_summaries
+               (id, scope, scope_key, text, model_id, prompt_ver, inputs_hash, generated_ts)
+             VALUES ('01JEMBEDSUMMARY000000000000', 'image', ?1, ?2,
+                     'mock-summary-generator', 1, 'summary-inputs-v1',
+                     '2026-07-26T12:00:00.000Z')",
+            rusqlite::params![image.as_str(), first],
+        )
+        .unwrap();
+
+    rig.env
+        .lib
+        .process_embedding_queue(&text_only, &QueueOptions::default())
+        .unwrap();
+
+    let space = VecSpace {
+        vec_kind: VecKind::ImageSummary,
+        model_id: TEXT_MODEL.into(),
+    };
+    let key = VecKey {
+        space: space.clone(),
+        unit: VecUnit::Image {
+            image_hash: image.to_string(),
+        },
+    };
+    assert_eq!(rig.store.space_stats(&space).unwrap(), (1, 1));
+    assert_eq!(
+        rig.store.row_inputs_hash(&key).unwrap(),
+        Some((inputs_hash(first.as_bytes()), false))
+    );
+    let first_vector = rig.store.fetch(&key).unwrap().unwrap();
+
+    // A regenerated retained summary is detected even if its text pass is
+    // already done. The vector upsert replaces in place: there is still
+    // exactly one row, and unchanged text remains a no-op.
+    let revised = "Mist over the harbor; the quiet blue frames are now the anchors.";
+    let conn = rig.env.conn();
+    conn.execute(
+        "UPDATE derived_summaries
+         SET text = ?2, inputs_hash = 'summary-inputs-v2',
+             generated_ts = '2026-07-26T13:00:00.000Z'
+         WHERE scope = 'image' AND scope_key = ?1",
+        rusqlite::params![image.as_str(), revised],
+    )
+    .unwrap();
+    drop(conn);
+    rig.env
+        .lib
+        .process_embedding_queue(&text_only, &QueueOptions::default())
+        .unwrap();
+    assert_eq!(rig.store.space_stats(&space).unwrap(), (1, 1));
+    assert_eq!(
+        rig.store.row_inputs_hash(&key).unwrap(),
+        Some((inputs_hash(revised.as_bytes()), false))
+    );
+    assert_ne!(rig.store.fetch(&key).unwrap().unwrap(), first_vector);
+
+    let unchanged = rig
+        .env
+        .lib
+        .process_embedding_queue(&text_only, &QueueOptions::default())
+        .unwrap();
+    assert_eq!(unchanged.processed, 0);
+    assert_eq!(
+        rig.store.space_stats(&space).unwrap(),
+        (1, 1),
+        "retries never append duplicate image-summary rows"
     );
 }
 

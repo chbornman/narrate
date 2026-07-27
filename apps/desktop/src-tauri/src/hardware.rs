@@ -8,6 +8,9 @@
 //! product floor); calibrated tier numbers are the P6.3 spike's.
 
 use photoproof_core::runtime::{GpuAdapter, HardwareProbe, HardwareReport};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Probing is rare (first run, settings re-detect) and some drivers
 /// dislike concurrent instance creation — one probe at a time,
@@ -16,12 +19,106 @@ static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct LiveProbe;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCapabilityResult {
+    pub hardware: HardwareReport,
+    pub providers: Vec<photoproof_connectors::OrtProviderCapability>,
+    pub total_memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    #[error("hardware capability probe was cancelled")]
+    Cancelled,
+    #[error("hardware capability probe exceeded its {0:?} deadline")]
+    Timeout(Duration),
+    #[error("hardware capability probe process could not start: {0}")]
+    Spawn(String),
+    #[error("hardware capability helper failed: {0}")]
+    Helper(String),
+}
+
+impl LiveProbe {
+    /// Run driver/ORT discovery in a disposable helper process. Unlike a Rust
+    /// thread blocked in a vendor driver, the helper can be killed on deadline,
+    /// cancellation, or application shutdown, so no native probe can outlive
+    /// the managed task barrier.
+    pub fn probe_bounded(
+        cancel: Arc<AtomicBool>,
+        timeout: Duration,
+    ) -> Result<LiveCapabilityResult, ProbeError> {
+        let executable =
+            std::env::current_exe().map_err(|error| ProbeError::Spawn(error.to_string()))?;
+        let child = std::process::Command::new(executable)
+            .arg("--photoproof-capability-helper")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| ProbeError::Spawn(error.to_string()))?;
+        collect_bounded_probe(child, cancel, timeout)
+    }
+
+    pub fn probe_for_helper() -> LiveCapabilityResult {
+        let hardware = LiveProbe.probe();
+        let providers = photoproof_connectors::ort_provider_capabilities();
+        LiveCapabilityResult {
+            hardware,
+            providers,
+            total_memory_bytes: total_memory_bytes(),
+        }
+    }
+}
+
+/// Own one capability-helper process through a terminal result. Factoring the
+/// child supervision from command construction gives the acceptance suite a
+/// real killable process seam: timeout/cancellation tests do not pretend that a
+/// cooperative Rust closure is equivalent to a vendor driver stuck in native
+/// code.
+fn collect_bounded_probe(
+    mut child: std::process::Child,
+    cancel: Arc<AtomicBool>,
+    timeout: Duration,
+) -> Result<LiveCapabilityResult, ProbeError> {
+    let started = Instant::now();
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ProbeError::Cancelled);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ProbeError::Timeout(timeout));
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| ProbeError::Helper(error.to_string()))?;
+                if !output.status.success() {
+                    return Err(ProbeError::Helper(
+                        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                    ));
+                }
+                return serde_json::from_slice(&output.stdout)
+                    .map_err(|error| ProbeError::Helper(error.to_string()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(ProbeError::Helper(error.to_string())),
+        }
+    }
+}
+
 impl HardwareProbe for LiveProbe {
     fn probe(&mut self) -> HardwareReport {
         let _serial = PROBE_LOCK.lock().expect("probe lock");
         let mut adapters = enumerate_wgpu_adapters();
         attach_native_vram(&mut adapters);
         HardwareReport {
+            schema_version: 1,
             adapters,
             apple_unified_bytes: apple_unified_bytes(),
             detected_at: photoproof_core::UtcMillis::now().to_rfc3339(),
@@ -45,6 +142,10 @@ fn enumerate_wgpu_adapters() -> Vec<GpuAdapter> {
             Some(GpuAdapter {
                 name: info.name,
                 backend: info.backend.to_string(),
+                vendor_id: Some(info.vendor),
+                device_id: Some(info.device),
+                driver: (!info.driver.is_empty()).then_some(info.driver),
+                driver_info: (!info.driver_info.is_empty()).then_some(info.driver_info),
                 vram_bytes: None, // the native layer fills this in
             })
         })
@@ -196,6 +297,61 @@ fn apple_unified_bytes() -> Option<u64> {
     (rc == 0).then_some(size)
 }
 
+#[cfg(target_os = "linux")]
+fn total_memory_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib = text
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    kib.checked_mul(1024)
+}
+
+#[cfg(target_os = "macos")]
+fn total_memory_bytes() -> Option<u64> {
+    apple_unified_bytes()
+}
+
+#[cfg(target_os = "windows")]
+fn total_memory_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.total_phys)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn total_memory_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(not(target_os = "macos"))]
 fn apple_unified_bytes() -> Option<u64> {
     None
@@ -206,6 +362,59 @@ mod tests {
     use super::*;
     use photoproof_connectors::config::Tier;
     use photoproof_core::runtime::decide_tier;
+
+    fn spawn_hung_test_process() -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--ignored",
+                "--exact",
+                "hardware::tests::hung_probe_process_fixture",
+                "--nocapture",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("hung helper fixture")
+    }
+
+    /// Only launched by the two process-supervision tests above. It is ignored
+    /// in ordinary test runs so a gate can never wait for its long sleep.
+    #[test]
+    #[ignore = "subprocess fixture for bounded capability-probe tests"]
+    fn hung_probe_process_fixture() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn hung_probe_is_killed_at_the_deadline() {
+        let started = Instant::now();
+        let error = collect_bounded_probe(
+            spawn_hung_test_process(),
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(75),
+        )
+        .expect_err("hung helper must time out");
+        assert!(matches!(error, ProbeError::Timeout(_)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the native helper is killed and reaped instead of outliving startup"
+        );
+    }
+
+    #[test]
+    fn capability_probe_cancellation_kills_and_reaps_the_helper() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let started = Instant::now();
+        let error =
+            collect_bounded_probe(spawn_hung_test_process(), cancel, Duration::from_secs(30))
+                .expect_err("cancelled helper must stop");
+        assert!(matches!(error, ProbeError::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "shutdown cancellation kills and reaps the native helper"
+        );
+    }
 
     /// The live path runs wherever the gate runs — a GPU-less CI box
     /// (Tier 0) or the founder's dev machine (the §12.1 RTX 5080 box):

@@ -62,6 +62,7 @@ impl Env {
                     probe: Arc::new(probe),
                     placeholders: Arc::new(SharedSetPlaceholderDetector::new()),
                     extractor: Arc::new(NoExtractor) as Arc<dyn EmbeddedPreviewExtractor>,
+                    ..Default::default()
                 },
             )
             .unwrap(),

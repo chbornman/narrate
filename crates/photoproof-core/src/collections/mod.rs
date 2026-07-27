@@ -211,20 +211,41 @@ impl Collections {
         description: &str,
         now: UtcMillis,
     ) -> Result<CollectionRecord, CollectionsError> {
+        self.create_with_images(name, description, &[], now)
+    }
+
+    /// Atomically create a collection and open its initial membership
+    /// intervals. This is the topic/selection bake primitive: collection
+    /// metadata and every member either commit together or leave no row.
+    ///
+    /// Returning the complete record from the committed inputs avoids a
+    /// post-commit re-read that could turn a successful durable mutation into
+    /// an apparent command failure with an unannounced collection.
+    pub fn create_with_images(
+        &self,
+        name: &str,
+        description: &str,
+        hashes: &[ContentHash],
+        now: UtcMillis,
+    ) -> Result<CollectionRecord, CollectionsError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(CollectionsError::Invalid("collection name is empty".into()));
         }
         let id = Ulid::new().to_string();
         let ts = now.to_rfc3339();
-        {
-            let conn = self.conn.lock().expect("collections mutex");
-            conn.execute(
+        let member_count = {
+            let mut conn = self.conn.lock().expect("collections mutex");
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO collections (id, name, description, status, created_ts, updated_ts)
                  VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
                 params![id, name, description, ts],
             )?;
-        }
+            let member_count = add_images_in_transaction(&tx, &id, hashes, now)?;
+            tx.commit()?;
+            member_count
+        };
         self.mark_dirty(now);
         Ok(CollectionRecord {
             id,
@@ -233,7 +254,7 @@ impl Collections {
             status: CollectionStatus::Active,
             created_ts: ts.clone(),
             updated_ts: ts,
-            member_count: 0,
+            member_count,
             note_count: 0,
         })
     }
@@ -328,47 +349,14 @@ impl Collections {
         hashes: &[ContentHash],
         now: UtcMillis,
     ) -> Result<usize, CollectionsError> {
-        let mut added = 0;
-        {
+        let added = {
             let mut conn = self.conn.lock().expect("collections mutex");
             let tx = conn.transaction()?;
             require_collection(&tx, collection_id)?;
-            for hash in hashes {
-                let open: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM collection_members
-                      WHERE collection_id = ?1 AND image_hash = ?2 AND removed_ts IS NULL)",
-                    params![collection_id, hash.as_str()],
-                    |r| r.get(0),
-                )?;
-                if open {
-                    continue;
-                }
-                // added_ts is part of the primary key: a remove + re-add
-                // within one millisecond must still open a DISTINCT
-                // interval, so the new row lands strictly after the last.
-                let last: Option<String> = tx.query_row(
-                    "SELECT MAX(added_ts) FROM collection_members
-                      WHERE collection_id = ?1 AND image_hash = ?2",
-                    params![collection_id, hash.as_str()],
-                    |r| r.get(0),
-                )?;
-                let mut ts = now;
-                if let Some(last) = last {
-                    let floor = UtcMillis::parse(&last)
-                        .map_err(|e| CollectionsError::Invalid(format!("stored added_ts: {e}")))?;
-                    if ts <= floor {
-                        ts = UtcMillis::from_epoch_ms(floor.epoch_ms() + 1);
-                    }
-                }
-                tx.execute(
-                    "INSERT INTO collection_members (collection_id, image_hash, added_ts, removed_ts)
-                     VALUES (?1, ?2, ?3, NULL)",
-                    params![collection_id, hash.as_str(), ts.to_rfc3339()],
-                )?;
-                added += 1;
-            }
+            let added = add_images_in_transaction(&tx, collection_id, hashes, now)?;
             tx.commit()?;
-        }
+            added
+        };
         if added > 0 {
             self.mark_dirty(now);
         }
@@ -762,6 +750,50 @@ fn require_collection(conn: &Connection, id: &str) -> Result<(), CollectionsErro
         return Err(CollectionsError::NotFound(id.to_owned()));
     }
     Ok(())
+}
+
+fn add_images_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    collection_id: &str,
+    hashes: &[ContentHash],
+    now: UtcMillis,
+) -> Result<usize, CollectionsError> {
+    let mut added = 0;
+    for hash in hashes {
+        let open: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collection_members
+              WHERE collection_id = ?1 AND image_hash = ?2 AND removed_ts IS NULL)",
+            params![collection_id, hash.as_str()],
+            |r| r.get(0),
+        )?;
+        if open {
+            continue;
+        }
+        // added_ts is part of the primary key: a remove + re-add within one
+        // millisecond must still open a DISTINCT interval, so the new row lands
+        // strictly after the last.
+        let last: Option<String> = tx.query_row(
+            "SELECT MAX(added_ts) FROM collection_members
+              WHERE collection_id = ?1 AND image_hash = ?2",
+            params![collection_id, hash.as_str()],
+            |r| r.get(0),
+        )?;
+        let mut ts = now;
+        if let Some(last) = last {
+            let floor = UtcMillis::parse(&last)
+                .map_err(|e| CollectionsError::Invalid(format!("stored added_ts: {e}")))?;
+            if ts <= floor {
+                ts = UtcMillis::from_epoch_ms(floor.epoch_ms() + 1);
+            }
+        }
+        tx.execute(
+            "INSERT INTO collection_members (collection_id, image_hash, added_ts, removed_ts)
+             VALUES (?1, ?2, ?3, NULL)",
+            params![collection_id, hash.as_str(), ts.to_rfc3339()],
+        )?;
+        added += 1;
+    }
+    Ok(added)
 }
 
 fn query_records(

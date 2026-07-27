@@ -496,7 +496,8 @@ impl Default for EvalConfig {
     /// The live baseline: fusion weights, `rrf_k`, and `β` from the active
     /// tuning config (file-overridable; code defaults absent a `tuning.toml`).
     fn default() -> Self {
-        let search = &crate::tuning::tuning().search;
+        let tuning = crate::tuning::tuning();
+        let search = &tuning.search;
         Self {
             weights: search.fusion,
             rrf_k: search.rrf_k,

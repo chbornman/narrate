@@ -107,5 +107,5 @@ for the upload.
   (`photoproof.db`, `models/`, `vectors/`, `previews/`, `logs/photoproof.log`).
 - Gate before any commit: `cd apps/desktop && npm run check && npx vitest run &&
   npm run check:emdash`, plus `cargo fmt --all --check && cargo clippy
-  --workspace --all-targets && cargo test --workspace`. Known pre-existing
-  failure to ignore: `s02_2_case_only_rename_relinks_sidecar`.
+  --workspace --all-targets && cargo test --workspace`. No test failure is
+  ignored; `s02_2_case_only_rename_relinks_sidecar` is a required green gate.

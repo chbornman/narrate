@@ -56,4 +56,11 @@ pub trait VoiceActivityDetector: Send {
 
     /// Required input sample rate (silero-vad: 16_000).
     fn sample_rate(&self) -> u32;
+
+    /// Replace live hysteresis knobs without rebuilding native model state.
+    /// Implementations that do not expose this tuning seam return false so a
+    /// caller can retain its prior committed configuration.
+    fn reconfigure(&mut self, _enter: f32, _exit: f32, _hang_windows: u32) -> bool {
+        false
+    }
 }

@@ -981,7 +981,11 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
     }
 
     /// §2.2: a case-only rename of the image leaves an old-case sidecar
-    /// behind; after the new name is written and verified, delete the old.
+    /// behind. Case-sensitive volumes hold two distinct entries after the
+    /// write, so the verified old one is deleted. On case-insensitive
+    /// volumes the old and target spellings alias ONE entry; deleting the
+    /// "old" path would delete the newly-written target. In that case rename
+    /// the directory entry itself to the requested spelling.
     fn case_rename_cleanup(&self, target: &Path, image: &ContentHash) -> Result<(), SidecarError> {
         let Some(dir) = target.parent() else {
             return Ok(());
@@ -994,21 +998,63 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
         let Ok(new_bytes) = fs::read(target) else {
             return Ok(());
         };
-        if !matches!(parse_sidecar(&new_bytes), Ok(ParsedSidecar::Doc(_))) {
+        if !matches!(
+            parse_sidecar(&new_bytes),
+            Ok(ParsedSidecar::Doc(doc))
+                if doc.image.as_ref().map(|s| &s.hash) == Some(image)
+        ) {
             return Ok(());
         }
+
+        let mut exact_target_exists = false;
+        let mut old_entries = Vec::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name != target_name
-                && name.eq_ignore_ascii_case(&target_name)
+            if name == target_name {
+                exact_target_exists = true;
+            } else if name.eq_ignore_ascii_case(&target_name)
                 && is_sidecar_filename(&name)
                 && let Ok(b) = fs::read(entry.path())
                 && let Ok(ParsedSidecar::Doc(doc)) = parse_sidecar(&b)
                 && doc.image.as_ref().map(|s| &s.hash) == Some(image)
             {
-                let _ = fs::remove_file(entry.path());
+                old_entries.push(entry.path());
             }
+        }
+
+        if exact_target_exists {
+            // Case-sensitive semantics: the target and old spellings are
+            // distinct directory entries. The target was verified above, and
+            // only old Photoproof files embedding the same hash are removed.
+            for old in old_entries {
+                fs::remove_file(old)?;
+            }
+            return Ok(());
+        }
+
+        // Case-insensitive semantics: `target` was readable, yet read_dir did
+        // not contain that exact spelling. Therefore one differently-cased
+        // entry is the target alias, not a second file. Normalize its actual
+        // directory-entry spelling and never delete it.
+        let Some(old) = old_entries.into_iter().next() else {
+            return Ok(());
+        };
+        fs::rename(&old, target)?;
+        if directory_has_exact_name(dir, &target_name)? {
+            return Ok(());
+        }
+
+        // Some case-insensitive filesystems treat an alias-to-alias rename as
+        // a no-op. A same-directory temporary hop forces the case update while
+        // retaining rename atomicity for each step. If the second rename
+        // fails, restore the verified sidecar under its original name.
+        let tmp =
+            target.with_file_name(format!("{target_name}.tmp-case-{:016x}", fastrand::u64(..)));
+        fs::rename(&old, &tmp)?;
+        if let Err(e) = fs::rename(&tmp, target) {
+            let _ = fs::rename(&tmp, &old);
+            return Err(e.into());
         }
         Ok(())
     }
@@ -1604,6 +1650,17 @@ impl<'s, L: ImageLocator> SidecarEngine<'s, L> {
     pub(crate) fn count(&self, sql: &str) -> Result<i64, SidecarError> {
         self.with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
     }
+}
+
+/// `Path::exists` cannot distinguish differently-cased aliases on APFS/FAT.
+/// Directory enumeration exposes the actual stored spelling.
+fn directory_has_exact_name(dir: &Path, wanted: &str) -> std::io::Result<bool> {
+    for entry in fs::read_dir(dir)? {
+        if entry?.file_name().to_string_lossy() == wanted {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// §2.3 vs §10.3 disambiguation for a file that fails JSON parsing: only a

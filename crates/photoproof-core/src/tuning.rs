@@ -27,7 +27,7 @@
 //! are marked "fixed" in `tuning.html`.
 
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -1022,25 +1022,51 @@ impl Tuning {
     /// range-validated — an out-of-range value logs a warning and keeps the
     /// default, so a hand-edited file can never inject a silent bad number.
     pub fn load(app_data: &Path) -> Tuning {
-        let path = app_data.join("tuning.toml");
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            // Missing file is the common case: ship-defaults, not an error.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Tuning::default(),
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "tuning.toml unreadable; using defaults");
-                return Tuning::default();
-            }
-        };
-        // `#[serde(default)]` makes this a partial merge: any field the file
-        // omits falls back to its code default.
-        match toml::from_str::<Tuning>(&raw) {
-            Ok(parsed) => parsed.validated(),
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "tuning.toml malformed; using defaults");
+        match Self::load_checked(app_data) {
+            Ok(loaded) => loaded.value,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    path = %app_data.join("tuning.toml").display(),
+                    "tuning.toml unavailable; using compatibility defaults"
+                );
                 Tuning::default()
             }
         }
+    }
+
+    /// Typed control-file load used by the desktop health surface. Unlike the
+    /// compatibility `load`, corruption/permissions stay distinguishable,
+    /// invalid bytes are quarantined, a valid LKG is restored, and ignored
+    /// keys are returned as visible validation warnings.
+    pub fn load_checked(
+        app_data: &Path,
+    ) -> Result<TuningControlLoad, crate::runtime::ControlFileError> {
+        let path = app_data.join("tuning.toml");
+        let loaded = crate::runtime::load_control(&path, |bytes| {
+            let raw = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+            let mut ignored = Vec::new();
+            let parsed: Tuning = serde_ignored::deserialize(toml::Deserializer::new(raw), |path| {
+                ignored.push(path.to_string());
+            })
+            .map_err(|error| error.to_string())?;
+            Ok(ParsedTuning {
+                value: parsed.validated(),
+                validation_warnings: ignored
+                    .into_iter()
+                    .map(|path| format!("unsupported tuning key: {path}"))
+                    .collect(),
+            })
+        })?;
+        let parsed = loaded.value.unwrap_or_else(|| ParsedTuning {
+            value: Tuning::default(),
+            validation_warnings: Vec::new(),
+        });
+        Ok(TuningControlLoad {
+            value: parsed.value,
+            recovery: loaded.recovery,
+            validation_warnings: parsed.validation_warnings,
+        })
     }
 
     /// Range-validate every section (clamp-or-default with a logged warning).
@@ -1057,33 +1083,70 @@ impl Tuning {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ParsedTuning {
+    value: Tuning,
+    validation_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TuningControlLoad {
+    pub value: Tuning,
+    pub recovery: crate::runtime::ControlFileRecovery,
+    pub validation_warnings: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Process-global access.
 // ---------------------------------------------------------------------------
 
-/// Set once at startup by the desktop shell ([`init_from`]); unset under tests
-/// and the eval, where the lazy fallback returns the code defaults.
-static TUNING: OnceLock<Tuning> = OnceLock::new();
+/// Process-wide live tuning. The shell installs the startup value before any
+/// consumers run, then may atomically replace it after a validated
+/// `tuning.toml` edit. Readers clone one small value object under a short read
+/// lock so no consumer can observe a partially applied section.
+static TUNING: OnceLock<RwLock<Tuning>> = OnceLock::new();
 
 /// The active tuning config. Initialized once at startup from `tuning.toml`;
 /// before that (tests, the eval, library code constructed directly) it returns
 /// the code defaults — which are byte-identical to the values these knobs held
 /// as scattered consts, so nothing changes by construction.
-pub fn tuning() -> &'static Tuning {
-    // `get_or_init` gives a stable default if `init_from` was never called,
-    // without forcing every consumer to thread an app handle.
-    TUNING.get_or_init(Tuning::default)
+pub fn tuning() -> Tuning {
+    TUNING
+        .get_or_init(|| RwLock::new(Tuning::default()))
+        .read()
+        .expect("tuning read lock")
+        .clone()
+}
+
+/// Atomically install a fully parsed and validated tuning candidate. File
+/// loading and recovery happen before this call; a failed load therefore
+/// leaves every live reader on the prior value.
+pub fn replace(candidate: Tuning) {
+    *TUNING
+        .get_or_init(|| RwLock::new(Tuning::default()))
+        .write()
+        .expect("tuning write lock") = candidate;
 }
 
 /// Load `<app_data>/tuning.toml` and install it as the process tuning. Call
-/// ONCE at startup, BEFORE any search/preview runs. A second call is a no-op
-/// (the first install wins) and logs, so a stray re-init can't silently swap
-/// the live config mid-run.
+/// at startup, BEFORE any search/preview runs.
 pub fn init_from(app_data: &Path) {
-    let loaded = Tuning::load(app_data);
-    if TUNING.set(loaded).is_err() {
-        tracing::warn!("tuning already initialized; ignoring re-init");
+    if let Err(error) = init_from_checked(app_data) {
+        tracing::warn!(%error, "tuning control file could not be recovered; using defaults");
+        replace(Tuning::default());
     }
+}
+
+/// Install tuning while returning its structured recovery truth to the shell.
+/// The returned value is also useful to commands that need to explain ignored
+/// keys. Repeated installs atomically replace the process value, which keeps
+/// desktop reload and test application construction on the same code path.
+pub fn init_from_checked(
+    app_data: &Path,
+) -> Result<TuningControlLoad, crate::runtime::ControlFileError> {
+    let loaded = Tuning::load_checked(app_data)?;
+    replace(loaded.value.clone());
+    Ok(loaded)
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,5 +1537,44 @@ mod tests {
     fn non_finite_rejects_to_default() {
         assert_eq!(range_or_default("x", f64::NAN, 0.0, 1.0, 0.5), 0.5);
         assert_eq!(range_or_default("x", f64::INFINITY, 0.0, 1.0, 0.5), 0.5);
+    }
+
+    #[test]
+    fn checked_load_distinguishes_missing_and_surfaces_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = Tuning::load_checked(dir.path()).unwrap();
+        assert_eq!(
+            missing.recovery.source,
+            crate::runtime::ControlFileSource::Missing
+        );
+        assert_eq!(missing.value, Tuning::default());
+
+        crate::runtime::save_control(
+            &dir.path().join("tuning.toml"),
+            b"[search]\nrrf_k = 42.0\nfuture_knob = 7\n",
+        )
+        .unwrap();
+        let loaded = Tuning::load_checked(dir.path()).unwrap();
+        assert_eq!(loaded.value.search.rrf_k, 42.0);
+        assert_eq!(
+            loaded.validation_warnings,
+            vec!["unsupported tuning key: search.future_knob"]
+        );
+    }
+
+    #[test]
+    fn checked_load_quarantines_corruption_and_restores_lkg() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tuning.toml");
+        crate::runtime::save_control(&path, b"[search]\nrrf_k = 31.0\n").unwrap();
+        std::fs::write(&path, b"[search\nbroken").unwrap();
+
+        let loaded = Tuning::load_checked(dir.path()).unwrap();
+        assert_eq!(loaded.value.search.rrf_k, 31.0);
+        assert_eq!(
+            loaded.recovery.source,
+            crate::runtime::ControlFileSource::LastKnownGood
+        );
+        assert_eq!(loaded.recovery.quarantined.len(), 1);
     }
 }

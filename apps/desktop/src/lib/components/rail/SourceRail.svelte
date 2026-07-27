@@ -141,6 +141,14 @@
   let addingTopic = $state(false);
   let topicDraft = $state("");
   let topicInputEl: HTMLInputElement | undefined = $state();
+  let addPolicy = $state<
+    "default" | "process-now" | "preview-only" | "process-later"
+  >("default");
+
+  async function addFolderWithPolicy() {
+    await ui.addRootFromPicker(addPolicy === "default" ? undefined : addPolicy);
+    addPolicy = "default";
+  }
 
   async function beginAddTopic() {
     addingTopic = true;
@@ -277,9 +285,17 @@
     <!-- emphasized (a full bordered button against the quiet rows) but
          token-only; the folder verb is also seated on the rail-folder menu -->
     {#if tab === "folders"}
-      <button class="footer-verb" onclick={() => void ui.perform({ kind: "add-root" })}>
-        Add folder…
-      </button>
+      <div class="add-folder">
+        <select bind:value={addPolicy} aria-label="Processing for next folder">
+          <option value="default">Default</option>
+          <option value="process-now">Process now</option>
+          <option value="preview-only">Previews only</option>
+          <option value="process-later">Process later</option>
+        </select>
+        <button class="footer-verb" onclick={() => void addFolderWithPolicy()}>
+          Add folder…
+        </button>
+      </div>
     {:else if tab === "collections" && creating}
       <input
         bind:this={inputEl}
@@ -356,6 +372,25 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .add-folder {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px;
+  }
+  .add-folder select {
+    min-width: 0;
+    flex: 1;
+    background: var(--bg-raised);
+    color: var(--text-dim);
+    border: 1px solid var(--chrome-strong);
+    border-radius: 4px;
+    padding: 5px 4px;
+    font-size: 11px;
+  }
+  .add-folder .footer-verb {
+    margin: 0;
   }
   .footer-verb:hover {
     background: var(--bg-overlay);

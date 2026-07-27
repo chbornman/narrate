@@ -14,7 +14,8 @@
 
 use photoproof_core::{DwellSource, UtcMillis};
 
-use super::{S, parse_hash};
+use super::{S, admit, parse_hash};
+use crate::command_work::CommandClass;
 use crate::error::{CmdError, CmdResult};
 
 /// One normalized intensity for an image (wire shape). Mirrors core's
@@ -43,6 +44,7 @@ fn parse_source(source: &str) -> CmdResult<DwellSource> {
 /// config. Light + fire-and-forget on the frontend side.
 #[tauri::command]
 pub fn record_dwell(app: S<'_>, hash: String, source: String, elapsed_ms: i64) -> CmdResult<()> {
+    let _permit = admit(app.inner(), "heatmap.record-dwell", CommandClass::Mutation)?;
     app.touch()?;
     let h = parse_hash(&hash)?;
     let src = parse_source(&source)?;
@@ -61,6 +63,7 @@ pub fn image_intensity(
     hashes: Vec<String>,
     all_time: bool,
 ) -> CmdResult<Vec<ImageIntensityDto>> {
+    let _permit = admit(app.inner(), "heatmap.image-intensity", CommandClass::Read)?;
     app.touch()?;
     // Parse all hashes up front; a malformed hash is a frontend bug, not a
     // silently-dropped cell.
@@ -84,6 +87,7 @@ pub fn image_intensity(
 /// to the number of per-image rows removed. Annotation counts are untouched.
 #[tauri::command]
 pub fn clear_dwell(app: S<'_>) -> CmdResult<usize> {
+    let _permit = admit(app.inner(), "heatmap.clear-dwell", CommandClass::Mutation)?;
     app.touch()?;
     Ok(app.store.clear_dwell()?)
 }

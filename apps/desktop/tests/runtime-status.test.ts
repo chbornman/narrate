@@ -11,6 +11,12 @@ import type { ModelRowDto, RuntimeStatus } from "../src/lib/types/dto";
 const model = (over: Partial<ModelRowDto> = {}): ModelRowDto => ({
   id: "gemma-4-e4b-it-q4_k_m",
   role: "llm",
+  defaultOffer: true,
+  advancedAvailable: false,
+  compatible: true,
+  compatibilityReason: "fixture",
+  compatibleProviders: ["CPU"],
+  consumers: [],
   state: "not-downloaded",
   totalBytes: 5_460_000_000,
   downloadedBytes: 0,
@@ -20,6 +26,9 @@ const model = (over: Partial<ModelRowDto> = {}): ModelRowDto => ({
   accepted: false,
   error: null,
   retryHint: null,
+  operation: null,
+  operationEvent: null,
+  registryError: null,
   ...over,
 });
 
@@ -30,15 +39,30 @@ const status = (over: Partial<RuntimeStatus> = {}): RuntimeStatus => ({
   llmBlocked: null,
   clipReady: false,
   textEmbedderReady: false,
-  clip: { state: "idle", error: null },
-  textEmbedder: { state: "idle", error: null },
+  clip: { state: "idle", attemptId: null, modelId: null, generation: 0, startedAt: null, error: null },
+  textEmbedder: { state: "idle", attemptId: null, modelId: null, generation: 0, startedAt: null, error: null },
+  capabilityState: "ready",
+  capabilitySummary: null,
+  capabilityAdapters: [],
+  capabilityDetectedAt: null,
   tierDetected: 1,
   tierEffective: 1,
   tierOverriddenAbove: false,
   consent: "undecided",
-  consentOfferBytes: 9_460_000_000,
-  models: [model(), model({ id: "qwen3-embedding-0.6b-int8", role: "text-embedder", acceptanceRequired: false, totalBytes: 600_000_000 })],
+  consentOfferBytes: 5_460_000_000,
+  models: [
+    model(),
+    model({
+      id: "qwen3-embedding-0.6b-int8",
+      role: "text-embedder",
+      defaultOffer: false,
+      advancedAvailable: true,
+      acceptanceRequired: false,
+      totalBytes: 600_000_000,
+    }),
+  ],
   instanceLockHeld: true,
+  controlFiles: [],
   ...over,
 });
 
@@ -93,11 +117,8 @@ describe("the one-time consent card (UI §9.1.3 / RUNTIME §10.2)", () => {
     const card = consentCard(status(), true);
     expect(card).not.toBeNull();
     expect(card?.tierDetected).toBe(1);
-    expect(card?.totalBytes).toBe(9_460_000_000);
-    expect(card?.models.map((m) => m.id)).toEqual([
-      "gemma-4-e4b-it-q4_k_m",
-      "qwen3-embedding-0.6b-int8",
-    ]);
+    expect(card?.totalBytes).toBe(5_460_000_000);
+    expect(card?.models.map((m) => m.id)).toEqual(["gemma-4-e4b-it-q4_k_m"]);
   });
 
   it("Download enables only once every required acceptance is recorded (§13.7)", () => {

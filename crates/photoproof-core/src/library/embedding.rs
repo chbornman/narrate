@@ -1,6 +1,6 @@
-//! Embedding ingest passes: `text-embedding` (annotation chunks) and
-//! `image-embedding` (CLIP image vectors), through the existing versioned
-//! pass queue (LIBRARY §10 / DECISIONS L4).
+//! Embedding ingest passes: `text-embedding` (annotation chunks and retained
+//! per-image summary text) and `image-embedding` (CLIP image vectors), through
+//! the existing versioned pass queue (LIBRARY §10 / DECISIONS L4).
 //!
 //! Contract: spec/RETRIEVAL.md §3 — "Embedding is a versioned backfill
 //! pass (LIBRARY.md mechanics)". Mechanics reused unchanged: the queue IS
@@ -25,7 +25,7 @@
 use std::path::Path;
 
 use photoproof_connectors::embedder::{DecodedImage, Embedder};
-use photoproof_connectors::vector_store::{VecKey, VecKind, VecSpace, VecUnit};
+use photoproof_connectors::vector_store::{VecKey, VecKind, VecSpace, VecUnit, VectorStore};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::preview::GENERATOR_VERSION;
@@ -117,6 +117,7 @@ impl Library {
                     ingest::PassName::TextEmbedding,
                     text.model_id(),
                 )?;
+                repend_stale_image_summaries(&conn, text.model_id(), self.now())?;
             }
         }
         // Physical hygiene first: rows the events engine marked deleted
@@ -158,9 +159,7 @@ impl Library {
         }
 
         loop {
-            if let Some(cancel) = &opts.cancel
-                && cancel.load(std::sync::atomic::Ordering::Relaxed)
-            {
+            if opts.is_cancelled() {
                 report.cancelled = true;
                 break;
             }
@@ -174,7 +173,13 @@ impl Library {
                 // Embedding reads cached previews / folded text, not the original
                 // file, so it runs even while the source volume is offline: no
                 // online-path requirement (false).
-                ingest::claim_next_of(&conn, self.now(), &allowed, false)?
+                ingest::claim_next_of_excluding_roots(
+                    &conn,
+                    self.now(),
+                    &allowed,
+                    false,
+                    &opts.excluded_embedding_root_ids,
+                )?
             };
             let Some(item) = item else { break };
             report.processed += 1;
@@ -198,6 +203,10 @@ impl Library {
                 vec_kind: VecKind::AnnotationChunk,
                 model_id: e.model_id().to_string(),
             }),
+            rig.text.map(|e| VecSpace {
+                vec_kind: VecKind::ImageSummary,
+                model_id: e.model_id().to_string(),
+            }),
             rig.clip.map(|e| VecSpace {
                 vec_kind: VecKind::ImageClip,
                 model_id: e.model_id().to_string(),
@@ -212,8 +221,10 @@ impl Library {
     }
 
     /// `text-embedding` for one image: chunk + embed every live indexable
-    /// event targeting it (§1.1 rules, §2 chunking), skipping chunks whose
-    /// `inputs_hash` is fresh.
+    /// event targeting it (§1.1 rules, §2 chunking), plus the newest retained
+    /// per-image summary text (§9.1), skipping rows whose `inputs_hash` is
+    /// fresh. Summary GENERATION remains separate; this pass only makes an
+    /// existing durable `derived_summaries` row rebuild its disposable vector.
     fn run_text_embedding_pass<TE: Embedder>(
         &self,
         item: &ingest::QueueItem,
@@ -269,12 +280,110 @@ impl Library {
             }
         }
 
+        if let Some(err) =
+            self.embed_retained_image_summary(embedder, vectors, item.image_hash.as_str())?
+        {
+            let conn = self.db.lock().expect("poisoned");
+            ingest::mark_failed(&conn, item, &err, true, self.now())?;
+            report.transient_retries += 1;
+            return Ok(());
+        }
+
         let conn = self.db.lock().expect("poisoned");
         // Record the text embedder's model_id so a later model swap re-pends
         // this pass (model-aware completion; see ingest::mark_done_with_model).
         ingest::mark_done_with_model(&conn, item, embedder.model_id(), self.now())?;
         report.done += 1;
         Ok(())
+    }
+
+    /// Rebuild the one image-keyed dense summary row from retained summary
+    /// text. During a summary-model transition the schema may hold more than
+    /// one generator-model row for an image; the newest generated row is the
+    /// current rolling summary, with `id` as a deterministic timestamp tie
+    /// break. The text embedder model is independently represented by the
+    /// vector space.
+    fn embed_retained_image_summary<TE: Embedder>(
+        &self,
+        embedder: &TE,
+        vectors: &PpvecStore,
+        image_hash: &str,
+    ) -> Result<Option<String>, LibraryError> {
+        let summary: Option<String> = {
+            let conn = self.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT text
+                 FROM derived_summaries
+                 WHERE scope = 'image' AND scope_key = ?1
+                 ORDER BY generated_ts DESC, id DESC
+                 LIMIT 1",
+                [image_hash],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        let Some(text) = summary else {
+            return Ok(None);
+        };
+
+        let space = VecSpace {
+            vec_kind: VecKind::ImageSummary,
+            model_id: embedder.model_id().to_string(),
+        };
+        let key = VecKey {
+            space,
+            unit: VecUnit::Image {
+                image_hash: image_hash.to_string(),
+            },
+        };
+        let hash = inputs_hash(text.as_bytes());
+        if let Some((existing, deleted)) = vectors.row_inputs_hash(&key)?
+            && !deleted
+            && existing == hash
+        {
+            return Ok(None);
+        }
+        let embedding = match pollster::block_on(embedder.embed_text(&text)) {
+            Ok(embedding) => embedding,
+            Err(error) => return Ok(Some(format!("embedder: {error}"))),
+        };
+        if let Err(error) = vectors.upsert_with_meta(
+            &key,
+            &embedding,
+            &VecMeta {
+                inputs_hash: hash.clone(),
+                char_start: None,
+                char_end: None,
+            },
+        ) {
+            return Ok(Some(format!("vector-store: {error}")));
+        }
+        // Summary deletion/redaction can commit while the embedder runs.
+        // Re-check after the upsert: if the selected text is no longer the
+        // current retained source, make the just-written row invisible again.
+        // Every ordering is safe: a deletion before/during the write is caught
+        // here; a deletion afterward marks the vector itself; a replacement
+        // also changes this hash and its writer/reconcile re-pends the pass.
+        let current_hash = {
+            let conn = self.db.lock().expect("poisoned");
+            conn.query_row(
+                "SELECT text
+                 FROM derived_summaries
+                 WHERE scope = 'image' AND scope_key = ?1
+                 ORDER BY generated_ts DESC, id DESC
+                 LIMIT 1",
+                [image_hash],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|current| inputs_hash(current.as_bytes()))
+        };
+        if current_hash.as_deref() != Some(hash.as_str())
+            && let Err(error) = vectors.mark_deleted(key.clone())
+        {
+            return Ok(Some(format!("vector-store: {error}")));
+        }
+        Ok(None)
     }
 
     /// Chunk + embed ONE event's folded text into `space`, skipping fresh
@@ -374,9 +483,7 @@ impl Library {
             // the inputs_hash check, so the cost is only in stale ones, which
             // we stop embedding the moment the flag flips. The half-swept rows
             // stay stale and the next idle drain resumes them.
-            if let Some(cancel) = &opts.cancel
-                && cancel.load(std::sync::atomic::Ordering::Relaxed)
-            {
+            if opts.is_cancelled() {
                 report.cancelled = true;
                 return Ok(());
             }
@@ -543,6 +650,70 @@ impl Library {
         report.done += 1;
         Ok(())
     }
+}
+
+/// A summary may be created after an image's text pass was already `done`, and
+/// this feature itself was added after existing libraries had completed every
+/// text pass. Reconcile retained summary text against the configured vector
+/// space before claiming work so both cases self-heal without a schema/pass
+/// version migration. Orphans are deliberately excluded: their
+/// `orphan-retention` terminal row is revived only by an authoritative relink.
+fn repend_stale_image_summaries(
+    conn: &Connection,
+    model_id: &str,
+    now: crate::UtcMillis,
+) -> Result<usize, LibraryError> {
+    let summaries: Vec<(String, String)> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT ds.scope_key, ds.text
+             FROM derived_summaries ds
+             WHERE ds.scope = 'image'
+               AND EXISTS (
+                   SELECT 1 FROM paths p
+                   WHERE p.image_hash = ds.scope_key AND p.state = 'active'
+               )
+             ORDER BY ds.scope_key, ds.generated_ts DESC, ds.id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut repended = 0;
+    for (image_hash, text) in summaries {
+        if !seen.insert(image_hash.clone()) {
+            continue;
+        }
+        let expected = inputs_hash(text.as_bytes());
+        let fresh = conn
+            .query_row(
+                "SELECT 1 FROM vectors
+                 WHERE vec_kind = 'image_summary' AND model_id = ?1
+                   AND image_hash = ?2 AND inputs_hash = ?3 AND deleted = 0",
+                params![model_id, image_hash, expected],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if fresh {
+            continue;
+        }
+        repended += conn.execute(
+            "UPDATE ingest_passes
+             SET state = 'pending', model_id = NULL, priority = ?3,
+                 attempts = 0, error = NULL, enqueued_at = ?4,
+                 started_at = NULL, completed_at = NULL, not_before = NULL
+             WHERE image_hash = ?1 AND pass_name = ?2
+               AND state NOT IN ('pending', 'running')
+               AND NOT (state = 'skipped' AND error = 'orphan-retention')",
+            params![
+                image_hash,
+                ingest::PassName::TextEmbedding.as_str(),
+                ingest::PRIORITY_BACKFILL,
+                now.to_rfc3339(),
+            ],
+        )?;
+    }
+    Ok(repended)
 }
 
 /// Folder for the tiny-chunk context prefix (§2), resolved per EVENT: the

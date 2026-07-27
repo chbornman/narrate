@@ -63,6 +63,11 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/pp-tune-check.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 RETRIEVAL_JSON="$WORK/retrieval.json"
 INGEST_JSONL="$WORK/ingest.jsonl"
+DESKTOP_JSONL="$WORK/desktop.jsonl"
+DESKTOP_ITERATIONS=$(read_int iterations 30)
+GRID_LIST_P99_MS=$(read_int grid_list_p99_ms 25)
+PREVIEW_SERVE_P99_MS=$(read_int preview_serve_p99_ms 5)
+PREVIEW_GENERATE_P99_MS=$(read_int preview_generate_p99_ms 100)
 
 echo "tune-check: building release benches..." >&2
 cargo build --release -q -p photoproof-core \
@@ -78,6 +83,21 @@ echo "tune-check: synthetic retrieval eval..." >&2
 echo "tune-check: synthetic ingest ($FILES files, ${EDGE}px)..." >&2
 "$BINDIR/pp_bench" ingest --files "$FILES" --edge "$EDGE" \
     --label tune-check --out "$INGEST_JSONL" >/dev/null
+
+echo "tune-check: desktop grid-list interaction budget..." >&2
+"$BINDIR/pp_bench" grid-list --files "$FILES" --edge "$EDGE" \
+    --iterations "$DESKTOP_ITERATIONS" --p99-budget-ms "$GRID_LIST_P99_MS" \
+    --label tune-check --out "$DESKTOP_JSONL" >/dev/null
+
+echo "tune-check: desktop preview-serve interaction budget..." >&2
+"$BINDIR/pp_bench" preview-serve --files "$FILES" --edge "$EDGE" \
+    --iterations "$DESKTOP_ITERATIONS" --p99-budget-ms "$PREVIEW_SERVE_P99_MS" \
+    --label tune-check --out "$DESKTOP_JSONL" >/dev/null
+
+echo "tune-check: desktop preview-generation budget..." >&2
+"$BINDIR/pp_bench" preview-generate --files "$FILES" --edge "$EDGE" \
+    --p99-budget-ms "$PREVIEW_GENERATE_P99_MS" \
+    --label tune-check --out "$DESKTOP_JSONL" >/dev/null
 
 # Compare (or update). The comparator exits non-zero on a regression, which set
 # -e then propagates as this script's exit status — the gate.

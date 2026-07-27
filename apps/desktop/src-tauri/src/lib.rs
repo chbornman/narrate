@@ -9,14 +9,27 @@
 //! photoproof-core; here is wiring, lifetimes, and the custom URI protocol
 //! that serves preview bytes without ever touching IPC (P16).
 
+/// Offline backup/verify/restore primitives for the installed-shell handoff
+/// and recovery tooling. Never invoke restore while the live App is managed.
+pub mod backup;
+mod bootstrap;
+mod command_work;
 mod commands;
+mod convergence;
 #[cfg(any(feature = "debug-panel", debug_assertions))]
 mod debug;
+mod diagnostics;
+mod disk;
 mod doctor;
 mod dto;
 mod embedders;
 mod error;
 mod hardware;
+pub mod installed_smoke;
+pub mod lifecycle;
+pub mod managed_tasks;
+mod model_registry;
+mod performance;
 // Native menu bar (desktop-conventions pass): macOS only — Windows/Linux
 // run undecorated with custom DOM chrome and need no menu roles (WHY in
 // menu.rs); compiling it out is the platform guard.
@@ -34,6 +47,7 @@ pub mod ort_runtime;
 // registration below uses (AUDIT-2026-07-07 F1/T1); nothing else imports it.
 pub mod protocol;
 mod pump;
+mod resource_governor;
 mod runtime;
 mod scope;
 mod search_types;
@@ -42,6 +56,7 @@ mod session;
 mod settings;
 mod state;
 mod supervisors;
+mod updates;
 
 use std::sync::Arc;
 
@@ -50,44 +65,72 @@ use tauri_plugin_window_state::StateFlags;
 
 use state::App;
 
+/// Private child-process entry point for bounded hardware/ORT discovery.
+/// `main` dispatches here before Tauri/GTK initialization when the parent
+/// supplies the internal helper flag.
+pub fn run_capability_probe_helper() -> i32 {
+    match std::panic::catch_unwind(hardware::LiveProbe::probe_for_helper) {
+        Ok(report) => match serde_json::to_writer(std::io::stdout(), &report) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("serialize capability report: {error}");
+                1
+            }
+        },
+        Err(_) => {
+            eprintln!("native capability probe panicked");
+            1
+        }
+    }
+}
+
 /// Structured logging: core/connectors emit `tracing` spans/events and the
 /// shell is the ONE place a subscriber installs. Two sinks share one filter
 /// (RUST_LOG overrides; default keeps release consoles quiet at `info` while
 /// photoproof's own drains/passes show at `debug` — set RUST_LOG=trace for
 /// the firehose):
 ///   - the console (stdout), as before, for `cargo tauri dev`;
-///   - a FRESH file at `<app_data>/logs/photoproof.log`, truncated on every
-///     launch (founder, June 2026: "a new log file whenever we run tauri
-///     dev"). Each Rust process start = one clean session log, so a jank is
-///     reviewable after the fact without console scrollback. Best-effort: a
-///     logs dir that won't open leaves the console sink alone.
+///   - a fresh active file at `<app_data>/logs/photoproof.log`; the prior
+///     launch is rotated and retained before this one opens, so relaunch never
+///     destroys crash evidence. Best-effort: a logs dir that will not open
+///     leaves the console sink alone.
 ///
 /// Installed from `.setup()` (not the top of `run()`) because the path comes
 /// from Tauri's resolver — `App::init`'s heavy startup still logs into it,
 /// since init runs after this.
-fn install_logging(app_data: &std::path::Path) {
+fn install_logging(
+    app_data: &std::path::Path,
+) -> (Option<diagnostics::CrashDiagnostics>, Option<String>) {
     use tracing_subscriber::prelude::*;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,photoproof_core=debug,photoproof_desktop=debug".into());
     let console = tracing_subscriber::fmt::layer().compact();
 
-    // File::create truncates-or-creates: the "new file each launch" the
-    // founder asked for falls out of opening it fresh per process.
-    let file_layer = std::fs::create_dir_all(app_data.join("logs"))
-        .and_then(|()| std::fs::File::create(app_data.join("logs").join("photoproof.log")))
-        .ok()
-        .map(|file| {
+    let (prepared, diagnostics_error) = match diagnostics::prepare(app_data) {
+        Ok(prepared) => (Some(prepared), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    if let Some(prepared) = &prepared {
+        diagnostics::install_panic_recording(&prepared.diagnostics.logs_dir);
+    }
+    let file_layer = prepared.as_ref().and_then(|prepared| {
+        prepared.log_file.try_clone().ok().map(|file| {
             tracing_subscriber::fmt::layer()
                 .with_ansi(false) // no terminal escapes in a file
                 .with_writer(std::sync::Mutex::new(file))
-        });
+        })
+    });
 
     tracing_subscriber::registry()
         .with(filter)
         .with(console)
         .with(file_layer) // Option<Layer>: None = console-only, no-op
         .init();
+    (
+        prepared.map(|prepared| prepared.diagnostics),
+        diagnostics_error,
+    )
 }
 
 pub fn run() {
@@ -104,6 +147,12 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // Signature verification is mandatory inside Tauri's updater. The
+        // plugin is present in every build so the IPC contract is stable, but
+        // updates.rs refuses all network/install work unless the production
+        // release build explicitly enables it and merges a real HTTPS endpoint
+        // plus matching public key.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Window geometry persisted (featureset §6). The settings window is
         // denylisted: it stays the one modest window (UI §2.4). Known risk
         // (UI-ARCHITECTURE Appendix B): restore drift with custom titlebars
@@ -144,6 +193,10 @@ pub fn run() {
                 .app_handle()
                 .try_state::<Arc<App>>()
                 .map(|s| s.library.clone());
+            let performance = ctx
+                .app_handle()
+                .try_state::<Arc<performance::PerformanceMonitor>>()
+                .map(|monitor| Arc::clone(monitor.inner()));
             // AUDIT-2026-07-07 F1: a FIXED pool instead of a thread per
             // request. A fling-scroll bursts dozens-to-hundreds of thumb
             // requests; spawning an OS thread for each flooded the FS and
@@ -152,10 +205,27 @@ pub fn run() {
             // no-library window (before setup manages App) still answers
             // 404 through the same path.
             protocol::serve_pool().run(move || {
+                let started = std::time::Instant::now();
                 let response = match library {
                     Some(lib) => protocol::serve(&lib, &path),
                     None => protocol::respond_not_found(),
                 };
+                if let Some(performance) = performance {
+                    let ok = response.status().is_success();
+                    let _ = performance.record_backend_with_context(
+                        performance::Journey::Preview,
+                        performance::Phase::Serve,
+                        started.elapsed().as_secs_f64() * 1_000.0,
+                        ok,
+                        Some(1),
+                        Some(response.body().len() as u64),
+                        Some(if ok {
+                            performance::CacheStatus::Hit
+                        } else {
+                            performance::CacheStatus::Miss
+                        }),
+                    );
+                }
                 responder.respond(response);
             });
         })
@@ -166,28 +236,73 @@ pub fn run() {
             menu::install(app)?;
 
             let app_data = app.path().app_data_dir()?;
+            let bootstrap = Arc::new(bootstrap::BootstrapState::default());
+            let performance =
+                Arc::new(performance::PerformanceMonitor::app_data_default(&app_data));
+            app.manage(Arc::clone(&bootstrap));
+            app.manage(Arc::clone(&performance));
+            app.manage(Arc::new(updates::UpdateCoordinator::default()));
             // Logging first, so App::init's startup (DB open, migrations,
             // supervisor plan) lands in this launch's fresh log file.
-            install_logging(&app_data);
-            let state = Arc::new(App::init(app_data)?);
-
-            // Restart watchers for every active root on online volumes.
-            {
-                let _ = state.library.probe_volumes();
-                let roots = state.library.roots().unwrap_or_default();
-                let mut watchers = state.watchers.lock().expect("watchers mutex");
-                for r in roots.iter().filter(|r| r.state == "active") {
-                    match state.library.start_watcher(&r.root_id) {
-                        Ok(h) => {
-                            watchers.insert(r.root_id.clone(), h);
-                        }
-                        Err(e) => tracing::warn!(
-                            root_id = %r.root_id,
-                            error = %e,
-                            "watcher unavailable at launch"
-                        ),
-                    }
+            let (diagnostics, diagnostics_error) = install_logging(&app_data);
+            let init_started = std::time::Instant::now();
+            let state = match App::init_with_diagnostics(app_data, diagnostics, diagnostics_error) {
+                Ok(state) => {
+                    let _ = performance.record_backend(
+                        performance::Journey::LibraryOpen,
+                        performance::Phase::Total,
+                        init_started.elapsed().as_secs_f64() * 1_000.0,
+                        true,
+                    );
+                    Arc::new(state)
                 }
+                Err(error) => {
+                    let _ = performance.record_backend(
+                        performance::Journey::LibraryOpen,
+                        performance::Phase::Total,
+                        init_started.elapsed().as_secs_f64() * 1_000.0,
+                        false,
+                    );
+                    tracing::error!(%error, "application data could not be opened");
+                    let message = error.to_string();
+                    let recovery = message
+                        .starts_with("device identity unavailable:")
+                        .then_some("reset-device-identity");
+                    bootstrap.fatal(message, recovery);
+                    // Keep Tauri and the configured window alive. The minimal
+                    // bootstrap command remains available even though Arc<App>
+                    // is intentionally not managed after a fatal open.
+                    return Ok(());
+                }
+            };
+            // Publish state before starting any owned background task so
+            // commands/protocol requests see one coherent App immediately.
+            app.manage(Arc::clone(&state));
+            bootstrap.ready();
+            if let Err(error) = state.start_supervisor_runtime() {
+                tracing::error!(%error, "owned supervisor ticker unavailable");
+            }
+            if let Err(error) = state.start_runtime_capability_detection() {
+                tracing::error!(%error, "managed hardware capability detection unavailable");
+            }
+            if let Err(error) = state.start_model_registry_recovery() {
+                tracing::error!(%error, "managed model registry recovery unavailable");
+            }
+            if let Err(error) = state.start_plan_convergence() {
+                tracing::error!(%error, "managed plan convergence unavailable");
+            }
+            if let Err(error) = state.start_live_control_watcher(app.handle().clone()) {
+                tracing::error!(%error, "managed live control watcher unavailable");
+            }
+            if let Err(error) = state.start_capture_runtime() {
+                tracing::error!(%error, "managed capture initialization unavailable");
+            }
+
+            // Volume discovery and watcher restoration can block on slow or
+            // newly-unresponsive mounts, so they begin after state is usable
+            // under the managed task registry instead of delaying setup.
+            if let Err(error) = state.start_startup_watchers() {
+                tracing::error!(%error, "managed startup watcher restore unavailable");
             }
 
             // Unified startup doctor (STATE-INTEGRITY-AUDIT): one ordered,
@@ -195,18 +310,34 @@ pub fn run() {
             // large library's preview existence walk never blocks the window
             // from showing; it only touches DERIVED state (vector spaces +
             // preview cache) and re-pends what must rebuild.
-            {
-                let doc = Arc::clone(&state);
-                std::thread::Builder::new()
-                    .name("pp-startup-doctor".into())
-                    .spawn(move || doctor::run_startup_doctor(&doc))
-                    .expect("spawn startup-doctor thread");
+            if let Err(error) = state.start_startup_doctor() {
+                tracing::error!(%error, "managed startup doctor unavailable");
             }
 
-            app.manage(state);
-            pump::spawn_ingest_pump(app.handle().clone());
-            pump::spawn_sidecar_pump(app.handle().clone());
-            pump::spawn_runtime_pump(app.handle().clone());
+            if let Err(error) = pump::spawn_ingest_pump(&state, app.handle().clone()) {
+                tracing::error!(%error, "managed ingest pump unavailable");
+            }
+            if let Err(error) = pump::spawn_preview_pump(&state, app.handle().clone()) {
+                tracing::error!(%error, "managed preview pump unavailable");
+            }
+            if let Err(error) = pump::spawn_raw_decode_pump(&state, app.handle().clone()) {
+                tracing::error!(%error, "managed interactive RAW pump unavailable");
+            }
+            if let Err(error) = pump::spawn_embedding_pump(&state) {
+                tracing::error!(%error, "managed embedding pump unavailable");
+            }
+            if let Err(error) = pump::spawn_volume_monitor(&state) {
+                tracing::error!(%error, "managed volume monitor unavailable");
+            }
+            if let Err(error) = pump::spawn_maintenance_pump(&state) {
+                tracing::error!(%error, "managed maintenance pump unavailable");
+            }
+            if let Err(error) = pump::spawn_sidecar_pump(&state) {
+                tracing::error!(%error, "managed sidecar pump unavailable");
+            }
+            if let Err(error) = pump::spawn_runtime_pump(&state, app.handle().clone()) {
+                tracing::error!(%error, "managed runtime pump unavailable");
+            }
             Ok(())
         });
 
@@ -219,7 +350,18 @@ pub fn run() {
             if let RunEvent::ExitRequested { .. } = event {
                 // CAPTURE §2.5 (M1 slice): close the session, flush sidecars.
                 if let Some(state) = app_handle.try_state::<Arc<App>>() {
+                    let started = std::time::Instant::now();
                     state.shutdown();
+                    if let Some(performance) =
+                        app_handle.try_state::<Arc<performance::PerformanceMonitor>>()
+                    {
+                        let _ = performance.record_backend(
+                            performance::Journey::Shutdown,
+                            performance::Phase::Total,
+                            started.elapsed().as_secs_f64() * 1_000.0,
+                            true,
+                        );
+                    }
                 }
             }
         });
@@ -231,6 +373,15 @@ pub fn run() {
 #[cfg(not(any(feature = "debug-panel", debug_assertions)))]
 fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        bootstrap::bootstrap_status,
+        bootstrap::bootstrap_relaunch,
+        bootstrap::bootstrap_reset_device_identity,
+        commands::backup::backup_operation_status,
+        commands::backup::backup_and_quit,
+        commands::backup::restore_and_restart,
+        updates::update_status,
+        updates::update_check,
+        updates::update_install,
         commands::capture::set_scope,
         commands::capture::indicator_state,
         commands::capture::add_note,
@@ -280,6 +431,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::unarchive_root,
         commands::library::list_archived_roots,
         commands::library::rescan_root,
+        commands::library::recover_roots,
         commands::library::rebuild_previews,
         commands::library::request_full_decode,
         commands::library::prioritize_previews,
@@ -287,9 +439,16 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::list_folder,
         commands::library::list_images,
         commands::library::ingest_status,
+        commands::health::application_health,
+        commands::health::retry_integrity_repair,
+        commands::convergence::application_state_snapshot,
+        commands::performance::performance_ingest,
+        commands::performance::performance_snapshot,
         commands::app::settings_get,
         commands::app::set_stack_display,
         commands::app::set_external_editor,
+        commands::app::set_processing_policy,
+        commands::app::restore_control_defaults,
         commands::app::set_preview_cache_budget,
         commands::app::preview_cache_stats,
         commands::app::clear_preview_cache,
@@ -298,10 +457,13 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::runtime_accept_license,
         commands::app::runtime_download_model,
         commands::app::runtime_remove_model,
+        commands::app::runtime_verify_model,
+        commands::app::runtime_discard_partial,
         commands::app::runtime_restart,
         commands::app::runtime_redetect,
         runtime::runtime_cancel_download,
         commands::app::export_journal,
+        commands::app::import_topics,
         commands::app::rebuild_index,
         commands::app::force_reembed,
         commands::app::open_settings_window,
@@ -316,6 +478,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::os::image_abs_path,
         commands::os::reveal_in_file_manager,
         commands::os::reveal_folder,
+        commands::os::reveal_logs,
         commands::os::open_with_default,
         commands::os::open_in_external_editor,
         // Attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md).
@@ -331,6 +494,15 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
 #[cfg(any(feature = "debug-panel", debug_assertions))]
 fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        bootstrap::bootstrap_status,
+        bootstrap::bootstrap_relaunch,
+        bootstrap::bootstrap_reset_device_identity,
+        commands::backup::backup_operation_status,
+        commands::backup::backup_and_quit,
+        commands::backup::restore_and_restart,
+        updates::update_status,
+        updates::update_check,
+        updates::update_install,
         commands::capture::set_scope,
         commands::capture::indicator_state,
         commands::capture::add_note,
@@ -380,6 +552,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::unarchive_root,
         commands::library::list_archived_roots,
         commands::library::rescan_root,
+        commands::library::recover_roots,
         commands::library::rebuild_previews,
         commands::library::request_full_decode,
         commands::library::prioritize_previews,
@@ -387,9 +560,16 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::library::list_folder,
         commands::library::list_images,
         commands::library::ingest_status,
+        commands::health::application_health,
+        commands::health::retry_integrity_repair,
+        commands::convergence::application_state_snapshot,
+        commands::performance::performance_ingest,
+        commands::performance::performance_snapshot,
         commands::app::settings_get,
         commands::app::set_stack_display,
         commands::app::set_external_editor,
+        commands::app::set_processing_policy,
+        commands::app::restore_control_defaults,
         commands::app::set_preview_cache_budget,
         commands::app::preview_cache_stats,
         commands::app::clear_preview_cache,
@@ -398,10 +578,13 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::app::runtime_accept_license,
         commands::app::runtime_download_model,
         commands::app::runtime_remove_model,
+        commands::app::runtime_verify_model,
+        commands::app::runtime_discard_partial,
         commands::app::runtime_restart,
         commands::app::runtime_redetect,
         runtime::runtime_cancel_download,
         commands::app::export_journal,
+        commands::app::import_topics,
         commands::app::rebuild_index,
         commands::app::force_reembed,
         commands::app::open_settings_window,
@@ -416,6 +599,7 @@ fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::os::image_abs_path,
         commands::os::reveal_in_file_manager,
         commands::os::reveal_folder,
+        commands::os::reveal_logs,
         commands::os::open_with_default,
         commands::os::open_in_external_editor,
         // Attention/engagement heatmap (DESIGN-ATTENTION-HEATMAP.md).

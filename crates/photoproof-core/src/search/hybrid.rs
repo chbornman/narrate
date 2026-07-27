@@ -135,7 +135,8 @@ impl Default for HybridOptions {
         // `SIM_BLEND_BETA` consts — so today's behavior is unchanged. The
         // Phase-3 per-search `weights` payload still composes ON TOP of this
         // default (search_wire.rs overrides the field).
-        let search = &tuning().search;
+        let tuning = tuning();
+        let search = &tuning.search;
         Self {
             now: None,
             include_debug: false,

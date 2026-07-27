@@ -181,6 +181,11 @@ pub struct PreviewCacheStatsDto {
 #[serde(rename_all = "camelCase")]
 pub struct IngestStatus {
     pub running: bool,
+    /// User resource policy at this same observation point. Pending rows may
+    /// keep `running` true while paused, so consumers must not infer Pause
+    /// from a frozen counter.
+    pub processing_paused: bool,
+    pub processing_intensity: crate::settings::ProcessingIntensity,
     /// Completed work units (done + skipped) across all passes.
     pub done: u64,
     /// All known work units across all passes.
@@ -270,7 +275,9 @@ impl PartialEq for PassRemaining {
 }
 impl Eq for PassRemaining {}
 
-/// One embedder role's real load state on the wire (idle/building/ready/failed).
+/// One embedder role's real load state on the wire. `Queued` means the helper
+/// attempt has not entered construction yet; `Stopping` is the terminal
+/// shutdown posture while its owned helper is killed and reaped.
 /// WHY: the `clip_ready`/`text_embedder_ready` bools below collapse Idle,
 /// Building and Failed all into `false`, so the UI cannot tell "still loading"
 /// from "failed" from "inactive" — a failed text embedder looks like it loads
@@ -280,9 +287,11 @@ impl Eq for PassRemaining {}
 #[serde(rename_all = "lowercase")]
 pub enum EmbedderState {
     Idle,
+    Queued,
     Building,
     Ready,
     Failed,
+    Stopping,
 }
 
 /// A role's slot as the runtime status reports it: the coarse state plus the
@@ -293,7 +302,73 @@ pub enum EmbedderState {
 #[serde(rename_all = "camelCase")]
 pub struct EmbedderSlot {
     pub state: EmbedderState,
+    /// Monotonic process-local attempt identity. Null only before a role has
+    /// ever attempted a model (or after an explicit failed-attempt reset).
+    pub attempt_id: Option<u64>,
+    pub model_id: Option<String>,
+    /// Per-role generation used to reject stale helper landings.
+    pub generation: u64,
+    /// Wall-clock dispatch time, RFC 3339 UTC. Timeout decisions use a
+    /// separate monotonic clock; this field is observability only.
+    pub started_at: Option<String>,
     pub error: Option<String>,
+    /// Provider truth from the live ORT sessions. Present only in Ready.
+    pub execution: Option<photoproof_connectors::ModelExecution>,
+}
+
+/// Persistence/recovery truth for one runtime-owned control file. Kept on the
+/// normal runtime status contract so corruption and failed writes are product
+/// state, not debug-log archaeology.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeControlFileStatus {
+    pub name: String,
+    pub recovery: Option<photoproof_core::runtime::ControlFileRecovery>,
+    pub errors: Vec<photoproof_core::runtime::ControlFileError>,
+    pub validation_warnings: Vec<String>,
+}
+
+/// One adapter observed by the background capability probe. `backend` is the
+/// graphics/runtime API reported by wgpu (for example Vulkan, Metal, or DX12);
+/// it is discovery truth, not a claim that an ONNX execution provider loaded.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAdapterStatus {
+    pub name: String,
+    pub backend: String,
+    pub vendor_id: Option<u32>,
+    pub device_id: Option<u32>,
+    pub driver: Option<String>,
+    pub driver_info: Option<String>,
+    pub vram_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeModelCompatibility {
+    pub model_id: String,
+    pub compatible: bool,
+    pub compatible_providers: Vec<String>,
+    pub reason: String,
+}
+
+/// One authoritative post-probe capability snapshot. It intentionally keeps
+/// provider-library availability separate from per-model session execution:
+/// an exported CUDA EP does not prove that a graph initialized or ran on it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapabilities {
+    pub report_schema_version: u32,
+    pub detected_at: String,
+    pub hardware_fingerprint: String,
+    pub os: String,
+    pub architecture: String,
+    pub total_memory_bytes: Option<u64>,
+    pub apple_unified_bytes: Option<u64>,
+    pub adapters: Vec<RuntimeAdapterStatus>,
+    pub providers: Vec<photoproof_connectors::OrtProviderCapability>,
+    pub runtime_library_available: bool,
+    pub model_compatibility: Vec<RuntimeModelCompatibility>,
 }
 
 /// RUNTIME contract seam (P6.2 fills this in; M1 is the degraded mode that
@@ -313,24 +388,35 @@ pub struct RuntimeStatus {
     /// warm-up. None = not blocked. Settings shows the reason quietly.
     pub asr_blocked: Option<String>,
     pub llm_blocked: Option<String>,
-    /// P7.4 §3.3: the in-process embedder readiness — true once the ort
+    /// P7.4 §3.3: isolated embedder readiness — true once the helper's ORT
     /// sessions are constructed (additive; settings rows show running/idle
     /// state text). False keeps search keyword-only and the backfill dark.
     ///
     /// KEPT alongside the richer `clip`/`text_embedder` slots below: other
     /// consumers (e.g. `active_vector_models`) gate on these bools, and they
     /// are exactly `slot.state == Ready`. The slots add the missing
-    /// building/failed/idle distinction the bools cannot express.
+    /// queued/building/failed/stopping distinction the bools cannot express.
     pub clip_ready: bool,
     pub text_embedder_ready: bool,
-    /// The CLIP embedder's real load state + failure detail (idle/building/
-    /// ready/failed). Lets the settings row show "loading" vs "failed" vs
-    /// "inactive" instead of one flat false.
+    /// The CLIP embedder's explicit lifecycle, attempt identity, and failure
+    /// detail. Lets settings distinguish queued/loading/failed/inactive.
     pub clip: EmbedderSlot,
     /// The text embedder's real load state + failure detail. A staged-but-slow
     /// EmbeddingGemma reads `building`; a corrupt/missing-weight load reads
     /// `failed` with the ort error in `error`.
     pub text_embedder: EmbedderSlot,
+    /// `provisional` while launch uses a safe/cached decision, `detecting`
+    /// while the managed hardware probe runs, `ready` after its result is
+    /// atomically adopted, and `failed` after a probe fault. None of these
+    /// states block the journal/window from becoming usable.
+    pub capability_state: String,
+    pub capability_summary: Option<String>,
+    /// The last cached or freshly observed adapters. A provisional empty list
+    /// means "not known yet", not "this machine has no accelerator."
+    pub capability_adapters: Vec<RuntimeAdapterStatus>,
+    pub capability_detected_at: Option<String>,
+    /// Present only after authoritative background discovery completes.
+    pub capabilities: Option<RuntimeCapabilities>,
     pub tier_detected: u8,
     /// After the `[runtime] tier` override — it always wins (§6.2).
     pub tier_effective: u8,
@@ -345,6 +431,21 @@ pub struct RuntimeStatus {
     pub consent_offer_bytes: u64,
     pub models: Vec<ModelRow>,
     pub instance_lock_held: bool,
+    pub control_files: Vec<RuntimeControlFileStatus>,
+}
+
+/// Consent persistence and its optional follow-on model dispatch are two
+/// settlements. `consent_committed` is true for every successful command
+/// response; a persistence failure remains a command error. `operation_error`
+/// means the saved decision is authoritative but no automatic model work was
+/// queued, and the same download decision may be retried safely.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConsentOutcome {
+    pub status: RuntimeStatus,
+    pub consent_committed: bool,
+    pub operation_error: Option<String>,
+    pub operation_retryable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -352,6 +453,20 @@ pub struct RuntimeStatus {
 pub struct ModelRow {
     pub id: String,
     pub role: String,
+    /// Backend-selected first-run offer. Exactly one compatible configured
+    /// model per local functional seam may be true.
+    pub default_offer: bool,
+    /// Compatible tier alternative that remains an explicit Settings choice
+    /// and is never automatically enqueued by consent.
+    pub advanced_available: bool,
+    /// Capability verdict joined by the backend, not reconstructed from the
+    /// hardware report in each webview.
+    pub compatible: bool,
+    pub compatibility_reason: String,
+    pub compatible_providers: Vec<String>,
+    /// Every runtime seam that desires or currently consumes this model.
+    /// This is the sole UI authority for desired/active/state/provider/retry.
+    pub consumers: Vec<ModelConsumerStatus>,
     /// "not-offered" | "not-downloaded" | "downloading" | "installed" |
     /// "failed" (§2.4 settings states).
     pub state: String,
@@ -370,6 +485,40 @@ pub struct ModelRow {
     /// `error` is written only when the retry schedule is exhausted) and
     /// this names the in-progress retry for settings to show.
     pub retry_hint: Option<String>,
+    /// Serialized lifecycle action currently owning this model
+    /// (`downloading`, `verifying`, `installing`, `removing`, or
+    /// `discarding-partial`). Null when idle.
+    pub operation: Option<String>,
+    /// Latest sequenced model-operation transition, retained after terminal
+    /// settlement so every window can catch up after an event gap.
+    pub operation_event: Option<ModelOperationStatus>,
+    /// Installed-index/file disagreement detected at launch or by Verify.
+    /// This is independent of transient download errors.
+    pub registry_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOperationStatus {
+    pub attempt_id: String,
+    pub sequence: u64,
+    pub phase: String,
+    pub terminal: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConsumerStatus {
+    pub role: String,
+    pub desired: bool,
+    pub active: bool,
+    pub state: String,
+    pub retryable: bool,
+    pub error: Option<String>,
+    pub requested_provider: Option<String>,
+    pub actual_provider: Option<String>,
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

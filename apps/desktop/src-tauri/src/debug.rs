@@ -17,7 +17,9 @@ use photoproof_core::library::ScanOptions;
 use serde::Serialize;
 use tauri::State;
 
-use crate::error::{CmdError, CmdResult};
+use crate::command_work::CommandClass;
+use crate::commands::{admit, run_blocking};
+use crate::error::CmdResult;
 use crate::search_types::QueryEcho;
 use crate::state::App;
 
@@ -52,6 +54,8 @@ pub struct DebugEventRow {
 /// Events tab: live tail of `annotation_events`, newest first.
 #[tauri::command]
 pub fn debug_tail_events(app: S<'_>, limit: u32) -> CmdResult<Vec<DebugEventRow>> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.tail-events", CommandClass::Read)?;
     let conn = app.readq.lock().expect("readq mutex");
     let mut stmt = conn.prepare_cached(
         "SELECT id, session_id, ts, kind, source, text, payload,
@@ -119,7 +123,9 @@ pub struct DebugCapture {
 /// the debug-note feed — partials included in dev builds) plus the scope
 /// ring. This is the "is it hearing me?" window: arm, speak, refresh.
 #[tauri::command]
-pub fn debug_capture(app: S<'_>) -> DebugCapture {
+pub fn debug_capture(app: S<'_>) -> CmdResult<DebugCapture> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.capture", CommandClass::Read)?;
     let scope_ring = {
         let scope = app.scope.lock().expect("scope mutex");
         scope
@@ -133,7 +139,7 @@ pub fn debug_capture(app: S<'_>) -> DebugCapture {
     };
     let capture = app.capture.lock().expect("capture mutex");
     match capture.as_ref() {
-        Some(engine) => DebugCapture {
+        Some(engine) => Ok(DebugCapture {
             mic: engine.mic().as_str(),
             stream_open: engine.stream_open(),
             streaming_utterances: engine.streaming_count(),
@@ -141,8 +147,8 @@ pub fn debug_capture(app: S<'_>) -> DebugCapture {
             asr_ready: app.runtime.supervisors.asr_ready(),
             notes: engine.debug_notes().to_vec(),
             scope_ring,
-        },
-        None => DebugCapture {
+        }),
+        None => Ok(DebugCapture {
             mic: "disarmed",
             stream_open: false,
             streaming_utterances: 0,
@@ -150,7 +156,7 @@ pub fn debug_capture(app: S<'_>) -> DebugCapture {
             asr_ready: app.runtime.supervisors.asr_ready(),
             notes: vec!["capture engine absent: in-process VAD failed to build".into()],
             scope_ring,
-        },
+        }),
     }
 }
 
@@ -172,6 +178,9 @@ pub struct DebugStageStat {
     pub count: u64,
     pub total_ms: f64,
     pub mean_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
     pub max_ms: f64,
 }
 
@@ -190,6 +199,8 @@ pub struct DebugPassCounter {
 /// Ingest tab: queue depth, per-pass states with versions, recent errors.
 #[tauri::command]
 pub fn debug_ingest(app: S<'_>) -> CmdResult<DebugIngest> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.ingest", CommandClass::Read)?;
     let counters = app
         .library
         .pass_counters()?
@@ -227,6 +238,9 @@ pub fn debug_ingest(app: S<'_>) -> CmdResult<DebugIngest> {
             count: s.count,
             total_ms: s.total_ms,
             mean_ms: s.mean_ms,
+            p50_ms: s.p50_ms,
+            p95_ms: s.p95_ms,
+            p99_ms: s.p99_ms,
             max_ms: s.max_ms,
         })
         .collect();
@@ -248,6 +262,8 @@ pub struct DebugSidecars {
 /// Sidecars tab: durable dirty queue + pending offline-volume redactions.
 #[tauri::command]
 pub fn debug_sidecars(app: S<'_>) -> CmdResult<DebugSidecars> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.sidecars", CommandClass::Read)?;
     let dirty = app
         .store
         .dirty_images()?
@@ -274,9 +290,11 @@ pub fn debug_sidecars(app: S<'_>) -> CmdResult<DebugSidecars> {
 
 /// Search tab: the last query echo (raw, filters, dropped, fallback).
 #[tauri::command]
-pub fn debug_search(app: S<'_>) -> Option<QueryEcho> {
+pub fn debug_search(app: S<'_>) -> CmdResult<Option<QueryEcho>> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.search", CommandClass::Read)?;
     let _ = DEBUG_PANEL_MARKER; // keep the marker in the binary
-    app.last_search.lock().expect("last_search mutex").clone()
+    Ok(app.last_search.lock().expect("last_search mutex").clone())
 }
 
 #[derive(Debug, Serialize)]
@@ -293,16 +311,20 @@ pub struct DebugRuntime {
 /// child exists before the P6.3 spike vendors binaries; supervisor state
 /// histories and scheduler decisions join these lines when they do.
 #[tauri::command]
-pub fn debug_runtime(app: S<'_>) -> DebugRuntime {
-    DebugRuntime {
+pub fn debug_runtime(app: S<'_>) -> CmdResult<DebugRuntime> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.runtime", CommandClass::Read)?;
+    Ok(DebugRuntime {
         processes: app.runtime.debug_lines(),
         status: app.runtime.status(),
-    }
+    })
 }
 
 /// [dev] Force sidecar flush.
 #[tauri::command]
 pub fn debug_force_flush(app: S<'_>) -> CmdResult<usize> {
+    let app = app.inner().clone();
+    let _permit = admit(&app, "debug.force-flush", CommandClass::Mutation)?;
     let flushed = app.engine.flush_all(UtcMillis::now())?;
     Ok(flushed.len())
 }
@@ -311,12 +333,16 @@ pub fn debug_force_flush(app: S<'_>) -> CmdResult<usize> {
 #[tauri::command]
 pub async fn debug_force_rescan(app: S<'_>, root_id: String) -> CmdResult<usize> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let report = app.library.scan_root(&root_id, &ScanOptions::default())?;
-        Ok(report.files_seen)
-    })
+    run_blocking(
+        app,
+        "debug.force-rescan",
+        CommandClass::Mutation,
+        move |app| {
+            let report = app.library.scan_root(&root_id, &ScanOptions::default())?;
+            Ok(report.files_seen)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 #[derive(Debug, Serialize)]
@@ -334,7 +360,7 @@ pub struct DebugDoctorReport {
 #[tauri::command]
 pub async fn debug_doctor(app: S<'_>) -> CmdResult<DebugDoctorReport> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "debug.doctor", CommandClass::Mutation, |app| {
         let r = app.library.doctor()?;
         Ok(DebugDoctorReport {
             repended: r.repended,
@@ -343,5 +369,4 @@ pub async fn debug_doctor(app: S<'_>) -> CmdResult<DebugDoctorReport> {
         })
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }

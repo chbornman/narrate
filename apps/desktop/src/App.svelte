@@ -32,6 +32,8 @@
   import type { ActionDef } from "./lib/actions/types";
   import * as ipc from "./lib/ipc/commands";
   import type {
+    ApplicationHealth,
+    ApplicationStateChanged,
     AppSettings,
     CollectionDto,
     IndicatorPulse,
@@ -48,6 +50,7 @@
   import FirstRun from "./lib/components/shell/FirstRun.svelte";
   import ConsentCard from "./lib/components/shell/ConsentCard.svelte";
   import WelcomeCard from "./lib/components/shell/WelcomeCard.svelte";
+  import BootStatus from "./lib/components/shell/BootStatus.svelte";
   import Cheatsheet from "./lib/components/shell/Cheatsheet.svelte";
   import ContextMenuHost from "./lib/components/shell/ContextMenuHost.svelte";
   import DropConfirm from "./lib/components/shell/DropConfirm.svelte";
@@ -86,6 +89,18 @@
     }
     return ui.folderName;
   });
+  let applicationHealth = $state<ApplicationHealth | null>(null);
+
+  /** Health is event/refocus refreshed, never polled. The titlebar and
+   * Settings both render the backend's same issue projection. */
+  async function refreshApplicationHealth(): Promise<void> {
+    try {
+      applicationHealth = await ipc.applicationHealth();
+    } catch {
+      // BootStatus remains the authority for command-channel failure. Keep the
+      // last good health snapshot instead of flashing a false healthy state.
+    }
+  }
 
   // ---- keyboard (one registry; dispatch = match over it) --------------------
 
@@ -185,6 +200,27 @@
     if (document.visibilityState === "hidden") ui.dwellPause();
   }
 
+  async function recoverBoot() {
+    if (ui.boot.failures.some((failure) => failure.subsystem === "bootstrap")) {
+      if (ui.bootstrapRecoveryAction === "reset-device-identity") {
+        const confirmed = window.confirm(
+          "Both saved device-identity copies are unusable. Resetting creates a new local replica identity; quarantined evidence will be retained. Reset and relaunch?",
+        );
+        if (confirmed) await ipc.bootstrapResetDeviceIdentity();
+      } else {
+        await ipc.bootstrapRelaunch();
+      }
+    } else if (ui.boot.failures.some((failure) => failure.subsystem === "events")) {
+      window.location.reload();
+    } else {
+      void ui.retryBoot();
+    }
+  }
+
+  function settleLiveUpdate(task: Promise<unknown>): void {
+    void task.catch((error) => ui.eventListenersFailed(error));
+  }
+
   // ---- activity reporting (CAPTURE §2.1), throttled -------------------------
 
   // At most one report per minute: the throttle must stay far below the
@@ -208,8 +244,8 @@
   // ---- backend events ----------------------------------------------------------
 
   onMount(() => {
+    const bootStarted = performance.now();
     ui.debugEnabled = Boolean(import.meta.env.PHOTOPROOF_DEBUG);
-    void ui.init();
     const unlisteners: Promise<UnlistenFn>[] = [
       // The pulse is pure indicator feedback now — the Look overlay's
       // refresh migrated onto the hash-aware `journal-changed` channel.
@@ -218,7 +254,7 @@
       // M2b voice events land without UI actions): affected open surfaces
       // — journal panel, grid badges, Look overlay — refresh themselves.
       listen<JournalChanged>("journal-changed", (e) =>
-        void ui.onJournalChanged(e.payload.hashes),
+        settleLiveUpdate(ui.onJournalChanged(e.payload.hashes)),
       ),
       // Preview artifacts landed (ingest drain): thumbs that gave up
       // retrying a 404 heal off the hash-aware ping — no restart needed.
@@ -231,21 +267,43 @@
       // Indicator pill + the mid-scan grid re-list. The grid now re-lists on
       // the Seam 1 `imagesVersion` handshake inside onIngestProgress (debounced)
       // — a new image entering the open folder advances the version; no poll.
-      listen<IngestStatus>("ingest-progress", (e) => void ui.onIngestProgress(e.payload)),
+      listen<IngestStatus>("ingest-progress", (e) => {
+        settleLiveUpdate(ui.onIngestProgress(e.payload));
+      }),
       // The Settings window's edits land live (set_stack_display emits to
       // every window; the grid re-pairs stacks on the spot).
-      listen<AppSettings>("settings-changed", (e) => ui.applySettings(e.payload)),
+      listen<AppSettings>("settings-changed", (e) =>
+        settleLiveUpdate(ui.onSettingsChanged(e.payload)),
+      ),
       // Root edits from any window (Settings add/remove — the same
       // pattern): the rail updates instantly off the fresh snapshot.
-      listen<RootDto[]>("roots-changed", (e) => void ui.onRootsChanged(e.payload)),
+      listen<RootDto[]>("roots-changed", (e) => {
+        settleLiveUpdate(ui.onRootsChanged(e.payload));
+        void refreshApplicationHealth();
+      }),
       // Collection mutations from any window (same snapshot pattern): the
       // rail's Collections tab — and a viewed collection's grid — follow.
       listen<CollectionDto[]>("collections-changed", (e) =>
-        void ui.onCollectionsChanged(e.payload),
+        settleLiveUpdate(ui.onCollectionsChanged(e.payload)),
+      ),
+      // Settings may union-import the portable saved-topic document. Pull the
+      // committed topic snapshot before its application-state revision event
+      // advances the catch-up clock.
+      listen<void>("topics-changed", () =>
+        settleLiveUpdate(ui.onTopicsChanged()),
       ),
       // RUNTIME §8.3: readiness/download snapshots — features light up
       // individually and silently (mic glyph appears, nothing else moves).
-      listen<RuntimeStatus>("runtime-status", (e) => ui.shell.onRuntimeStatus(e.payload)),
+      listen<RuntimeStatus>("runtime-status", (e) => {
+        ui.onRuntimeStatus(e.payload);
+        void refreshApplicationHealth();
+      }),
+      // Process-monotone catch-up clock. Domain snapshot events above provide
+      // the fast path; a revision gap triggers one coherent backend snapshot
+      // so a late/reinstalled window cannot remain silently stale.
+      listen<ApplicationStateChanged>("application-state-changed", (e) =>
+        settleLiveUpdate(ui.onApplicationStateChanged(e.payload)),
+      ),
       // Native menu bar (macOS, menu.rs): custom items forward their
       // registry id here — the same perform sink the keyboard feeds.
       listen<string>("menu-action", (e) => onMenuAction(e.payload)),
@@ -255,6 +313,33 @@
         if (e.payload.type === "drop") ui.offerDrop(e.payload.paths);
       }),
     ];
+    const listenersInstalled = Promise.all(unlisteners)
+      .then(() => ui.eventListenersReady())
+      .catch((error) => ui.eventListenersFailed(error));
+    // Subscribe BEFORE any cold state reads. Once boot settles, one versioned
+    // catch-up closes the tiny install/read race and seeds the revision clock.
+    void listenersInstalled
+      .then(() => ui.init())
+      .then(() => ui.catchUpApplicationState())
+      .then(() => {
+        void refreshApplicationHealth();
+        requestAnimationFrame(() => {
+          ipc.recordPerformance(
+            "startup",
+            "first-paint",
+            performance.now() - bootStarted,
+          );
+        });
+      })
+      .catch((error) => {
+        ipc.recordPerformance(
+          "startup",
+          "total",
+          performance.now() - bootStarted,
+          false,
+        );
+        ui.failBoot(error);
+      });
     // Seam 1 (ARCHITECTURE-CONTRACTS.md step 3): the mid-scan grid re-list is
     // driven entirely by the `imagesVersion` handshake in onIngestProgress now.
     // The old setInterval(INGEST_RELIST_MS) poll that ALSO re-listed while
@@ -262,7 +347,8 @@
     // (the "each view invents its own staleness story" anti-pattern). One
     // versioned refresh policy, zero wall-clock timers.
     return () => {
-      for (const u of unlisteners) void u.then((f) => f());
+      for (const u of unlisteners) void u.then((f) => f()).catch(() => {});
+      void ipc.flushPerformance();
     };
   });
 </script>
@@ -278,7 +364,11 @@
 
 <div class="shell" data-surround={ui.shell.surround}>
   {#if !ui.shell.chromeHidden}
-    <Titlebar {title} />
+    <Titlebar
+      {title}
+      health={applicationHealth}
+      onrefreshhealth={refreshApplicationHealth}
+    />
   {/if}
 
   <div class="main">
@@ -388,6 +478,12 @@
   {#if import.meta.env.PHOTOPROOF_DEBUG && ui.shell.debugOpen && DebugPanel !== null}
     <DebugPanel />
   {/if}
+
+  <BootStatus
+    status={ui.boot}
+    recoveryAction={ui.bootstrapRecoveryAction}
+    onretry={recoverBoot}
+  />
 </div>
 
 <style>

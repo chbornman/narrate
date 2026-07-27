@@ -238,11 +238,11 @@ function clampEmbedderError(error: string | null): string {
 /** The HONEST per-role embedder signal (replaces the interim CLIP-only
  * `embedderLoading` boolean): turn one lane's slot state into a waiting-on
  * reason, or null when the lane needs no row.
- *   · building -> a transient "loading" row (e.g. "image embedder loading").
+ *   · queued/building -> a transient "loading" row.
  *   · failed   -> a DEGRADED row ("image search unavailable") with the clamped
  *     error inlined and the full error on `detail`; this lane is broken, not
  *     warming up.
- *   · ready/idle -> null. idle means the lane is simply not configured/active
+ *   · ready/idle/stopping -> null. idle means the lane is simply not configured/active
  *     (the M1 text lane sits idle when unlit) — we do NOT nag, which is exactly
  *     what the old CLIP-only hack worked around the wrong way. */
 function embedderReason(
@@ -253,7 +253,7 @@ function embedderReason(
     role === "clip" ? "image embedder loading" : "text embedder loading";
   const failedText =
     role === "clip" ? "image search unavailable" : "text search unavailable";
-  if (slot.state === "building") {
+  if (slot.state === "queued" || slot.state === "building") {
     return { id: `embedder-loading:${role}`, text: loadingText };
   }
   if (slot.state === "failed") {
@@ -309,6 +309,13 @@ export function libraryStatusModel(
   // then downloading models, then the per-role embedder rows (failed before
   // building).
   const waitingOn: WaitingReason[] = [];
+  if (ing.processingPaused) {
+    const intensity = ing.processingIntensity ?? "balanced";
+    waitingOn.push({
+      id: "processing-paused",
+      text: `Paused by you - ${intensity[0].toUpperCase()}${intensity.slice(1)}`,
+    });
+  }
   for (const v of ing.offlineVolumes) {
     waitingOn.push({
       id: `offline:${v.label}`,

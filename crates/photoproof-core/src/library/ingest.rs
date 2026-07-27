@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 
 use crate::id::{ContentHash, UtcMillis};
 
@@ -211,6 +211,28 @@ pub fn enqueue(
     Ok(())
 }
 
+/// An orphan-retention sweep retires rebuildable preview/vector passes while
+/// their image has no active path. If that content later relinks, revive
+/// exactly those retention-cleaned rows so its derived data self-heals.
+/// Ordinary move correlation is unaffected because its rows never carry this
+/// error code.
+pub fn revive_retention_cleaned(
+    conn: &Connection,
+    hash: &ContentHash,
+    now: UtcMillis,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE ingest_passes
+         SET state = 'pending', priority = ?3, attempts = 0, error = NULL,
+             enqueued_at = ?2, started_at = NULL, completed_at = NULL,
+             not_before = NULL
+         WHERE image_hash = ?1
+           AND pass_name IN ('preview', 'image-embedding', 'text-embedding')
+           AND state = 'skipped' AND error = 'orphan-retention'",
+        params![hash.as_str(), now.to_rfc3339(), PRIORITY_BACKFILL],
+    )
+}
+
 /// Bump a pending row's priority upward (promotion rule, §10.3). Never
 /// demotes.
 pub fn promote(
@@ -247,16 +269,32 @@ pub fn claim_next(conn: &Connection, now: UtcMillis) -> rusqlite::Result<Option<
 /// unconfigured model passes sit pending (idle, NotConfigured-style; never
 /// errors), exactly like the rest of the degraded posture.
 ///
-/// `require_online_path`: when true, only claim an image that has an ACTIVE path
-/// on an ONLINE volume. File-reading passes (hash/exif/preview/full-raw-decode)
-/// set this so an offline drive does not drive a perpetual claim→defer sweep;
-/// the embedding passes set it false (they read cached previews/text, which
-/// survive a drive going offline).
+/// Every claim requires a processable path: rootless, or attached to an active
+/// root. Paths retained by an archived root deliberately remain searchable,
+/// but their derived work rests in `pending` until unarchive. When
+/// `require_online_path` is true, the processable path must also sit on an
+/// ONLINE volume. File-reading passes (hash/exif/preview/full-raw-decode) set
+/// this so an offline drive does not drive a perpetual claim→defer sweep; the
+/// embedding passes set it false because their cached inputs survive offline.
 pub fn claim_next_of(
     conn: &Connection,
     now: UtcMillis,
     allowed: &[PassName],
     require_online_path: bool,
+) -> rusqlite::Result<Option<QueueItem>> {
+    claim_next_of_excluding_roots(conn, now, allowed, require_online_path, &[])
+}
+
+/// Embedding-policy variant of [`claim_next_of`]. An image remains eligible
+/// when it has any path under an active, unexcluded root (or a rootless path);
+/// it is deferred when every retained path belongs to an archived,
+/// preview-only, or process-later root.
+pub fn claim_next_of_excluding_roots(
+    conn: &Connection,
+    now: UtcMillis,
+    allowed: &[PassName],
+    require_online_path: bool,
+    excluded_root_ids: &[String],
 ) -> rusqlite::Result<Option<QueueItem>> {
     if allowed.is_empty() {
         return Ok(None);
@@ -269,15 +307,70 @@ pub fn claim_next_of(
         .map(|p| format!("'{}'", p.as_str()))
         .collect::<Vec<_>>()
         .join(",");
-    // Gate file-reading passes on an online location (see `require_online_path`).
-    // `image_hash` correlates to the outer row; `paths_by_image` indexes it.
+    // A zero-root database is valid for isolated authored/session text work and
+    // for ingest's unit fixtures. Once roots exist, however, root lifecycle is
+    // authoritative: an archived root keeps its path row for search/restoration
+    // but must not keep any queue lane live.
+    let active_root_filter = "AND (
+        NOT EXISTS (SELECT 1 FROM roots)
+        OR EXISTS (
+          SELECT 1
+          FROM paths eligible
+          LEFT JOIN roots eligible_root ON eligible_root.root_id = eligible.root_id
+          WHERE eligible.image_hash = ingest_passes.image_hash
+            AND eligible.state = 'active'
+            AND (eligible.root_id IS NULL OR eligible_root.state = 'active')
+        )
+      )";
+    // Gate file-reading passes on an online, processable location (see
+    // `require_online_path`). `image_hash` correlates to the outer row;
+    // `paths_by_image` indexes it.
     let online_filter = if require_online_path {
-        "AND EXISTS (SELECT 1 FROM paths p JOIN volumes v ON v.volume_id = p.volume_id \
-         WHERE p.image_hash = ingest_passes.image_hash AND p.state = 'active' \
-         AND v.state = 'online')"
+        "AND EXISTS (
+           SELECT 1
+           FROM paths p
+           JOIN volumes v ON v.volume_id = p.volume_id
+           LEFT JOIN roots pr ON pr.root_id = p.root_id
+           WHERE p.image_hash = ingest_passes.image_hash
+             AND p.state = 'active' AND v.state = 'online'
+             AND (p.root_id IS NULL OR pr.state = 'active')
+         )"
     } else {
         ""
     };
+    let root_filter = if excluded_root_ids.is_empty() {
+        String::new()
+    } else {
+        let placeholders = (2..=excluded_root_ids.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "AND (
+               NOT EXISTS (
+                 SELECT 1
+                 FROM paths rooted
+                 JOIN roots rooted_root ON rooted_root.root_id = rooted.root_id
+                 WHERE rooted.image_hash = ingest_passes.image_hash
+                   AND rooted.state = 'active'
+                   AND rooted_root.state = 'active'
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM paths eligible
+                 LEFT JOIN roots eligible_root ON eligible_root.root_id = eligible.root_id
+                 WHERE eligible.image_hash = ingest_passes.image_hash
+                   AND eligible.state = 'active'
+                   AND (eligible.root_id IS NULL
+                        OR (eligible_root.state = 'active'
+                            AND eligible.root_id NOT IN ({placeholders})))
+               )
+             )"
+        )
+    };
+    let mut bind = Vec::with_capacity(excluded_root_ids.len() + 1);
+    bind.push(Value::Text(now_s.clone()));
+    bind.extend(excluded_root_ids.iter().cloned().map(Value::Text));
     let row = conn
         .query_row(
             &format!(
@@ -286,11 +379,13 @@ pub fn claim_next_of(
                  WHERE state = 'pending'
                    AND pass_name IN ({in_list})
                    AND (not_before IS NULL OR not_before <= ?1)
+                   {active_root_filter}
                    {online_filter}
+                   {root_filter}
                  ORDER BY priority, enqueued_at
                  LIMIT 1"
             ),
-            params![now_s],
+            params_from_iter(bind),
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -575,10 +670,42 @@ pub fn mark_failed(
 /// §10.6 counters: `(pass_name, pass_version) → {pending, running, done,
 /// error, skipped}`.
 pub fn pass_counters(conn: &Connection) -> rusqlite::Result<BTreeMap<(String, i64), PassCounters>> {
-    let mut stmt = conn.prepare(
+    pass_counters_where(conn, "")
+}
+
+/// Queue counters for work attached to an active (or rootless) path. Archived
+/// roots retain their raw `pending` rows for lossless resume, but those rows
+/// are lifecycle-paused and must not keep the desktop's global background-work
+/// indicator spinning forever.
+pub fn active_pass_counters(
+    conn: &Connection,
+) -> rusqlite::Result<BTreeMap<(String, i64), PassCounters>> {
+    pass_counters_where(
+        conn,
+        "WHERE (
+           NOT EXISTS (SELECT 1 FROM roots)
+           OR EXISTS (
+             SELECT 1
+             FROM paths eligible
+             LEFT JOIN roots eligible_root ON eligible_root.root_id = eligible.root_id
+             WHERE eligible.image_hash = ingest_passes.image_hash
+               AND eligible.state = 'active'
+               AND (eligible.root_id IS NULL OR eligible_root.state = 'active')
+           )
+         )",
+    )
+}
+
+fn pass_counters_where(
+    conn: &Connection,
+    predicate: &str,
+) -> rusqlite::Result<BTreeMap<(String, i64), PassCounters>> {
+    let mut stmt = conn.prepare(&format!(
         "SELECT pass_name, pass_version, state, COUNT(*)
-         FROM ingest_passes GROUP BY pass_name, pass_version, state",
-    )?;
+             FROM ingest_passes
+             {predicate}
+             GROUP BY pass_name, pass_version, state"
+    ))?;
     let mut map: BTreeMap<(String, i64), PassCounters> = BTreeMap::new();
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -811,6 +938,225 @@ mod tests {
             .unwrap()
             .expect("file pass claimable once the volume is online");
         assert_eq!(item.pass, PassName::Preview);
+    }
+
+    #[test]
+    fn embedding_claim_defers_preview_only_roots_but_not_shared_images() {
+        let (_tmp, conn) = setup();
+        let now = UtcMillis::now();
+        let ts = now.to_rfc3339();
+        let hash = ContentHash::from_hex(&"cf".repeat(32)).unwrap();
+        conn.execute(
+            "INSERT INTO volumes (volume_id, state, first_seen_at, last_seen_at)
+             VALUES ('vol-policy', 'online', ?1, ?1)",
+            params![ts],
+        )
+        .unwrap();
+        for root in ["preview-root", "full-root"] {
+            conn.execute(
+                "INSERT INTO roots
+                   (root_id, volume_id, rel_path, state, created_at)
+                 VALUES (?1, 'vol-policy', ?1, 'active', ?2)",
+                params![root, ts],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, root_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p-preview', ?1, 'vol-policy', 'preview-root', 'a.jpg', 1, 1,
+                     'active', ?2, ?2)",
+            params![hash.as_str(), ts],
+        )
+        .unwrap();
+        enqueue(
+            &conn,
+            &hash,
+            PassName::ImageEmbedding,
+            PassState::Pending,
+            PRIORITY_GPU,
+            None,
+            now,
+        )
+        .unwrap();
+        let excluded = vec!["preview-root".to_owned()];
+        assert!(
+            claim_next_of_excluding_roots(
+                &conn,
+                now,
+                &[PassName::ImageEmbedding],
+                false,
+                &excluded,
+            )
+            .unwrap()
+            .is_none(),
+            "an image available only through a preview-only root remains pending"
+        );
+
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, root_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p-full', ?1, 'vol-policy', 'full-root', 'b.jpg', 1, 1,
+                     'active', ?2, ?2)",
+            params![hash.as_str(), ts],
+        )
+        .unwrap();
+        assert!(
+            claim_next_of_excluding_roots(
+                &conn,
+                now,
+                &[PassName::ImageEmbedding],
+                false,
+                &excluded,
+            )
+            .unwrap()
+            .is_some(),
+            "a shared image remains eligible through its full-processing root"
+        );
+    }
+
+    #[test]
+    fn archived_root_pauses_every_pass_until_an_active_path_exists() {
+        let (_tmp, conn) = setup();
+        let now = UtcMillis::now();
+        let ts = now.to_rfc3339();
+        let hash = ContentHash::from_hex(&"ca".repeat(32)).unwrap();
+        conn.execute(
+            "INSERT INTO volumes (volume_id, state, first_seen_at, last_seen_at)
+             VALUES ('vol-archive', 'online', ?1, ?1)",
+            params![ts],
+        )
+        .unwrap();
+        for (root, state) in [("resting", "archived"), ("live", "active")] {
+            conn.execute(
+                "INSERT INTO roots
+                   (root_id, volume_id, rel_path, state, created_at)
+                 VALUES (?1, 'vol-archive', ?1, ?2, ?3)",
+                params![root, state, ts],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, root_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p-resting', ?1, 'vol-archive', 'resting', 'resting/a.jpg',
+                     1, 1, 'active', ?2, ?2)",
+            params![hash.as_str(), ts],
+        )
+        .unwrap();
+        for pass in [PassName::Preview, PassName::ImageEmbedding] {
+            enqueue(
+                &conn,
+                &hash,
+                pass,
+                PassState::Pending,
+                PRIORITY_WATCHER,
+                None,
+                now,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            claim_next_of(&conn, now, &[PassName::Preview], true)
+                .unwrap()
+                .is_none(),
+            "file-reading work is dormant for an archived-only image"
+        );
+        assert!(
+            claim_next_of(&conn, now, &[PassName::ImageEmbedding], false)
+                .unwrap()
+                .is_none(),
+            "cached model work is dormant too; archive is one lifecycle"
+        );
+        assert!(
+            active_pass_counters(&conn).unwrap().is_empty(),
+            "paused rows do not keep the desktop activity projection running"
+        );
+        assert!(
+            !pass_counters(&conn).unwrap().is_empty(),
+            "raw durable counters retain the paused rows for diagnostics/resume"
+        );
+
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, root_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p-live', ?1, 'vol-archive', 'live', 'live/a.jpg',
+                     1, 1, 'active', ?2, ?2)",
+            params![hash.as_str(), ts],
+        )
+        .unwrap();
+        assert!(
+            claim_next_of(&conn, now, &[PassName::Preview], true)
+                .unwrap()
+                .is_some(),
+            "one active duplicate path makes file work eligible"
+        );
+        assert!(
+            claim_next_of(&conn, now, &[PassName::ImageEmbedding], false)
+                .unwrap()
+                .is_some(),
+            "one active duplicate path makes derived model work eligible"
+        );
+        assert!(
+            !active_pass_counters(&conn).unwrap().is_empty(),
+            "active-path work returns to the desktop projection"
+        );
+    }
+
+    /// Critical-disk admission is pass-selective: the desktop asks for EXIF
+    /// only, so the small metadata row can advance while the reproducible
+    /// preview writer remains durably pending for capacity recovery.
+    #[test]
+    fn essential_claim_leaves_preview_pending() {
+        let (_tmp, conn) = setup();
+        let now = UtcMillis::now();
+        let ts = now.to_rfc3339();
+        let hash = ContentHash::from_hex(&"ce".repeat(32)).unwrap();
+        conn.execute(
+            "INSERT INTO volumes (volume_id, state, first_seen_at, last_seen_at)
+             VALUES ('vol-essential', 'online', ?1, ?1)",
+            params![ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO paths (path_id, image_hash, volume_id, rel_path, size,
+                                mtime_ns, state, first_seen_at, last_verified_at)
+             VALUES ('p-essential', ?1, 'vol-essential', 'a.jpg', 1, 1,
+                     'active', ?2, ?2)",
+            params![hash.as_str(), ts],
+        )
+        .unwrap();
+        for pass in [PassName::Exif, PassName::Preview] {
+            enqueue(
+                &conn,
+                &hash,
+                pass,
+                PassState::Pending,
+                PRIORITY_WATCHER,
+                None,
+                now,
+            )
+            .unwrap();
+        }
+
+        let item = claim_next_of(&conn, now, &[PassName::Exif], true)
+            .unwrap()
+            .expect("essential metadata claim");
+        assert_eq!(item.pass, PassName::Exif);
+        let preview_state: String = conn
+            .query_row(
+                "SELECT state FROM ingest_passes WHERE pass_name = 'preview'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preview_state, "pending");
+        assert!(
+            claim_next_of(&conn, now, &[PassName::Exif], true)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Seam 2 re-embed contract (`docs/ARCHITECTURE-CONTRACTS.md`): a model swap

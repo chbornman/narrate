@@ -45,6 +45,18 @@ pub enum RuntimeEvent {
         downloaded_bytes: u64,
         total_bytes: u64,
     },
+    /// One ordered model-operation transition. Unlike byte progress, these
+    /// events are never inferred or synthesized by the UI: the operation
+    /// authority emits queued/downloading/verifying/installing and exactly
+    /// one installed/failed/cancelled terminal verdict for each attempt.
+    ModelOperation {
+        model_id: String,
+        attempt_id: String,
+        sequence: u64,
+        phase: String,
+        terminal: bool,
+        error: Option<String>,
+    },
     /// §11: "may I GC model X?" is answered over the bus; the GC
     /// coordinator publishes the question's resolution for the debug
     /// panel.

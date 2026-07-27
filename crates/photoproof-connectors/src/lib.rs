@@ -51,7 +51,10 @@ pub use model_specs::{
     build_clip_embedder, build_text_embedder, is_known_clip_model, is_known_text_model,
 };
 pub use openai::{EndpointCell, HealthStatus, InFlightGauge, LostReports, OpenAiCompatClient};
-pub use ort_embedder::{OrtEmbedder, TextRecipe};
+pub use ort_embedder::{
+    ExecutionSelection, ModelExecution, OrtEmbedder, OrtProviderCapability, SessionExecution,
+    TextRecipe, ort_provider_capabilities,
+};
 pub use reranker::{CandidateText, Reranker};
 pub use sherpa::SherpaOnlineTranscriber;
 pub use transcriber::{AudioFrame, SegmentKind, StreamMs, Transcriber, TranscriptSegment};

@@ -31,7 +31,8 @@ use photoproof_core::{
 };
 use tauri::AppHandle;
 
-use super::{S, emit_journal_changed, emit_pulse, hashes, parse_hash};
+use super::{S, admit, emit_journal_changed, emit_pulse, hashes, parse_hash, run_blocking};
+use crate::command_work::CommandClass;
 use crate::dto::{ImageMetadataDto, JournalEntryDto, RedactReportDto, StrokeDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
@@ -534,18 +535,26 @@ pub(crate) fn metadata_dto(library: &Library, hash: &ContentHash) -> CmdResult<I
 #[tauri::command]
 pub async fn image_journal(app: S<'_>, hash: String) -> CmdResult<Vec<JournalEntryDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || journal_entries(&app.store, &parse_hash(&hash)?))
-        .await
-        .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+    run_blocking(
+        app,
+        "journal.image-journal",
+        CommandClass::Read,
+        move |app| journal_entries(&app.store, &parse_hash(&hash)?),
+    )
+    .await
 }
 
 /// Read-only EXIF subset for the Metadata tab (K16).
 #[tauri::command]
 pub async fn image_metadata(app: S<'_>, hash: String) -> CmdResult<ImageMetadataDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || metadata_dto(&app.library, &parse_hash(&hash)?))
-        .await
-        .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+    run_blocking(
+        app,
+        "journal.image-metadata",
+        CommandClass::Read,
+        move |app| metadata_dto(&app.library, &parse_hash(&hash)?),
+    )
+    .await
 }
 
 /// Inline Correct → revision event (EVENTS §3.4; the fold flips to the
@@ -557,6 +566,7 @@ pub fn revise_event(
     event_id: String,
     text: String,
 ) -> CmdResult<bool> {
+    let _permit = admit(app.inner(), "journal.revise-event", CommandClass::Mutation)?;
     app.touch()?;
     let Some(text) = normalize_note(&text) else {
         return Ok(false);
@@ -580,6 +590,7 @@ pub fn revise_event(
 /// button). The frontend's toast offers Undo (= re-state, E4).
 #[tauri::command]
 pub fn retract_event(app: S<'_>, handle: AppHandle, event_id: String) -> CmdResult<bool> {
+    let _permit = admit(app.inner(), "journal.retract-event", CommandClass::Mutation)?;
     app.touch()?;
     let target = EventId::from_str_strict(&event_id)?;
     let session = app.session_id();
@@ -600,6 +611,11 @@ pub fn retract_event(app: S<'_>, handle: AppHandle, event_id: String) -> CmdResu
 /// content (retraction-of-retraction is spec-forbidden, DECISIONS E4).
 #[tauri::command]
 pub fn unretract_event(app: S<'_>, handle: AppHandle, event_id: String) -> CmdResult<bool> {
+    let _permit = admit(
+        app.inner(),
+        "journal.unretract-event",
+        CommandClass::Mutation,
+    )?;
     app.touch()?;
     let id = EventId::from_str_strict(&event_id)?;
     let session = app.session_id();
@@ -622,17 +638,22 @@ pub async fn redact_event(
     event_id: String,
 ) -> CmdResult<RedactReportDto> {
     let app = app.inner().clone();
-    let (report, affected) = tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let id = EventId::from_str_strict(&event_id)?;
-        // Targets read BEFORE the scrub (they survive it, but the receipt
-        // is about the pre-redaction truth).
-        let affected = affected_hashes(&app.store, &id)?;
-        let report = redact_report(&app.store, &app.library, &app.engine, &id, UtcMillis::now())?;
-        Ok::<_, CmdError>((report, affected))
-    })
-    .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))??;
+    let (report, affected) = run_blocking(
+        app,
+        "journal.redact-event",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let id = EventId::from_str_strict(&event_id)?;
+            // Targets read BEFORE the scrub (they survive it, but the receipt
+            // is about the pre-redaction truth).
+            let affected = affected_hashes(&app.store, &id)?;
+            let report =
+                redact_report(&app.store, &app.library, &app.engine, &id, UtcMillis::now())?;
+            Ok::<_, CmdError>((report, affected))
+        },
+    )
+    .await?;
     emit_pulse(&handle, "redaction");
     emit_journal_changed(&handle, affected);
     Ok(report)

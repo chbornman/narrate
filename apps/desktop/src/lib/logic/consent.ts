@@ -33,7 +33,9 @@ export function consentCard(
   // Tier 0 is whole: nothing is offered below the floor, so no card,
   // no download prompt, ever (§1.4/§13.3).
   if (status.tierEffective < 1) return null;
-  const offered = status.models.filter((m) => m.state !== "not-offered");
+  const offered = status.models.filter(
+    (m) => m.defaultOffer && m.state !== "not-offered",
+  );
   if (offered.length === 0) return null;
   return {
     tierDetected: status.tierDetected,

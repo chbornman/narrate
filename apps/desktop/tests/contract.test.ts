@@ -9,7 +9,7 @@
  * rows with their chords.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render } from "@testing-library/svelte";
+import { render, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import type { GridItem, ScopeView } from "../src/lib/types/dto";
 
@@ -239,6 +239,9 @@ describe("Tab lights-out hides every chrome region (rendered App)", () => {
     ui.inspector.openTab("metadata");
     ui.summonNote();
     await tick();
+    await waitFor(() => {
+      expect(container.querySelector(".grid-header")).not.toBeNull();
+    });
 
     const q = (s: string) => container.querySelector(s);
     expect(q(".titlebar")).not.toBeNull();

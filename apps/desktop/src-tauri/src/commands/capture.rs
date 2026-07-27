@@ -14,10 +14,14 @@ use tauri::{AppHandle, Emitter};
 
 use photoproof_core::capture::ScopeSubject;
 
-use super::{S, announce_events, emit_journal_changed, emit_pulse, hashes, indicator, parse_hash};
+use super::{
+    S, admit, announce_events, emit_journal_changed, emit_pulse, hashes, indicator, parse_hash,
+};
+use crate::command_work::CommandClass;
 use crate::dto::{IndicatorState, ScopeSubjectDto, ScopeView, StrokeCommitDto, StrokePayloadDto};
 use crate::error::{CmdError, CmdResult};
 use crate::note::normalize_note;
+use crate::state::App;
 
 /// The UI reports its selection/view-derived target list (ordered) and,
 /// DESIGN-VOICE-SUBJECTS.md, an OPTIONAL non-image subject (a collection or
@@ -32,6 +36,7 @@ pub fn set_scope(
     targets: Vec<String>,
     subject: Option<ScopeSubjectDto>,
 ) -> CmdResult<ScopeView> {
+    let _permit = admit(app.inner(), "capture.set-scope", CommandClass::Mutation)?;
     app.touch()?;
     let hashes: Result<Vec<ContentHash>, _> =
         targets.iter().map(|t| ContentHash::from_hex(t)).collect();
@@ -72,7 +77,7 @@ pub fn set_scope(
 /// M-key TAP gesture and the indicator segment click ride this.
 #[tauri::command]
 pub fn toggle_mic(app: S<'_>, handle: AppHandle) -> CmdResult<IndicatorState> {
-    apply_mic(app, handle, None)
+    apply_mic(app, handle, None, "capture.toggle-mic")
 }
 
 /// Explicit arm/disarm intent (the M two-gesture ruling, June 2026):
@@ -84,7 +89,7 @@ pub fn toggle_mic(app: S<'_>, handle: AppHandle) -> CmdResult<IndicatorState> {
 /// call just echoes the indicator.
 #[tauri::command]
 pub fn set_mic(app: S<'_>, handle: AppHandle, armed: bool) -> CmdResult<IndicatorState> {
-    apply_mic(app, handle, Some(armed))
+    apply_mic(app, handle, Some(armed), "capture.set-mic")
 }
 
 /// The one mic transition (`want`: None = toggle, Some = idempotent set).
@@ -93,8 +98,48 @@ pub fn set_mic(app: S<'_>, handle: AppHandle, armed: bool) -> CmdResult<Indicato
 /// `pp-mic` audio thread. Disarm stops audio, accepts trailing finals
 /// (engine-bounded, ≤ 5 s), zeroes the ring, and joins the thread. Echoes
 /// the §11 indicator either way.
-fn apply_mic(app: S<'_>, handle: AppHandle, want: Option<bool>) -> CmdResult<IndicatorState> {
+fn apply_mic(
+    app: S<'_>,
+    handle: AppHandle,
+    want: Option<bool>,
+    command_name: &'static str,
+) -> CmdResult<IndicatorState> {
+    let _permit = admit(app.inner(), command_name, CommandClass::Mutation)?;
     app.touch()?; // the gesture is user activity (§2.1); may rotate first
+    // A runtime device error can finish the owner thread asynchronously.
+    // Reap that terminal handle before interpreting engine state so an
+    // idempotent set(true) can perform a genuine fresh arm.
+    let finished_worker = {
+        let mut mic = app.mic.lock().expect("mic mutex");
+        if mic.as_ref().is_some_and(|worker| !worker.is_active()) {
+            mic.take()
+        } else {
+            None
+        }
+    };
+    if let Some(worker) = finished_worker {
+        drop(worker);
+        let (events, draining) = {
+            let mut capture = app.capture.lock().expect("capture mutex");
+            match capture.as_mut() {
+                Some(engine) if engine.mic().is_armed() => {
+                    let events = engine.disarm(&app.store);
+                    (events, engine.stream_open())
+                }
+                _ => (Vec::new(), false),
+            }
+        };
+        app.runtime
+            .capture_live
+            .store(false, std::sync::atomic::Ordering::Release);
+        announce_events(&handle, &events);
+        if draining && let Err(error) = crate::mic::spawn_disarm_drain(handle.clone()) {
+            tracing::error!(
+                error = %error,
+                "failed to start managed drain after terminal microphone worker"
+            );
+        }
+    }
     let armed_now = {
         let mut capture = app.capture.lock().expect("capture mutex");
         match capture.as_mut() {
@@ -113,8 +158,15 @@ fn apply_mic(app: S<'_>, handle: AppHandle, want: Option<bool>) -> CmdResult<Ind
                     announce_events(&handle, &events);
                     if draining {
                         // A trailing final is still due (§6.4): with the mic
-                        // thread gone nothing pumps — the drain thread does.
-                        crate::mic::spawn_disarm_drain(handle.clone());
+                        // thread gone nothing pumps. The managed drain task
+                        // participates in the same quit barrier as every other
+                        // background writer.
+                        if let Err(error) = crate::mic::spawn_disarm_drain(handle.clone()) {
+                            tracing::error!(
+                                error = %error,
+                                "failed to start managed post-disarm drain"
+                            );
+                        }
                     }
                     false
                 }
@@ -126,10 +178,10 @@ fn apply_mic(app: S<'_>, handle: AppHandle, want: Option<bool>) -> CmdResult<Ind
                     let state = engine.arm();
                     drop(capture);
                     if state.is_armed() {
-                        *app.mic.lock().expect("mic mutex") =
-                            Some(crate::mic::start(handle.clone()));
+                        install_mic_worker(&app, &handle, crate::mic::start)?
+                    } else {
+                        false
                     }
-                    state.is_armed()
                 }
             }
         }
@@ -144,9 +196,60 @@ fn apply_mic(app: S<'_>, handle: AppHandle, want: Option<bool>) -> CmdResult<Ind
     Ok(state)
 }
 
+/// Commit an armed capture engine only when its owner thread actually exists.
+/// OS thread exhaustion is rare but must not leave the UI and download pacer
+/// believing a microphone is live with no worker capable of opening it.
+fn install_mic_worker<R: tauri::Runtime>(
+    app: &App,
+    handle: &AppHandle<R>,
+    start: impl FnOnce(AppHandle<R>) -> std::io::Result<crate::mic::MicHandle>,
+) -> CmdResult<bool> {
+    match start(handle.clone()) {
+        Ok(worker) if worker.is_active() => {
+            *app.mic.lock().expect("mic mutex") = Some(worker);
+            Ok(true)
+        }
+        outcome => {
+            let error = match outcome {
+                Ok(worker) => {
+                    drop(worker);
+                    std::io::Error::other("microphone worker exited before armed acknowledgement")
+                }
+                Err(error) => error,
+            };
+            let (events, draining) = {
+                let mut capture = app.capture.lock().expect("capture mutex");
+                match capture.as_mut() {
+                    Some(engine) => {
+                        let events = engine.disarm(&app.store);
+                        (events, engine.stream_open())
+                    }
+                    None => (Vec::new(), false),
+                }
+            };
+            app.runtime
+                .capture_live
+                .store(false, std::sync::atomic::Ordering::Release);
+            crate::mic::announce_events(handle, &events);
+            if draining && let Err(drain_error) = crate::mic::spawn_disarm_drain(handle.clone()) {
+                tracing::error!(
+                    error = %drain_error,
+                    "failed to start managed drain after microphone worker spawn failure"
+                );
+            }
+            let state = indicator(app);
+            let _ = handle.emit("indicator-state", state);
+            Err(CmdError::Invalid(format!(
+                "microphone worker failed to start: {error}"
+            )))
+        }
+    }
+}
+
 #[tauri::command]
-pub fn indicator_state(app: S<'_>) -> IndicatorState {
-    indicator(&app)
+pub fn indicator_state(app: S<'_>) -> CmdResult<IndicatorState> {
+    let _permit = admit(app.inner(), "capture.indicator-state", CommandClass::Read)?;
+    Ok(indicator(&app))
 }
 
 /// Append one typed remark over an explicit target list (CAPTURE §4 text
@@ -221,6 +324,7 @@ pub fn add_note(
     text: String,
     target: Option<String>,
 ) -> CmdResult<bool> {
+    let _permit = admit(app.inner(), "capture.add-note", CommandClass::Mutation)?;
     app.touch()?;
     let targets = note_targets(&app, target.as_deref())?;
     let session = app.session_id();
@@ -244,6 +348,7 @@ pub fn set_rating(
     value: u8,
     target: Option<String>,
 ) -> CmdResult<bool> {
+    let _permit = admit(app.inner(), "capture.set-rating", CommandClass::Mutation)?;
     app.touch()?;
     let targets = note_targets(&app, target.as_deref())?;
     let session = app.session_id();
@@ -263,6 +368,11 @@ pub fn set_rating(
 /// session-scoped pencil undo stack (§8.5).
 #[tauri::command]
 pub fn report_activity(app: S<'_>) -> CmdResult<String> {
+    let _permit = admit(
+        app.inner(),
+        "capture.report-activity",
+        CommandClass::Mutation,
+    )?;
     app.touch()?;
     Ok(app.session_id().as_str().to_owned())
 }
@@ -385,6 +495,7 @@ pub fn add_stroke(
     hash: String,
     payload: StrokePayloadDto,
 ) -> CmdResult<StrokeCommitDto> {
+    let _permit = admit(app.inner(), "capture.add-stroke", CommandClass::Mutation)?;
     app.touch()?; // pen contact is activity (CAPTURE §2.1) — may rotate
     let session = app.session_id();
     let id = mint_stroke(&app.store, &session, &hash, payload)?;
@@ -403,7 +514,13 @@ pub fn add_stroke(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use photoproof_connectors::mock::{MockTranscriber, MockVad};
+    use photoproof_core::capture::{CaptureEngine, SystemClock};
     use photoproof_core::{Kind, Payload, RetractionSource, SessionContext, Source};
+    use tauri::Manager;
+    use tauri::test::{mock_builder, mock_context, noop_assets};
 
     use super::*;
     use crate::commands::journal::journal_entries;
@@ -437,6 +554,148 @@ mod tests {
             [4330, 2204, 820, 9],
             [4391, 2188, 770, 17],
         ]
+    }
+
+    #[test]
+    fn mic_worker_spawn_failure_rolls_the_engine_back_to_disarmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tauri_app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let app = Arc::new(App::init(dir.path().join("appdata")).unwrap());
+        tauri_app.manage(Arc::clone(&app));
+
+        let transcriber: &'static MockTranscriber =
+            Box::leak(Box::new(MockTranscriber::new("test-asr", 16_000)));
+        let vad = MockVad::new(16_000, Vec::new());
+        let mut engine = CaptureEngine::new(
+            SystemClock::new(),
+            transcriber,
+            Box::new(vad),
+            app.session_id(),
+        );
+        assert!(engine.arm().is_armed());
+        *app.capture.lock().expect("capture mutex") = Some(engine);
+        app.runtime
+            .capture_live
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let result = install_mic_worker(&app, tauri_app.handle(), |_| {
+            Err(std::io::Error::other("injected thread exhaustion"))
+        });
+
+        assert!(result.is_err());
+        assert!(
+            !app.capture
+                .lock()
+                .expect("capture mutex")
+                .as_ref()
+                .unwrap()
+                .mic()
+                .is_armed(),
+            "no worker means the engine cannot remain armed"
+        );
+        assert!(app.mic.lock().expect("mic mutex").is_none());
+        assert!(
+            !app.runtime
+                .capture_live
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(
+            app.tasks
+                .shutdown(std::time::Duration::from_secs(1))
+                .acknowledged
+        );
+    }
+
+    #[test]
+    fn mic_worker_is_committed_only_after_successful_initialization_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let tauri_app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let app = Arc::new(App::init(dir.path().join("appdata")).unwrap());
+        tauri_app.manage(Arc::clone(&app));
+
+        let transcriber: &'static MockTranscriber =
+            Box::leak(Box::new(MockTranscriber::new("test-asr", 16_000)));
+        let mut engine = CaptureEngine::new(
+            SystemClock::new(),
+            transcriber,
+            Box::new(MockVad::new(16_000, Vec::new())),
+            app.session_id(),
+        );
+        assert!(engine.arm().is_armed());
+        *app.capture.lock().expect("capture mutex") = Some(engine);
+
+        let active = install_mic_worker(&app, tauri_app.handle(), |_| {
+            Ok(crate::mic::MicHandle::active_test_handle())
+        })
+        .unwrap();
+
+        assert!(active);
+        assert!(
+            app.mic
+                .lock()
+                .expect("mic mutex")
+                .as_ref()
+                .is_some_and(crate::mic::MicHandle::is_active)
+        );
+        drop(app.mic.lock().expect("mic mutex").take());
+        app.capture
+            .lock()
+            .expect("capture mutex")
+            .as_mut()
+            .unwrap()
+            .disarm(&app.store);
+        assert!(
+            app.tasks
+                .shutdown(std::time::Duration::from_secs(1))
+                .acknowledged
+        );
+    }
+
+    #[test]
+    fn already_finished_worker_is_rejected_and_engine_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let tauri_app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let app = Arc::new(App::init(dir.path().join("appdata")).unwrap());
+        tauri_app.manage(Arc::clone(&app));
+
+        let transcriber: &'static MockTranscriber =
+            Box::leak(Box::new(MockTranscriber::new("test-asr", 16_000)));
+        let mut engine = CaptureEngine::new(
+            SystemClock::new(),
+            transcriber,
+            Box::new(MockVad::new(16_000, Vec::new())),
+            app.session_id(),
+        );
+        assert!(engine.arm().is_armed());
+        *app.capture.lock().expect("capture mutex") = Some(engine);
+
+        let error = install_mic_worker(&app, tauri_app.handle(), |_| {
+            Ok(crate::mic::MicHandle::finished_test_handle())
+        })
+        .expect_err("finished worker cannot acknowledge armed");
+
+        assert!(error.to_string().contains("exited before armed"));
+        assert!(app.mic.lock().expect("mic mutex").is_none());
+        assert!(
+            !app.capture
+                .lock()
+                .expect("capture mutex")
+                .as_ref()
+                .unwrap()
+                .mic()
+                .is_armed()
+        );
+        assert!(
+            app.tasks
+                .shutdown(std::time::Duration::from_secs(1))
+                .acknowledged
+        );
     }
 
     /// The journal-panel composer (BACKLOG "compose entries from the

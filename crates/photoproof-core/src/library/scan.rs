@@ -30,7 +30,10 @@ use super::exclusions::{
     MAX_FILE_BYTES, classify_extension, is_excluded_dir_name, is_excluded_file_name,
 };
 use super::ingest::{self, PRIORITY_SCAN};
-use super::{CancelFlag, Library, LibraryError, hashing, mtime_ns_of, paths, rel_path_str};
+use super::{
+    ActivePathMatch, CancelFlag, Library, LibraryError, PauseToken, hashing, mtime_ns_of, paths,
+    rel_path_str,
+};
 
 /// Clock-shift confirmation sample size (§7.3).
 const CLOCK_SHIFT_SAMPLE: usize = 16;
@@ -63,6 +66,12 @@ pub struct ScanOptions {
     /// preceding it, and emission coalescing stays the CALLER's policy —
     /// no event discipline leaks into the core.
     pub discovered: Option<Arc<AtomicU64>>,
+    /// Optional file-hashing worker ceiling for a desktop resource profile.
+    pub max_concurrency: Option<usize>,
+    /// Manual processing Pause. This is deliberately distinct from cancel:
+    /// a paused walk retains its in-memory `seen` set and resumes before stale
+    /// inference, so absence is never inferred from a partial traversal.
+    pub pause: Option<PauseToken>,
 }
 
 impl Default for ScanOptions {
@@ -71,6 +80,8 @@ impl Default for ScanOptions {
             priority: PRIORITY_SCAN,
             cancel: None,
             discovered: None,
+            max_concurrency: None,
+            pause: None,
         }
     }
 }
@@ -101,6 +112,10 @@ pub struct ScanReport {
     pub updated: usize,
     /// Path rows inserted/reactivated for already-known hashes.
     pub relinked: usize,
+    /// Retention-cleaned ingest passes returned to `pending` by relinks.
+    /// This makes S5's self-heal observable without adding a second repair
+    /// loop.
+    pub retention_repairs_revived: usize,
     pub new_images: usize,
     /// §1.3 in-place overwrites.
     pub superseded: usize,
@@ -113,6 +128,10 @@ pub struct ScanReport {
     pub skipped_non_utf8: usize,
     pub skipped_oversize: usize,
     pub io_errors: usize,
+    /// At least one directory entry could not be enumerated, so absence was
+    /// not authoritative and the scan deliberately skipped stale/move
+    /// inference. A later healthy scan retries the comparison.
+    pub stale_inference_suppressed: bool,
     pub clock_shift: Option<ClockShiftReport>,
     pub cancelled: bool,
 }
@@ -140,6 +159,10 @@ struct WalkedFile {
 struct Mismatch {
     file: WalkedFile,
     row: LoadedRow,
+    /// The row was found by a filesystem-proven case alias rather than exact
+    /// path spelling. A same-content result must therefore recase the row,
+    /// not merely update its stat fields.
+    case_alias: bool,
 }
 
 enum HashJob {
@@ -164,21 +187,37 @@ impl HashJob {
 }
 
 /// The §1.2 file-level hashing pool: `min(physical_cores, 8)`.
-fn hash_pool() -> &'static rayon::ThreadPool {
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(hashing::hash_pool_size())
-            .thread_name(|i| format!("pp-hash-{i}"))
-            .build()
-            .expect("hash pool")
-    })
+fn hash_pool(max_concurrency: Option<usize>) -> &'static rayon::ThreadPool {
+    static POOLS: OnceLock<Vec<rayon::ThreadPool>> = OnceLock::new();
+    let max = hashing::hash_pool_size().max(1);
+    let pools = POOLS.get_or_init(|| {
+        (1..=max)
+            .map(|width| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(width)
+                    .thread_name(move |i| format!("pp-hash-{width}-{i}"))
+                    .build()
+                    .expect("hash pool")
+            })
+            .collect()
+    });
+    let width = max_concurrency.unwrap_or(max).clamp(1, max);
+    &pools[width - 1]
 }
 
 fn cancelled(opts: &ScanOptions) -> bool {
     opts.cancel
         .as_ref()
         .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn wait_until_resumed(opts: &ScanOptions) -> bool {
+    if cancelled(opts) {
+        return false;
+    }
+    opts.pause
+        .as_ref()
+        .is_none_or(|pause| pause.wait_until_resumed(opts.cancel.as_deref()))
 }
 
 pub(crate) fn scan_root(
@@ -191,6 +230,10 @@ pub(crate) fn scan_root(
     let tolerance_ns = lib.mtime_tolerance_ns(volume.fs_type.as_deref());
     let scan_start = lib.now();
     let mut report = ScanReport::default();
+    if !wait_until_resumed(opts) {
+        report.cancelled = true;
+        return Ok(report);
+    }
 
     // 1. Load all active path rows of this root into a map.
     let mut known: HashMap<String, LoadedRow> = {
@@ -241,10 +284,15 @@ pub(crate) fn scan_root(
             }
         });
     for entry in walker {
+        if !wait_until_resumed(opts) {
+            report.cancelled = true;
+            return Ok(report);
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(_) => {
                 report.io_errors += 1;
+                report.stale_inference_suppressed = true;
                 continue;
             }
         };
@@ -263,10 +311,14 @@ pub(crate) fn scan_root(
             report.excluded_files += 1;
             continue;
         }
-        let meta = match entry.metadata() {
+        let meta = match lib.fs_semantics.metadata(entry.path()) {
             Ok(m) => m,
             Err(_) => {
                 report.io_errors += 1;
+                // The entry was indexable but could not be statted. It may
+                // correspond to an active row in the opening snapshot, so the
+                // walk is not authoritative evidence of absence.
+                report.stale_inference_suppressed = true;
                 continue;
             }
         };
@@ -323,25 +375,97 @@ pub(crate) fn scan_root(
             Some(row) => mismatches.push(Mismatch {
                 file,
                 row: row.clone(),
+                case_alias: false,
             }),
             None => unknown.push(file),
         }
     }
 
     // 3. Uniform clock-shift detection — BEFORE any mismatch re-hashing.
-    if let Some(shift) = detect_clock_shift(lib, loaded_count, &mut mismatches, &mut report)? {
+    if let Some(shift) = detect_clock_shift(lib, loaded_count, &mut mismatches, &mut report, opts)?
+    {
         report.clock_shift = Some(shift);
     }
 
-    // 4. Unknown paths: the §5 re-registration fast path first (a
+    // 4. Unknown spellings first ask the live filesystem whether an active
+    //    case-folded row aliases this exact directory entry. This is required
+    //    for default APFS reconciliation: WalkDir sees only the new spelling,
+    //    while the startup snapshot still holds the old one. The proof is
+    //    deliberately per-entry, so a case-sensitive volume containing both
+    //    `a.jpg` and `A.jpg` retains two independent claims.
+    //
+    //    If no active alias exists, try the §5 re-registration fast path (a
     //    `root-removed` stale row at the same location with matching
     //    size+mtime relinks with zero hashing).
     let mut to_hash: Vec<HashJob> = Vec::new();
     let mut relinked_hashes: Vec<ContentHash> = Vec::new();
     for file in unknown {
-        if cancelled(opts) {
+        if !wait_until_resumed(opts) {
             report.cancelled = true;
             return Ok(report);
+        }
+        match lib.active_path_match(&volume.volume_id, &file.rel, &file.abs)? {
+            Some(ActivePathMatch::CaseAlias(row)) => {
+                // Prevent phase 6 from staling the same row under its old
+                // snapshot key after we have recased it.
+                seen.insert(row.rel_path.clone());
+                let loaded = LoadedRow {
+                    path_id: row.path_id,
+                    size: row.size,
+                    mtime_ns: row.mtime_ns,
+                    image_hash: row.image_hash.as_str().to_owned(),
+                };
+                if loaded.size == file.size
+                    && (loaded.mtime_ns - file.mtime_ns).abs() <= tolerance_ns
+                {
+                    let conn = lib.db.lock().expect("poisoned");
+                    paths::recase_active(
+                        &conn,
+                        &loaded.path_id,
+                        Some(root_id),
+                        &file.rel,
+                        file.size,
+                        file.mtime_ns,
+                        lib.now(),
+                    )?;
+                    drop(conn);
+                    lib.bump_images_version();
+                    report.relinked += 1;
+                } else {
+                    to_hash.push(HashJob::Mismatch(Mismatch {
+                        file,
+                        row: loaded,
+                        case_alias: true,
+                    }));
+                }
+                continue;
+            }
+            Some(ActivePathMatch::Exact(row)) => {
+                // A watcher may have inserted the exact row after this scan's
+                // opening snapshot. Treat it as known instead of creating a
+                // duplicate claim.
+                let loaded = LoadedRow {
+                    path_id: row.path_id,
+                    size: row.size,
+                    mtime_ns: row.mtime_ns,
+                    image_hash: row.image_hash.as_str().to_owned(),
+                };
+                if loaded.size == file.size
+                    && (loaded.mtime_ns - file.mtime_ns).abs() <= tolerance_ns
+                {
+                    let conn = lib.db.lock().expect("poisoned");
+                    paths::touch_verified(&conn, &loaded.path_id, lib.now())?;
+                    report.fast_path += 1;
+                } else {
+                    to_hash.push(HashJob::Mismatch(Mismatch {
+                        file,
+                        row: loaded,
+                        case_alias: false,
+                    }));
+                }
+                continue;
+            }
+            None => {}
         }
         if let Some(stale) = lib.reactivatable_row(
             &volume.volume_id,
@@ -352,7 +476,10 @@ pub(crate) fn scan_root(
         )? {
             {
                 let conn = lib.db.lock().expect("poisoned");
-                paths::reactivate(&conn, &stale.path_id, root_id, lib.now())?;
+                let now = lib.now();
+                paths::reactivate(&conn, &stale.path_id, root_id, now)?;
+                report.retention_repairs_revived +=
+                    ingest::revive_retention_cleaned(&conn, &stale.image_hash, now)?;
             }
             // Seam 1 (AUDIT-2026-07-07 S3): reactivation is a relink — the
             // image re-enters the grid's slice — so it advances the version
@@ -372,19 +499,30 @@ pub(crate) fn scan_root(
     //    sequential.
     to_hash.sort_by_key(HashJob::size);
     for batch in to_hash.chunks(HASH_BATCH) {
-        if cancelled(opts) {
+        if !wait_until_resumed(opts) {
             report.cancelled = true;
             return Ok(report);
         }
-        let hashed: Vec<std::io::Result<(ContentHash, u64)>> = hash_pool().install(|| {
-            batch
-                .par_iter()
-                .map(|j| hashing::hash_file(j.abs()))
-                .collect()
-        });
+        let hashed: Vec<std::io::Result<Option<(ContentHash, u64)>>> =
+            hash_pool(opts.max_concurrency).install(|| {
+                batch
+                    .par_iter()
+                    .map(|j| {
+                        hashing::hash_file_controlled(
+                            j.abs(),
+                            opts.cancel.as_deref(),
+                            opts.pause.as_ref(),
+                        )
+                    })
+                    .collect()
+            });
         for (job, result) in batch.iter().zip(hashed) {
             let (hash, hashed_size) = match result {
-                Ok(h) => h,
+                Ok(Some(h)) => h,
+                Ok(None) => {
+                    report.cancelled = true;
+                    return Ok(report);
+                }
                 Err(e) => {
                     // Vanished or unreadable mid-scan: transient; the next
                     // scan or watcher event recovers.
@@ -398,14 +536,29 @@ pub(crate) fn scan_root(
                 HashJob::Mismatch(m) => {
                     if hash.as_str() == m.row.image_hash {
                         let conn = lib.db.lock().expect("poisoned");
-                        paths::update_size_mtime(
-                            &conn,
-                            &m.row.path_id,
-                            hashed_size as i64,
-                            m.file.mtime_ns,
-                            lib.now(),
-                        )?;
-                        report.updated += 1;
+                        if m.case_alias {
+                            paths::recase_active(
+                                &conn,
+                                &m.row.path_id,
+                                Some(root_id),
+                                &m.file.rel,
+                                hashed_size as i64,
+                                m.file.mtime_ns,
+                                lib.now(),
+                            )?;
+                            drop(conn);
+                            lib.bump_images_version();
+                            report.relinked += 1;
+                        } else {
+                            paths::update_size_mtime(
+                                &conn,
+                                &m.row.path_id,
+                                hashed_size as i64,
+                                m.file.mtime_ns,
+                                lib.now(),
+                            )?;
+                            report.updated += 1;
+                        }
                     } else {
                         lib.supersede_tx(
                             &m.row.path_id,
@@ -422,7 +575,7 @@ pub(crate) fn scan_root(
                 }
                 HashJob::New(f) => {
                     if lib.image_exists(&hash)? {
-                        lib.relink_tx(
+                        report.retention_repairs_revived += lib.relink_tx(
                             &hash,
                             &volume.volume_id,
                             Some(root_id),
@@ -451,8 +604,12 @@ pub(crate) fn scan_root(
     }
 
     // 6. Loaded rows not seen → stale (`deleted`), one transaction.
+    if !wait_until_resumed(opts) {
+        report.cancelled = true;
+        return Ok(report);
+    }
     known.retain(|rel, _| !seen.contains(rel));
-    if !known.is_empty() {
+    if !known.is_empty() && !report.stale_inference_suppressed {
         let stale_since = lib.now().to_rfc3339();
         let mut conn = lib.db.lock().expect("poisoned");
         let tx = conn.transaction()?;
@@ -485,6 +642,10 @@ pub(crate) fn scan_root(
     // 8. Batch `last_verified_at` for fast-path rows (one transaction per few
     //    thousand rows; per-row writes would dominate the scan).
     for chunk in fast_rows.chunks(VERIFY_BATCH) {
+        if !wait_until_resumed(opts) {
+            report.cancelled = true;
+            return Ok(report);
+        }
         let now = lib.now().to_rfc3339();
         let mut conn = lib.db.lock().expect("poisoned");
         let tx = conn.transaction()?;
@@ -515,6 +676,7 @@ fn detect_clock_shift(
     loaded_count: usize,
     mismatches: &mut Vec<Mismatch>,
     report: &mut ScanReport,
+    opts: &ScanOptions,
 ) -> Result<Option<ClockShiftReport>, LibraryError> {
     if loaded_count == 0 || mismatches.is_empty() {
         return Ok(None);
@@ -522,6 +684,12 @@ fn detect_clock_shift(
     // Group size-unchanged mismatches by their round-hour delta (±2 s).
     let mut groups: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, m) in mismatches.iter().enumerate() {
+        // A case-only recase is a path-identity transition, not evidence for
+        // a root-wide timestamp shift. It must reach the normal hash/apply
+        // branch so the stored spelling is converged.
+        if m.case_alias {
+            continue;
+        }
         if m.file.size != m.row.size {
             continue;
         }
@@ -547,12 +715,20 @@ fn detect_clock_shift(
     sample.truncate(CLOCK_SHIFT_SAMPLE);
     let mut samples_hashed = 0;
     for &i in &sample {
+        if !wait_until_resumed(opts) {
+            report.cancelled = true;
+            return Ok(None);
+        }
         let m = &mismatches[i];
         samples_hashed += 1;
         report.rehashed += 1;
         let confirmed = matches!(
-            hashing::hash_file(&m.file.abs),
-            Ok((h, _)) if h.as_str() == m.row.image_hash
+            hashing::hash_file_controlled(
+                &m.file.abs,
+                opts.cancel.as_deref(),
+                opts.pause.as_ref()
+            ),
+            Ok(Some((h, _))) if h.as_str() == m.row.image_hash
         );
         if !confirmed {
             // Any sample mismatch aborts the shortcut: ordinary per-file

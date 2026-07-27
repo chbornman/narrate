@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use photoproof_connectors::mock::{StubHttpServer, StubResponse};
 use photoproof_core::runtime::download::sha256_bytes;
 use photoproof_core::runtime::{
-    Acceptances, DownloadError, DownloadManager, FileEntry, License, ModelEntry, NoPace, Pacer,
-    RuntimeBus, RuntimeEvent,
+    Acceptances, DownloadError, DownloadManager, DownloadPhase, FileEntry, License, ModelEntry,
+    NoPace, Pacer, RuntimeBus, RuntimeEvent,
 };
 
 fn file_bytes(len: usize, seed: u8) -> Vec<u8> {
@@ -309,6 +309,64 @@ fn corrupt_byte_complete_part_restarts_clean_once() {
     );
 }
 
+/// An unindexed final file is not trusted by byte length. It may be a crash
+/// remnant or same-length disk corruption; hash it before adopting it into a
+/// newly committed installed index.
+#[test]
+fn unindexed_same_length_final_is_rehashed_before_install_commit() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(80_000, 7);
+    let model = model_with(&server, vec![("model.gguf", &payload)], false);
+    server.route(
+        "/model.gguf",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("test-model")).unwrap();
+    std::fs::write(
+        dir.path().join("test-model/model.gguf"),
+        file_bytes(80_000, 201),
+    )
+    .unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+
+    manager
+        .download_model(&model, 1, &accepted(&model), &mut NoPace, &NO_CANCEL, NOW)
+        .expect("same-length corrupt final is replaced");
+
+    assert_eq!(server.requests_for("/model.gguf").len(), 1);
+    assert_eq!(
+        std::fs::read(dir.path().join("test-model/model.gguf")).unwrap(),
+        payload
+    );
+    assert!(manager.is_installed("test-model"));
+}
+
+#[test]
+fn discard_partial_reclaims_only_part_files() {
+    let server = StubHttpServer::start();
+    let payload = file_bytes(10, 7);
+    let model = model_with(
+        &server,
+        vec![("nested/a.bin", &payload), ("nested/b.bin", &payload)],
+        false,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("test-model/nested")).unwrap();
+    std::fs::write(dir.path().join("test-model/nested/a.bin.part"), b"partial").unwrap();
+    std::fs::write(dir.path().join("test-model/nested/b.bin"), &payload).unwrap();
+    let manager = DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new());
+
+    assert_eq!(manager.discard_partial(&model).unwrap(), 7);
+    assert!(!dir.path().join("test-model/nested/a.bin.part").exists());
+    assert!(
+        dir.path().join("test-model/nested/b.bin").exists(),
+        "final artifacts are never discarded"
+    );
+}
+
 /// §5.2: a model is installed only when ALL its files verify; files
 /// download one at a time, in manifest order.
 #[test]
@@ -396,6 +454,53 @@ fn pacer_seam_is_consulted_with_chunk_sizes() {
         calls.iter().sum::<usize>(),
         payload.len(),
         "every byte passed through the pacer"
+    );
+}
+
+#[test]
+fn successful_download_reports_transport_verify_and_install_in_order() {
+    struct Recording {
+        phases: Arc<Mutex<Vec<DownloadPhase>>>,
+    }
+    impl Pacer for Recording {
+        fn pace(&mut self, _just_transferred: usize) {}
+
+        fn phase(&mut self, phase: DownloadPhase) {
+            self.phases.lock().unwrap().push(phase);
+        }
+    }
+
+    let server = StubHttpServer::start();
+    let payload = file_bytes(96_000, 44);
+    let model = model_with(&server, vec![("model.gguf", &payload)], false);
+    server.route(
+        "/model.gguf",
+        StubResponse::RangedFile {
+            file: payload.clone(),
+        },
+    );
+    let phases = Arc::new(Mutex::new(Vec::new()));
+    let dir = tempfile::tempdir().unwrap();
+    DownloadManager::new(dir.path().to_path_buf(), RuntimeBus::new())
+        .download_model(
+            &model,
+            1,
+            &accepted(&model),
+            &mut Recording {
+                phases: Arc::clone(&phases),
+            },
+            &NO_CANCEL,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        *phases.lock().unwrap(),
+        vec![
+            DownloadPhase::Downloading,
+            DownloadPhase::Verifying,
+            DownloadPhase::Installing,
+        ],
+        "byte completion, integrity proof, and durable index publication are distinct phases"
     );
 }
 

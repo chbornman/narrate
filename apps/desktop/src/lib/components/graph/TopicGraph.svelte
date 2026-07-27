@@ -627,6 +627,7 @@
    * on the topic set or alpha, so this is reused across a topic add / blend move
    * without a refetch. */
   async function applyNeighbors(sc: ipc.GraphScope) {
+    const started = performance.now();
     // LOD super-nodes never carry semantic edges (see above): clear any stale
     // list and skip the fetch entirely.
     if (lodActive) {
@@ -645,6 +646,7 @@
     // immediately before this call, so it is the version this layout belongs to.
     const key = `${scopeKey(sc)}|v=${lastVectorsVersion}`;
     let graph = neighborCache.get(key);
+    const cacheStatus = graph === undefined ? "miss" : "hit";
     if (graph === undefined) {
       try {
         graph = await ipc.graphNeighbors(sc);
@@ -676,12 +678,23 @@
       }
       node.neighbors = edges.length > 0 ? edges : undefined;
     }
+    ipc.recordPerformance("graph", "read", performance.now() - started, true, {
+      itemCount: graph.length,
+      cacheStatus,
+    });
   }
 
   // -- affinity fetch + (re)seed ----------------------------------------------
   // Recomputed only when the topic SET, alpha, or scope changes (a topic-set or
   // alpha change is the DESIGN trigger; the rAF loop never calls this).
+  let performanceGeneration = 0;
+  let settleJourney:
+    | { generation: number; started: number; itemCount: number }
+    | null = null;
+
   async function recompute() {
+    const journeyStarted = performance.now();
+    const journeyGeneration = ++performanceGeneration;
     const sc = scope();
     // The scope refused (no folder/collection source, no result-set variant to
     // name): show the calm refusal affordance instead of computing over the WHOLE
@@ -745,6 +758,10 @@
       }
     }
     const elapsed = Math.round(performance.now() - t0);
+    ipc.recordPerformance("graph", "cache-lookup", elapsed, true, {
+      itemCount: report.images.length,
+      cacheStatus: cached === undefined ? "miss" : "hit",
+    });
     visualReady = report.visual_ready;
     annotationReady = report.annotation_ready;
     // Seam 1: record the vector-store version this layout was computed against, so
@@ -782,7 +799,15 @@
     // instead of oozing across the canvas from a random spiral. Applies to both
     // full-detail nodes and LOD super-nodes (a super-node carries its bin's mean
     // affinity, so it lands where the cluster it stands for belongs).
+    const layoutStarted = performance.now();
     computeStaticLayout(nodes, anchors, { ringRadius: forceConfig().ringRadius });
+    ipc.recordPerformance(
+      "graph",
+      "layout",
+      performance.now() - layoutStarted,
+      true,
+      { itemCount: nodes.length },
+    );
     nodeCount = nodes.length;
 
     // SEMANTIC-NEIGHBOR attraction: resolve each full-detail node's k-NN edges
@@ -809,7 +834,37 @@
     // The node/anchor SET (and its affinities) just changed, so the worker's
     // static mirror is stale: the next compute resyncs it before stepping.
     staticDirty = true;
+    settleJourney = {
+      generation: journeyGeneration,
+      started: journeyStarted,
+      itemCount: imageTotal,
+    };
     restartLoop();
+    requestAnimationFrame(() => {
+      if (journeyGeneration !== performanceGeneration) return;
+      const renderStarted = performance.now();
+      draw();
+      ipc.recordPerformance(
+        "graph",
+        "render",
+        performance.now() - renderStarted,
+        true,
+        { itemCount: nodeCount },
+      );
+      requestAnimationFrame(() => {
+        if (journeyGeneration !== performanceGeneration) return;
+        ipc.recordPerformance(
+          "graph",
+          "first-paint",
+          performance.now() - journeyStarted,
+          true,
+          {
+            itemCount: imageTotal,
+            cacheStatus: cached === undefined ? "miss" : "hit",
+          },
+        );
+      });
+    });
   }
 
   /** Boost the sim energy so the layout SETTLES fast then cools (founder
@@ -1074,6 +1129,19 @@
    * recompute point the design calls for. */
   function onSettled() {
     cancelAnimationFrame(raf);
+    if (
+      settleJourney !== null &&
+      settleJourney.generation === performanceGeneration
+    ) {
+      ipc.recordPerformance(
+        "graph",
+        "settle",
+        performance.now() - settleJourney.started,
+        true,
+        { itemCount: settleJourney.itemCount },
+      );
+      settleJourney = null;
+    }
     scheduleFieldRecompute();
   }
 
@@ -2340,6 +2408,7 @@
 
   // -- lifecycle --------------------------------------------------------------
   onMount(() => {
+    const mountStarted = performance.now();
     // Spin up the off-thread sim worker (PLAN-PERF.md P3) so the O(N^2) physics
     // stops blocking the UI main thread. FEATURE-DETECT Worker: an old webview or
     // the test/SSR env has none, and there the inline rAF loop (the v1 path) runs
@@ -2404,6 +2473,15 @@
       // is skipped entirely.
       if (restoreSnapshot()) {
         draw();
+        requestAnimationFrame(() => {
+          ipc.recordPerformance(
+            "graph",
+            "first-paint",
+            performance.now() - mountStarted,
+            true,
+            { itemCount: imageTotal, cacheStatus: "hit" },
+          );
+        });
         scheduleFieldRecompute();
         void loadSuggestions();
         // A snapshot saved while a half was still embedding restores a degraded

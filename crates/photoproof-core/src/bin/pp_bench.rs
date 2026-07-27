@@ -9,6 +9,12 @@
 //! Usage (scripts/bench.sh wraps the release build):
 //!   pp-bench ingest --files 2000 [--edge 4000] [--label "smb-test"]
 //!            [--source /path/to/real/folder] [--out bench-results.jsonl]
+//!   pp-bench grid-list --files 2000 --iterations 100
+//!            [--p99-budget-ms 50] [--out bench-results.jsonl]
+//!   pp-bench preview-serve --files 2000 --iterations 10
+//!            [--p99-budget-ms 10] [--out bench-results.jsonl]
+//!   pp-bench preview-generate --files 2000
+//!            [--p99-budget-ms 100] [--out bench-results.jsonl]
 //!
 //! Modes:
 //! - SYNTHETIC (default): a deterministic corpus of JPEGs is generated
@@ -20,10 +26,11 @@
 //!   the bench probe reports its volume as a system root, which
 //!   maybe_write_marker skips by rule, plus read-only belt.)
 //!
-//! Output schema (one JSON object per line, schema=1):
+//! Output schema (one JSON object per line, schema=2):
 //!   { schema, ts, label, scenario, mode, files, bytes,
 //!     scan_ms, drain_ms, total_ms, files_per_s, mb_per_s,
-//!     stages: [{stage, count, total_ms, mean_ms, max_ms}],
+//!     stages: [{stage, count, total_ms, mean_ms, p50_ms, p95_ms, p99_ms,
+//!               max_ms}],
 //!     host: {os, arch, cores} }
 //!
 //! Honest-numbers notes: run the RELEASE build (the dev profile's
@@ -41,17 +48,52 @@ use photoproof_core::library::{
     ProbedVolume, QueueOptions, RawlerExtractor, ScanOptions,
 };
 
+#[derive(Clone, Copy)]
+enum Scenario {
+    Ingest,
+    GridList,
+    PreviewGenerate,
+    PreviewServe,
+}
+
+impl Scenario {
+    fn parse(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("ingest") => Some(Self::Ingest),
+            Some("grid-list") => Some(Self::GridList),
+            Some("preview-generate") => Some(Self::PreviewGenerate),
+            Some("preview-serve") => Some(Self::PreviewServe),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ingest => "ingest",
+            Self::GridList => "grid-list",
+            Self::PreviewGenerate => "preview-generate",
+            Self::PreviewServe => "preview-serve",
+        }
+    }
+}
+
+fn usage() -> &'static str {
+    "usage: pp-bench <ingest|grid-list|preview-generate|preview-serve> \
+     [--files N] [--edge PX] [--source DIR] [--iterations N] \
+     [--p99-budget-ms N] [--label S] [--out FILE]"
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) != Some("ingest") {
-        eprintln!(
-            "usage: pp-bench ingest [--files N] [--edge PX] [--source DIR] [--label S] [--out FILE]"
-        );
+    let Some(scenario) = Scenario::parse(args.first().map(String::as_str)) else {
+        eprintln!("{}", usage());
         std::process::exit(2);
-    }
+    };
     let mut files: usize = 500;
     let mut edge: u32 = 3000;
     let mut source: Option<PathBuf> = None;
+    let mut iterations: usize = 100;
+    let mut p99_budget_ms: Option<f64> = None;
     let mut label = String::from("");
     let mut out = PathBuf::from("bench-results.jsonl");
     let mut it = args[1..].iter();
@@ -61,6 +103,8 @@ fn main() {
             "--files" => files = val().parse().expect("--files N"),
             "--edge" => edge = val().parse().expect("--edge PX"),
             "--source" => source = Some(PathBuf::from(val())),
+            "--iterations" => iterations = val().parse().expect("--iterations N"),
+            "--p99-budget-ms" => p99_budget_ms = Some(val().parse().expect("--p99-budget-ms N")),
             "--label" => label = val(),
             "--out" => out = PathBuf::from(val()),
             other => {
@@ -111,6 +155,7 @@ fn main() {
                 probe: Arc::new(probe),
                 placeholders: Arc::new(PlatformPlaceholderDetector),
                 extractor: Arc::new(RawlerExtractor),
+                ..Default::default()
             },
         )
         .expect("open library"),
@@ -119,7 +164,10 @@ fn main() {
         .register_root(&root_dir, Some("bench"))
         .expect("register root");
 
-    // ---- the measured section -------------------------------------------------
+    // Every scenario uses the same deterministic populated library. Ingest
+    // measures setup itself; grid-list and preview-serve deliberately begin
+    // only after the queue has settled so their numbers describe steady-state
+    // interaction rather than fixture construction.
     let t0 = Instant::now();
     let scan = lib.scan_root(&root, &ScanOptions::default()).expect("scan");
     let scan_ms = t0.elapsed().as_millis() as u64;
@@ -128,42 +176,141 @@ fn main() {
     let report = lib.process_queue(&QueueOptions::default()).expect("drain");
     let drain_ms = t1.elapsed().as_millis() as u64;
     let total_ms = t0.elapsed().as_millis() as u64;
-    // -----------------------------------------------------------------------------
 
     let file_count = scan.files_seen;
     let bytes: u64 = walk_bytes(&root_dir);
-    let secs = (total_ms as f64 / 1000.0).max(0.001);
-    let stages: Vec<String> = lib
-        .metrics_snapshot()
-        .iter()
-        .map(|s| {
-            format!(
-                r#"{{"stage":"{}","count":{},"total_ms":{:.1},"mean_ms":{:.2},"max_ms":{:.1}}}"#,
-                s.stage, s.count, s.total_ms, s.mean_ms, s.max_ms
+    let (line, observed_p99) = match scenario {
+        Scenario::Ingest => {
+            let secs = (total_ms as f64 / 1000.0).max(0.001);
+            let stages: Vec<String> = lib
+                .metrics_snapshot()
+                .iter()
+                .map(|s| {
+                    format!(
+                        r#"{{"stage":"{}","count":{},"total_ms":{:.1},"mean_ms":{:.2},"p50_ms":{:.3},"p95_ms":{:.3},"p99_ms":{:.3},"max_ms":{:.1}}}"#,
+                        s.stage,
+                        s.count,
+                        s.total_ms,
+                        s.mean_ms,
+                        s.p50_ms,
+                        s.p95_ms,
+                        s.p99_ms,
+                        s.max_ms
+                    )
+                })
+                .collect();
+            (
+                format!(
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"ingest","mode":"{}","files":{},"bytes":{},"scan_ms":{},"drain_ms":{},"total_ms":{},"queue_done":{},"queue_errors":{},"files_per_s":{:.1},"mb_per_s":{:.1},"stages":[{}],"host":{}}}"#,
+                    rfc3339_now(),
+                    label.replace('"', "'"),
+                    mode,
+                    file_count,
+                    bytes,
+                    scan_ms,
+                    drain_ms,
+                    total_ms,
+                    report.done,
+                    report.errors,
+                    file_count as f64 / secs,
+                    bytes as f64 / 1_000_000.0 / secs,
+                    stages.join(","),
+                    host_json(),
+                ),
+                None,
             )
-        })
-        .collect();
-    let line = format!(
-        r#"{{"schema":1,"ts":"{}","label":"{}","scenario":"ingest","mode":"{}","files":{},"bytes":{},"scan_ms":{},"drain_ms":{},"total_ms":{},"queue_done":{},"queue_errors":{},"files_per_s":{:.1},"mb_per_s":{:.1},"stages":[{}],"host":{{"os":"{}","arch":"{}","cores":{}}}}}"#,
-        rfc3339_now(),
-        label.replace('"', "'"),
-        mode,
-        file_count,
-        bytes,
-        scan_ms,
-        drain_ms,
-        total_ms,
-        report.done,
-        report.errors,
-        file_count as f64 / secs,
-        bytes as f64 / 1_000_000.0 / secs,
-        stages.join(","),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(0),
-    );
+        }
+        Scenario::GridList => {
+            let mut samples = Vec::with_capacity(iterations);
+            let mut rows = 0usize;
+            for _ in 0..iterations {
+                let started = Instant::now();
+                let listed = lib.list_folder(&root, "").expect("list folder");
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                rows = listed.len();
+                std::hint::black_box(listed);
+            }
+            let (p50, p99, max) = latency_summary(&mut samples);
+            (
+                format!(
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"grid-list","mode":"{}","files":{},"rows":{},"iterations":{},"p50_ms":{:.4},"p99_ms":{:.4},"max_ms":{:.4},"host":{}}}"#,
+                    rfc3339_now(),
+                    label.replace('"', "'"),
+                    mode,
+                    file_count,
+                    rows,
+                    iterations,
+                    p50,
+                    p99,
+                    max,
+                    host_json(),
+                ),
+                Some(p99),
+            )
+        }
+        Scenario::PreviewGenerate => {
+            let stages = lib.metrics_snapshot();
+            let preview = stages
+                .iter()
+                .find(|stage| stage.stage == "preview_pass")
+                .expect("preview stage");
+            (
+                format!(
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"preview-generate","mode":"{}","files":{},"bytes":{},"completed":{},"errors":{},"p50_ms":{:.3},"p95_ms":{:.3},"p99_ms":{:.3},"max_ms":{:.3},"host":{}}}"#,
+                    rfc3339_now(),
+                    label.replace('"', "'"),
+                    mode,
+                    file_count,
+                    bytes,
+                    preview.count,
+                    report.errors,
+                    preview.p50_ms,
+                    preview.p95_ms,
+                    preview.p99_ms,
+                    preview.max_ms,
+                    host_json(),
+                ),
+                Some(preview.p99_ms),
+            )
+        }
+        Scenario::PreviewServe => {
+            let listed = lib.list_folder(&root, "").expect("list folder");
+            let mut samples = Vec::with_capacity(iterations.saturating_mul(listed.len()));
+            let mut served_bytes = 0u64;
+            for _ in 0..iterations {
+                for image in &listed {
+                    let file = photoproof_core::library::artifact_path(
+                        lib.cache_dir(),
+                        &image.hash,
+                        photoproof_core::library::ArtifactKind::Thumb,
+                    );
+                    let started = Instant::now();
+                    let payload = std::fs::read(&file)
+                        .unwrap_or_else(|error| panic!("serve {}: {error}", file.display()));
+                    samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                    served_bytes = served_bytes.saturating_add(payload.len() as u64);
+                    std::hint::black_box(payload);
+                }
+            }
+            let (p50, p99, max) = latency_summary(&mut samples);
+            (
+                format!(
+                    r#"{{"schema":2,"ts":"{}","label":"{}","scenario":"preview-serve","mode":"{}","files":{},"operations":{},"served_bytes":{},"p50_ms":{:.4},"p99_ms":{:.4},"max_ms":{:.4},"host":{}}}"#,
+                    rfc3339_now(),
+                    label.replace('"', "'"),
+                    mode,
+                    file_count,
+                    samples.len(),
+                    served_bytes,
+                    p50,
+                    p99,
+                    max,
+                    host_json(),
+                ),
+                Some(p99),
+            )
+        }
+    };
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -172,17 +319,46 @@ fn main() {
     writeln!(f, "{line}").expect("append result");
     println!("{line}");
     eprintln!(
-        "\n{} files, {:.1} MB in {:.1}s — scan {:.1}s, drain {:.1}s → {:.1} files/s, {:.1} MB/s\nappended to {}",
-        file_count,
-        bytes as f64 / 1_000_000.0,
-        total_ms as f64 / 1000.0,
-        scan_ms as f64 / 1000.0,
-        drain_ms as f64 / 1000.0,
-        file_count as f64 / secs,
-        bytes as f64 / 1_000_000.0 / secs,
+        "{}: {file_count} files; appended result to {}",
+        scenario.name(),
         out.display()
     );
     let _ = std::fs::remove_dir_all(&tmp);
+    if let (Some(observed), Some(budget)) = (observed_p99, p99_budget_ms)
+        && observed > budget
+    {
+        eprintln!(
+            "{} p99 {:.4} ms exceeds {:.4} ms budget",
+            scenario.name(),
+            observed,
+            budget
+        );
+        std::process::exit(1);
+    }
+}
+
+fn latency_summary(samples: &mut [f64]) -> (f64, f64, f64) {
+    assert!(
+        !samples.is_empty(),
+        "latency scenario needs at least one sample"
+    );
+    samples.sort_by(f64::total_cmp);
+    let at = |percentile: f64| {
+        let index = ((samples.len() - 1) as f64 * percentile).round() as usize;
+        samples[index]
+    };
+    (at(0.50), at(0.99), samples[samples.len() - 1])
+}
+
+fn host_json() -> String {
+    format!(
+        r#"{{"os":"{}","arch":"{}","cores":{}}}"#,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
+    )
 }
 
 /// Deterministic corpus: per-index seeded gradient JPEGs — identical bytes

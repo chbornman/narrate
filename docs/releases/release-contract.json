@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "database": {
+    "schema": 16,
+    "migrationsVerified": true,
+    "downgradeSupported": false,
+    "compatibility": "This build opens schema 16 and migrates older supported databases forward only. It refuses any database stamped newer than schema 16."
+  },
+  "rollback": "Withdraw the rollout offer, restore the pre-upgrade backup if a schema migration occurred, and ship the previous known-good code as a newly signed higher patch version. Never offer an unsigned or lower-version artifact."
+}

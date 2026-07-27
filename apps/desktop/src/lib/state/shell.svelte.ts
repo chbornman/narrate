@@ -149,6 +149,8 @@ export class ShellSlice {
   lastPulseAt = 0;
   ingest = $state<IngestStatus>({
     running: false,
+    processingPaused: false,
+    processingIntensity: "balanced",
     done: 0,
     total: 0,
     errors: 0,

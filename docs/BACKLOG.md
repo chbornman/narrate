@@ -7,38 +7,800 @@ loop. The vision filter applies to every line (reviewing/processing = core;
 managing = off-thesis). Shipped items move to LANDED.md verbatim — only open
 work lives here.
 
+## Desktop application foundation audit - 2026-07-26
+
+Read-only sweep of startup, shutdown, background work, roots/volumes,
+previews/caches/vectors, persisted control files, model/runtime convergence,
+degraded-state UX, observability, packaging, and release operations. Overall:
+the domain/core repair primitives are strong, but the desktop lifecycle is
+implicit and needs one coordinator before the app can reliably promise
+"opens quickly, tells the truth, heals itself, and closes cleanly."
+
+Existing items are PART OF this program and stay canonical where already
+recorded (S5 is now landed; S6/D4/D6/D7/D8 retain their current statuses);
+Dogfood round 5's backend-aware model offer,
+terminal 100%-download settlement, ingest intensity controls, unresponsive-
+volume startup hang, and CUDA/provider observability. Do not create parallel
+implementations when packetizing this section.
+
+### P0 - runtime state machines that can strand required services
+
+- [x] **Make `SupervisorHost` truly converge desired runtime state**
+  - Track a comparable desired spec/model id for each ASR/LLM slot.
+  - Implement `Run A -> Run B`, `Run -> dark -> Run`, binary
+    disappear/reappear, remove/reinstall, tier/config changes, and retired-slot
+    cleanup. Today `apply()` stops a supervisor but leaves the occupied slot,
+    and only creates when `slot.is_none()`, so a later valid plan can remain
+    stopped forever. `apps/desktop/src-tauri/src/supervisors.rs:267-381`.
+  - Done means a shell-level transition-matrix test pins every transition and
+    proves changed launch arguments/models replace the old child after a
+    bounded stop.
+  - Delivered 2026-07-27: each role retains comparable desired/current
+    `SupervisorTarget` state (model id, program, and argv), converges changed
+    targets by bounded retirement/replacement, clears dark slots, and recreates
+    roles after binary reappearance. `supervisors.rs` pins Run A -> Run B,
+    same-model launch-spec change, Run -> dark -> Run, binary disappearance/
+    reappearance, explicit restart, terminal shutdown, and bounded ticker join.
+
+- [x] **Make "Restart runtime" perform a real restart**
+  - Call the core supervisor fresh-budget restart, restart/rebuild failed
+    embedders, clear terminal backoff where appropriate, and re-apply the
+    current plan. It must not merely clear download errors while Settings says
+    "Restarted." `apps/desktop/src-tauri/src/runtime.rs:966-972`;
+    `apps/desktop/src/lib/settings/SettingsApp.svelte:560-569`.
+  - Done means a five-crash `Failed -> restart -> Spawning -> Ready` acceptance
+    test exists for child supervisors and an embedder load failure has an
+    equivalent retry-now path.
+  - Delivered 2026-07-27: `RuntimeHost::restart_runtime` clears download
+    errors, gives every desired supervisor a fresh attempt budget, retries only
+    failed embedder slots, and reapplies the current plan. Core acceptance
+    `s8_1_rolling_window_budget_then_failed_then_fresh_budget_on_restart_action`
+    proves crash-budget exhaustion and `Failed -> Spawning -> Ready`;
+    `explicit_restart_resets_only_failed_embedder_slots` pins the embedder path.
+
+- [x] **Stop offering the unhosted CUDA-default fp16 CLIP artifact now**
+  - This is the immediate safety half of D8: either remove
+    `ViT-H-14-378-quickgelu__dfn5b-fp16` from public tiers/default selection or
+    make pin validation reject its `local-fp16-convert` staged-only revision.
+    Re-enable only after an immutable hosted pin is real. Current CUDA config
+    selects a fresh-install download that is knowingly unavailable.
+    `crates/photoproof-connectors/src/config.rs:386-408`;
+    `crates/photoproof-core/src/runtime/manifest.rs:523-568`.
+  - Delivered 2026-07-27: the hosted int8 DFN5B artifact is the public default.
+    The fp16 recipe remains staged with no offered tiers, and
+    `local-fp16-convert` deliberately fails immutable-pin validation.
+    `fp16_clip_is_staged_unpinned_and_offered_at_no_tier` pins all three facts.
+
+### P1 - one explicit application lifecycle
+
+- [~] **Introduce an `AppLifecycle` coordinator and show a usable window early**
+  - Model at least `Cold -> OpeningData -> Usable -> Reconciling -> Ready`,
+    plus independent degraded states for database, roots/volumes, runtime,
+    previews, vectors, and settings.
+  - Keep only the minimum database/open contract before `Usable`; move volume
+    probes, watcher creation, hardware detection, native VAD/model session
+    construction, and integrity walks off Tauri's setup thread.
+    `apps/desktop/src-tauri/src/lib.rs:162-210`;
+    `apps/desktop/src-tauri/src/state.rs:157-282`.
+  - The already-recorded unresponsive-network-volume launch item is the first
+    acceptance case. Done means the main window maps promptly with an offline
+    root while a hard/unresponsive mount probe remains blocked or times out.
+  - Delivered deterministic slice 2026-07-27: `AppLifecycle` now models
+    `Cold -> OpeningData -> Usable -> Reconciling -> Ready -> Stopping` with
+    independent subsystem health. `App::init` opens only minimum durable state
+    before `Usable`; hardware/model/capture construction, volume/watcher
+    restoration, integrity work, and pumps start afterward as owned tasks.
+    `blocked_startup_volume_probe_does_not_hold_the_usable_barrier` injects a
+    probe that remains blocked and proves the app stays usable while the work
+    remains observable. Residual acceptance is a real native hard/unresponsive
+    network-mount launch receipt proving actual window-map latency; do not
+    round this item up without that platform drill.
+
+- [x] **Give frontend boot explicit loading, degraded, retry, and fatal states**
+  - Stop fire-and-forget `void ui.init()` from silently stranding a partial UI.
+    Catch boot-critical failures, retain the successful subsystem snapshots,
+    show a useful recovery action, and parallelize independent post-first-paint
+    reads. `apps/desktop/src/App.svelte:210-267`;
+    `apps/desktop/src/lib/state/app.svelte.ts:458-529`.
+  - Done means injected failures for settings, roots, initial folder, ingest
+    status, runtime, collections, and topics each render an honest state and
+    recover without relaunch where recovery is possible.
+  - Apply the same contract to the Settings window: its current `void
+    refresh()` serially loads roots, runtime, settings, and cache, aborts the
+    rest on the first error, and has no explicit recovery state.
+  - Add monotone snapshot revisions or equivalent arbitration between cold
+    reads and live settings/roots/collections/runtime events. A slower launch
+    response must never overwrite a newer event-delivered snapshot.
+  - Settings boot now arbitrates its own cold reads against live roots,
+    settings, and runtime events, but the backend payloads still carry no
+    monotone revision. A failed Tauri event subscription can only be logged,
+    and cache changes made by another window have no live event at all; add
+    revisioned snapshots/subscription health before treating cross-window
+    convergence as proven.
+  - Treat event-listener installation as boot health in both windows. A
+    rejected subscription currently leaves that window permanently stale
+    while only logging or ignoring the error; expose retry and backend
+    revision/catch-up semantics instead.
+  - Settings post-boot mutations still use `void` async event handlers without
+    one action-error/single-flight surface. A rejected add/remove folder,
+    cache clear, model operation, export, or rebuild can therefore become an
+    unhandled rejection even though boot itself now settles safely. Give these
+    actions the same explicit pending/failed/retry discipline.
+  - Make topic-to-collection bake one transaction or compensate on failure.
+    It currently creates the collection before all member hashes are parsed
+    and added, so invalid input or a later add failure can leave an empty,
+    unannounced collection. Topic suggestions also suppress some collection
+    list/member read failures and return incomplete healthy-looking results.
+  - Make folder navigation commit intentionally: `openFolder` currently
+    changes scope/root before `list_folder`, then replaces items before
+    `folder_tree`, exposing a partially advanced view when either read fails.
+  - Distinguish an unsupported archived-roots command from a transient read
+    failure; do not silently map both to an empty healthy archive.
+  - Remove the unrelated unawaited `reportScope` write that `applySettings`
+    can dispatch during boot when stack-display settings change.
+  - Make root lifecycle commands transactional at the product-state level.
+    Add/unarchive currently commits an active root before scan-task dispatch
+    and watcher installation are known to succeed. A dispatch failure must
+    leave a durable degraded/retryable state rather than returning a healthy
+    active root with no owned convergence work.
+  - Delivered 2026-07-27: main and Settings boot now settle independent
+    dependencies into explicit loading/ready/degraded/fatal states, retain
+    successful snapshots, retry failed dependencies/actions, arbitrate cold
+    reads against revisioned live events, and expose event-subscription health
+    with catch-up. Folder navigation and topic/root mutations commit
+    transactionally. `boot-state.test.ts`, `settings-boot.test.ts`, and
+    `settings-window-boot.test.ts` cover every named injected dependency
+    failure, recovery without relaunch, event gaps, and atomic view changes.
+
+- [x] **Create a managed background-task registry**
+  - Every pump, scan, startup doctor, resume reconcile, watcher activation,
+    model build, download, and plan-convergence loop needs an owner,
+    cancellation token, single-flight key, priority, start time,
+    progress/last-error snapshot, and join handle or bounded shutdown
+    acknowledgement.
+  - Replace detached threads and the endless plan-converge loop with managed
+    tasks that cannot outlive shutdown or silently duplicate work.
+    `apps/desktop/src-tauri/src/state.rs:218-228`;
+    `apps/desktop/src-tauri/src/pump.rs`; `apps/desktop/src-tauri/src/doctor.rs`.
+  - Remaining direct-thread inventory: the supervisor drive loop
+    (`supervisors.rs`), both ORT embedder builders (`embedders.rs`), and the
+    post-disarm mic drain (`mic.rs`) still lack registry ownership. The
+    supervisor host stores no tick-thread join handle; `shutdown()` currently
+    only flips its stop flag. Model downloads are now registered and settle
+    product state on cancellation, but a blocking DNS/connect/body read has no
+    cooperative cancellation boundary and can still miss the three-second
+    join deadline; configure a bounded transport or isolate it in a killable
+    process before calling that shutdown proof complete.
+  - Audit Tauri `spawn_blocking` command work as well as explicit OS threads:
+    mutating commands accepted immediately before quit can still be running
+    after the finalization barrier begins. Classify the bounded preview
+    protocol pool and external-program child reaper as explicit process-scope
+    exceptions only after proving they cannot mutate durable state after that
+    barrier.
+  - Route every database/filesystem IPC operation through a process-wide
+    admission registry. Closing it must reject queued late commands and join
+    already-admitted reads and mutations before finalization; a Tauri
+    blocking-pool future is not itself application ownership.
+  - Delivered 2026-07-27: `ManagedTaskRegistry` provides owner/key
+    single-flight, priority, cancellation, timing, progress/error snapshots,
+    terminal history, and bounded acknowledgement. Pumps, scans, watcher
+    restore, doctor/reconcile, live control, registry recovery, vector repair,
+    and downloads use it; `CommandWorkRegistry` closes IPC admission and joins
+    accepted reads/mutations. Supervisors retain and join their owned ticker;
+    ORT builds/inference run in hard-killable same-executable helpers;
+    microphone initialization/live/post-drain work is explicitly stopped and
+    joined. The fixed preview protocol pool and external-program reaper are
+    process infrastructure and cannot mutate durable application state. Tests
+    prove single-flight, observable failures, late-work rejection, and zero
+    live managed tasks after the two-phase barrier.
+
+- [x] **Separate ingest, volume monitoring, repair, and derived backfill lanes**
+  - Volume probes and full maintenance/reconciliation must never run
+    synchronously on the ingest pump. Split interactive RAW development,
+    live ingest, preview work, embedding backfill, root reconciliation, volume
+    polling, and status publication into independently paced/prioritized work.
+  - Correct the documented six-hour maintenance policy versus the currently
+    wired 600-second interval, and avoid the maintenance tick probing volumes a
+    second time. `apps/desktop/src-tauri/src/pump.rs:37-40,358-400`;
+    `crates/photoproof-core/src/library/mod.rs:1262-1275`.
+  - Log and surface drain/probe/maintenance failures; never turn a failed
+    `process_queue` into a default empty report. Pair with the existing ingest
+    intensity/pause/Eco-Balanced-Max item.
+  - Delivered 2026-07-27: essential ingest/status, preview generation,
+    interactive RAW development, embedding backfill, volume polling, and
+    maintenance/reconciliation are independently paced managed lanes.
+    Resource-governor admission preserves interactive priority, capture
+    preemption, pause/intensity policy, and bounded batches without serializing
+    the lanes behind ingest idleness. Maintenance is six-hour, does not reprobe
+    volumes, and records failures. The long-lived-lane shutdown test includes
+    all three derived workers.
+
+- [~] **Implement coordinated, bounded shutdown**
+  - Transition lifecycle to `Stopping`, reject new work, cancel scans/doctor/
+    builds/download dispatch, stop watchers, and join or receive bounded
+    acknowledgements from every database/filesystem writer before session,
+    sidecar, collection, and WAL finalization.
+  - Preserve the current correct ordering of mic drain before ASR stop.
+    `apps/desktop/src-tauri/src/state.rs:335-385`.
+  - Done means quitting during initial scan, resume reconciliation, preview
+    generation, embedding, model load, download, and sidecar flush is tested;
+    no worker writes after the final checkpoint begins.
+  - Include the detached post-disarm mic drain in quit-at-phase coverage: it
+    pumps capture events into `EventStore` for up to five seconds, does not
+    currently check `App::shutdown`, and can overlap the quit drain/final
+    checkpoint. Download workers and late command `spawn_blocking` mutations
+    need the same explicit admission/cancel/join barrier.
+  - Treat failure to spawn the live microphone thread as a failed arm
+    transition. The capture engine must not remain armed behind a `MicHandle`
+    that owns no thread; surface the error and roll back to disarmed.
+  - Complete microphone device/stream initialization before acknowledging a
+    stable armed transition, or expose an explicit `arming` state. Initialization
+    currently happens inside the spawned worker, so a missing device can
+    briefly return `armed` before the worker corrects it to disarmed; the
+    finished handle also remains stored until the next toggle or shutdown.
+  - Delivered microphone slice 2026-07-27: the arm command now waits for an
+    explicit acknowledgement emitted only after device selection, input
+    configuration, stream construction, and `stream.play()` succeed. Missing
+    devices, stream-init errors, thread-spawn failure, timeout, and quit during
+    the injected initialization seam stop/join the worker, return an error, and
+    roll the capture engine and download-pacing flag back to disarmed.
+    `MicHandle::is_active` includes JoinHandle completion, terminal workers
+    remove only their exact generation, and capture rejects a returned handle
+    that has already finished. The managed post-disarm drain remains
+    cancellation/join covered by the process task barrier.
+  - Evidence: microphone lifecycle tests 11/11 and capture worker transition
+    tests 3/3 passed; full desktop library 273/3 ignored passed. Residual
+    platform fact: CPAL's native device/config/build/play calls expose no
+    force-cancel API. Shutdown cancellation is deterministic around that
+    boundary, but an OS backend call wedged inside CPAL can delay the join
+    until the native call returns; a real device-removal/platform drill remains
+    necessary.
+  - Delivered deterministic slice 2026-07-27: shutdown transitions to
+    `Stopping`, closes download/task/IPC admission, cancels and joins owned
+    filesystem/DB work before finalization, drops watchers, preserves mic drain
+    before supervisor stop, kills/reaps ORT helpers, and skips all final writes
+    if the barrier times out. The managed quit phase matrix covers initial
+    scan, resume reconcile, preview, embedding, download, and sidecar work;
+    `quit_during_model_load_kills_and_reaps_the_helper_before_acknowledging`
+    covers a native model load. Barrier tests prove checkpoint ordering and the
+    no-write-on-timeout branch. The sole remaining hard-bound gap is the native
+    CPAL wedge above: `MicHandle::drop` joins the OS audio thread and cannot
+    impose a deadline while a backend call itself refuses to return.
+
+### P1 - health, repair, and persistent-state integrity
+
+- [x] **Publish one application-health snapshot and recovery surface**
+  - Include boot phase; DB/schema/WAL; settings/config/device identity; disk
+    space; each root/volume/watcher; scan/ingest queues; preview/cache/vector
+    integrity; model registry/files/providers; supervisors; and current repair
+    jobs.
+  - Each unhealthy state must name whether it is blocking or degraded, its last
+    error/time, and a precise safe action such as Retry volume, Verify model,
+    Rebuild previews, Retry runtime, Reveal logs, or Restore defaults.
+  - Settings and the header should consume backend truth rather than inventing
+    separate staleness/loading stories.
+  - Represent fatal storage/open/migration failure before `App` can be fully
+    managed. The current health command exists only after successful
+    initialization, so the most important blocking failure aborts Tauri setup
+    before any recovery UI can query it.
+  - Delivered 2026-07-27: `ApplicationHealth.issues` is the one product
+    projection across lifecycle, DB/schema/WAL, roots/volumes/watchers,
+    managed work, settings/config/tuning/device recovery, disk/cache,
+    ingest/repair, runtime capabilities/providers/models/helpers, supervisors,
+    and diagnostics. Every issue carries subsystem, blocking/degraded truth,
+    summary, retained error/time, and a closed action vocabulary whose verbs
+    all invoke real safe commands. Settings executes those actions through its
+    serialized retryable lane and refreshes backend truth; the main header
+    consumes the same projection instead of inventing a second status model.
+    Pre-`App` database/open/migration failure remains queryable through the
+    separately managed bootstrap state and renders a real relaunch surface.
+  - Evidence: health projection tests 5/5 (including blocked/critical WAL and
+    queued/building model-helper work), desktop library 263/3 ignored at the
+    health handoff, full frontend 98 files/1,242 tests, rendered health/header
+    tests 46/46, strict desktop Clippy, and Svelte check 0/0.
+
+- [x] **Make repair scheduling readiness-driven and best-effort per subsystem**
+  - Split safe startup vector orphan cleanup from active-model reconciliation;
+    rerun active-space reconciliation on
+    `Embedder Ready(model_id,generation)` so the startup doctor cannot race an
+    asynchronously loading model. `apps/desktop/src-tauri/src/doctor.rs:34-78`;
+    `apps/desktop/src-tauri/src/runtime.rs:396-427`.
+  - Key readiness repair by `(role, model_id, ready_generation)`, not model id
+    alone. A same-model unload/failure/reload is a new readiness generation and
+    must receive a fresh integrity pass even though its model id is unchanged.
+  - Prevent startup doctor and live ingest from creating an uncontrolled I/O
+    storm.
+  - Make `reconcile_all` continue to later roots after one non-offline root
+    error, returning a per-root report instead of aborting the whole sweep.
+    `crates/photoproof-core/src/library/mod.rs:1230-1246`.
+  - Treat an unreadable/missing root walk as incomplete evidence, not an empty
+    directory. Today `WalkDir` can increment `io_errors` and continue to the
+    unseen-row phase, which can stale every indexed path under an allegedly
+    online root. Suppress destructive stale/move inference unless the root walk
+    completed authoritatively; surface the root as degraded and retry it.
+    `crates/photoproof-core/src/library/scan.rs`.
+  - S5's conservative orphan preview/all-vector retention cleanup is complete;
+    keep its report and relink repair visible through this program's health
+    snapshot rather than building a second cleanup loop.
+  - Delivered 2026-07-27: repair is keyed by role, model id, and ready
+    generation; each root settles independently; incomplete metadata/walk
+    evidence cannot stale unseen paths; and retained S5/relink reports remain
+    visible and retryable through Application Health.
+
+- [x] **Make schema upgrades transactional and recoverable**
+  - Acquire the process/database migration lock before any connection can
+    migrate, create a verified pre-upgrade backup, run an upgrade atomically
+    where SQLite permits, and make each step idempotent after interruption.
+    The v14 table rebuild is the priority crash-injection case.
+    `crates/photoproof-core/src/store/schema.rs:639-646,738-775`.
+  - Keep the already-landed newer-schema downgrade refusal.
+  - Done means failure injection at every migration statement either rolls
+    back to the prior schema/data or resumes safely on the next launch.
+  - Shipped: the whole ladder runs beneath one `BEGIN IMMEDIATE`; the version
+    is read only after that writer reservation, so racing processes serialize
+    and the waiter rechecks the winner's committed version. Existing databases
+    receive a deterministic SQLite online-backup artifact whose integrity and
+    source version are independently verified before the first upgrade
+    statement. `concurrent_migrators_serialize_and_recheck_version` and
+    `on_disk_upgrade_writes_verified_pre_upgrade_backup` cover both contracts.
+  - Shipped: multi-statement migration programs are divided with SQLite's own
+    `sqlite3_complete` parser, then executed one statement at a time inside the
+    same transaction. This preserves trigger bodies and quoted semicolons while
+    exposing every literal SQL boundary, not merely each former
+    `execute_batch`, to fault injection. The exhaustive v1-v16 matrix
+    `every_migration_statement_and_version_boundary_rolls_back_then_resumes`
+    compares the exact pre-upgrade schema/version after every injected failure,
+    retries to head, and runs `integrity_check`; the dedicated v14 table-swap
+    matrix also verifies the original row and narrow CHECK survive every
+    interruption. The complete core crate suite is green (including 317 unit
+    tests, with 2 fixture/perf tests intentionally ignored), and strict
+    all-target core Clippy is green.
+
+- [~] **Harden settings/config/device-id/consent control files**
+  - Distinguish missing from corrupt; quarantine invalid files; keep a
+    last-known-good copy; write atomically with file and parent-directory
+    durability; expose recovery instead of silently substituting defaults.
+  - Never silently mint a new replica/device identity because its file became
+    malformed. `apps/desktop/src-tauri/src/settings.rs:79-115`.
+  - Make `config.toml` validation and unsupported options visible in product
+    status, not debug-only lines; define reload/apply/rollback semantics rather
+    than launch-only behavior. Resolve relative model paths against an explicit
+    base, never process CWD.
+  - Apply the same typed, durable contract to runtime consent, per-license
+    acceptances, tier cache, compiled-manifest publication, and the supervisor
+    child registry. Current reads often collapse missing, corrupt, permission,
+    and unknown values; several writes mutate memory before an ignored/unsynced
+    disk failure, use a static temp path, or silently default corrupt records.
+    The UI must acknowledge only a committed consent/license/config mutation.
+  - Retain settings/device-id recovery metadata in `App` health instead of
+    calling the compatibility loader that logs an unrecoverable settings fault
+    and continues with unlabelled in-memory defaults. Define a product action
+    and retention policy for quarantined control files.
+  - Make every control mutation persist-then-publish: several settings
+    commands currently edit the shared in-memory value before `save()`, so a
+    failed disk commit returns an error while the running process keeps using
+    the rejected value. Build a candidate copy, commit it, then swap/broadcast;
+    apply the same rollback invariant to runtime consent and acceptances.
+  - Bring `tuning.toml` under the same inventory. It is another launch-time
+    control file whose read errors currently collapse to defaults without
+    last-known-good recovery, live reload semantics, or product health.
+  - Remove or explicitly confine legacy convenience loaders that discard the
+    structured recovery result. Add installed Linux/macOS/Windows failure
+    drills for missing, corrupt, truncated, permission-denied, interrupted,
+    and read-only control-file cases.
+  - Local implementation is complete: versioned durable control files use
+    atomic persist-then-publish, quarantine/LKG recovery, explicit fatal
+    device-identity reset, and health-visible config apply/rollback. Missing,
+    corrupt, truncated, interrupted, and permission fixtures pass. Installed
+    Linux/macOS/Windows read-only and interruption receipts remain required.
+
+- [x] **Schedule real idle database maintenance**
+  - Call `EventStore::maintain()` during genuine idle periods for
+    `PRAGMA optimize` and WAL truncation, with retry/health reporting when a
+    reader blocks it. Do not wait until shutdown for a long-running session.
+    `crates/photoproof-core/src/store/mod.rs:1439-1472`.
+  - Add WAL-size monitoring and prove shutdown checkpointing begins only after
+    all managed readers/writers have acknowledged stop.
+  - Shipped: the managed maintenance lane runs only after the exact six-hour
+    cadence and a fully idle ingest/scan/capture snapshot, retries without
+    resetting the due deadline, and records SQLite's explicit blocked-reader
+    verdict in application health until a later idle checkpoint succeeds.
+    WAL health is distinct from combined DB inventory: current bytes,
+    modification age, warning/critical thresholds, inventory failure, and the
+    last maintenance attempt/success/failure/error remain observable.
+  - Shipped: shutdown now obtains an unforgeable finalization gate only after
+    both managed tasks and admitted IPC reads/writes acknowledge. Session,
+    sidecar, collection, and WAL finalization all sit after that gate; a timeout
+    takes the crash-recovery path and skips checkpointing. Deterministic tests
+    `blocked_reader_is_wal_health_until_the_next_idle_retry_succeeds`,
+    `shutdown_checkpoint_begins_only_after_tasks_and_commands_acknowledge`, and
+    `shutdown_barrier_timeout_skips_checkpoint` cover recovery, ordering, and
+    the timeout path.
+
+- [~] **Add disk-space and backup/restore operational safety**
+  - Monitor free space for DB/WAL, previews, vectors, downloads/parts, and RAW
+    full-decode cache; warn before operations fail and pause safe derived work
+    when critically low.
+  - Define backup/restore for app-data truth that sidecars do not reconstruct
+    completely: settings/config, device identity, collections export state,
+    overflow/session journals, and migration recovery. Document what sidecars
+    can and cannot rebuild.
+  - Backend safety is now implemented: the managed volume lane samples
+    app-data and separately configured model-volume capacity every 30 seconds,
+    inventories DB/WAL, previews, full decodes, vectors, models, and `.part`
+    files off the startup/ingest lanes every 15 minutes, and reports lower-bound
+    inventory errors in `ApplicationHealth`. Below 2 GiB, reproducible preview,
+    full-decode, vector, and maintenance writes pause while EXIF/journal work
+    remains admitted; model downloads retain their separate required-size +
+    2-GiB preflight. Settings health renders the warning and pause reason.
+    Linux/macOS use `statvfs`; Windows uses `GetDiskFreeSpaceExW`.
+  - `docs/BACKUP-RESTORE.md` distinguishes journal portability from a complete
+    app-data snapshot. Settings now offers **Back up complete app state** and
+    **Restore complete app state** with explicit quit/restart confirmation. A
+    private same-executable helper receives its request only through an
+    anonymous pipe retained for the lifetime of the desktop process; it cannot
+    copy SQLite/WAL or replace app data until OS process teardown delivers EOF.
+    Backups are checksummed and reject overwrite, tampering, symlinks,
+    unmanifested payloads, and destinations inside the live source. Restore
+    verifies before quit, stages and verifies again, atomically publishes, and
+    retains the old app-data directory as a rollback copy; failure before
+    publication reinstates it. The durable receipt is rendered after relaunch.
+  - Saved topic phrases and authored topic notes now travel in the deterministic
+    `topics.photoproof.json` journal export. Settings exposes an explicit
+    all-or-nothing union import; same-id/different-content conflicts abort the
+    transaction rather than choosing a winner. Core tests cover round-trip,
+    idempotence, and conflict rollback, while backup/helper tests cover seven
+    exit-boundary/tamper/replace/receipt cases. Final checkbox closure still
+    requires the installed-package helper drill on the platform matrix.
+
+### P1 - authoritative runtime/model management
+
+- [x] **Introduce one authoritative `RuntimeCapabilities` report**
+  - Record OS, detected adapters/vendor/backend/memory, compiled execution
+    providers, runtime-library availability, actual provider initialization,
+    and per-model compatibility.
+  - Derive default offers and execution plans from capabilities, not tier
+    alone. Preserve advanced alternate models outside the default consent set.
+    This owns the already-recorded backend-aware model-offer and CUDA/provider
+    observability items.
+  - Hardware cache entries need age/version/driver/adapter fingerprints.
+    Perform bounded background detection and atomically adopt changes; manual
+    re-detect must not block an IPC/UI thread indefinitely.
+  - Landed 2026-07-27: discovery now runs in a private helper process with a
+    20-second deadline and cooperative shutdown/manual-redetect cancellation;
+    timeout kills and reaps the helper, so a wedged vendor driver cannot outlive
+    the managed-task barrier. The atomically adopted report includes OS/arch,
+    physical/unified memory, adapter vendor/device/backend/VRAM/driver
+    fingerprint, report schema/time, compiled and runtime-exported ORT EPs, and
+    per-model compatibility. Cached reports remain visible only as provisional
+    recovery context.
+  - The runtime plan is explicitly Tier-0/dark until this launch adopts the
+    authoritative report. Once ready, both offers and local Run plans reject
+    incompatible model rows. A stale cached or user-forced tier therefore
+    cannot launch a child or construct an ORT session by itself.
+  - Verification: production helper smoke returned schema/provider/RAM JSON;
+    desktop all-target compile is green; focused runtime suite 24/24; frontend
+    Svelte check 0 warnings/errors and full 95-file/1,219-test suite are green.
+
+- [x] **Report the actual model execution provider and fallback reason**
+  - Do not infer acceleration from the provider ladder requested before ORT
+    session construction. Surface requested, available, selected, and fallback
+    reason per loaded model, including CPU fallback.
+  - Scheduling decisions such as whether CLIP may run during CPU ASR must use
+    actual execution, not `runs_on_accelerator()` derived from the requested
+    ladder. `crates/photoproof-connectors/src/ort_embedder.rs:203-220,288-303,
+    585-620`; `apps/desktop/src-tauri/src/pump.rs:489-556`.
+  - Landed 2026-07-27: every live embedder session reports requested,
+    runtime-available, registered, selected, fallback reason, measurement
+    method, and optional profile path. CPU-only construction is proven CPU.
+    ORT rc.12 does not expose post-partition per-node provider selection, so an
+    accelerator registration is honestly `unknown`, never mislabeled GPU;
+    capture scheduling pauses unknown work conservatively. Setting
+    `PHOTOPROOF_ORT_PROFILE_DIR` enables ORT per-node JSON profiling and flushes
+    it when the final embedder handle drops, providing the feasible measurement
+    seam needed to turn unknown into evidence. Settings surfaces the same truth.
+  - Strange but now explicit: “EP available,” “EP registered,” and “graph ran
+    on EP” are three different facts. CUDA/TensorRT's rc.12 fail-silent ladder
+    cannot reveal which registration succeeded, and CoreML may partition only
+    part of a graph; neither is claimed as actual acceleration without profile
+    evidence.
+  - Verification: connector ORT suite 15/15 and strict all-target/all-feature
+    connector clippy are green. Desktop strict clippy reaches an unrelated
+    concurrent core dead-code warning after compiling this slice.
+
+- [x] **Make embedder loading a complete restartable state machine**
+  - Use explicit `Idle/Queued/Building/Ready/Failed/Stopping` states with
+    attempt id, desired model, generation, start time, timeout/watchdog, retry
+    budget, retry-now, cancellation, and reset semantics.
+  - A thread-dispatch failure must become `Failed`, never leave `Building`
+    forever; a hung load must not hold the shared build lock and block the other
+    role indefinitely. Preserve the existing generation gate that prevents a
+    stale build landing after a plan change/shutdown.
+    `apps/desktop/src-tauri/src/embedders.rs`.
+  - The shell state machine now makes a timed-out native result stale and
+    terminally reports `Failed`, but ONNX Runtime session construction itself
+    cannot be force-cancelled or joined in-process. A truly wedged constructor
+    can retain the serialized build mutex, causing the other role and retries
+    to queue and then time out until that native call returns. Isolate native
+    construction in a killable helper process (or provide an equivalently
+    revocable build lane) before calling hard recovery and bounded shutdown
+    proven.
+  - Delivered 2026-07-27: local ORT construction and inference now live in one
+    same-executable helper process per role. The desktop retains
+    `Idle/Queued/Building/Ready/Failed/Stopping`, attempt/generation truth, and
+    proxies live text/image inference to the already-constructed child over a
+    versioned, length-bounded binary stdio protocol. ORT is never constructed
+    again in the journal process.
+  - Plan changes, timeout, explicit retry/remove convergence, helper failure,
+    and shutdown invalidate the generation, kill and reap the owned child, and
+    reject stale proxy calls. Text and CLIP no longer share a native build
+    mutex, so one wedged constructor cannot block the other role or its own
+    replacement generation. A wedged inference read is kill-interruptible
+    during quit.
+  - Evidence: `embedders::tests` 18 passed/2 ignored; real subprocess fixtures
+    prove hung-construction timeout/reap, other-role progress, replacement
+    retry, crash-to-Failed projection, stale-generation rejection, oversized
+    protocol refusal, and quit during wedged inference. The full desktop
+    library gate passed 227/3 ignored, and strict desktop all-target clippy is
+    green.
+
+- [x] **Build one serialized model-operation registry**
+  - Coordinate download, verify, install-index commit, load, unload, remove,
+    and GC under one per-model operation/state machine. Removal must cancel or
+    wait for download, stop consumers, unload, delete files, then commit the
+    registry transition without lost updates.
+  - Incorporate existing D4/D6/D7: partial reclamation, post-install
+    existence/size verification plus hash-on-suspicion or explicit Verify, and
+    locked/durable `installed.json` mutation.
+  - Recover a malformed/missing installed index from files that verify against
+    the current immutable manifest; identify true orphan model directories.
+    `crates/photoproof-core/src/runtime/download.rs:196-242,329-338`;
+    `apps/desktop/src-tauri/src/runtime.rs:951-963`.
+  - Do not parse and trust `installed.json` while holding the shared runtime
+    state lock on every status request. Publish a verified in-memory snapshot
+    after serialized durable commits; status reads must stay cheap and surface
+    registry/file disagreement rather than treating a row as installed.
+  - Serialize `remove_model` against an active/queued download and every live
+    consumer. The managed download worker alone does not prevent removal from
+    racing its verify/install commit.
+  - Delivered 2026-07-27: the desktop now opens one
+    `ModelOperationRegistry`, validates `installed.json` once into a cheap
+    in-memory snapshot, durably repairs rejected records, hash-recovers only
+    manifest-valid files after a missing/corrupt index, and surfaces
+    disagreements plus true orphan directories. One operation gate is
+    intentionally global (stronger than per-model) because different model ids
+    share the same index commit. Download/install, Verify, discard-partial, and
+    removal all enter it; a second process without the runtime instance lock
+    cannot mutate model files.
+  - Removal cancels queued/live transfer work, makes the model unavailable to
+    the plan, invalidates queued builds, kills and reaps constructing/ready
+    embedder helpers, drains supervised children, then deletes files and
+    durably commits the index removal. The internal production GC seam runs the
+    same gated retirement pipeline after scheduler/reindex approval; no GC UI
+    or automatic policy is implied.
+  - A same-model download is rejected once installed, including a worker-side
+    recheck under the gate, so weights cannot be rewritten beneath a live
+    consumer. Adversarial evidence covers concurrent
+    download/Verify/load/unload/remove/GC admission, helper-build cancellation,
+    GC/remove versus queued transfers, and exact durable/in-memory
+    `installed.json` equality with sibling records preserved
+    (`model_registry::tests` 7 passed, `embedders::tests` 20 passed/2 ignored,
+    `runtime::tests` 30 passed).
+
+- [x] **Emit explicit terminal model-operation events**
+  - Model download state should be
+    `queued/downloading/verifying/installing/installed/failed/cancelled`, with
+    one committed terminal snapshot after registry mutation and internal
+    progress cleanup. A row must never remain "downloading 100%."
+  - Add tier, installed-set, error-detail, desired/active model, and operation
+    changes to event propagation rather than the readiness-only timeout
+    fingerprint. `apps/desktop/src-tauri/src/pump.rs:683-700,703-769`.
+  - Every runtime mutation (consent, acceptance, download, cancel, remove,
+    restart, redetect/config apply) must emit the committed global snapshot to
+    every window, not only return it to the caller.
+  - Split durable consent from automatic enqueue settlement in the command
+    contract. If consent commits successfully but download dispatch fails, the
+    response must report a committed consent plus a retryable operation failure
+    rather than implying the whole mutation rolled back.
+  - Delivered 2026-07-27: every runtime mutation command now publishes its
+    committed global `runtime-status`, and the idle pump fingerprint includes
+    tier, consent, full installed/progress/error/registry/operation rows,
+    capability detail, blocked reasons, and complete embedder slots. The pump
+    has a terminal-download regression proof, so a cleared operation cannot
+    leave a 100%-downloading row resident.
+  - Consent now has an explicit two-settlement command DTO: a failed durable
+    write still rejects, while a saved decision plus failed automatic enqueue
+    returns `consentCommitted: true`, the committed status, and a retryable
+    operation error. The consent card adopts that truth and offers an honest
+    retry.
+  - The row contract now exposes the exact
+    `queued/downloading/verifying/installing/installed/failed/cancelled`
+    sequence and commits one terminal snapshot after registry/progress
+    settlement. Failed and cancelled variants plus two-window broadcast tests
+    prove no 100%-downloading residue survives.
+
+- [x] **Render model/runtime UI entirely from backend truth**
+  - Return active model id, desired model id, role, state, actual provider,
+    operation, progress, error/retry, and compatibility per model.
+  - Remove hardcoded embedder ID arrays; do not label every recognized installed
+    alternative from one role-level bool; use the existing rich
+    `idle/building/ready/failed` DTO and show failure detail instead of
+    "idle (loading)" forever. Include the omitted fp16 variant if it becomes a
+    real supported artifact. `apps/desktop/src/lib/settings/SettingsApp.svelte:
+    59-77,529-552`; `apps/desktop/src-tauri/src/dto.rs:273-333`.
+  - Require confirmation and coordinated unload for destructive model removal.
+  - Delivered 2026-07-27: Settings no longer carries embedder-id allowlists.
+    It matches rows against the backend slot's `modelId`, renders the slot's
+    `idle/queued/building/ready/failed/stopping` state, native failure detail,
+    configured versus actually observed provider, and requires inline
+    confirmation before the existing gated unload/remove pipeline.
+  - Each backend model row now joins desired/active model ids, role,
+    compatibility, operation/retry/error truth, provider selection/fallback,
+    and complete runtime state. Rendered tests cover every state and confirmed
+    unload/remove behavior.
+
+- [~] **Bundle and smoke-test every required child runtime**
+  - Configure Tauri `externalBin`/resources and platform packaging so
+    `pp-asr-server` is present beside/in the installed application as the
+    resolver expects; make an explicit product decision for shipping or
+    excluding `llama-server`. Build hooks compiling a sibling in Cargo target
+    directories are not evidence that a clean installed package contains it.
+    `apps/desktop/src-tauri/tauri.conf.json:6-10,29-37`;
+    `apps/desktop/src-tauri/src/supervisors.rs:67-93`.
+  - Done means the installed artifact reaches Ready on a clean machine with no
+    Cargo workspace, developer PATH, or manually staged binaries.
+  - PARTIAL 2026-07-27: the supported bundle recipe builds and target-stages
+    `pp-asr-server` through Tauri `externalBin`; Linux/macOS/Windows jobs
+    extract the native package, find the child beside the installed app, and
+    launch the installed app against fresh data without a workspace or
+    developer PATH. `docs/DESKTOP-RELEASE.md` explicitly excludes
+    `llama-server` while no shipped feature consumes it.
+  - STILL OPEN: the model-free smoke proves child placement and a clean
+    degraded `Usable` launch, but does not execute the ASR child with pinned
+    weights or prove the supervisor reaches Ready. That native/model receipt is
+    the acceptance criterion and cannot be replaced by archive inspection.
+
+### P2 - observability, resource governance, release, and proof
+
+- [~] **Finish desktop packaging and safe updates**
+  - Add macOS and Windows bundles alongside Linux, code signing/notarization,
+    updater signing, staged rollout/rollback policy, release notes/version
+    migration compatibility, and installed-package smoke tests.
+  - Ensure the normal dev/release recipes intentionally select supported
+    acceleration features and runtime libraries. The native CPU bundle matrix
+    is now cross-platform, but default builds still do not enable the NVIDIA
+    path.
+    `apps/desktop/src-tauri/tauri.conf.json:29-38`.
+  - 2026-07-27 foundation landed: native Linux/macOS/Windows bundle matrix,
+    packaged ASR sidecar staging, extracted installed-binary smoke, signed
+    updater state machine and explicit Settings UX, release/schema/rollback
+    contract gate, and a fail-closed draft production workflow for Developer
+    ID notarization, Authenticode, and mandatory updater signatures. Also fixed
+    Windows runtime resolution to look for the bundled `pp-asr-server.exe`;
+    the older presence-only archive check could have passed while the runtime
+    stayed dark.
+  - External closure only: provision a cohort-aware HTTPS endpoint and matching
+    updater keypair, Apple Developer/notary secrets, Windows signing identity
+    and timestamp service, then run the signed workflow and founder/model-ready
+    installed gates. NVIDIA package feature/runtime selection remains part of
+    the capability-specific release matrix rather than this CPU-native base
+    package. See `docs/DESKTOP-RELEASE.md`.
+
+- [~] **Build a desktop lifecycle chaos/acceptance matrix**
+  - Startup: unavailable/hard NAS, unplugged external drive, corrupt settings/
+    config/installed registry, newer DB, interrupted migration, full disk,
+    missing child binaries/runtime libraries, slow/hung hardware probe, and
+    corrupt/same-size model files.
+  - Live transitions: add/archive/remove/re-add roots, volume offline/online,
+    watcher overflow, sleep/resume, model download/remove/reinstall, tier and
+    config changes, GPU fallback, runtime crash budget/restart, cache deletion,
+    and multi-window mutations.
+  - Shutdown/crash: quit/kill during each scan, queue, doctor, model build,
+    download, sidecar flush, collection flush, and WAL checkpoint phase.
+  - Pin invariants: window becomes usable promptly; authored truth is never
+    lost; derived state either remains valid or is re-pended; every task reaches
+    a terminal/paused state; UI matches backend truth; clean shutdown leaves no
+    unowned children or writers.
+  - Define and test archived-root semantics across health, search, offline
+    volume burden, watcher ownership, repair, stale inference, and pending
+    ingest. Filtering an archived root from one health list is not proof that
+    retained path rows and background work honor the same lifecycle.
+  - FOUNDATION EVIDENCE 2026-07-27: the executable 28-case/15-suite runner and
+    evidence map live in `apps/desktop/scripts/run-desktop-chaos-matrix.mjs`
+    and `docs/DESKTOP-CHAOS-MATRIX.md`. The settled Linux run passed all local
+    suites: 23 cases passed and 5 honestly remain installed-platform drills
+    (kernel-blocked NAS, real suspend/resume, real GPU provider fallback, two
+    native webviews, and a wedged native model build).
+  - Archived roots now keep authored/search truth and durable pending rows but
+    leave offline burden, watcher/scan ownership, stale inference, queue
+    claims, and active-work status until unarchived. Acceptance coverage proves
+    cache deletion/repair dormancy, active duplicate-path eligibility, and
+    remove/re-add identity revival.
+  - Timing hardening still open: one loaded full-suite pass missed the
+    managed-task registry's one-second shutdown acknowledgement, then the
+    focused test, full desktop suite, and canonical matrix passed. Add a
+    deterministic scheduler-delay seam or deadline telemetry so this cannot
+    remain a retry-only observation.
+
+- [~] **Establish measurable desktop experience budgets**
+  - Gate time-to-window, time-to-usable-library, startup I/O, idle CPU/wakeups,
+    memory by library/worker tier, root reconciliation fairness, shutdown
+    latency, model-load timeout/fallback, progress update smoothness, cache
+    growth/eviction, and installed-package launch.
+  - Use representative local SSD, removable drive, sleeping NAS, CPU-only,
+    Apple, and NVIDIA fixtures. Pair with T2/T4 performance backlog items and
+    the existing ingest intensity design.
+  - CLOSED SLICE 2026-07-27: ordinary model-registry launch does only
+    existence/size checks, and missing/corrupt/stale `installed.json` recovery
+    no longer hashes multi-GB payloads before `Usable`. Candidate models stay
+    dark while a managed, cancellable post-Usable task verifies and durably
+    adopts them. Watchdog/cancellation tests cover the recovery lane; native
+    model-set timing remains part of the real-device receipt matrix.
+  - FOUNDATION EVIDENCE 2026-07-27: the ingest governor now has deterministic
+    mode-budget tests for total concurrency, hashing/ingest workers,
+    queue/embed/RAW batch sizes, and the bounded-pipeline decoded-frame memory
+    proxy (Eco 2, Balanced 4, Max 16 maximum queued+working frames). Admission
+    tests prove foreground priority plus eventual root-scan service and dynamic
+    watcher ceilings; pump tests pin immediate initial progress followed by
+    change-only 400-ms coalescing. These close the mode-dependent ingest slice,
+    not the remaining real-device time-to-window/NAS/package benchmark matrix.
+
 ## Audit 2026-07-07 - deferred items (wave-1 fixes shipped; see LANDED.md + docs/AUDIT-2026-07-07.md)
 
 The full-codebase audit shipped its wave-1 fixes (G1, S1-S4, U1/U2/U4-U7,
 F1/F2/F3, D1/D2/D3/D5 - all in LANDED.md July 7 2026). These findings were
 logged but deliberately deferred; each names its audit ID and why.
 
-- [ ] **S5: orphan preview/vector sweep** - `doctor()` only counts
-  `stale_orphans`; thumb/display artifacts and `.ppvec` rows for images with no
-  active path are kept forever (only the 1:1 full-decode tier LRU-evicts), so a
-  churning library leaks previews + embeddings on disk unbounded. Deferred: it
-  wants a deletion-window ruling (how long after last-active-path before a
-  conservative sweep, vs the move-correlation window) before writing a
-  destructive doctor step. `mod.rs:1363-1374`.
-- [ ] **S6 / `s02_2`: case-only rename correlation on APFS** - `watcher.rs`
-  correlates renames by exact `rel_path`; a case-only rename on a
-  case-insensitive volume can leave a ghost row. This is the standing
-  case-sensitivity ruling (also the known-red `s02_2` sidecar test).
-- [ ] **D4: reclaim failed partial downloads from the UI** - a terminally-
+- [x] **S5: orphan preview/vector sweep** - the doctor applies a conservative
+  30-day window after every path becomes stale, with active, recent,
+  timestamp-unknown, and running-pass images protected. It removes preview
+  files/metadata and retires `image_clip`, `annotation_chunk`, and
+  `image_summary` vectors through PPVEC's dead-row sweep and crash-atomic
+  compaction; authored annotations, stale path tombstones, and
+  `derived_summaries`/`summaries_fts` text remain intact. Shared annotation
+  vectors retire only when every target is eligible. The text-embedding pass
+  now deterministically rebuilds an image-summary vector from the newest
+  retained per-image summary text, including automatic missing/stale-vector
+  reconciliation for already-completed libraries. Relinking revives all three
+  derived passes, and interruption/idempotence/relink coverage proves the
+  retained text restores both text-vector spaces without an LLM call.
+- [~] **S6 / `s02_2`: case-only rename correlation on APFS** - implemented
+  2026-07-27. Exact path spelling remains authoritative on case-sensitive
+  volumes. A case-folded candidate is recased in place only after an injectable
+  live-filesystem seam proves both spellings are one entry; watcher
+  post-rename-only events, paired events, and reconciliation scans preserve
+  path identity and never rehash that alias. Distinct case-sensitive entries
+  remain separate. Sidecar cleanup verifies hash/content, distinguishes actual
+  directory-entry spelling, and uses a temporary rename hop when an
+  alias-to-alias APFS rename is a no-op. `s02_2` and cross-platform injected
+  fixtures are green locally; three-OS CI no longer skips or tolerates the
+  test. Remaining proof only: after this worktree is synchronized to the
+  founder Mac, run `./scripts/verify-apfs-case-rename.sh <receipt-path>` on its
+  confirmed default APFS Data volume and retain the emitted receipt.
+- [x] **D4: reclaim failed partial downloads from the UI** - a terminally-
   failed model keeps `.part` gigabytes the orphan scan skips (it has a manifest
   entry) and the settings row offers only Download. Surface partial bytes + a
-  "Discard partial" action. `runtime.rs:791-795`, `gc.rs:132-151`.
-- [ ] **D6: post-install model re-verification** - installed files are trusted
+  "Discard partial" action. Delivered 2026-07-27: status retains the cheap
+  in-memory partial-byte count after cancel/failure, Settings shows it and a
+  Discard partial action, and the backend removes only manifest-owned `.part`
+  files under the serialized model gate.
+- [x] **D6: post-install model re-verification** - installed files are trusted
   by byte-length only; disk corruption surfaces as an opaque spawn failure. A
   doctor/verify action re-hashing a model's files (`sha256_file` exists).
-- [ ] **D7: lock-guard installed.json mutation** - single-worker today, but
+  Delivered 2026-07-27: Settings Verify runs off the IPC thread, hashes every
+  final artifact against the immutable manifest, and adopts an unindexed
+  directory only after the full proof.
+- [x] **D7: lock-guard installed.json mutation** - single-worker today, but
   `remove_model` runs on a command thread; also `remove_installed_record`
-  lacks the `create_dir_all` its counterpart has. `download.rs:189-221`.
-- [ ] **D8: unhosted fp16 CLIP manifest entry** - `ViT-H-14-378-quickgelu__
-  dfn5b-fp16` (revision `local-fp16-convert`) is offered at tiers 1-2 but the
-  artifact is dev-staged only; an unstaged machine configured for it downloads-
-  fails forever. Wants a hosting decision (host + re-pin, or stop offering it
-  until hosted). `manifest.rs:536-569`.
+  lacks the `create_dir_all` its counterpart has. Delivered 2026-07-27:
+  installed-index writers use the shared operation gate plus unique-temp,
+  file-fsync, atomic-replace, parent-fsync durable writes; non-lock-holder
+  processes fail closed.
+- [x] **D8: unhosted fp16 CLIP manifest entry** - the staged
+  `ViT-H-14-378-quickgelu__dfn5b-fp16` recipe has no offered tiers, immutable
+  pin validation rejects `local-fp16-convert`, and fresh installs choose the
+  hosted int8 artifact. Hosting/re-pinning is tracked separately before fp16
+  can re-enter public offers.
 - [ ] **U3: force-reembed affordance** - `force_reembed` is registered but has
   no UI caller (dev-console only). Wants a product decision on where the
   affordance lives (Settings -> Models "Force re-embed", or explicit
@@ -55,10 +817,11 @@ logged but deliberately deferred; each names its audit ID and why.
   grid-list bench before optimizing.
 - [ ] **F7: full-res protocol routes read whole files** - `/original`,
   `/embedded`, `/full-decode` have no HTTP range support. Look-scale only.
-- [ ] **T2: `pp_bench` preview-serve + grid-list scenarios** - append to
-  `bench-results.jsonl` and wire into `tune-check` baselines (the Rust T1
-  serve-latency test + T3 vitest budgets already landed). **T4:** optional
-  headless scripted-scroll harness counting requests-fired vs cells-settled.
+- [~] **T2/T4 desktop journey performance evidence** - T2 now ships
+  `pp_bench grid-list`, `preview-generate`, and `preview-serve` with committed
+  `tune-check` ceilings. T4 has a deterministic 50k-item/60-frame fling-load
+  request-growth gate. Representative installed device receipts remain under
+  A26.
 
 ## Dogfood round 4 (founder, June 12 2026 evening — second live session)
 
@@ -247,7 +1010,7 @@ intensity / RAM, and a startup-reliability bug.
   `apps/desktop/src/lib/components/shell/ConsentCard.svelte:24-116`,
   `apps/desktop/src/lib/logic/consent.ts:23-45`. (Founder, June 21 2026.)
 
-- [ ] **Model download offers ALL variants (int8 + fp16 duplicates), not the
+- [x] **Model download offers ALL variants (int8 + fp16 duplicates), not the
   hardware-best pick** (founder, June 21 2026, after a fresh `cargo clean` +
   delete: "it asked me to download ALL models?? like duplicates that shouldn't
   be if we are analyzing the machine's capabilities and selecting the best
@@ -274,8 +1037,12 @@ intensity / RAM, and a startup-reliability bug.
   hardware-aware model selection the first-run onboarding item wants - it makes
   the "optimizing for your hardware" promise true at the download gate, not
   just in copy. (Founder, June 21 2026.)
+  - Delivered 2026-07-27: the authoritative capability report narrows default
+    consent offers to one compatible model per role, keeps alternates
+    explicitly available, and fails closed while capability truth is
+    provisional. CPU/Metal/NVIDIA/unsupported fixtures pin the selection.
 
-- [ ] **Header still shows "downloading" when the last model is at 100%**
+- [x] **Header still shows "downloading" when the last model is at 100%**
   (founder, June 21 2026: "the last model to download is at 100% but it still
   shows as downloading in the header"). The header pill / settlement lives in
   `LibraryStatus.svelte` + `logic/librarystatus.ts`. The `downloading` flag is
@@ -291,6 +1058,9 @@ intensity / RAM, and a startup-reliability bug.
   `apps/desktop/src/lib/logic/librarystatus.ts:318-327,355-360`,
   `apps/desktop/src/lib/components/shell/LibraryStatus.svelte:149-183`.
   (Founder, June 21 2026.)
+  - Delivered 2026-07-27: the header consumes the committed terminal operation
+    snapshot, and exact installed/failed/cancelled transition tests prove that
+    progress cleanup cannot leave a 100%-downloading aggregate.
 
 - [ ] **Status hover card makes large jumps between number updates** (founder,
   June 21 2026: "the hover card when i hover over it seems to do large jumps
@@ -308,7 +1078,7 @@ intensity / RAM, and a startup-reliability bug.
   `apps/desktop/src/lib/components/shell/LibraryStatus.svelte:271` (the 300ms
   width transition that can lag the number). (Founder, June 21 2026.)
 
-- [ ] **User control over ingest intensity + "what processes when" (left
+- [x] **User control over ingest intensity + "what processes when" (left
   sidebar) - the app runs too hard / eats RAM** (founder, June 21 2026: "i'm
   not sure the best strategy is to just cue up every image instantly to go
   through all the operations... probably in the left sidebar we need more
@@ -337,8 +1107,55 @@ intensity / RAM, and a startup-reliability bug.
   exist as the mechanism - this is about USER GOVERNANCE over them. Needs a
   design round (where it lives, the default that stays quiet and fast, how RAM
   ceiling maps to worker/batch sizing). (Founder, June 21 2026.)
+  - FOUNDATION LANDED 2026-07-27: `ResourceGovernor` is now the single
+    process-wide admission/priority authority. Persisted Eco/Balanced/Max map
+    to real total-lane, ingest worker, queue-batch, embed-batch, RAW-batch, and
+    scan-hash concurrency ceilings. The Settings window exposes the mode,
+    Pause/Resume, and a new-folder Process now/Process later default; health
+    reports active/waiting counts for every lane, and `IngestStatus` carries
+    the same Pause/intensity truth so the header says "Paused by you" instead
+    of pretending frozen counters are active work.
+  - The authority now gates metadata/live ingest ahead of preview work,
+    interactive RAW ahead of both, embedding after them, initial/resume/
+    maintenance scans, startup doctor/root I/O, vector repair, six-hour
+    maintenance, and managed model-download workers. Queue and scan tests prove
+    the configured concurrency ceiling; governor tests prove Pause, priority,
+    and dynamic mode wake-up. Critical-disk admission remains the stronger
+    gate and composes with manual Pause.
+  - CLOSED 2026-07-27: `NewRootPolicy` now includes a durable `preview-only`
+    contract. Every source freezes its effective policy at add time in
+    `rootProcessingPolicies`; a one-shot Default / Process now / Previews only /
+    Process later chooser is available in both the left rail and Settings, and
+    the override does not mutate the saved future default. A failed policy
+    fsync rolls registration back instead of leaving an ungoverned active root.
+    Explicit Rescan promotes that root to full processing.
+  - Text and image embedding are independent persisted switches. Deferral does
+    not rewrite/drop queue rows: disabled passes remain pending and resume
+    normally. Preview-only/later roots are excluded at claim time; an image
+    shared with any full-processing active root remains eligible. Core tests
+    prove both the exclusive-root deferral and shared-image escape.
+  - Watcher event bursts, per-path hashing, overflow recovery, and polled scans
+    now acquire the desktop's dynamic RootScan lane through
+    `start_watcher_with_options`; every turn snapshots the live intensity's
+    hash ceiling. Startup-restored, add, and unarchive watchers all use it.
+  - Pause is now a waitable process signal, not only a next-batch check.
+    Filesystem walks observe it before every entry and phase; controlled hashes
+    check it every 64 KiB. A paused walk retains its complete in-memory seen
+    set and resumes the same idempotent operation, so stale inference can never
+    run from a partial traversal. Cancellation breaks the wait without
+    publishing a partial digest.
+  - In-flight model transport observes the same signal after each 64-KiB
+    resumable `.part` write through `GovernorDownloadPacer`; Pause suspends and
+    Resume continues the same body, while shutdown/user cancel still wins.
+    Deterministic tests prove an admitted scan and download chunk both stop and
+    resume.
+  - Budget evidence is exact and executable: Eco/Balanced/Max tests pin total
+    concurrency, ingest/hash concurrency, queue/embed/RAW batch bounds, and the
+    bounded-pipeline decoded-frame memory proxy (2/4/16 frames). Separate tests
+    pin foreground-before-root fairness, eventual RootScan admission, dynamic
+    watcher ceilings, and the immediate-then-400-ms progress cadence.
 
-- [ ] **Startup hang when a library root's volume is on an unresponsive
+- [~] **Startup hang when a library root's volume is on an unresponsive
   network mount (silent windowless freeze)** (margo, June 21 2026 - diagnosed
   live). REPRO: a hung `hard` NFS mount (`bornmanserver:/HomeNAS/raw_photos` at
   `/mnt/raw_photos`) that a library root lives on. SYMPTOM: app launches, the
@@ -365,8 +1182,13 @@ intensity / RAM, and a startup-reliability bug.
   per-volume probe a short timeout / non-blocking stat, so an unreachable
   volume just marks itself offline and the window still comes up. (Founder /
   margo dogfood, June 21 2026.)
+  - Deterministic implementation delivered 2026-07-27: the usable barrier no
+    longer waits for volume probing or watcher restoration, and a blocked
+    injected probe remains owned and observable after the shell is usable. A
+    real installed launch against a kernel-blocked NAS remains the acceptance
+    receipt.
 
-- [ ] **Default `tauri dev` launch on NVIDIA silently runs CPU embedding (no
+- [~] **Default `tauri dev` launch on NVIDIA silently runs CPU embedding (no
   CUDA) - and nothing tells the user** (margo, June 21 2026 - "did we detect
   CUDA? / embedding is super slow"). CONFIRMED on the 5080: the live app log
   shows ONLY `CPUExecutionProvider` (1262 CPU BFCArena allocs, zero
@@ -389,6 +1211,11 @@ intensity / RAM, and a startup-reliability bug.
   able to SEE that the 5080 is or isn't doing the work. Pairs with the
   hardware-aware model-selection item above and the CUDA EP item below.
   (Founder / margo dogfood, June 21 2026.)
+  - 2026-07-27 contract: ordinary `dev` and CPU-native bundles stay portable
+    and do not claim CUDA. NVIDIA machines use the explicit `dev:nvidia` /
+    `bundle:nvidia` profile, whose feature, staged-library, resolver, package,
+    and provider-observability wiring is verified. A real CUDA/TensorRT
+    installed run is still required before this item can close.
 
 ## Founder thread, June 14 2026 - model-usage walkthrough (decisions)
 
@@ -1027,8 +1854,10 @@ magnitudes.
 - [ ] Burst/HDR-bracket stacks beyond RAW+JPEG.
 - [ ] GPS map view; histogram in Look (needs decode-pipeline access).
 - [ ] Very-large grid cells served by display previews (>512px targets).
-- [ ] CI pipeline (GitHub Actions: standing gate + OS-matrix sidecar
-  byte-compare + nightly full-scale `#[ignore]` lane).
+- [~] CI pipeline: checked-in workflows cover three-OS quality/package smoke,
+  production signing/update gates, dependency advisories, NVIDIA packaging,
+  and mandatory APFS proof. Remote runs and the nightly full-scale `#[ignore]`
+  lane remain open.
 
 ## Recorded, not designed (K17 — unchanged)
 

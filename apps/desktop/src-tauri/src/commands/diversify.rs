@@ -31,8 +31,9 @@ use photoproof_core::tuning::tuning;
 use rusqlite::OpenFlags;
 use serde::Serialize;
 
-use super::S;
 use super::graph::{GraphScope, enumerate_scope};
+use super::{S, run_blocking};
+use crate::command_work::CommandClass;
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -77,92 +78,96 @@ pub async fn diversify_scope(
     tolerance: f32,
 ) -> CmdResult<DiversifyReport> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let started = Instant::now();
-        let hashes = enumerate_scope(&app, &scope)?;
-        let t = tuning().diversify;
-        // Map the single slider to the objective's cutoff (the documented curve).
-        let cutoff = tolerance_to_cutoff(tolerance, t.cutoff_high as f32, t.cutoff_low as f32);
+    run_blocking(
+        app,
+        "diversify.diversify-scope",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let started = Instant::now();
+            let hashes = enumerate_scope(app, &scope)?;
+            let t = tuning().diversify;
+            // Map the single slider to the objective's cutoff (the documented curve).
+            let cutoff = tolerance_to_cutoff(tolerance, t.cutoff_high as f32, t.cutoff_low as f32);
 
-        // Resolve the CLIP image space's model id exactly like graph_neighbors:
-        // the loaded embedder when present, else any stored row's model so an
-        // embedded-but-models-unloaded library still diversifies.
-        let clip_model = match app
-            .runtime
-            .embedders
-            .clip()
-            .map(|e| e.model_id().to_owned())
-        {
-            Some(m) => Some(m),
-            None => app
+            // Resolve the CLIP image space's model id exactly like graph_neighbors:
+            // the loaded embedder when present, else any stored row's model so an
+            // embedded-but-models-unloaded library still diversifies.
+            let clip_model = match app
+                .runtime
+                .embedders
+                .clip()
+                .map(|e| e.model_id().to_owned())
+            {
+                Some(m) => Some(m),
+                None => app
+                    .vectors
+                    .any_model_id(VecKind::ImageClip)
+                    .map_err(|e| CmdError::Invalid(format!("clip model lookup: {e}")))?,
+            };
+
+            // No CLIP model id ⇒ no similarity signal ⇒ nothing to collapse: the
+            // honest "all shown" report (degraded), never an error.
+            let Some(clip_model) = clip_model else {
+                let mut shown = hashes;
+                shown.sort();
+                shown.dedup();
+                tracing::info!(
+                    scope = ?scope,
+                    images = shown.len(),
+                    tolerance,
+                    cutoff,
+                    "diversify_scope: no CLIP model (degraded all-shown)"
+                );
+                return Ok(DiversifyReport {
+                    shown,
+                    hidden: Vec::new(),
+                    cutoff,
+                    degraded: true,
+                });
+            };
+
+            // The sparse CLIP cosine k-NN graph over exactly the scope — the same
+            // brute-force kernel the visualizer reads, with a wider fan-out (the
+            // Diversify pass wants to see more of each cluster than the layout does).
+            let graph = app
                 .vectors
-                .any_model_id(VecKind::ImageClip)
-                .map_err(|e| CmdError::Invalid(format!("clip model lookup: {e}")))?,
-        };
+                .knn_within(
+                    VecSpace {
+                        vec_kind: VecKind::ImageClip,
+                        model_id: clip_model,
+                    },
+                    &hashes,
+                    t.knn_k as usize,
+                )
+                .map_err(|e| CmdError::Invalid(format!("clip knn: {e}")))?;
 
-        // No CLIP model id ⇒ no similarity signal ⇒ nothing to collapse: the
-        // honest "all shown" report (degraded), never an error.
-        let Some(clip_model) = clip_model else {
-            let mut shown = hashes;
-            shown.sort();
-            shown.dedup();
+            // Per-image QUALITY = current rating (0..=5), so a cluster collapses to
+            // its highest-rated frame. Unrated images score 0 ⇒ the deterministic
+            // hash tie-break decides among equally-(un)rated frames. A read-only
+            // projection over the shared WAL db (the established debug-readq pattern).
+            let quality = read_ratings(app, &hashes)?;
+
+            let sel = facility_location_select(&graph, &hashes, &quality, cutoff);
             tracing::info!(
                 scope = ?scope,
-                images = shown.len(),
+                images = hashes.len(),
+                shown = sel.shown.len(),
+                hidden = sel.hidden.len(),
                 tolerance,
                 cutoff,
-                "diversify_scope: no CLIP model (degraded all-shown)"
+                diversify_ms = started.elapsed().as_millis(),
+                "diversify_scope computed"
             );
-            return Ok(DiversifyReport {
-                shown,
-                hidden: Vec::new(),
+            Ok(DiversifyReport {
+                shown: sel.shown,
+                hidden: sel.hidden,
                 cutoff,
-                degraded: true,
-            });
-        };
-
-        // The sparse CLIP cosine k-NN graph over exactly the scope — the same
-        // brute-force kernel the visualizer reads, with a wider fan-out (the
-        // Diversify pass wants to see more of each cluster than the layout does).
-        let graph = app
-            .vectors
-            .knn_within(
-                VecSpace {
-                    vec_kind: VecKind::ImageClip,
-                    model_id: clip_model,
-                },
-                &hashes,
-                t.knn_k as usize,
-            )
-            .map_err(|e| CmdError::Invalid(format!("clip knn: {e}")))?;
-
-        // Per-image QUALITY = current rating (0..=5), so a cluster collapses to
-        // its highest-rated frame. Unrated images score 0 ⇒ the deterministic
-        // hash tie-break decides among equally-(un)rated frames. A read-only
-        // projection over the shared WAL db (the established debug-readq pattern).
-        let quality = read_ratings(&app, &hashes)?;
-
-        let sel = facility_location_select(&graph, &hashes, &quality, cutoff);
-        tracing::info!(
-            scope = ?scope,
-            images = hashes.len(),
-            shown = sel.shown.len(),
-            hidden = sel.hidden.len(),
-            tolerance,
-            cutoff,
-            diversify_ms = started.elapsed().as_millis(),
-            "diversify_scope computed"
-        );
-        Ok(DiversifyReport {
-            shown: sel.shown,
-            hidden: sel.hidden,
-            cutoff,
-            degraded: false,
-        })
-    })
+                degraded: false,
+            })
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Read the current rating (0..=5) for each in-scope image from the

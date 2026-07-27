@@ -18,8 +18,9 @@ use photoproof_core::ContentHash;
 use photoproof_core::tuning::tuning;
 use serde::Serialize;
 
-use super::S;
 use super::graph::{GraphScope, enumerate_scope};
+use super::{S, run_blocking};
+use crate::command_work::CommandClass;
 use crate::error::{CmdError, CmdResult};
 
 /// One near-duplicate group on the wire: the member image hashes (lowercase
@@ -54,31 +55,35 @@ pub async fn find_near_duplicates(
     // is O(n²), so run it off the async runtime's cooperative threads (the
     // find_similar / os.rs spawn_blocking precedent) — a big library must not
     // stall the UI loop.
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let scope_hashes = enumerate_scope(&app, &scope)?;
-        // Resolve the hex strings to typed ContentHash for the core call. A
-        // malformed hash from the scope reader is a hard bug, not user input,
-        // so surface it rather than silently drop.
-        let typed: Vec<ContentHash> = scope_hashes
-            .iter()
-            .map(|h| {
-                ContentHash::from_hex(h)
-                    .map_err(|e| CmdError::Invalid(format!("bad scope hash: {e}")))
-            })
-            .collect::<CmdResult<_>>()?;
-        let groups = app
-            .library
-            .find_near_duplicates(&typed, threshold)
-            .map_err(|e| CmdError::Invalid(format!("near-dup scan: {e}")))?;
-        Ok(groups
-            .into_iter()
-            .map(|g| DuplicateGroupDto {
-                count: g.image_hashes.len(),
-                image_hashes: g.image_hashes,
-            })
-            .collect())
-    })
+    run_blocking(
+        app,
+        "dedup.find-near-duplicates",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let scope_hashes = enumerate_scope(app, &scope)?;
+            // Resolve the hex strings to typed ContentHash for the core call. A
+            // malformed hash from the scope reader is a hard bug, not user input,
+            // so surface it rather than silently drop.
+            let typed: Vec<ContentHash> = scope_hashes
+                .iter()
+                .map(|h| {
+                    ContentHash::from_hex(h)
+                        .map_err(|e| CmdError::Invalid(format!("bad scope hash: {e}")))
+                })
+                .collect::<CmdResult<_>>()?;
+            let groups = app
+                .library
+                .find_near_duplicates(&typed, threshold)
+                .map_err(|e| CmdError::Invalid(format!("near-dup scan: {e}")))?;
+            Ok(groups
+                .into_iter()
+                .map(|g| DuplicateGroupDto {
+                    count: g.image_hashes.len(),
+                    image_hashes: g.image_hashes,
+                })
+                .collect())
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }

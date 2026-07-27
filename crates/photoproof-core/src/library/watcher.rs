@@ -22,7 +22,9 @@ use crate::id::UtcMillis;
 use super::exclusions::{MAX_FILE_BYTES, classify_extension, is_excluded_file_name};
 use super::ingest::PRIORITY_WATCHER;
 use super::scan::ScanOptions;
-use super::{Library, LibraryError, Observed, mtime_ns_of, paths, rel_path_str};
+use super::{
+    ActivePathMatch, CancelFlag, Library, LibraryError, Observed, mtime_ns_of, paths, rel_path_str,
+};
 
 /// §7.1 timing knobs (DECISIONS L3). Tests inject compressed clocks; the
 /// defaults are the normative values.
@@ -395,12 +397,48 @@ impl WatchPipeline {
             fallback(self);
             return Ok(vec![]);
         };
-        let old_row = {
-            let conn = self.lib.db.lock().expect("poisoned");
-            paths::active_row_at(&conn, &self.volume_id, &from_rel)?
+        // For a case-only pair, ask whether the old DB spelling aliases the
+        // post-rename path BEFORE treating `from` as an ordinary exact move.
+        // That preserves path_id on APFS/FAT. The same proof fails when
+        // `a.jpg` and `A.jpg` are distinct entries, so case-sensitive volumes
+        // continue through the normal stale+insert move-correlation path.
+        let case_alias = if from_rel != to_rel && from_rel.eq_ignore_ascii_case(&to_rel) {
+            self.lib
+                .active_case_alias_match(&self.volume_id, &to_rel, &to)?
+        } else {
+            None
+        };
+        let old_row = match case_alias {
+            some @ Some(_) => some,
+            None => match self
+                .lib
+                .active_path_match(&self.volume_id, &from_rel, &to)?
+            {
+                some @ Some(_) => some,
+                None => self.lib.active_path_match(&self.volume_id, &to_rel, &to)?,
+            },
         };
         match old_row {
-            Some(row) if row.size == meta.len() as i64 => {
+            Some(ActivePathMatch::CaseAlias(row)) if row.size == meta.len() as i64 => {
+                let now_db = self.lib.now();
+                let conn = self.lib.db.lock().expect("poisoned");
+                paths::recase_active(
+                    &conn,
+                    &row.path_id,
+                    Some(&self.root_id),
+                    &to_rel,
+                    row.size,
+                    mtime_ns_of(&meta),
+                    now_db,
+                )?;
+                drop(conn);
+                self.lib.bump_images_version();
+                Ok(vec![PipelineEffect::RenameRelinked {
+                    from: from_rel,
+                    to: to_rel,
+                }])
+            }
+            Some(ActivePathMatch::Exact(row)) if row.size == meta.len() as i64 => {
                 let mtime_ns = mtime_ns_of(&meta);
                 let path_id = self.lib.mint_ulid();
                 let now_db = self.lib.now();
@@ -441,6 +479,14 @@ impl WatchPipeline {
     /// Evaluate every quiescent path (call on a timer, or after `push` with
     /// an advanced clock in tests).
     pub fn tick(&mut self, now: UtcMillis) -> Result<Vec<PipelineEffect>, LibraryError> {
+        self.tick_with_options(now, &ScanOptions::default())
+    }
+
+    fn tick_with_options(
+        &mut self,
+        now: UtcMillis,
+        opts: &ScanOptions,
+    ) -> Result<Vec<PipelineEffect>, LibraryError> {
         let now_ms = now.epoch_ms();
         let mut effects = Vec::new();
         for path in self.core.due(now_ms) {
@@ -500,7 +546,7 @@ impl WatchPipeline {
                 Stability::Recheck => {} // mid-copy: re-checked every 2 s
                 Stability::Stable => {
                     let window = UtcMillis::from_epoch_ms(now.epoch_ms() - self.cfg.move_window_ms);
-                    let outcome = self.lib.observe_file(
+                    let Some(outcome) = self.lib.observe_file(
                         &self.volume_id,
                         Some(&self.root_id),
                         &rel,
@@ -510,7 +556,12 @@ impl WatchPipeline {
                         PRIORITY_WATCHER,
                         self.tolerance_ns,
                         window,
-                    )?;
+                        opts.cancel.as_deref(),
+                        opts.pause.as_ref(),
+                    )?
+                    else {
+                        continue;
+                    };
                     effects.push(PipelineEffect::Observed {
                         rel_path: rel,
                         outcome,
@@ -549,6 +600,10 @@ pub struct RootWatcherHandle {
 }
 
 impl RootWatcherHandle {
+    pub fn is_active(&self) -> bool {
+        self.join.as_ref().is_some_and(|join| !join.is_finished())
+    }
+
     pub fn stop(mut self) {
         self.shutdown();
     }
@@ -604,6 +659,26 @@ pub(crate) fn start_root_watcher(
     lib: &Arc<Library>,
     root_id: &str,
 ) -> Result<RootWatcherHandle, LibraryError> {
+    start_root_watcher_with_options(lib, root_id, |stop| {
+        Some((
+            ScanOptions {
+                cancel: Some(Arc::clone(stop)),
+                ..ScanOptions::default()
+            },
+            (),
+        ))
+    })
+}
+
+pub(crate) fn start_root_watcher_with_options<F, G>(
+    lib: &Arc<Library>,
+    root_id: &str,
+    policy: F,
+) -> Result<RootWatcherHandle, LibraryError>
+where
+    F: Fn(&CancelFlag) -> Option<(ScanOptions, G)> + Send + Sync + 'static,
+    G: Send + 'static,
+{
     let mut pipeline = WatchPipeline::new(Arc::clone(lib), root_id, DebounceConfig::default())?;
     let root_dir = pipeline.root_dir.clone();
     let (tx, rx) = mpsc::channel::<RawWatchEvent>();
@@ -624,8 +699,8 @@ pub(crate) fn start_root_watcher(
         .name("pp-watcher".into())
         .spawn(move || {
             let mut last_polled_scan = std::time::Instant::now();
-            let run_scan = |reason: &str| {
-                if let Err(e) = lib_thread.scan_root(&root, &ScanOptions::default()) {
+            let run_scan = |reason: &str, opts: &ScanOptions| {
+                if let Err(e) = lib_thread.scan_root(&root, opts) {
                     lib_thread.log(format!("watcher-triggered scan ({reason}) failed: {e}"));
                 }
             };
@@ -636,6 +711,12 @@ pub(crate) fn start_root_watcher(
                 let mut scan_needed = false;
                 match rx.recv_timeout(WATCHER_TICK) {
                     Ok(ev) => {
+                        let Some((opts, _permit)) = policy(&stop_thread) else {
+                            if stop_thread.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            continue;
+                        };
                         match pipeline.push(ev, UtcMillis::now()) {
                             Ok(effects) => {
                                 scan_needed |= effects.contains(&PipelineEffect::ScanNeeded);
@@ -651,22 +732,47 @@ pub(crate) fn start_root_watcher(
                                 Err(e) => lib_thread.log(format!("watcher push failed: {e}")),
                             }
                         }
+                        match pipeline.tick_with_options(UtcMillis::now(), &opts) {
+                            Ok(effects) => {
+                                scan_needed |= effects.contains(&PipelineEffect::ScanNeeded);
+                            }
+                            Err(e) => lib_thread.log(format!("watcher tick failed: {e}")),
+                        }
+                        if scan_needed {
+                            run_scan("overflow/error", &opts);
+                            last_polled_scan = std::time::Instant::now();
+                        }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if pipeline.pending_paths() > 0 {
+                            let Some((opts, _permit)) = policy(&stop_thread) else {
+                                if stop_thread.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                continue;
+                            };
+                            match pipeline.tick_with_options(UtcMillis::now(), &opts) {
+                                Ok(effects) => {
+                                    scan_needed |= effects.contains(&PipelineEffect::ScanNeeded);
+                                }
+                                Err(e) => lib_thread.log(format!("watcher tick failed: {e}")),
+                            }
+                            if scan_needed {
+                                run_scan("overflow/error", &opts);
+                                last_polled_scan = std::time::Instant::now();
+                            }
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                match pipeline.tick(UtcMillis::now()) {
-                    Ok(effects) => {
-                        scan_needed |= effects.contains(&PipelineEffect::ScanNeeded);
-                    }
-                    Err(e) => lib_thread.log(format!("watcher tick failed: {e}")),
-                }
-                if scan_needed {
-                    run_scan("overflow/error");
-                    last_polled_scan = std::time::Instant::now();
-                }
                 if pipeline.polled_mode() && last_polled_scan.elapsed() >= POLLED_SCAN_INTERVAL {
-                    run_scan("polled mode");
+                    let Some((opts, _permit)) = policy(&stop_thread) else {
+                        if stop_thread.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        continue;
+                    };
+                    run_scan("polled mode", &opts);
                     last_polled_scan = std::time::Instant::now();
                 }
             }

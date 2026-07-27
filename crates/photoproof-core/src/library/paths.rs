@@ -92,6 +92,27 @@ pub fn active_row_at(
     .optional()
 }
 
+/// Active rows whose stored spelling differs from `rel_path` only by ASCII
+/// case. This is only a *candidate* lookup: callers MUST prove that the
+/// stored spelling and the observed path resolve to the same filesystem
+/// entry before treating it as a case-only rename. SQLite's NOCASE collation
+/// alone is not filesystem semantics and would conflate distinct `a.jpg` /
+/// `A.jpg` files on case-sensitive volumes.
+pub(crate) fn active_case_alias_candidates(
+    conn: &Connection,
+    volume_id: &str,
+    rel_path: &str,
+) -> rusqlite::Result<Vec<PathRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {PATH_COLUMNS} FROM paths
+         WHERE volume_id = ?1 AND rel_path = ?2 COLLATE NOCASE
+           AND rel_path <> ?2 AND state = 'active'
+         ORDER BY rel_path"
+    ))?;
+    let rows = stmt.query_map(params![volume_id, rel_path], row_to_path)?;
+    rows.collect()
+}
+
 /// All rows for an image, active first.
 pub fn rows_for_image(conn: &Connection, hash: &ContentHash) -> rusqlite::Result<Vec<PathRow>> {
     let mut stmt = conn.prepare(&format!(
@@ -187,6 +208,29 @@ pub fn update_size_mtime(
         "UPDATE paths SET size = ?2, mtime_ns = ?3, last_verified_at = ?4
          WHERE path_id = ?1",
         params![path_id, size, mtime_ns, now.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Preserve path identity while updating the directory-entry spelling after
+/// a proven case-only rename. This is deliberately an UPDATE, not a
+/// stale+insert pair: on a case-insensitive volume both spellings name one
+/// entry and must never coexist as two active claims.
+pub(crate) fn recase_active(
+    conn: &Connection,
+    path_id: &str,
+    root_id: Option<&str>,
+    rel_path: &str,
+    size: i64,
+    mtime_ns: i64,
+    now: UtcMillis,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE paths
+         SET root_id = COALESCE(?2, root_id), rel_path = ?3, size = ?4,
+             mtime_ns = ?5, last_verified_at = ?6
+         WHERE path_id = ?1 AND state = 'active'",
+        params![path_id, root_id, rel_path, size, mtime_ns, now.to_rfc3339()],
     )?;
     Ok(())
 }

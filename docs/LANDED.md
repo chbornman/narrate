@@ -6,6 +6,38 @@ de facto changelog of backlog-sourced work. Open work stays in BACKLOG.md;
 this file only grows. Organized by era, newest first; older entries keep
 their original wording.
 
+## July 27 2026 - desktop foundation observability and gates
+
+- [x] **Retain crash diagnostics and add startup/lifecycle telemetry**
+  - Rotate/preserve previous session logs instead of truncating the only crash
+    record on the next launch; add a previous-launch crash marker, panic hook,
+    build/runtime/capability metadata, and per-phase startup timings.
+    `apps/desktop/src-tauri/src/lib.rs:53-90`.
+  - Surface Reveal logs / Copy health report. Log-sink creation failure itself
+    must be discoverable.
+  - Landed evidence: `diagnostics.rs` rotates and bounds retained launch logs,
+    durably marks unclean launches, and records panics; coordinated shutdown
+    alone clears the marker. `lifecycle.rs` records monotone phase timings.
+    Application Health joins build/runtime/capability and diagnostics metadata,
+    promotes log-sink failure to a health issue, and Settings exposes Reveal
+    logs plus Copy health report. Relaunch/rotation, phase, health projection,
+    and Settings-window tests pin the contract.
+
+- [x] **Add multi-platform CI and dependency/release workflow contracts**
+  - Run format, clippy, Rust tests, frontend typecheck/tests/build, no-em-dash
+    UI check, migration fixtures, bundle construction, and installed smoke tests
+    on Linux/macOS/Windows. Compile platform-specific code paths even when live
+    hardware tests remain founder-machine gates.
+  - The APFS `s02_2` case-only rename is now a required macOS receipt, not a
+    tolerated red; no red is tolerated.
+  - Landed source: `.github/workflows/desktop-foundation.yml` defines
+    format/clippy/workspace tests and the full frontend check/test/build matrix
+    on Linux, macOS, and Windows, with APFS proof mandatory on macOS. Its native
+    matrix builds and smokes deb+AppImage/app+dmg/msi+nsis packages. RustSec and
+    Bun audits are required, while Dependabot tracks Cargo, npm, and Actions
+    weekly. Local YAML and contract validation are green; A24 remains open in
+    BACKLOG until the workflows have remote receipts.
+
 ## July 7 2026 - Full audit fix wave (loops, sync, model downloads, UX, perf)
 
 Full-codebase audit (`docs/AUDIT-2026-07-07.md`, findings keyed G/S/D/U/F/T)
@@ -80,13 +112,10 @@ below carries a named test.
   error row); and a live "1.2 / 3.9 GB - 8.0 MB/s" throughput line (frontend
   EWMA over the existing byte samples). `4779983`.
 
-REMAINING (still BACKLOG, logged in the audit sec 6): S5 orphan preview/vector
-sweep (wants a deletion-window ruling), S6/`s02_2` (case-sensitivity ruling),
-D4 partial-download reclaim UI, D6 post-install re-verify, D7 installed.json
-lock, D8 unhosted fp16 CLIP entry (hosting decision), U3 force-reembed
-affordance (product decision), U8 dupes-lens interactivity, F4 fling load
-ordering, F5/F6 (measure via T2 first), F7 full-res ranges, T2 grid-list bench,
-T4 scripted-scroll harness.
+S5 later landed with a 30-day authoritative-orphan policy, all-vector cleanup,
+retained-summary rebuild, and interruption/relink coverage. Remaining items
+from this snapshot continue in BACKLOG: S6/`s02_2`, D4, D6, D7, D8, U3, U8,
+F4-F7, T2, and T4 (see their current entries for live status).
 
 ## June 17 2026 - Seam 2: model-swap re-embed coverage (revive transient skips)
 

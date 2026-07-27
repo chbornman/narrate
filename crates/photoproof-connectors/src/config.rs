@@ -385,21 +385,11 @@ pub struct EmbedderConfig {
 
 impl Default for EmbedderConfig {
     fn default() -> Self {
-        // PLATFORM-CONDITIONAL CLIP default.
-        // - CUDA build -> fp16: TensorRT compiles the WHOLE graph as one unit, so
-        //   fp16 is 54-85x with a fast load (no fragmentation).
-        // - macOS + plain CPU builds -> the int8 base on CPU. The fp16 export
-        //   *would* graduate to CoreML, but the DFN5B graph fragments into ~36
-        //   CoreML partitions (one per transformer block), so a cache-WARM load
-        //   measured 878s (~14.6 min) EVERY launch -- worse than int8/CPU's ~1.5s
-        //   load. Folding the attention Sqrt did NOT reduce the partitions, so the
-        //   fragmenting op is still unidentified (see the backlog investigation
-        //   "CoreML CLIP graph fragmentation"). Until that lands, macOS ships
-        //   int8/CPU: instant startup, background embedding. The fp16 model stays
-        //   in the manifest and is one `[embedder] model = ...` line away.
-        #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
-        let model = "ViT-H-14-378-quickgelu__dfn5b-fp16";
-        #[cfg(not(all(not(target_os = "macos"), feature = "cuda")))]
+        // SAFE HOSTED DEFAULT ON EVERY PLATFORM. The fp16 export is faster on
+        // CUDA, but it currently exists only as a local conversion with no
+        // immutable hosted revision. Fresh installs must never name a model
+        // they cannot download. Once the fp16 bytes are hosted and the manifest
+        // is re-pinned, backend-aware selection may opt CUDA machines into it.
         let model = "ViT-H-14-378-quickgelu__dfn5b";
         Self {
             backend: EmbedderBackend::LocalOrt,

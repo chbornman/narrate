@@ -82,10 +82,23 @@ since `e60cb15` (optimized deps).
   binding, §4.1 level-3 heuristic fallback (B63). Windows volume-serial
   recipe still behind its seam — defer until Windows is a target.
 - [ ] **APFS case-insensitivity ruling** — s02_2 (case-only rename
-  relinks sidecar) fails on macOS: a case-only rename is NOT a rename on
-  default APFS. Decide the semantics (detect fs case-sensitivity and
-  branch, or treat case-only renames as same-file on insensitive
-  volumes); until then s02_2 is the one known-red test on macOS.
+  relinks sidecar) is implemented with live mounted-volume semantics:
+  same-entry aliases recase one path row, while case-distinct entries remain
+  independent. After synchronizing the current worktree, run
+  `./scripts/verify-apfs-case-rename.sh <receipt-path>` on the founder Mac;
+  check this item only when its default-APFS receipt says `result=PASS`.
+- [ ] **Desktop-foundation native receipts** — retain the installed Mac
+  package startup/shutdown and crash/relaunch record, two-webview convergence,
+  real suspend/resume, CPAL device-removal behavior, and control-file plus
+  backup/restore drills. The deterministic A01-A26 foundation is green; these
+  are the facts simulation cannot establish.
+- [ ] **Accelerator and performance receipts** — run CoreML on this Mac and
+  CUDA/TensorRT on the 5080, confirm the UI-reported selected provider matches
+  the profile, and retain idle/peak RSS plus primary journey timings. Windows,
+  removable-drive, and hard-NAS receipts remain separate platform gates.
+- [ ] **Release credentials and rollout** — provision Developer ID
+  Application/notarization, Windows Authenticode, updater signing, and the
+  cohort-aware HTTPS endpoint before any 0.1.0 candidate is published.
 - [ ] **Wave-2 eyeball pass (macOS)** — only you can judge: rounded
   corners + traffic lights (Overlay titlebar; check the lights hide/show
   with Tab lights-out), the welcome card copy + first-run feel, the

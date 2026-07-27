@@ -6,7 +6,6 @@
 //! Filters are hard constraints: a DTO this layer cannot translate is an
 //! error, never a silent drop (RETRIEVAL §5.1 firewall discipline).
 
-use photoproof_connectors::OrtEmbedder;
 use photoproof_connectors::vector_store::VectorStore;
 use photoproof_core::search::{
     self as core_search, CollectionRef, Comparison, DateField, DateRange, Filter as CoreFilter,
@@ -15,6 +14,7 @@ use photoproof_core::search::{
 };
 use photoproof_core::{Source, UtcMillis};
 
+use crate::embedders::EmbedderProxy;
 use crate::error::{CmdError, CmdResult};
 use crate::search_types as dto;
 
@@ -112,7 +112,7 @@ pub fn run_search(
         .iter()
         .map(filter_to_core)
         .collect::<CmdResult<_>>()?;
-    let rig = core_search::HybridRig::<core_search::NoModel, OrtEmbedder, OrtEmbedder> {
+    let rig = core_search::HybridRig::<core_search::NoModel, EmbedderProxy, EmbedderProxy> {
         llm: None,
         text: text.as_deref(),
         clip: clip.as_deref(),

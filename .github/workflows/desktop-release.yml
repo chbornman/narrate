@@ -1,0 +1,104 @@
+name: Desktop production release candidate
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-production-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Release contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version, schema, notes, and rollback gate
+        working-directory: apps/desktop
+        run: node scripts/verify-release-contract.mjs
+      - name: NVIDIA/CPU package wiring contract
+        working-directory: apps/desktop
+        run: node scripts/verify-nvidia-wiring.mjs
+
+  signed:
+    name: Signed package (${{ matrix.os }})
+    needs: contract
+    environment: desktop-production
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bundles: appimage,deb
+          - os: macos-latest
+            bundles: app,dmg
+          - os: windows-latest
+            bundles: nsis,msi
+    env:
+      PHOTOPROOF_UPDATES_ENABLED: "1"
+      PHOTOPROOF_UPDATE_ENDPOINT: ${{ vars.PHOTOPROOF_UPDATE_ENDPOINT }}
+      PHOTOPROOF_UPDATER_PUBLIC_KEY: ${{ vars.PHOTOPROOF_UPDATER_PUBLIC_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install locked frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Fail closed on missing production credentials
+        working-directory: apps/desktop
+        run: node scripts/assert-production-release-env.mjs
+      - name: Import Developer ID certificate and notarization key
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        run: bash scripts/prepare-apple-signing.sh
+      - name: Import Authenticode certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: apps/desktop
+        run: ./scripts/prepare-windows-signing.ps1
+      - name: Generate release-only Tauri configuration
+        working-directory: apps/desktop
+        run: node scripts/write-production-config.mjs "${{ runner.temp }}/photoproof-production.json"
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: desktop-v__VERSION__
+          releaseName: Photoproof __VERSION__
+          releaseBody: See the committed release notes and compatibility record.
+          releaseDraft: true
+          prerelease: false
+          args: >-
+            --config ${{ runner.temp }}/photoproof-production.json
+            --bundles ${{ matrix.bundles }}
+      - name: Verify platform and updater signatures
+        working-directory: apps/desktop
+        run: node scripts/verify-production-signatures.mjs ../../target/release/bundle
+      - name: Smoke extracted signed package
+        working-directory: apps/desktop
+        run: node scripts/smoke-installed-bundle.mjs ../../target/release/bundle

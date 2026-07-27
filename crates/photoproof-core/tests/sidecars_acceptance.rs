@@ -1575,9 +1575,19 @@ fn s02_2_case_only_rename_relinks_sidecar() {
     engine.flush_image(&h, now).unwrap();
     let sc_new = sidecar_path_for_image(&p_new);
     assert!(sc_new.exists(), "new-case sidecar written");
+    let actual_names: Vec<String> = fs::read_dir(w.images.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let new_name = sc_new.file_name().unwrap().to_string_lossy();
+    let old_name = sc_old.file_name().unwrap().to_string_lossy();
     assert!(
-        !sc_old.exists(),
-        "old-case sidecar removed after verification"
+        actual_names.iter().any(|name| name == new_name.as_ref()),
+        "directory entry uses the image's new byte-exact spelling: {actual_names:?}"
+    );
+    assert!(
+        !actual_names.iter().any(|name| name == old_name.as_ref()),
+        "old directory-entry spelling removed after verification: {actual_names:?}"
     );
     let ParsedSidecar::Doc(doc) = parse_sidecar(&fs::read(&sc_new).unwrap()).unwrap() else {
         panic!("parse");

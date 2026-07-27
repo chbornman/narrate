@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 use photoproof_connectors::http::{self, HttpError};
 
 use super::bus::{RuntimeBus, RuntimeEvent};
+use super::control_file::write_durable;
 use super::manifest::{Acceptances, FileEntry, ModelEntry};
 
 /// Transfer chunk size, shared by both transports. Load-bearing twice:
@@ -129,10 +130,25 @@ pub enum DownloadError {
     BadUrl(String),
 }
 
+/// Observable phases inside one model download attempt. The desktop owns the
+/// queued and terminal phases; core reports the three phases that bracket
+/// transport, integrity settlement, and the durable installed-index commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadPhase {
+    Downloading,
+    Verifying,
+    Installing,
+}
+
 /// Background-priority throttle seam (§5.2: throttled while a capture
-/// session is live). Called between chunks with the transferred size.
+/// session is live). Called between chunks with the transferred size. The
+/// phase hook defaults to a no-op so non-desktop callers do not need an event
+/// sink, while the desktop can publish every phase without inferring it from
+/// byte counts.
 pub trait Pacer: Send {
     fn pace(&mut self, just_transferred: usize);
+
+    fn phase(&mut self, _phase: DownloadPhase) {}
 }
 
 /// Production pacer: sleeps a beat per chunk while the capture-live flag
@@ -222,24 +238,83 @@ impl DownloadManager {
                 when: when.to_owned(),
             },
         );
-        let tmp = self.installed_path().with_extension("json.tmp");
-        std::fs::create_dir_all(&self.models_dir)?;
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(&all).expect("installed json"),
-        )?;
-        std::fs::rename(tmp, self.installed_path())
+        let bytes = serde_json::to_vec_pretty(&all)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        write_durable(&self.installed_path(), &bytes)
     }
 
     pub fn remove_installed_record(&self, model_id: &str) -> std::io::Result<()> {
         let mut all = self.installed();
         all.remove(model_id);
-        let tmp = self.installed_path().with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(&all).expect("installed json"),
-        )?;
-        std::fs::rename(tmp, self.installed_path())
+        let bytes = serde_json::to_vec_pretty(&all)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        write_durable(&self.installed_path(), &bytes)
+    }
+
+    /// Replace the complete installed index in one durable commit. The desktop
+    /// model-operation registry uses this only while holding its mutation
+    /// gate, after recovering a missing/corrupt index from manifest-valid
+    /// immutable files.
+    pub fn replace_installed(
+        &self,
+        installed: &BTreeMap<String, InstalledRecord>,
+    ) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(installed)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        write_durable(&self.installed_path(), &bytes)
+    }
+
+    /// Verify every final artifact for one model against the immutable
+    /// manifest. This is deliberately independent of `installed.json`: it is
+    /// the recovery/doctor proof when the derived index is missing, malformed,
+    /// or suspected stale.
+    pub fn verify_model(
+        &self,
+        model: &ModelEntry,
+        cancel: &AtomicBool,
+    ) -> Result<(), DownloadError> {
+        for file in &model.files {
+            if !is_contained_relative_path(&file.path) {
+                return Err(DownloadError::UnsafePath {
+                    file: file.path.clone(),
+                });
+            }
+            let path = self.models_dir.join(&model.id).join(&file.path);
+            let metadata = std::fs::metadata(&path)?;
+            if metadata.len() != file.bytes
+                || sha256_file_cancellable(&path, cancel)? != file.sha256.to_lowercase()
+            {
+                return Err(DownloadError::ChecksumFailed {
+                    file: file.path.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove only resumable `.part` artifacts belonging to this manifest
+    /// entry. Final verified files and the installed index are never touched.
+    /// Returns the number of bytes reclaimed.
+    pub fn discard_partial(&self, model: &ModelEntry) -> std::io::Result<u64> {
+        let mut reclaimed = 0;
+        for file in &model.files {
+            if !is_contained_relative_path(&file.path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsafe manifest path {}", file.path),
+                ));
+            }
+            let part = part_path(&self.models_dir.join(&model.id).join(&file.path));
+            match std::fs::metadata(&part) {
+                Ok(metadata) => {
+                    std::fs::remove_file(&part)?;
+                    reclaimed += metadata.len();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(reclaimed)
     }
 
     /// Bytes already on disk for a model (final + part files) — settings
@@ -301,6 +376,8 @@ impl DownloadManager {
                 });
             }
         }
+        pacer.phase(DownloadPhase::Downloading);
+        let trusted_install = self.is_installed(&model.id);
         let dir = self.models_dir.join(&model.id);
         std::fs::create_dir_all(&dir)?;
         let mut outcome = DownloadOutcome {
@@ -333,8 +410,17 @@ impl DownloadManager {
                 std::fs::create_dir_all(parent)?;
             }
             if std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(file.bytes) {
-                base += file.bytes;
-                continue; // verified at rename time on a previous run
+                // An indexed install was hash-verified before its atomic
+                // rename. Unindexed files are not trusted by length: they may
+                // be a crash remnant or same-length corruption. Re-hash before
+                // adopting them into a newly committed installed index.
+                if trusted_install
+                    || sha256_file_cancellable(&dest, cancel)? == file.sha256.to_lowercase()
+                {
+                    base += file.bytes;
+                    continue;
+                }
+                std::fs::remove_file(&dest)?;
             }
             match self.fetch_and_verify(model, file, &dest, pacer, cancel, base) {
                 Ok(bytes) => {
@@ -346,13 +432,9 @@ impl DownloadManager {
                     // automatic retry, then surface.
                     let _ = std::fs::remove_file(part_path(&dest));
                     let _ = std::fs::remove_file(&dest);
-                    match self.fetch_and_verify(model, file, &dest, pacer, cancel, base) {
-                        Ok(bytes) => {
-                            outcome.files_fetched += 1;
-                            outcome.bytes_fetched += bytes;
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    let bytes = self.fetch_and_verify(model, file, &dest, pacer, cancel, base)?;
+                    outcome.files_fetched += 1;
+                    outcome.bytes_fetched += bytes;
                 }
                 Err(e) => return Err(e),
             }
@@ -360,6 +442,11 @@ impl DownloadManager {
             // and renamed, so it joins the cumulative baseline.
             base += file.bytes;
         }
+        // Every payload has passed its immutable hash proof. Publish the
+        // model-level integrity and durable-index phases explicitly; callers
+        // must not infer either from a 100% byte counter.
+        pacer.phase(DownloadPhase::Verifying);
+        pacer.phase(DownloadPhase::Installing);
         // All files verified ⇒ installed (§5.2 atomicity at model grain).
         self.record_installed(&model.id, manifest_version, now_rfc3339)?;
         Ok(outcome)
@@ -402,7 +489,7 @@ impl DownloadManager {
             let _ = std::fs::remove_file(&part);
             have = 0;
         } else if have == file.bytes && file.bytes > 0 {
-            self.verify_and_finish(model, file, &part, dest, base)?;
+            self.verify_and_finish(model, file, &part, dest, base, cancel)?;
             return Ok(0);
         }
         let url = file.url();
@@ -501,7 +588,7 @@ impl DownloadManager {
         }
         out.flush()?;
         drop(out);
-        self.verify_and_finish(model, file, &part, dest, base)?;
+        self.verify_and_finish(model, file, &part, dest, base, cancel)?;
         Ok(fetched)
     }
 
@@ -530,8 +617,10 @@ impl DownloadManager {
         // the code, and D2 needs the Retry-After HEADER off a 429/503 —
         // so take the response whole and classify the status ourselves.
         let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_resolve(Some(self.connect_timeout))
             .timeout_connect(Some(self.connect_timeout))
             .timeout_recv_response(Some(self.read_timeout))
+            .timeout_recv_body(Some(self.read_timeout))
             .http_status_as_error(false)
             .build()
             .into();
@@ -604,7 +693,7 @@ impl DownloadManager {
         }
         out.flush()?;
         drop(out);
-        self.verify_and_finish(model, file, part, dest, base)?;
+        self.verify_and_finish(model, file, part, dest, base, cancel)?;
         Ok(fetched)
     }
 
@@ -617,8 +706,9 @@ impl DownloadManager {
         part: &Path,
         dest: &Path,
         base: u64,
+        cancel: &AtomicBool,
     ) -> Result<(), DownloadError> {
-        let digest = sha256_file(part)?;
+        let digest = sha256_file_cancellable(part, cancel)?;
         if digest != file.sha256.to_lowercase() {
             // The bytes are wrong; keeping them would re-fail every retry
             // (resume Ranges past them, or the complete-part fast path
@@ -743,23 +833,70 @@ pub fn available_disk_bytes(path: &Path) -> Option<u64> {
     Some((vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64))
 }
 
-/// Non-unix builds have no statvfs; report "unknown" so the preflight
-/// passes rather than blocking every download. A Windows
-/// GetDiskFreeSpaceExW wrapper can slot in here when that target ships.
-#[cfg(not(unix))]
+/// Windows equivalent of `statvfs`, using the bytes available to the calling
+/// user (not total free bytes, which can include inaccessible quota).
+#[cfg(target_os = "windows")]
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    let wide: Vec<u16> = probe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut available = 0_u64;
+    // SAFETY: `wide` is NUL-terminated and lives through the call; only the
+    // first out-parameter is requested and points to a valid u64.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
+}
+
+/// Other non-Unix/non-Windows targets cannot currently answer; unknown is
+/// deliberately non-blocking rather than misreported as a full disk.
+#[cfg(not(any(unix, target_os = "windows")))]
 pub fn available_disk_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
-pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+fn sha256_file_cancellable(path: &Path, cancel: &AtomicBool) -> Result<String, DownloadError> {
     let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(path)?;
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut buf = [0_u8; TRANSFER_CHUNK];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(DownloadError::Cancelled);
+        }
+        let read = std::io::Read::read(&mut file, &mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
     Ok(hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    match sha256_file_cancellable(path, &AtomicBool::new(false)) {
+        Ok(digest) => Ok(digest),
+        Err(DownloadError::Io(error)) => Err(error),
+        Err(_) => unreachable!("a permanently-false cancellation flag cannot cancel hashing"),
+    }
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -834,6 +971,22 @@ mod tests {
         assert_eq!(human_size(0), "0 MB");
         assert_eq!(human_size(500 * 1024 * 1024), "500 MB");
         assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn checksum_verification_observes_cancellation_without_deleting_the_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("large-model.part");
+        std::fs::write(&part, vec![7_u8; TRANSFER_CHUNK * 2]).unwrap();
+
+        let result = sha256_file_cancellable(&part, &AtomicBool::new(true));
+
+        assert!(matches!(result, Err(DownloadError::Cancelled)));
+        assert_eq!(
+            std::fs::metadata(part).unwrap().len(),
+            (TRANSFER_CHUNK * 2) as u64,
+            "quit keeps resumable bytes intact"
+        );
     }
 
     /// D1: the statvfs wrapper answers for an existing dir, for a

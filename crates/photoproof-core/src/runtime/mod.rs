@@ -20,6 +20,7 @@
 
 pub mod bus;
 pub mod children;
+pub mod control_file;
 pub mod download;
 pub mod gc;
 pub mod launch;
@@ -34,9 +35,13 @@ pub mod tier;
 
 pub use bus::{ProcessId, RuntimeBus, RuntimeEvent};
 pub use children::{ChildRecord, ChildRegistry, InstanceLock, process_start_time};
+pub use control_file::{
+    ControlFileError, ControlFileErrorKind, ControlFileLoad, ControlFileRecovery,
+    ControlFileSource, load_control, load_json, save_control, save_json, write_durable,
+};
 pub use download::{
-    DownloadError, DownloadManager, DownloadOutcome, InstalledRecord, NoPace, Pacer, SleepPacer,
-    available_disk_bytes, is_retryable_status,
+    DownloadError, DownloadManager, DownloadOutcome, DownloadPhase, InstalledRecord, NoPace, Pacer,
+    SleepPacer, available_disk_bytes, is_retryable_status,
 };
 pub use gc::{GcCoordinator, GcDecision, ReindexGate, StubReindexGate};
 pub use logs::RotatingLog;
@@ -54,6 +59,6 @@ pub use scheduler::{
 };
 pub use supervisor::{ProcState, Supervisor, SupervisorConfig, WeightsGate};
 pub use tier::{
-    GpuAdapter, HardwareProbe, HardwareReport, TierCache, TierDecision, decide_tier, detect_tier,
-    resolve_tier,
+    GpuAdapter, HardwareProbe, HardwareReport, TierCache, TierDecision, TierResolution,
+    decide_tier, detect_tier, resolve_tier, resolve_tier_checked,
 };

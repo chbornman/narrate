@@ -76,6 +76,9 @@ fn local_model_plan(
     let Some(entry) = manifest.model(model_id) else {
         return dark(&format!("config names unknown model {model_id:?}"));
     };
+    if !entry.is_pinned() {
+        return dark(&format!("{model_id} has no immutable hosted artifact yet"));
+    }
     if !entry.tiers.contains(&tier) {
         return dark(&format!("{model_id} is not offered at tier {tier}"));
     }
@@ -113,13 +116,11 @@ pub fn stale_installed_models(
     stale
 }
 
-/// Embedder slot resolution WITH a bypass (STATE-INTEGRITY-AUDIT; founder: a
-/// configured CLIP may be locally-converted/unhosted, so a fresh/unstaged
-/// machine cannot download it). When the CONFIGURED embedder model is not
-/// installed, fall back to ANY installed model of the same manifest `role`
-/// offered at this tier, so the app uses a real embedder instead of going dark
-/// on a download that can only 404. The configured model still wins when it IS
-/// installed; an `External` config path is handled by the caller, not here.
+/// Embedder slot resolution WITH a bypass (STATE-INTEGRITY-AUDIT). When the
+/// CONFIGURED embedder model is not runnable, fall back to ANY installed model
+/// of the same manifest `role` offered at this tier, so a stale or staged-only
+/// config can still use a safe hosted model. The configured model wins when it
+/// is runnable; an `External` config path is handled by the caller, not here.
 /// Deterministic: installed ids are sorted, first same-role match wins.
 fn embedder_plan(
     configured_id: &str,
@@ -139,7 +140,7 @@ fn embedder_plan(
         .filter(|id| {
             manifest
                 .model(id)
-                .is_some_and(|e| e.role == role && e.tiers.contains(&tier))
+                .is_some_and(|e| e.role == role && e.is_pinned() && e.tiers.contains(&tier))
         })
         .collect();
     candidates.sort();
@@ -395,19 +396,21 @@ mod tests {
         assert!(matches!(&p.asr, ProcessPlan::NotConfigured { .. }));
     }
 
-    /// The embedder bypass: when the configured CLIP is not installed but
-    /// another same-role ("embedder") model is, the clip slot falls back to it
-    /// instead of going dark. (Test/CI default is the int8 base; here it is
-    /// absent and only the fp16 is installed, so the bypass picks fp16.)
+    /// The embedder bypass: a stale config may still name the staged-only fp16
+    /// artifact. Even if an installed.json record claims it is present, its
+    /// empty tier list makes it unrunnable; the safe hosted int8 same-role model
+    /// wins instead.
     #[test]
-    fn embedder_bypass_falls_back_to_installed_same_role_model() {
-        let cfg = from_toml_str("").unwrap().config; // default CLIP = int8 base (non-cuda)
+    fn embedder_bypass_rejects_staged_fp16_and_uses_hosted_int8() {
+        let cfg = from_toml_str("[embedder]\nmodel = \"ViT-H-14-378-quickgelu__dfn5b-fp16\"\n")
+            .unwrap()
+            .config;
         let p = plan(
             &cfg,
             1,
             &compiled_manifest(),
-            // The default (int8 base) NOT installed; fp16 (same role) + text ARE.
             &installed(&[
+                "ViT-H-14-378-quickgelu__dfn5b",
                 "ViT-H-14-378-quickgelu__dfn5b-fp16",
                 "embeddinggemma-300m-q8",
             ]),
@@ -415,15 +418,49 @@ mod tests {
         assert_eq!(
             p.clip_embedder,
             ProcessPlan::Run {
-                model_id: "ViT-H-14-378-quickgelu__dfn5b-fp16".into()
+                model_id: "ViT-H-14-378-quickgelu__dfn5b".into()
             },
-            "bypass to the installed fp16 when the int8 base default is absent"
+            "staged-only fp16 cannot run; bypass to the hosted int8 model"
         );
         assert_eq!(
             p.text_embedder,
             ProcessPlan::Run {
                 model_id: "embeddinggemma-300m-q8".into()
             }
+        );
+    }
+
+    /// Defense in depth: an accidental tier flip alone must not graduate a
+    /// staged artifact. Planning still refuses an unpinned model even when an
+    /// installed.json record exists and the manifest claims the tier offers it.
+    #[test]
+    fn unpinned_embedder_cannot_run_even_if_tier_and_install_record_exist() {
+        let cfg = from_toml_str("[embedder]\nmodel = \"ViT-H-14-378-quickgelu__dfn5b-fp16\"\n")
+            .unwrap()
+            .config;
+        let mut manifest = compiled_manifest();
+        manifest
+            .models
+            .iter_mut()
+            .find(|model| model.id == "ViT-H-14-378-quickgelu__dfn5b-fp16")
+            .expect("staged fp16 entry")
+            .tiers = vec![1];
+        let p = plan(
+            &cfg,
+            1,
+            &manifest,
+            &installed(&["ViT-H-14-378-quickgelu__dfn5b-fp16"]),
+        );
+        assert!(
+            matches!(
+                &p.clip_embedder,
+                ProcessPlan::NotConfigured {
+                    reason,
+                    fixable_by_download: false,
+                } if reason.contains("no immutable hosted artifact")
+            ),
+            "an unpinned artifact cannot run or present a download fix: {:?}",
+            p.clip_embedder
         );
     }
 

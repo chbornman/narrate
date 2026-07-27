@@ -14,9 +14,11 @@ use photoproof_core::ContentHash;
 use photoproof_core::collections::{CollectionRecord, CollectionStatus, NoteEntry};
 use tauri::{AppHandle, Emitter, Runtime};
 
-use super::{S, parse_hash};
+use super::{S, parse_hash, run_blocking};
+use crate::command_work::CommandClass;
+use crate::convergence::StateDomain;
 use crate::dto::{CollectionDto, CollectionNoteDto, GridItem};
-use crate::error::{CmdError, CmdResult};
+use crate::error::CmdResult;
 use crate::state::App;
 
 /// `pub(crate)` so the topic→collection bake (commands/topics.rs) returns the
@@ -43,7 +45,7 @@ fn note_dto(n: NoteEntry) -> CollectionNoteDto {
     }
 }
 
-fn snapshot(app: &App) -> CmdResult<Vec<CollectionDto>> {
+pub(crate) fn snapshot(app: &App) -> CmdResult<Vec<CollectionDto>> {
     Ok(app
         .collections
         .list()?
@@ -69,6 +71,7 @@ pub(crate) fn emit_collections_changed<R: Runtime>(app: &App, handle: &AppHandle
     let _ordered = EMIT_ORDER.lock().expect("collections emit mutex");
     if let Ok(list) = snapshot(app) {
         let _ = handle.emit("collections-changed", list);
+        app.convergence.publish(handle, [StateDomain::Collections]);
     }
 }
 
@@ -79,9 +82,7 @@ fn parse_hashes(hashes: &[String]) -> CmdResult<Vec<ContentHash>> {
 #[tauri::command]
 pub async fn list_collections(app: S<'_>) -> CmdResult<Vec<CollectionDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || snapshot(&app))
-        .await
-        .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
+    run_blocking(app, "collections.list", CommandClass::Read, snapshot).await
 }
 
 #[tauri::command]
@@ -92,18 +93,22 @@ pub async fn create_collection<R: Runtime>(
     description: Option<String>,
 ) -> CmdResult<CollectionDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let rec = app.collections.create(
-            &name,
-            description.as_deref().unwrap_or(""),
-            photoproof_core::UtcMillis::now(),
-        )?;
-        emit_collections_changed(&app, &handle);
-        Ok(collection_dto(rec))
-    })
+    run_blocking(
+        app,
+        "collections.create",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let rec = app.collections.create(
+                &name,
+                description.as_deref().unwrap_or(""),
+                photoproof_core::UtcMillis::now(),
+            )?;
+            emit_collections_changed(app, &handle);
+            Ok(collection_dto(rec))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 #[tauri::command]
@@ -114,15 +119,19 @@ pub async fn rename_collection<R: Runtime>(
     name: String,
 ) -> CmdResult<CollectionDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        app.collections
-            .rename(&id, &name, photoproof_core::UtcMillis::now())?;
-        emit_collections_changed(&app, &handle);
-        Ok(collection_dto(app.collections.get(&id)?))
-    })
+    run_blocking(
+        app,
+        "collections.rename",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            app.collections
+                .rename(&id, &name, photoproof_core::UtcMillis::now())?;
+            emit_collections_changed(app, &handle);
+            Ok(collection_dto(app.collections.get(&id)?))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 #[tauri::command]
@@ -133,16 +142,20 @@ pub async fn set_collection_status<R: Runtime>(
     status: String,
 ) -> CmdResult<CollectionDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let status = CollectionStatus::parse(&status)?;
-        app.collections
-            .set_status(&id, status, photoproof_core::UtcMillis::now())?;
-        emit_collections_changed(&app, &handle);
-        Ok(collection_dto(app.collections.get(&id)?))
-    })
+    run_blocking(
+        app,
+        "collections.set-status",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let status = CollectionStatus::parse(&status)?;
+            app.collections
+                .set_status(&id, status, photoproof_core::UtcMillis::now())?;
+            emit_collections_changed(app, &handle);
+            Ok(collection_dto(app.collections.get(&id)?))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 #[tauri::command]
@@ -153,15 +166,22 @@ pub async fn set_collection_description<R: Runtime>(
     description: String,
 ) -> CmdResult<CollectionDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        app.collections
-            .set_description(&id, &description, photoproof_core::UtcMillis::now())?;
-        emit_collections_changed(&app, &handle);
-        Ok(collection_dto(app.collections.get(&id)?))
-    })
+    run_blocking(
+        app,
+        "collections.set-description",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            app.collections.set_description(
+                &id,
+                &description,
+                photoproof_core::UtcMillis::now(),
+            )?;
+            emit_collections_changed(app, &handle);
+            Ok(collection_dto(app.collections.get(&id)?))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Append a note (§10.1: append-only — no edit or delete exists).
@@ -173,24 +193,28 @@ pub async fn add_collection_note<R: Runtime>(
     text: String,
 ) -> CmdResult<CollectionNoteDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let note = app
-            .collections
-            .add_note(&id, &text, photoproof_core::UtcMillis::now())?;
-        // note_count is part of every snapshot row, so notes announce too.
-        emit_collections_changed(&app, &handle);
-        Ok(note_dto(note))
-    })
+    run_blocking(
+        app,
+        "collections.add-note",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let note = app
+                .collections
+                .add_note(&id, &text, photoproof_core::UtcMillis::now())?;
+            // note_count is part of every snapshot row, so notes announce too.
+            emit_collections_changed(app, &handle);
+            Ok(note_dto(note))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Notes in id order (ULID order = time order).
 #[tauri::command]
 pub async fn collection_notes(app: S<'_>, id: String) -> CmdResult<Vec<CollectionNoteDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "collections.notes", CommandClass::Read, move |app| {
         Ok(app
             .collections
             .notes(&id)?
@@ -199,7 +223,6 @@ pub async fn collection_notes(app: S<'_>, id: String) -> CmdResult<Vec<Collectio
             .collect())
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Add images by explicit hash list. Returns the number of NEWLY opened
@@ -212,19 +235,23 @@ pub async fn add_to_collection<R: Runtime>(
     hashes: Vec<String>,
 ) -> CmdResult<usize> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let parsed = parse_hashes(&hashes)?;
-        let added = app
-            .collections
-            .add_images(&id, &parsed, photoproof_core::UtcMillis::now())?;
-        if added > 0 {
-            emit_collections_changed(&app, &handle);
-        }
-        Ok(added)
-    })
+    run_blocking(
+        app,
+        "collections.add-images",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let parsed = parse_hashes(&hashes)?;
+            let added =
+                app.collections
+                    .add_images(&id, &parsed, photoproof_core::UtcMillis::now())?;
+            if added > 0 {
+                emit_collections_changed(app, &handle);
+            }
+            Ok(added)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Remove images by explicit hash list: closes the open intervals —
@@ -238,19 +265,23 @@ pub async fn remove_from_collection<R: Runtime>(
     hashes: Vec<String>,
 ) -> CmdResult<usize> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let parsed = parse_hashes(&hashes)?;
-        let removed =
-            app.collections
-                .remove_images(&id, &parsed, photoproof_core::UtcMillis::now())?;
-        if removed > 0 {
-            emit_collections_changed(&app, &handle);
-        }
-        Ok(removed)
-    })
+    run_blocking(
+        app,
+        "collections.remove-images",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let parsed = parse_hashes(&hashes)?;
+            let removed =
+                app.collections
+                    .remove_images(&id, &parsed, photoproof_core::UtcMillis::now())?;
+            if removed > 0 {
+                emit_collections_changed(app, &handle);
+            }
+            Ok(removed)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Current members as grid rows (the rail's Collections tab: clicking a
@@ -264,13 +295,12 @@ pub async fn remove_from_collection<R: Runtime>(
 #[tauri::command]
 pub async fn list_collection_members(app: S<'_>, id: String) -> CmdResult<Vec<GridItem>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "collections.members", CommandClass::Read, move |app| {
         let members = app.collections.current_members(&id)?;
         let items = app.library.list_images(&members)?;
         Ok(items.into_iter().map(super::library::grid_item).collect())
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// Collections this image is CURRENTLY a member of (the Look's membership
@@ -278,17 +308,21 @@ pub async fn list_collection_members(app: S<'_>, id: String) -> CmdResult<Vec<Gr
 #[tauri::command]
 pub async fn collections_for_image(app: S<'_>, hash: String) -> CmdResult<Vec<CollectionDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let h = parse_hash(&hash)?;
-        Ok(app
-            .collections
-            .collections_for_image(&h)?
-            .into_iter()
-            .map(collection_dto)
-            .collect())
-    })
+    run_blocking(
+        app,
+        "collections.for-image",
+        CommandClass::Read,
+        move |app| {
+            let h = parse_hash(&hash)?;
+            Ok(app
+                .collections
+                .collections_for_image(&h)?
+                .into_iter()
+                .map(collection_dto)
+                .collect())
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 // ---------------------------------------------------------------------------

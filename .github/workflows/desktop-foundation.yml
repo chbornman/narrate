@@ -1,0 +1,123 @@
+name: Desktop foundation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-foundation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: oven-sh/setup-bun@v2
+      - name: Install locked frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Frontend dependency audit
+        working-directory: apps/desktop
+        run: bun audit --audit-level=high
+
+  quality:
+    name: Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Rust lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo test --workspace
+      - name: Required APFS case-only rename proof
+        if: runner.os == 'macOS'
+        run: ./scripts/verify-apfs-case-rename.sh
+      - name: Frontend typecheck
+        working-directory: apps/desktop
+        run: bun run check
+      - name: NVIDIA/CPU package wiring contract
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: bun run verify:nvidia-wiring
+      - name: Frontend tests
+        working-directory: apps/desktop
+        run: bun run test
+      - name: Frontend production build
+        working-directory: apps/desktop
+        run: bun run build
+      - name: UI punctuation gate
+        working-directory: apps/desktop
+        run: bun run check:emdash
+      - name: Release surface exclusion
+        if: runner.os == 'Linux'
+        run: bash apps/desktop/scripts/assert-release-clean.sh
+
+  bundle:
+    name: Unsigned bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bundles: deb,appimage
+          - os: macos-latest
+            bundles: app,dmg
+          - os: windows-latest
+            bundles: nsis,msi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Build native package with ASR sidecar
+        working-directory: apps/desktop
+        run: bun run bundle -- --bundles ${{ matrix.bundles }}
+      - name: Smoke extracted installed package
+        working-directory: apps/desktop
+        run: node scripts/smoke-installed-bundle.mjs ../../target/release/bundle
+      - name: Smoke AppImage installed package
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: node scripts/smoke-installed-bundle.mjs ../../target/release/bundle --format appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photoproof-${{ runner.os }}
+          path: target/release/bundle
+          if-no-files-found: error

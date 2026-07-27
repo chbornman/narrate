@@ -42,7 +42,7 @@ device = "cpu"               # "cpu" (default, all tiers) | "gpu"
 
 [embedder]
 backend = "local-ort"        # "local-ort" | "openai-compatible"
-model = "ViT-H-14-378-quickgelu__dfn5b-fp16"   # GPU-ready single-file (CUDA builds); compiled default on macOS/CPU builds is the int8 base ViT-H-14-378-quickgelu__dfn5b (CoreML fragmentation, see backlog)
+model = "ViT-H-14-378-quickgelu__dfn5b"   # immutable hosted default on every platform; fp16 stays staged until hosted
 device = "auto"              # "auto" | "cpu" | "gpu"
 
 [embedder.text]              # the text-embedding model (§3.3): annotation
@@ -82,7 +82,7 @@ fn spec_literal_block_parses_with_no_warnings() {
     assert_eq!(c.asr.device, AsrDevice::Cpu);
 
     assert_eq!(c.embedder.backend, EmbedderBackend::LocalOrt);
-    assert_eq!(c.embedder.model, "ViT-H-14-378-quickgelu__dfn5b-fp16");
+    assert_eq!(c.embedder.model, "ViT-H-14-378-quickgelu__dfn5b");
     assert_eq!(c.embedder.device, EmbedDevice::Auto);
     assert_eq!(c.embedder.text.backend, TextEmbedderBackend::LocalOrt);
     assert_eq!(c.embedder.text.model, "embeddinggemma-300m-q8");
@@ -91,27 +91,14 @@ fn spec_literal_block_parses_with_no_warnings() {
 
 #[test]
 fn spec_block_equals_defaults() {
-    // §4.4 shows defaults: parsing it must equal an empty config — modulo the
-    // one platform-conditional field. The CLIP model defaults to the fp16
-    // single-file only on CUDA builds; macOS/CPU builds compile the int8 base
-    // as the default (CoreML fragmentation, see EmbedderConfig::default). The
-    // spec block prints the GPU-ready value, so pin the field per-platform and
-    // compare everything else exactly.
+    // §4.4 shows defaults: parsing it must equal an empty config. The immutable
+    // hosted int8 CLIP is the fail-closed default even in CUDA builds until the
+    // staged fp16 export has immutable hosted pins.
     let from_spec = from_toml_str(SPEC_TOML).unwrap().config;
     let from_empty = from_toml_str("").unwrap().config;
     assert_eq!(from_empty, Config::default());
-
-    #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
-    assert_eq!(
-        from_empty.embedder.model,
-        "ViT-H-14-378-quickgelu__dfn5b-fp16"
-    );
-    #[cfg(not(all(not(target_os = "macos"), feature = "cuda")))]
     assert_eq!(from_empty.embedder.model, "ViT-H-14-378-quickgelu__dfn5b");
-
-    let mut normalized = from_spec;
-    normalized.embedder.model = from_empty.embedder.model.clone();
-    assert_eq!(normalized, from_empty);
+    assert_eq!(from_spec, from_empty);
 }
 
 #[test]

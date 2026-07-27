@@ -12,8 +12,10 @@
 //! served by the `photoproof://` protocol (protocol.rs).
 
 pub mod app;
+pub mod backup;
 pub mod capture;
 pub mod collections;
+pub mod convergence;
 // Tier-1 near-duplicate detection (DESIGN-DEDUP-AND-SIMILARITY.md §"Tier 1"):
 // find_near_duplicates over the perceptual-hash column. A self-contained module.
 pub mod dedup;
@@ -24,10 +26,12 @@ pub mod diversify;
 // Semantic topic-graph lens (DESIGN-SEMANTIC-GRAPH.md): topic_affinities /
 // suggest_topics / graph_tuning. A self-contained command module.
 pub mod graph;
+pub mod health;
 pub mod heatmap;
 pub mod journal;
 pub mod library;
 pub mod os;
+pub mod performance;
 pub mod search;
 // Topics + autosuggest + the topic→collection bake (DESIGN-TOPICS-COLLECTIONS.md):
 // manual saved-phrase CRUD, the single-topic ranked grid, and the one-way bake.
@@ -38,11 +42,44 @@ use std::sync::Arc;
 use photoproof_core::ContentHash;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::command_work::{CommandClass, CommandWorkPermit};
 use crate::dto::{DegradedFlags, IndicatorPulse, IndicatorState, JournalChanged};
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
 pub(crate) type S<'a> = State<'a, Arc<App>>;
+
+/// Run finite IPC work under the process-wide command admission barrier.
+/// Admission happens inside the blocking closure: a command queued just before
+/// quit but started after the barrier closes is rejected without touching
+/// SQLite or the filesystem.
+pub(crate) async fn run_blocking<T, F>(
+    app: Arc<App>,
+    name: &'static str,
+    class: CommandClass,
+    work: F,
+) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&App) -> CmdResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = admit(&app, name, class)?;
+        work(&app)
+    })
+    .await
+    .map_err(|error| CmdError::Invalid(format!("task join: {error}")))?
+}
+
+pub(crate) fn admit(
+    app: &Arc<App>,
+    name: &'static str,
+    class: CommandClass,
+) -> CmdResult<CommandWorkPermit> {
+    app.command_work
+        .admit(name, class)
+        .map_err(|error| CmdError::Invalid(error.to_string()))
+}
 
 pub(crate) fn emit_pulse(handle: &AppHandle, event_kind: &'static str) {
     let _ = handle.emit("indicator-pulse", IndicatorPulse { event_kind });

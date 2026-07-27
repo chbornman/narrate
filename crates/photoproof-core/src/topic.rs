@@ -30,6 +30,7 @@ use photoproof_connectors::embedder::{Embedder, Embedding};
 use photoproof_connectors::vector_store::{VecKind, VecSpace};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::retrieval::{PpvecStore, instruct_query};
 
@@ -571,6 +572,18 @@ pub struct CollectionCandidate {
 /// spine (live remark/rating/stroke/revision events joined to their targets).
 pub type SessionImageLink = (String, String);
 
+#[derive(Debug, Error)]
+pub enum TopicReadError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("invalid stored {field} value {value:?}: {detail}")]
+    InvalidStoredValue {
+        field: &'static str,
+        value: String,
+        detail: String,
+    },
+}
+
 /// Co-annotation candidates: a session that touched >= `MIN_SESSION_IMAGES`
 /// DISTINCT images is a candidate grouping (the photographer worked that set
 /// together). `links` is `(session_id, image_hash)` for every live event/target
@@ -835,12 +848,13 @@ pub fn scope_session_image_links(
 }
 
 /// Map every session id that appears in `links` to its start instant (epoch ms),
-/// for the co-annotation candidate labels' "<date>". Sessions whose `started_ts`
-/// is absent/unparseable are simply omitted (the candidate then carries no date).
+/// for the co-annotation candidate labels' "<date>". A missing session or
+/// malformed timestamp is stored-data corruption and fails the whole projection
+/// rather than returning a healthy-looking incomplete suggestion set.
 pub fn session_start_millis(
     conn: &Connection,
     links: &[SessionImageLink],
-) -> rusqlite::Result<HashMap<String, i64>> {
+) -> Result<HashMap<String, i64>, TopicReadError> {
     if links.is_empty() {
         return Ok(HashMap::new());
     }
@@ -857,10 +871,22 @@ pub fn session_start_millis(
     let mut out = HashMap::new();
     for row in rows {
         let (id, started) = row?;
-        // started_ts is the canonical RFC3339; a parse failure just drops the
-        // date (the candidate is still valid, it just has no "<date>" label).
-        if let Ok(ms) = crate::UtcMillis::parse(&started) {
-            out.insert(id, ms.epoch_ms());
+        let ms = crate::UtcMillis::parse(&started).map_err(|error| {
+            TopicReadError::InvalidStoredValue {
+                field: "sessions.started_ts",
+                value: started,
+                detail: error.to_string(),
+            }
+        })?;
+        out.insert(id, ms.epoch_ms());
+    }
+    for id in ids {
+        if !out.contains_key(id) {
+            return Err(TopicReadError::InvalidStoredValue {
+                field: "sessions.id",
+                value: id.to_owned(),
+                detail: "session referenced by an annotation event is missing".into(),
+            });
         }
     }
     Ok(out)
@@ -876,7 +902,7 @@ pub fn session_start_millis(
 pub fn scope_folder_time_rows(
     conn: &Connection,
     scope: &[String],
-) -> rusqlite::Result<Vec<FolderTimeRow>> {
+) -> Result<Vec<FolderTimeRow>, TopicReadError> {
     if scope.is_empty() {
         return Ok(Vec::new());
     }
@@ -910,11 +936,13 @@ pub fn scope_folder_time_rows(
     let mut out = Vec::new();
     for row in rows {
         let (hash, capture_ts, root_id, rel_path) = row?;
-        // A capture_ts that does not parse is treated as undated (skip it — it
-        // cannot sit in a time-ordered burst).
-        let Ok(ms) = crate::UtcMillis::parse(&capture_ts) else {
-            continue;
-        };
+        let ms = crate::UtcMillis::parse(&capture_ts).map_err(|error| {
+            TopicReadError::InvalidStoredValue {
+                field: "images.capture_ts",
+                value: capture_ts,
+                detail: error.to_string(),
+            }
+        })?;
         // Folder key = root_id + the file's PARENT directory. The parent is
         // rel_path with its last '/'-segment (the filename) stripped; a file at
         // the root has an empty parent. Keying on root_id keeps identical camera
@@ -1242,6 +1270,57 @@ pub fn suggest_topics_llm<L: TopicLlm>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggestion_projection_surfaces_malformed_stored_timestamps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, started_ts TEXT NOT NULL);
+             INSERT INTO sessions VALUES ('session-bad', 'not-a-timestamp');
+             CREATE TABLE images (image_hash TEXT PRIMARY KEY, capture_ts TEXT);
+             CREATE TABLE paths (
+               image_hash TEXT NOT NULL,
+               root_id TEXT,
+               rel_path TEXT NOT NULL,
+               state TEXT NOT NULL
+             );
+             INSERT INTO images VALUES ('hash-bad', 'also-not-a-timestamp');
+             INSERT INTO paths VALUES ('hash-bad', 'root-a', 'shoot/image.jpg', 'active');",
+        )
+        .unwrap();
+
+        let session_error =
+            session_start_millis(&conn, &[("session-bad".into(), "hash-bad".into())]).unwrap_err();
+        assert!(matches!(
+            session_error,
+            TopicReadError::InvalidStoredValue {
+                field: "sessions.started_ts",
+                value,
+                ..
+            } if value == "not-a-timestamp"
+        ));
+        let missing_error =
+            session_start_millis(&conn, &[("session-missing".into(), "hash-bad".into())])
+                .unwrap_err();
+        assert!(matches!(
+            missing_error,
+            TopicReadError::InvalidStoredValue {
+                field: "sessions.id",
+                value,
+                ..
+            } if value == "session-missing"
+        ));
+
+        let capture_error = scope_folder_time_rows(&conn, &["hash-bad".into()]).unwrap_err();
+        assert!(matches!(
+            capture_error,
+            TopicReadError::InvalidStoredValue {
+                field: "images.capture_ts",
+                value,
+                ..
+            } if value == "also-not-a-timestamp"
+        ));
+    }
 
     // ---- blend (the looks-vs-said math, α = 0 / 1 / 0.5) ------------------
 

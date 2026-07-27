@@ -18,6 +18,7 @@ photoproof-core = { path = "../../../crates/photoproof-core" }
 photoproof-connectors = { path = "../../../crates/photoproof-connectors" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
 # Single-instance discipline (RUNTIME §8.5): the plugin forwards a second
 # launch's focus to the first instance; the core's instance.lock is the
 # belt-and-braces half supervisors check before any spawn.
@@ -59,6 +60,11 @@ libc = "0.2.186"
 # region gates can't reach. Already in-tree transitively via tauri/wry.
 objc2 = "0.6"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Crash-safe replacement for desktop control files. MOVEFILE_WRITE_THROUGH is
+# the Windows equivalent of rename + parent-directory fsync used on Unix.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 futures-core = { workspace = true }
@@ -91,3 +97,8 @@ custom-protocol = ["tauri/custom-protocol"]
 cuda = ["photoproof-connectors/cuda"]
 tensorrt = ["photoproof-connectors/tensorrt"]
 cuda-dynamic = ["photoproof-connectors/cuda-dynamic"]
+# Self-contained Linux NVIDIA artifact. Unlike a developer `cuda-dynamic`
+# build, this flavor must resolve a verified staged runtime at process start;
+# it may never silently identify itself as NVIDIA-capable while running the
+# bundled CPU-only ONNX Runtime.
+nvidia-package = ["cuda-dynamic"]

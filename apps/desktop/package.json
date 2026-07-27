@@ -6,6 +6,18 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:sidecar": "cargo build --release -p pp-asr-server --features engine-parakeet && node scripts/stage-sidecar.mjs",
+    "build:bundle": "npm run build:sidecar && npm run build",
+    "build:bundle:nvidia": "node scripts/nvidia-runtime.mjs stage && npm run build:sidecar && npm run build",
+    "bundle": "node scripts/run-tauri-bundle.mjs --config src-tauri/tauri.bundle.conf.json",
+    "dev:nvidia": "tauri dev --config src-tauri/tauri.nvidia.conf.json --features nvidia-package",
+    "bundle:nvidia": "node scripts/run-tauri-bundle.mjs --config src-tauri/tauri.nvidia.conf.json --features nvidia-package",
+    "verify:nvidia-runtime": "node scripts/nvidia-runtime.mjs source",
+    "verify:nvidia-wiring": "node scripts/verify-nvidia-wiring.mjs",
+    "bundle:smoke:nvidia": "node scripts/smoke-installed-bundle.mjs ../../target/release/bundle --expect-runtime nvidia",
+    "release:check": "node scripts/verify-release-contract.mjs",
+    "bundle:smoke": "node scripts/smoke-installed-bundle.mjs ../../target/release/bundle",
+    "bundle:smoke:appimage": "node scripts/smoke-installed-bundle.mjs ../../target/release/bundle --format appimage",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "check:emdash": "../../scripts/check-no-emdash.sh",
@@ -22,14 +34,18 @@
     "@tauri-apps/cli": "^2",
     "@testing-library/svelte": "^5",
     "@tsconfig/svelte": "^5",
+    "@types/node": "^26.1.1",
     "jsdom": "^26",
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",
-    "vite": "^6",
+    "vite": "^6.4.3",
     "vitest": "^3"
   },
   "allowScripts": {
     "esbuild@0.25.12": true
+  },
+  "overrides": {
+    "postcss": "8.5.23"
   }
 }

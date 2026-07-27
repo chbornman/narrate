@@ -28,7 +28,6 @@
 //! signals the app already has, computed on the fly (K14: it proposes, the human
 //! commits via the same bake).
 
-use photoproof_connectors::OrtEmbedder;
 use photoproof_core::topic::{self, RankedImage};
 use photoproof_core::topics::TopicSpace;
 use photoproof_core::tuning::tuning;
@@ -36,8 +35,10 @@ use rusqlite::OpenFlags;
 use tauri::{AppHandle, Runtime};
 
 use super::graph::{GraphScope, enumerate_scope};
-use super::{S, parse_hash};
+use super::{S, parse_hash, run_blocking};
+use crate::command_work::CommandClass;
 use crate::dto::{CollectionCandidateDto, CollectionDto, RankedImageDto, TopicDto, TopicNoteDto};
+use crate::embedders::EmbedderProxy;
 use crate::error::{CmdError, CmdResult};
 use crate::state::App;
 
@@ -45,7 +46,7 @@ use crate::state::App;
 // 1. Manual topics CRUD
 // ---------------------------------------------------------------------------
 
-fn topic_dto(rec: photoproof_core::topics::TopicRecord) -> TopicDto {
+pub(crate) fn topic_dto(rec: photoproof_core::topics::TopicRecord) -> TopicDto {
     TopicDto {
         id: rec.id,
         phrase: rec.phrase,
@@ -68,7 +69,7 @@ fn topic_note_dto(n: photoproof_core::topics::TopicNote) -> TopicNoteDto {
 #[tauri::command]
 pub async fn add_topic(app: S<'_>, phrase: String, space: Option<String>) -> CmdResult<TopicDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "topics.add", CommandClass::Mutation, move |app| {
         app.touch()?;
         let space = TopicSpace::parse(space.as_deref());
         let rec = app
@@ -78,14 +79,13 @@ pub async fn add_topic(app: S<'_>, phrase: String, space: Option<String>) -> Cmd
         Ok(topic_dto(rec))
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `list_topics()` — every saved manual topic, newest first.
 #[tauri::command]
 pub async fn list_topics(app: S<'_>) -> CmdResult<Vec<TopicDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "topics.list", CommandClass::Read, move |app| {
         let list = app
             .topics
             .list()
@@ -93,7 +93,6 @@ pub async fn list_topics(app: S<'_>) -> CmdResult<Vec<TopicDto>> {
         Ok(list.into_iter().map(topic_dto).collect())
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `remove_topic(id)` — delete a saved topic. A missing id is an error (the
@@ -101,14 +100,13 @@ pub async fn list_topics(app: S<'_>) -> CmdResult<Vec<TopicDto>> {
 #[tauri::command]
 pub async fn remove_topic(app: S<'_>, id: String) -> CmdResult<()> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "topics.remove", CommandClass::Mutation, move |app| {
         app.touch()?;
         app.topics
             .remove(&id)
             .map_err(|e| CmdError::Invalid(format!("remove topic: {e}")))
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `add_topic_note(id, text)` — append a note to a topic (founder decision:
@@ -121,7 +119,7 @@ pub async fn remove_topic(app: S<'_>, id: String) -> CmdResult<()> {
 #[tauri::command]
 pub async fn add_topic_note(app: S<'_>, id: String, text: String) -> CmdResult<TopicNoteDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "topics.add-note", CommandClass::Mutation, move |app| {
         app.touch()?;
         let note = app
             .topics
@@ -130,7 +128,6 @@ pub async fn add_topic_note(app: S<'_>, id: String, text: String) -> CmdResult<T
         Ok(topic_note_dto(note))
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `topic_notes(id)` — a topic's append-only notes in id order (ULID order =
@@ -138,7 +135,7 @@ pub async fn add_topic_note(app: S<'_>, id: String, text: String) -> CmdResult<T
 #[tauri::command]
 pub async fn topic_notes(app: S<'_>, id: String) -> CmdResult<Vec<TopicNoteDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "topics.notes", CommandClass::Read, move |app| {
         Ok(app
             .topics
             .notes(&id)
@@ -148,7 +145,6 @@ pub async fn topic_notes(app: S<'_>, id: String) -> CmdResult<Vec<TopicNoteDto>>
             .collect())
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +171,7 @@ fn rank_scope(
     // The ready embedders (or None ⇒ a degraded half contributing 0).
     let text = app.runtime.embedders.text();
     let clip = app.runtime.embedders.clip();
-    Ok(topic::topic_ranked_images::<OrtEmbedder, OrtEmbedder>(
+    Ok(topic::topic_ranked_images::<EmbedderProxy, EmbedderProxy>(
         &hashes,
         phrase,
         alpha,
@@ -205,19 +201,23 @@ pub async fn topic_ranked_images(
 ) -> CmdResult<Vec<RankedImageDto>> {
     let app = app.inner().clone();
     let alpha = resolve_alpha(alpha);
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let ranked = rank_scope(&app, &scope, &phrase, alpha)?;
-        Ok(ranked
-            .into_iter()
-            .map(|r| RankedImageDto {
-                hash: r.hash,
-                score: r.score,
-            })
-            .collect())
-    })
+    run_blocking(
+        app,
+        "topics.ranked-images",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let ranked = rank_scope(app, &scope, &phrase, alpha)?;
+            Ok(ranked
+                .into_iter()
+                .map(|r| RankedImageDto {
+                    hash: r.hash,
+                    score: r.score,
+                })
+                .collect())
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -242,34 +242,24 @@ fn bake_collection<R: Runtime>(
     members: &[String],
 ) -> CmdResult<CollectionDto> {
     let now = photoproof_core::UtcMillis::now();
-    // Provenance rides the description (the collections store has no dedicated
-    // provenance field; DESIGN allows "a concise note in description"). Reusing
-    // the evented create keeps the bake on the one collection-create path every
-    // other surface shares.
-    let rec = app
-        .collections
-        .create(name, description, now)
-        .map_err(|e| CmdError::Invalid(format!("bake create: {e}")))?;
-    // Parse hashes to ContentHash through the shared validator, then add through
-    // the SAME evented add path the rail uses (skips already-current members,
-    // opens interval rows). An empty member set is a legal (empty) collection.
+    // Validate the entire client-supplied set before the first durable write.
+    // An invalid tail hash must not leave the successfully parsed prefix as an
+    // empty or partially populated collection.
     let parsed: Vec<photoproof_core::ContentHash> = members
         .iter()
         .map(|h| parse_hash(h))
         .collect::<CmdResult<_>>()?;
-    if !parsed.is_empty() {
-        app.collections
-            .add_images(&rec.id, &parsed, now)
-            .map_err(|e| CmdError::Invalid(format!("bake add members: {e}")))?;
-    }
-    // Re-read so member_count reflects the just-added members, then announce the
-    // new collection on the SAME snapshot event every collection mutation emits
-    // (so the Collections rail refreshes live, the create + add as one bake).
-    let dto = super::collections::collection_dto(
-        app.collections
-            .get(&rec.id)
-            .map_err(|e| CmdError::Invalid(format!("bake reread: {e}")))?,
-    );
+    // Provenance rides the description (the collections store has no dedicated
+    // provenance field; DESIGN allows "a concise note in description"). Reusing
+    // the core's atomic create-with-members path keeps collection metadata and
+    // all evented membership intervals in one SQLite transaction.
+    let rec = app
+        .collections
+        .create_with_images(name, description, &parsed, now)
+        .map_err(|e| CmdError::Invalid(format!("bake collection: {e}")))?;
+    let dto = super::collections::collection_dto(rec);
+    // Publication is strictly post-commit. Every validation/insert/commit
+    // failure returns above without emitting a collection snapshot.
     super::collections::emit_collections_changed(app, handle);
     Ok(dto)
 }
@@ -297,25 +287,29 @@ pub async fn create_collection_from_topic<R: Runtime>(
 ) -> CmdResult<CollectionDto> {
     let app = app.inner().clone();
     let alpha = resolve_alpha(alpha);
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let ranked = rank_scope(&app, &scope, &phrase, alpha)?;
-        // >= threshold (the slider's "at or above the cut glows"): an inclusive
-        // bound so the image sitting exactly on the threshold is committed.
-        let members: Vec<String> = ranked
-            .into_iter()
-            .filter(|r| r.score >= threshold)
-            .map(|r| r.hash)
-            .collect();
-        // Provenance: a concise, human-readable note so the photographer (and a
-        // later "where did this come from" glance) sees the bake's origin. The
-        // collection then decouples — this is a record, not a live link.
-        let provenance =
-            format!("Born from topic \"{phrase}\" at threshold {threshold} (alpha {alpha}).");
-        bake_collection(&app, &handle, &name, &provenance, &members)
-    })
+    run_blocking(
+        app,
+        "topics.bake-from-topic",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let ranked = rank_scope(app, &scope, &phrase, alpha)?;
+            // >= threshold (the slider's "at or above the cut glows"): an inclusive
+            // bound so the image sitting exactly on the threshold is committed.
+            let members: Vec<String> = ranked
+                .into_iter()
+                .filter(|r| r.score >= threshold)
+                .map(|r| r.hash)
+                .collect();
+            // Provenance: a concise, human-readable note so the photographer (and a
+            // later "where did this come from" glance) sees the bake's origin. The
+            // collection then decouples — this is a record, not a live link.
+            let provenance =
+                format!("Born from topic \"{phrase}\" at threshold {threshold} (alpha {alpha}).");
+            bake_collection(app, &handle, &name, &provenance, &members)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// `create_collection_from_selection(hashes, name)` (DESIGN-TOPICS-COLLECTIONS.md):
@@ -334,15 +328,19 @@ pub async fn create_collection_from_selection<R: Runtime>(
     name: String,
 ) -> CmdResult<CollectionDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        // The selection was computed in the graph (the glowing set from the
-        // threshold drag); provenance records that origin without a live link.
-        let provenance = "Made from a topic graph selection.";
-        bake_collection(&app, &handle, &name, provenance, &hashes)
-    })
+    run_blocking(
+        app,
+        "topics.bake-from-selection",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            // The selection was computed in the graph (the glowing set from the
+            // threshold drag); provenance records that origin without a live link.
+            let provenance = "Made from a topic graph selection.";
+            bake_collection(app, &handle, &name, provenance, &hashes)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -372,62 +370,67 @@ pub async fn suggest_collections(
     scope: GraphScope,
 ) -> CmdResult<Vec<CollectionCandidateDto>> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let hashes = enumerate_scope(&app, &scope)?;
+    run_blocking(
+        app,
+        "topics.suggest-collections",
+        CommandClass::Read,
+        move |app| {
+            app.touch()?;
+            let hashes = enumerate_scope(app, &scope)?;
 
-        // Gather every candidate source's raw rows on ONE read-only connection
-        // (a short projection has no business holding a write lock — the same
-        // posture suggest_topics/cluster_topics take).
-        let db_path = app.app_data.join("photoproof.db");
-        let conn = rusqlite::Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|e| CmdError::Invalid(format!("open suggest-collections read: {e}")))?;
+            // Gather every candidate source's raw rows on ONE read-only connection
+            // (a short projection has no business holding a write lock — the same
+            // posture suggest_topics/cluster_topics take).
+            let db_path = app.app_data.join("photoproof.db");
+            let conn = rusqlite::Connection::open_with_flags(
+                &db_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|e| CmdError::Invalid(format!("open suggest-collections read: {e}")))?;
 
-        // 1. Co-annotation: (session, image) links + each session's start time.
-        let session_links = topic::scope_session_image_links(&conn, &hashes)
-            .map_err(|e| CmdError::Invalid(format!("session links: {e}")))?;
-        let session_started = topic::session_start_millis(&conn, &session_links)
-            .map_err(|e| CmdError::Invalid(format!("session starts: {e}")))?;
+            // 1. Co-annotation: (session, image) links + each session's start time.
+            let session_links = topic::scope_session_image_links(&conn, &hashes)
+                .map_err(|e| CmdError::Invalid(format!("session links: {e}")))?;
+            let session_started = topic::session_start_millis(&conn, &session_links)
+                .map_err(|e| CmdError::Invalid(format!("session starts: {e}")))?;
 
-        // 2. Repeated phrase: per-image note text (the same projection the v2
-        //    cluster labeling mines, grouped by image).
-        let notes_by_hash = topic::scope_note_texts_by_hash(&conn, &hashes)
-            .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?;
+            // 2. Repeated phrase: per-image note text (the same projection the v2
+            //    cluster labeling mines, grouped by image).
+            let notes_by_hash = topic::scope_note_texts_by_hash(&conn, &hashes)
+                .map_err(|e| CmdError::Invalid(format!("scope notes: {e}")))?;
 
-        // 3. Time + folder: (folder_key, capture_ms, hash) for dated, located
-        //    images.
-        let folder_time_rows = topic::scope_folder_time_rows(&conn, &hashes)
-            .map_err(|e| CmdError::Invalid(format!("folder/time rows: {e}")))?;
+            // 3. Time + folder: (folder_key, capture_ms, hash) for dated, located
+            //    images.
+            let folder_time_rows = topic::scope_folder_time_rows(&conn, &hashes)
+                .map_err(|e| CmdError::Invalid(format!("folder/time rows: {e}")))?;
 
-        let candidates = topic::suggest_collections(
-            &session_links,
-            &session_started,
-            &notes_by_hash,
-            &folder_time_rows,
-        );
-        Ok(candidates
-            .into_iter()
-            .map(|c| CollectionCandidateDto {
-                label: c.label,
-                members: c.members,
-                source: c.source,
-                score: c.score,
-            })
-            .collect())
-    })
+            let candidates = topic::suggest_collections(
+                &session_links,
+                &session_started,
+                &notes_by_hash,
+                &folder_time_rows,
+            );
+            Ok(candidates
+                .into_iter()
+                .map(|c| CollectionCandidateDto {
+                    label: c.label,
+                    members: c.members,
+                    source: c.source,
+                    score: c.score,
+                })
+                .collect())
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tauri::Manager;
     use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
+    use tauri::{Listener, Manager};
 
     use super::*;
 
@@ -554,6 +557,11 @@ mod tests {
         let (_tmp, tauri_app) = mock_app();
         let handle = tauri_app.handle().clone();
         let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&event_count);
+        tauri_app.listen_any("collections-changed", move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
 
         let a = "ab".repeat(32);
         let b = "cd".repeat(32);
@@ -580,6 +588,103 @@ mod tests {
         .expect("collections_for_image");
         assert_eq!(memberships.len(), 1);
         assert_eq!(memberships[0].id, coll.id);
+        assert_eq!(
+            event_count.load(Ordering::SeqCst),
+            1,
+            "the committed bake publishes exactly one collection snapshot"
+        );
+    }
+
+    #[test]
+    fn invalid_selection_hash_leaves_no_collection_or_event() {
+        let (_tmp, tauri_app) = mock_app();
+        let handle = tauri_app.handle().clone();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&event_count);
+        tauri_app.listen_any("collections-changed", move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let result = tauri::async_runtime::block_on(create_collection_from_selection(
+            state.clone(),
+            handle,
+            vec!["ab".repeat(32), "not-a-content-hash".into()],
+            "Invalid Tail".into(),
+        ));
+        assert!(result.is_err());
+        assert!(
+            state.collections.list().unwrap().is_empty(),
+            "validation completes before the collection transaction starts"
+        );
+        assert_eq!(
+            event_count.load(Ordering::SeqCst),
+            0,
+            "a rejected bake never announces a collection"
+        );
+    }
+
+    #[test]
+    fn member_insert_failure_rolls_back_collection_and_suppresses_event() {
+        let (_tmp, tauri_app) = mock_app();
+        let handle = tauri_app.handle().clone();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&event_count);
+        tauri_app.listen_any("collections-changed", move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+        let injector = rusqlite::Connection::open(state.app_data.join("photoproof.db")).unwrap();
+        injector
+            .execute_batch(
+                "CREATE TRIGGER inject_topic_bake_member_failure
+                 BEFORE INSERT ON collection_members
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected topic bake member failure');
+                 END;",
+            )
+            .unwrap();
+
+        let result = tauri::async_runtime::block_on(create_collection_from_selection(
+            state.clone(),
+            handle,
+            vec!["cd".repeat(32)],
+            "Must Roll Back".into(),
+        ));
+        assert!(result.is_err());
+        assert!(
+            state.collections.list().unwrap().is_empty(),
+            "the member insert and collection metadata share one transaction"
+        );
+        assert_eq!(
+            event_count.load(Ordering::SeqCst),
+            0,
+            "failed transaction never publishes collections-changed"
+        );
+    }
+
+    #[test]
+    fn list_topics_surfaces_corrupt_stored_rows() {
+        let (_tmp, tauri_app) = mock_app();
+        let state: tauri::State<'_, Arc<App>> = tauri_app.state();
+        let topic = tauri::async_runtime::block_on(add_topic(
+            state.clone(),
+            "harbor".into(),
+            Some("clip".into()),
+        ))
+        .unwrap();
+        let conn = rusqlite::Connection::open(state.app_data.join("photoproof.db")).unwrap();
+        conn.execute(
+            "UPDATE topics SET space = 'unknown-space' WHERE id = ?1",
+            [&topic.id],
+        )
+        .unwrap();
+
+        let result = tauri::async_runtime::block_on(list_topics(state));
+        assert!(
+            matches!(result, Err(CmdError::Invalid(detail)) if detail.contains("unknown-space")),
+            "stored-row corruption is an explicit command error, not a blend default"
+        );
     }
 
     /// `suggest_collections` over an empty/fresh library returns an empty rail,

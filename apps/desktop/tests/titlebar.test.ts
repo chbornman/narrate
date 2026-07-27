@@ -35,6 +35,7 @@ import Titlebar from "../src/lib/components/shell/Titlebar.svelte";
 import SettingsApp from "../src/lib/settings/SettingsApp.svelte";
 import { isMac } from "../src/lib/logic/platform";
 import { ui } from "../src/lib/state/app.svelte";
+import type { ApplicationHealth } from "../src/lib/types/dto";
 
 const MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
@@ -149,6 +150,28 @@ describe("Titlebar platform chrome", () => {
     expect(busy.getByText("Hashing")).not.toBeNull();
     expect(busy.container.querySelector(".pill.working")).not.toBeNull();
     ui.shell.ingest = { running: false, done: 0, total: 0, errors: 0, passes: [], scanning: false, discovered: 0, offlineVolumes: [], vectorsVersion: 0, imagesVersion: 0, journalVersion: 0 };
+  });
+
+  it("uses the backend health projection for the header attention state", () => {
+    stubNavigator("MacIntel", MAC_UA);
+    const health = {
+      issues: [
+        {
+          id: "disk:wal",
+          subsystem: "database",
+          title: "Database maintenance is blocked",
+          blocking: true,
+          summary: "A reader is holding the WAL open.",
+          lastError: "reader busy",
+          lastErrorAtMs: 1_700_000_000_000,
+          action: { kind: "reveal-logs", label: "Reveal logs", targetId: null },
+        },
+      ],
+    } as ApplicationHealth;
+
+    const rendered = render(Titlebar, { title: "shoots", health });
+    expect(rendered.getByText("Health action required")).not.toBeNull();
+    expect(rendered.container.querySelector(".pill.blocked")).not.toBeNull();
   });
 
   it("the bar itself stays a drag region on both platforms", () => {

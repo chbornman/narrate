@@ -32,6 +32,11 @@ BUILD-LOOP.md with where their content went; full text stays in git history.
 | `MODELS.md` | The connector-options matrix: per seam, the current pick, alternates evaluated, candidates, watch triggers. |
 | `LICENSES.md` | The license inventory: our own code, the Rust + npm dep trees, the ML runtimes, the GPU runtimes, and the model weights, with the copyleft + model-license flags. Re-run `cargo license` when deps/models change. |
 | `STATE-INTEGRITY-AUDIT.md` | Data/state integrity audit: silent-failure bugs, version/downgrade guards, disk-vs-DB reconciliation, recovery/reset gaps, plus a living checklist for new state classes. Re-run `scripts/state-integrity-audit.workflow.js`. |
+| `BACKUP-RESTORE.md` | Operator contract for journal export versus complete offline app-data backup, exact recoverable state, safe restore ordering, and migration snapshots. |
+| `PLAN-DESKTOP-FOUNDATION.md` | Active packet and proof map for the July 26 desktop-foundation program: A01-A26, linked integrity/runtime work, dependency order, and completion evidence. |
+| `DESKTOP-CHAOS-MATRIX.md` | Executable A25 lifecycle/failure matrix, invariant map, latest local counts, and native drills that fixtures cannot replace. |
+| `DESKTOP-EXPERIENCE-BUDGETS.md` | A26 numeric gates, structured journey-monitoring contract, fixture ledger, and remaining real-device receipts. |
+| `DESKTOP-RELEASE.md` | Installed bundle, sidecar, signing, updater, staged-rollout, and rollback contract plus current release evidence. |
 | `AUDIT-FRONTEND-COUPLING.md` | Frontend implicit-seam / staleness audit: the 5 interaction axes (viewMode × scope × search-lane × capture × escape) swept for the visualizer bug class, anchored CONFIRMED/SUSPECTED, ending in the P1-P7 fix packet (tracked in `BACKLOG.md`). |
 | `DESIGN-DEDUP-AND-SIMILARITY.md` | Wide-think + cited SOTA research for similarity grouping, near-dup dedup, and the "duplication-tolerance" hide-for-variety slider: the three-tier model (BLAKE3 / perceptual hash / CLIP), diverse-subset algorithms over the existing kNN graph, burst grouping, and adjacent use cases. |
 | `SPIKE-ASR35.md` | Nemotron 3.5 dev evaluation + the chunk-size root-cause finding (B74). |

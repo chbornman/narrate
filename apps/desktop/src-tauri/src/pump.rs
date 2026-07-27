@@ -9,14 +9,22 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use photoproof_core::UtcMillis;
-use photoproof_core::library::{QueueOptions, ScanOptions};
-use tauri::{AppHandle, Emitter, Manager};
+use photoproof_core::library::{
+    QueueOptions, RootReconcileOutcome, RootReconcileResult, ScanOptions,
+};
+use photoproof_core::runtime::RuntimeEvent;
+use tauri::{AppHandle, Emitter, Runtime};
 
+use crate::convergence::StateDomain;
 use crate::dto::{IngestStatus, PassRemaining};
+use crate::lifecycle::{Subsystem, SubsystemHealth};
+use crate::managed_tasks::{SpawnTaskError, TaskPriority};
+use crate::resource_governor::ResourceLane;
+use crate::settings::NewRootPolicy;
 use crate::state::App;
 
 const QUEUE_BATCH: usize = 64;
@@ -37,7 +45,10 @@ const DECODE_BATCH: usize = 2;
 const IDLE_SLEEP: Duration = Duration::from_millis(500);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
-const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
+const DISK_INVENTORY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const MAINTENANCE_HOURS: u64 = 6;
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(MAINTENANCE_HOURS * 60 * 60);
+const MAINTENANCE_IDLE_RETRY: Duration = Duration::from_secs(30);
 const SIDECAR_TICK: Duration = Duration::from_millis(500);
 /// Wall-clock gap between pump iterations that we treat as a sleep/resume
 /// (AUDIT-2026-07-07 S2). WHY wall clock: `Instant` is suspend-paused on
@@ -63,6 +74,10 @@ const RUNTIME_PUMP_TICK: Duration = Duration::from_millis(500);
 /// jerk the ETA around. (Chosen to match the human-perceived "settling in a
 /// second or two" feel; not load-bearing, easy to retune.)
 const RATE_ALPHA: f32 = 0.3;
+
+fn progress_emit_due(has_previous: bool, changed: bool, elapsed: Duration) -> bool {
+    !has_previous || (changed && elapsed >= PROGRESS_INTERVAL)
+}
 
 /// Quantum (items/sec) for emit-gating the otherwise-continuous rate. A change
 /// smaller than this does not, on its own, force a progress emit — without it a
@@ -178,12 +193,15 @@ fn rate_quantum_changed(prev: &IngestStatus, next: &IngestStatus) -> bool {
 }
 
 pub fn ingest_status(app: &App) -> IngestStatus {
-    let queue = match app.library.pass_counters() {
+    let queue = match app.library.active_pass_counters() {
         Ok(c) => status_from_counters(&c),
         Err(_) => IngestStatus::default(),
     };
     let (scanning, discovered) = app.scans.snapshot();
     let mut status = overlay_walk(queue, scanning, discovered);
+    let resources = app.resources.snapshot();
+    status.processing_paused = resources.paused;
+    status.processing_intensity = resources.intensity;
     // Warn surface (founder: warn + pause): list offline volumes the library
     // lives on so the shell can say "drive disconnected, N photos unavailable"
     // instead of silently stalling. A read failure degrades to "no warning"
@@ -286,44 +304,96 @@ fn wall_gap_signals_resume(prev: SystemTime, now: SystemTime) -> bool {
         .is_ok_and(|gap| gap >= RESUME_WALL_GAP)
 }
 
-/// Drives `process_queue` continuously, plus the periodic volume probe and
-/// maintenance tick, emitting coalesced `ingest-progress` events.
-pub fn spawn_ingest_pump(handle: AppHandle) {
-    std::thread::Builder::new()
-        .name("pp-ingest-pump".into())
-        .spawn(move || {
+fn should_run_idle_maintenance(
+    elapsed: Duration,
+    ingest_running: bool,
+    scanning: bool,
+    capture_live: bool,
+) -> bool {
+    elapsed >= MAINTENANCE_INTERVAL && !ingest_running && !scanning && !capture_live
+}
+
+fn observe_store_maintenance(
+    disk: &crate::disk::DiskGovernor,
+    result: Result<(), photoproof_core::StoreError>,
+) -> Result<(), photoproof_core::StoreError> {
+    match &result {
+        Ok(()) => {
+            disk.record_wal_maintenance_success();
+        }
+        Err(error) => {
+            disk.record_wal_maintenance_failure(
+                error.to_string(),
+                matches!(error, photoproof_core::StoreError::CheckpointBlocked),
+            );
+        }
+    }
+    result
+}
+
+fn log_reconcile_outcomes(trigger: &str, reports: &[RootReconcileResult]) {
+    for report in reports {
+        match &report.outcome {
+            RootReconcileOutcome::Scanned(scan) if scan.stale_inference_suppressed => {
+                tracing::warn!(
+                    root_id = %report.root_id,
+                    io_errors = scan.io_errors,
+                    %trigger,
+                    "root reconcile was incomplete; unseen paths were preserved"
+                );
+            }
+            RootReconcileOutcome::Scanned(_) => {}
+            RootReconcileOutcome::Offline { volume_id } => {
+                tracing::warn!(
+                    root_id = %report.root_id,
+                    %volume_id,
+                    %trigger,
+                    "root reconcile deferred because its volume is offline"
+                );
+            }
+            RootReconcileOutcome::Failed { error } => {
+                tracing::error!(
+                    root_id = %report.root_id,
+                    %error,
+                    %trigger,
+                    "root reconcile failed"
+                );
+            }
+        }
+    }
+}
+
+/// Drives only the latency-sensitive essential ingest queue and publishes the
+/// aggregate status snapshot. Preview, interactive RAW, and embedding work
+/// each have their own independently paced lane below; a slow derived batch
+/// therefore cannot hold this loop (or another derived kind) hostage.
+pub fn spawn_ingest_pump(app: &Arc<App>, handle: AppHandle) -> Result<(), SpawnTaskError> {
+    let pump_app = Arc::clone(app);
+    app.tasks.spawn(
+        "scheduler",
+        "ingest-pump",
+        TaskPriority::Background,
+        move |task| {
             let mut last_emit: Option<(Instant, IngestStatus)> = None;
             // Per-pass throughput trackers, persisted across loop iterations
             // (the loop owns the clock + prev state the rate needs). Pruned
             // inside `apply_pass_rates` when a pass finishes.
             let mut rate_trackers: HashMap<String, RateEma> = HashMap::new();
-            let mut last_probe = Instant::now();
-            let mut last_maintenance = Instant::now();
             // S2 sleep/resume detection state: the previous iteration's WALL
             // time (see RESUME_WALL_GAP for why not `Instant`), plus a
-            // one-in-flight latch so rapid wake/sleep cycles cannot stack
-            // concurrent full-library reconciles.
+            // registry single-flight key so rapid wake/sleep cycles cannot
+            // stack concurrent full-library reconciles.
             let mut last_wall = SystemTime::now();
-            let resume_scan_running = Arc::new(AtomicBool::new(false));
             loop {
-                let Some(app) = handle.try_state::<Arc<App>>() else {
-                    std::thread::sleep(IDLE_SLEEP);
-                    continue;
-                };
-                let app = app.inner().clone();
-                if app.shutdown.load(Ordering::Relaxed) {
-                    return;
+                if task.is_cancelled() || pump_app.shutdown.load(Ordering::Relaxed) {
+                    return Ok(());
                 }
                 // S2: a large wall-clock gap since the previous iteration means
                 // the machine slept — the notify watcher silently missed every
                 // filesystem event in between, so force the §7.3 wake reconcile
                 // now instead of waiting out the 10-minute maintenance tick.
                 let now_wall = SystemTime::now();
-                if wall_gap_signals_resume(last_wall, now_wall)
-                    // swap(true) latches: only the FIRST detection while no
-                    // reconcile is in flight spawns one.
-                    && !resume_scan_running.swap(true, Ordering::SeqCst)
-                {
+                if wall_gap_signals_resume(last_wall, now_wall) {
                     tracing::info!(
                         gap_secs = now_wall
                             .duration_since(last_wall)
@@ -337,107 +407,113 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     // the queue and emitting progress meanwhile. Registered
                     // with `app.scans` (the add-root/rescan idiom) so the walk
                     // is visible as scanning/discovered in `ingest_status`.
-                    let resume_app = app.clone();
-                    let latch = Arc::clone(&resume_scan_running);
-                    std::thread::Builder::new()
-                        .name("pp-resume-reconcile".into())
-                        .spawn(move || {
+                    let resume_app = Arc::clone(&pump_app);
+                    let spawn = pump_app.tasks.spawn(
+                        "library",
+                        "resume-reconcile",
+                        TaskPriority::Maintenance,
+                        move |scan_task| {
+                            let cancel = scan_task.cancel_flag();
+                            let Some(_resource) = resume_app
+                                .resources
+                                .acquire(ResourceLane::RootScan, &cancel)
+                            else {
+                                return Ok(());
+                            };
                             let _walk = resume_app.scans.begin();
                             let opts = ScanOptions {
+                                cancel: Some(cancel),
                                 discovered: Some(resume_app.scans.counter()),
+                                max_concurrency: Some(
+                                    resume_app.resources.budget().ingest_concurrency,
+                                ),
+                                pause: Some(resume_app.resources.pause_token()),
                                 ..ScanOptions::default()
                             };
-                            if let Err(e) = resume_app.library.on_system_resume(&opts) {
-                                tracing::warn!(error = %e, "resume reconcile failed");
+                            match resume_app.library.on_system_resume(&opts) {
+                                Ok(reports) => log_reconcile_outcomes("resume", &reports),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "resume reconcile failed");
+                                }
                             }
-                            latch.store(false, Ordering::SeqCst);
-                        })
-                        .expect("spawn resume reconcile");
-                }
-                last_wall = now_wall;
-                if last_probe.elapsed() >= PROBE_INTERVAL {
-                    last_probe = Instant::now();
-                    let _ = app.library.probe_volumes();
-                }
-                if last_maintenance.elapsed() >= MAINTENANCE_INTERVAL {
-                    last_maintenance = Instant::now();
-                    let _ = app.library.maintenance_tick();
-                }
-                let report = app
-                    .library
-                    .process_queue(&QueueOptions {
-                        cancel: None,
-                        max_items: Some(QUEUE_BATCH),
-                    })
-                    .unwrap_or_default();
-                let processed = report.processed;
-                // The on-demand full-raw-decode drain (OD-1). It runs when the
-                // regular ingest queue went idle this turn (same L4 politeness
-                // as embeddings), but BEFORE embeddings: a view-time develop is
-                // interactive (a user waiting on a "developing..." spinner),
-                // the highest-priority work in the queue, so it outranks the
-                // lowest-priority embedding backfill. It is a no-op (zero items)
-                // unless a develop was requested AND the mic is not armed; its
-                // completed develops emit `previews-changed` so Look swaps in
-                // the developed artifact the moment it lands.
-                let decoded = if processed == 0 {
-                    drain_raw_decode(&app, &handle)
-                } else {
-                    0
-                };
-                // P7.4 decision 5: the embedding backfill drain. Politeness
-                // rule (L4 ordering) — embeddings are the LOWEST priority, so
-                // they run ONLY when the regular ingest queue went idle this
-                // turn (`processed == 0`); a freshly-arriving photo or note
-                // preempts them on the next loop. The drain itself is a no-op
-                // (zero items) unless an embedder is ready AND the mic is not
-                // armed. Its passes land in `pass_counters`, so the coalesced
-                // jobs indicator below picks them up for free (the status is
-                // computed after this).
-                let embedded = if processed == 0 {
-                    drain_embeddings(&app)
-                } else {
-                    0
-                };
-                // Hash-aware preview completions (the journal-changed
-                // pattern): thumbs whose retry budget ran out heal off
-                // this. One event per drain batch — same low-rate wire
-                // discipline as ingest-progress (≤ QUEUE_BATCH hashes).
-                if !report.completed_previews.is_empty() {
-                    let _ = handle.emit(
-                        "previews-changed",
-                        crate::dto::PreviewsChanged {
-                            hashes: report
-                                .completed_previews
-                                .iter()
-                                .map(|h| h.as_str().to_owned())
-                                .collect(),
+                            Ok(())
                         },
                     );
+                    if let Err(error) = spawn
+                        && !matches!(error, SpawnTaskError::AlreadyRunning { .. })
+                    {
+                        tracing::warn!(%error, "resume reconcile task unavailable");
+                    }
                 }
+                last_wall = now_wall;
+                let report = if pump_app.resources.paused() {
+                    Default::default()
+                } else {
+                    let budget = pump_app.resources.budget();
+                    let Some(metadata_resource) = pump_app
+                        .resources
+                        .acquire(ResourceLane::LiveIngest, &task.cancel_flag())
+                    else {
+                        return Ok(());
+                    };
+                    let queue_options = QueueOptions {
+                        cancel: Some(task.cancel_flag()),
+                        additional_cancel: None,
+                        max_items: Some(budget.ingest_batch.min(QUEUE_BATCH)),
+                        max_concurrency: Some(budget.ingest_concurrency),
+                        excluded_embedding_root_ids: Vec::new(),
+                    };
+                    let report = match pump_app.library.process_essential_queue(&queue_options) {
+                        Ok(report) => {
+                            pump_app
+                                .lifecycle
+                                .set_health(Subsystem::Ingest, SubsystemHealth::Healthy);
+                            report
+                        }
+                        Err(_) if task.is_cancelled() => return Ok(()),
+                        Err(error) => {
+                            task.report_error(format!("ingest queue batch failed: {error}"));
+                            pump_app.lifecycle.set_health(
+                                Subsystem::Ingest,
+                                SubsystemHealth::Degraded {
+                                    summary: error.to_string(),
+                                },
+                            );
+                            tracing::error!(%error, "ingest queue batch failed");
+                            if task.wait_for_cancel(IDLE_SLEEP) {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                    };
+                    drop(metadata_resource);
+                    report
+                };
+                let processed = report.processed;
 
-                let mut status = ingest_status(&app);
+                let mut status = ingest_status(&pump_app);
                 // PAUSE signal for the rate EMAs: the mic owns the machine
                 // (`capture_live`) OR an offline volume is holding back work
                 // (no pass can drain bytes off a disconnected drive). Either
                 // way `done` cannot advance for the right reasons, so we freeze
                 // the rate rather than let it decay toward 0 — the ETA the user
                 // reads must survive the pause.
-                let paused = app.runtime.capture_live.load(Ordering::Relaxed)
+                let paused = pump_app.runtime.capture_live.load(Ordering::Relaxed)
                     || !status.offline_volumes.is_empty();
                 apply_pass_rates(&mut rate_trackers, &mut status, Instant::now(), paused);
                 let due = match &last_emit {
-                    None => true,
+                    None => progress_emit_due(false, true, Duration::ZERO),
                     // `prev != status` already ignores `rate_per_sec` (the DTO's
                     // hand-written eq excludes the drifting float). To still let
                     // a MEANINGFUL rate move surface, also emit when the
                     // quantized rate of any pass changed — quantizing kills the
                     // 2.5/s vs 2.50001/s wobble that would otherwise pin the
                     // channel at one emit per PROGRESS_INTERVAL forever.
-                    Some((at, prev)) => {
-                        (*prev != status || rate_quantum_changed(prev, &status))
-                            && at.elapsed() >= PROGRESS_INTERVAL
-                    }
+                    Some((at, prev)) => progress_emit_due(
+                        true,
+                        *prev != status || rate_quantum_changed(prev, &status),
+                        at.elapsed(),
+                    ),
                 };
                 if due {
                     // `passes` made the status non-Copy: clone for the
@@ -445,15 +521,366 @@ pub fn spawn_ingest_pump(handle: AppHandle) {
                     let _ = handle.emit("ingest-progress", status.clone());
                     last_emit = Some((Instant::now(), status));
                 }
-                // Sleep only when ALL drains are idle — otherwise a develop or
-                // embedding batch would pace at one batch per IDLE_SLEEP and
-                // never catch up. Any work this turn loops straight back.
-                if processed == 0 && decoded == 0 && embedded == 0 {
-                    std::thread::sleep(IDLE_SLEEP);
+                if processed == 0 && task.wait_for_cancel(IDLE_SLEEP) {
+                    return Ok(());
                 }
             }
-        })
-        .expect("spawn ingest pump");
+        },
+    )
+}
+
+/// Independently paced preview backfill. Resource admission retains the
+/// process-wide priority policy, while the separate managed owner/key gives
+/// this lane its own cancellation, health, errors, and shutdown acknowledgement.
+pub fn spawn_preview_pump(app: &Arc<App>, handle: AppHandle) -> Result<(), SpawnTaskError> {
+    let pump_app = Arc::clone(app);
+    app.tasks.spawn(
+        "derived",
+        "preview-pump",
+        TaskPriority::Background,
+        move |task| loop {
+            if task.is_cancelled() || pump_app.shutdown.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            if pump_app.resources.paused() || pump_app.disk.derived_work_paused() {
+                if task.wait_for_cancel(IDLE_SLEEP) {
+                    return Ok(());
+                }
+                continue;
+            }
+            let cancel = task.cancel_flag();
+            let Some(_resource) = pump_app.resources.acquire(ResourceLane::Preview, &cancel) else {
+                return Ok(());
+            };
+            let budget = pump_app.resources.budget();
+            let options = QueueOptions {
+                cancel: Some(cancel),
+                additional_cancel: None,
+                max_items: Some(budget.ingest_batch.min(QUEUE_BATCH)),
+                max_concurrency: Some(budget.ingest_concurrency),
+                excluded_embedding_root_ids: Vec::new(),
+            };
+            let report = match pump_app.library.process_preview_queue(&options) {
+                Ok(report) => {
+                    pump_app
+                        .lifecycle
+                        .set_health(Subsystem::Previews, SubsystemHealth::Healthy);
+                    report
+                }
+                Err(_) if task.is_cancelled() => return Ok(()),
+                Err(error) => {
+                    task.report_error(format!("preview queue batch failed: {error}"));
+                    pump_app.lifecycle.set_health(
+                        Subsystem::Previews,
+                        SubsystemHealth::Degraded {
+                            summary: error.to_string(),
+                        },
+                    );
+                    tracing::error!(%error, "preview queue batch failed");
+                    if task.wait_for_cancel(IDLE_SLEEP) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+            if !report.completed_previews.is_empty() {
+                let _ = handle.emit(
+                    "previews-changed",
+                    crate::dto::PreviewsChanged {
+                        hashes: report
+                            .completed_previews
+                            .iter()
+                            .map(|hash| hash.as_str().to_owned())
+                            .collect(),
+                    },
+                );
+            }
+            if report.processed == 0 && task.wait_for_cancel(IDLE_SLEEP) {
+                return Ok(());
+            }
+        },
+    )
+}
+
+/// Interactive develops are not paced by live ingest or preview backlog. The
+/// resource governor still gives this lane interactive priority and the drain
+/// retains per-item capture preemption.
+pub fn spawn_raw_decode_pump(app: &Arc<App>, handle: AppHandle) -> Result<(), SpawnTaskError> {
+    let pump_app = Arc::clone(app);
+    app.tasks.spawn(
+        "derived",
+        "interactive-raw-pump",
+        TaskPriority::Background,
+        move |task| loop {
+            if task.is_cancelled() || pump_app.shutdown.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            if pump_app.disk.derived_work_paused() {
+                if task.wait_for_cancel(IDLE_SLEEP) {
+                    return Ok(());
+                }
+                continue;
+            }
+            let processed = drain_raw_decode(&pump_app, &handle, &task.cancel_flag());
+            if processed == 0 && task.wait_for_cancel(IDLE_SLEEP) {
+                return Ok(());
+            }
+        },
+    )
+}
+
+/// Lowest-priority embedding backfill, with independent pacing. A busy ingest
+/// queue no longer starves it; the resource governor and capture policy remain
+/// the admission authority for contention and microphone preemption.
+pub fn spawn_embedding_pump(app: &Arc<App>) -> Result<(), SpawnTaskError> {
+    let pump_app = Arc::clone(app);
+    app.tasks.spawn(
+        "derived",
+        "embedding-pump",
+        TaskPriority::Background,
+        move |task| loop {
+            if task.is_cancelled() || pump_app.shutdown.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            if pump_app.resources.paused() || pump_app.disk.derived_work_paused() {
+                if task.wait_for_cancel(IDLE_SLEEP) {
+                    return Ok(());
+                }
+                continue;
+            }
+            let processed = drain_embeddings(&pump_app, &task.cancel_flag());
+            if processed == 0 && task.wait_for_cancel(IDLE_SLEEP) {
+                return Ok(());
+            }
+        },
+    )
+}
+
+/// Lightweight volume monitoring is isolated from the ingest queue. A slow
+/// mount probe can delay only this lane, never live hashing, preview work, or
+/// progress publication.
+pub fn spawn_volume_monitor(app: &Arc<App>) -> Result<(), SpawnTaskError> {
+    let monitor_app = Arc::clone(app);
+    app.tasks.spawn(
+        "monitor",
+        "volume-probe",
+        TaskPriority::Background,
+        move |task| {
+            let mut last_inventory = Instant::now()
+                .checked_sub(DISK_INVENTORY_INTERVAL)
+                .unwrap_or_else(Instant::now);
+            let mut last_disk_state = None;
+            let mut last_wal_state = None;
+            loop {
+                let disk = if last_inventory.elapsed() >= DISK_INVENTORY_INTERVAL {
+                    last_inventory = Instant::now();
+                    monitor_app.disk.refresh_inventory()
+                } else {
+                    monitor_app.disk.refresh_capacity()
+                };
+                let disk_state = (disk.app_data_state, disk.models_state);
+                if last_disk_state != Some(disk_state) {
+                    match disk.app_data_state {
+                        crate::disk::CapacityState::Healthy => {
+                            tracing::info!("app-data disk capacity is healthy")
+                        }
+                        crate::disk::CapacityState::Warning => tracing::warn!(
+                            available_bytes =
+                                disk.stores.first().and_then(|store| store.available_bytes),
+                            "app-data disk space is low"
+                        ),
+                        crate::disk::CapacityState::Critical => tracing::error!(
+                            available_bytes =
+                                disk.stores.first().and_then(|store| store.available_bytes),
+                            "app-data disk space is critical; derived work is paused"
+                        ),
+                        crate::disk::CapacityState::Unknown => {
+                            tracing::warn!("app-data disk capacity could not be determined")
+                        }
+                    }
+                    match disk.models_state {
+                        crate::disk::CapacityState::Healthy => {}
+                        crate::disk::CapacityState::Warning => {
+                            tracing::warn!("configured model disk space is low")
+                        }
+                        crate::disk::CapacityState::Critical => {
+                            tracing::error!("configured model disk space is critical")
+                        }
+                        crate::disk::CapacityState::Unknown => {
+                            tracing::warn!("configured model disk capacity could not be determined")
+                        }
+                    }
+                    last_disk_state = Some(disk_state);
+                }
+                if last_wal_state != Some(disk.wal.state) {
+                    match disk.wal.state {
+                        crate::disk::WalState::Healthy => {
+                            tracing::info!(
+                                wal_bytes = ?disk.wal.size_bytes,
+                                "SQLite WAL health is healthy"
+                            );
+                        }
+                        crate::disk::WalState::Warning => {
+                            tracing::warn!(
+                                wal_bytes = ?disk.wal.size_bytes,
+                                wal_age_ms = ?disk.wal.age_ms,
+                                last_error = ?disk.wal.last_maintenance_error,
+                                "SQLite WAL exceeds a warning threshold or maintenance failed"
+                            );
+                        }
+                        crate::disk::WalState::Critical => {
+                            tracing::error!(
+                                wal_bytes = ?disk.wal.size_bytes,
+                                wal_age_ms = ?disk.wal.age_ms,
+                                "SQLite WAL exceeds a critical size or age threshold"
+                            );
+                        }
+                        crate::disk::WalState::Blocked => {
+                            tracing::error!(
+                                wal_bytes = ?disk.wal.size_bytes,
+                                last_error = ?disk.wal.last_maintenance_error,
+                                "SQLite WAL checkpoint is blocked by a reader"
+                            );
+                        }
+                        crate::disk::WalState::Unknown => {
+                            tracing::warn!(
+                                error = ?disk.wal.inventory_error,
+                                "SQLite WAL health could not be measured"
+                            );
+                        }
+                    }
+                    last_wal_state = Some(disk.wal.state);
+                }
+                if let Err(error) = monitor_app.library.probe_volumes() {
+                    tracing::warn!(%error, "periodic volume probe failed");
+                }
+                if task.wait_for_cancel(PROBE_INTERVAL) {
+                    return Ok(());
+                }
+            }
+        },
+    )
+}
+
+/// Six-hour repair/reconciliation and EventStore maintenance have their own
+/// lane. Once due, maintenance waits for a genuine idle snapshot and retries
+/// that admission check without resetting the six-hour deadline.
+pub fn spawn_maintenance_pump(app: &Arc<App>) -> Result<(), SpawnTaskError> {
+    let maintenance_app = Arc::clone(app);
+    app.tasks.spawn(
+        "maintenance",
+        "library-and-store",
+        TaskPriority::Maintenance,
+        move |task| {
+            let mut last_maintenance = Instant::now();
+            loop {
+                let elapsed = last_maintenance.elapsed();
+                if elapsed < MAINTENANCE_INTERVAL
+                    && task.wait_for_cancel(MAINTENANCE_INTERVAL - elapsed)
+                {
+                    return Ok(());
+                }
+                if task.is_cancelled() {
+                    return Ok(());
+                }
+
+                let status = ingest_status(&maintenance_app);
+                let capture_live = maintenance_app.runtime.capture_live.load(Ordering::Relaxed);
+                if !should_run_idle_maintenance(
+                    last_maintenance.elapsed(),
+                    status.running,
+                    status.scanning,
+                    capture_live,
+                ) {
+                    if task.wait_for_cancel(MAINTENANCE_IDLE_RETRY) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                if maintenance_app.disk.derived_work_paused() || maintenance_app.resources.paused()
+                {
+                    maintenance_app.lifecycle.set_health(
+                        Subsystem::Maintenance,
+                        SubsystemHealth::Degraded {
+                            summary: if maintenance_app.resources.paused() {
+                                "paused by processing policy".into()
+                            } else {
+                                "paused while app-data disk space is critical".into()
+                            },
+                        },
+                    );
+                    if task.wait_for_cancel(MAINTENANCE_IDLE_RETRY) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+
+                let cancel = task.cancel_flag();
+                let Some(_resource) = maintenance_app
+                    .resources
+                    .acquire(ResourceLane::Maintenance, &cancel)
+                else {
+                    return Ok(());
+                };
+                let _walk = maintenance_app.scans.begin();
+                let opts = ScanOptions {
+                    cancel: Some(cancel),
+                    discovered: Some(maintenance_app.scans.counter()),
+                    max_concurrency: Some(maintenance_app.resources.budget().ingest_concurrency),
+                    pause: Some(maintenance_app.resources.pause_token()),
+                    ..ScanOptions::default()
+                };
+                let library_maintained = match maintenance_app
+                    .library
+                    .maintenance_tick_without_volume_probe(&opts)
+                {
+                    Ok(reports) => {
+                        log_reconcile_outcomes("six-hour-maintenance", &reports);
+                        true
+                    }
+                    Err(_) if task.is_cancelled() => return Ok(()),
+                    Err(error) => {
+                        task.report_error(format!("library maintenance failed: {error}"));
+                        tracing::warn!(%error, "library maintenance tick failed");
+                        false
+                    }
+                };
+                if task.is_cancelled() {
+                    return Ok(());
+                }
+                let store_maintained = match observe_store_maintenance(
+                    &maintenance_app.disk,
+                    maintenance_app.store.maintain(),
+                ) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        task.report_error(format!("event-store maintenance failed: {error}"));
+                        tracing::warn!(
+                            %error,
+                            "event-store idle maintenance deferred; next idle retry will rerun it"
+                        );
+                        false
+                    }
+                };
+                if library_maintained && store_maintained {
+                    maintenance_app
+                        .lifecycle
+                        .set_health(Subsystem::Maintenance, SubsystemHealth::Healthy);
+                    last_maintenance = Instant::now();
+                } else {
+                    maintenance_app.lifecycle.set_health(
+                        Subsystem::Maintenance,
+                        SubsystemHealth::Degraded {
+                            summary: "idle repair or WAL maintenance will retry".into(),
+                        },
+                    );
+                    if task.wait_for_cancel(MAINTENANCE_IDLE_RETRY) {
+                        return Ok(());
+                    }
+                }
+            }
+        },
+    )
 }
 
 /// The per-model capture-pause policy (the GPU-embedder relax).
@@ -510,10 +937,36 @@ fn should_pause_during_capture(runs_on_accelerator: bool) -> bool {
 /// DEGRADED: with no embedder ready this returns 0 and the rows sit pending
 /// — the journal is whole, the backfill is simply dark (RETRIEVAL §3 /
 /// embedding.rs degraded contract).
-fn drain_embeddings(app: &App) -> usize {
+fn drain_embeddings(app: &Arc<App>, cancel: &Arc<std::sync::atomic::AtomicBool>) -> usize {
+    let Some(_resource) = app.resources.acquire(ResourceLane::Embedding, cancel) else {
+        return 0;
+    };
+    let batch = app.resources.budget().embedding_batch;
     let armed = app.runtime.capture_live.load(Ordering::Relaxed);
-    let text = app.runtime.embedders.text();
-    let clip = app.runtime.embedders.clip();
+    let (defer_text, defer_image, excluded_roots) = {
+        let settings = app.settings.lock().expect("settings mutex");
+        (
+            settings.defer_text_embeddings,
+            settings.defer_image_embeddings,
+            settings
+                .root_processing_policies
+                .iter()
+                .filter_map(|(root_id, policy)| {
+                    matches!(
+                        policy,
+                        NewRootPolicy::PreviewOnly | NewRootPolicy::ProcessLater
+                    )
+                    .then_some(root_id.clone())
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let text = (!defer_text)
+        .then(|| app.runtime.embedders.text())
+        .flatten();
+    let clip = (!defer_image)
+        .then(|| app.runtime.embedders.clip())
+        .flatten();
     // Nothing ready ⇒ degraded; leave the rows pending, no claim, no error.
     if text.is_none() && clip.is_none() {
         return 0;
@@ -532,17 +985,21 @@ fn drain_embeddings(app: &App) -> usize {
         }
         // CLIP-only rig: `process_embedding_queue` then claims only
         // ImageEmbedding passes and skips the text session-level sweep.
-        let rig = photoproof_core::library::EmbeddingRig::<photoproof_connectors::OrtEmbedder> {
+        let rig = photoproof_core::library::EmbeddingRig::<crate::embedders::EmbedderProxy> {
             text: None,
             clip: Some(clip.as_ref()),
             vectors: &app.vectors,
         };
         return run_embedding_drain(
-            app, &rig,
+            app,
+            &rig,
             // No `capture_live` cancel here: it is true for the whole armed
             // window, so it would cancel the GPU work we WANT to keep draining.
             // The bounded batch keeps the armed turn short on its own.
             None,
+            Arc::clone(cancel),
+            batch,
+            excluded_roots,
         );
     }
 
@@ -553,7 +1010,14 @@ fn drain_embeddings(app: &App) -> usize {
         clip: clip.as_deref(),
         vectors: &app.vectors,
     };
-    run_embedding_drain(app, &rig, Some(app.runtime.capture_live.clone()))
+    run_embedding_drain(
+        app,
+        &rig,
+        Some(app.runtime.capture_live.clone()),
+        Arc::clone(cancel),
+        batch,
+        excluded_roots,
+    )
 }
 
 /// Run one bounded embedding-queue drain with the given cancel flag, logging and
@@ -563,12 +1027,18 @@ fn run_embedding_drain<TE: photoproof_connectors::Embedder, CE: photoproof_conne
     app: &App,
     rig: &photoproof_core::library::EmbeddingRig<'_, TE, CE>,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    shutdown_cancel: Arc<std::sync::atomic::AtomicBool>,
+    batch: usize,
+    excluded_embedding_root_ids: Vec<String>,
 ) -> usize {
     match app.library.process_embedding_queue(
         rig,
         &QueueOptions {
             cancel,
-            max_items: Some(EMBED_BATCH),
+            additional_cancel: Some(shutdown_cancel),
+            max_items: Some(batch.min(EMBED_BATCH)),
+            max_concurrency: Some(1),
+            excluded_embedding_root_ids,
         },
     ) {
         Ok(report) => report.processed,
@@ -589,14 +1059,24 @@ fn run_embedding_drain<TE: photoproof_connectors::Embedder, CE: photoproof_conne
 /// armed mid-batch preempts at the next item — a develop is seconds, the §10.3
 /// preempt bound). Completed develops emit `previews-changed` so Look swaps in
 /// the developed full-res artifact the instant it lands.
-fn drain_raw_decode(app: &App, handle: &AppHandle) -> usize {
+fn drain_raw_decode(
+    app: &Arc<App>,
+    handle: &AppHandle,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> usize {
     // The mic owns the machine: no develop batch starts while armed.
     if app.runtime.capture_live.load(Ordering::Relaxed) {
         return 0;
     }
+    let Some(_resource) = app.resources.acquire(ResourceLane::InteractiveRaw, cancel) else {
+        return 0;
+    };
     match app.library.process_raw_decode_queue(&QueueOptions {
         cancel: Some(app.runtime.capture_live.clone()),
-        max_items: Some(DECODE_BATCH),
+        additional_cancel: Some(Arc::clone(cancel)),
+        max_items: Some(app.resources.budget().raw_batch.min(DECODE_BATCH)),
+        max_concurrency: Some(1),
+        excluded_embedding_root_ids: Vec::new(),
     }) {
         Ok(report) => {
             // A developed RAW's display/thumb artifacts changed (source flips
@@ -645,90 +1125,320 @@ fn drain_raw_decode(app: &App, handle: &AppHandle) -> usize {
 /// The same tick drains §2.5 step-3 close processing (P6.2 obligation:
 /// processors run on the PUMP, never inline on the close/quit path — a
 /// quit-before-done re-enqueues on next launch by bookkeeping).
-pub fn spawn_sidecar_pump(handle: AppHandle) {
-    std::thread::Builder::new()
-        .name("pp-sidecar-pump".into())
-        .spawn(move || {
+pub fn spawn_sidecar_pump(app: &Arc<App>) -> Result<(), SpawnTaskError> {
+    let pump_app = Arc::clone(app);
+    app.tasks.spawn(
+        "scheduler",
+        "sidecar-pump",
+        TaskPriority::Background,
+        move |task| {
             loop {
-                std::thread::sleep(SIDECAR_TICK);
-                let Some(app) = handle.try_state::<Arc<App>>() else {
-                    continue;
-                };
-                let app = app.inner().clone();
-                if app.shutdown.load(Ordering::Relaxed) {
-                    return;
+                if task.wait_for_cancel(SIDECAR_TICK) || pump_app.shutdown.load(Ordering::Relaxed) {
+                    return Ok(());
                 }
-                if let Err(e) = app.engine.pump(UtcMillis::now()) {
+                if let Err(e) = pump_app.engine.pump(UtcMillis::now()) {
                     tracing::error!(error = %e, "sidecar pump error");
                 }
                 // Collections ride the same tick (RETRIEVAL §10.2: "the
                 // same debounced writer that maintains sidecars"); a write
                 // failure backs off inside the core writer and retries here.
-                if let Err(e) = app.collections.pump(UtcMillis::now()) {
+                if let Err(e) = pump_app.collections.pump(UtcMillis::now()) {
                     tracing::error!(error = %e, "collections pump error");
                 }
-                if let Err(e) = app.run_close_processing() {
+                if let Err(e) = pump_app.run_close_processing() {
                     tracing::error!(error = %e, "close processing error");
                 }
             }
-        })
-        .expect("spawn sidecar pump");
+        },
+    )
 }
 
-/// Readiness fingerprint for the runtime pump's idle-tick re-emit gate: the
-/// fields that can transition WITHOUT a bus event. The embedder host lands a
-/// slot Ready/Failed on a background build thread and publishes nothing, so the
-/// timeout path must notice the change itself. Download byte-progress is NOT
-/// here — it rides real bus events and never needs the timeout refresh.
-type ReadyFp = (
-    crate::dto::EmbedderState, // clip slot state (covers clip_ready == Ready)
-    crate::dto::EmbedderState, // text embedder slot state
-    bool,                      // asr_ready
-    bool,                      // llm_ready
-    bool,                      // asr_blocked present
-    bool,                      // llm_blocked present
-);
+/// Committed runtime fingerprint for transitions that can land without a bus
+/// event. In particular, the final download progress event may be observed
+/// while the row is still `downloading` at 100%; registry commit + progress
+/// cleanup happens immediately afterwards and must produce a terminal
+/// `installed` snapshot on the next bounded tick. Full blocked reasons,
+/// embedder attempts/generations, capability settlement, tier, and model
+/// terminal/error states are included so a same-shape change cannot stay stale
+/// in one window forever.
+#[derive(Debug, PartialEq, Eq)]
+struct ModelFp {
+    id: String,
+    state: String,
+    downloaded_bytes: u64,
+    error: Option<String>,
+    operation: Option<String>,
+    operation_sequence: Option<u64>,
+    operation_phase: Option<String>,
+    operation_terminal: Option<bool>,
+    registry_error: Option<String>,
+}
 
-fn readiness_fp(s: &crate::dto::RuntimeStatus) -> ReadyFp {
-    (
-        s.clip.state,
-        s.text_embedder.state,
-        s.asr_ready,
-        s.llm_ready,
-        s.asr_blocked.is_some(),
-        s.llm_blocked.is_some(),
-    )
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeFp {
+    clip: crate::dto::EmbedderSlot,
+    text: crate::dto::EmbedderSlot,
+    asr_ready: bool,
+    llm_ready: bool,
+    asr_blocked: Option<String>,
+    llm_blocked: Option<String>,
+    capability_state: String,
+    capability_summary: Option<String>,
+    tier_detected: u8,
+    tier_effective: u8,
+    consent: String,
+    models: Vec<ModelFp>,
+}
+
+fn runtime_fp(s: &crate::dto::RuntimeStatus) -> RuntimeFp {
+    RuntimeFp {
+        clip: s.clip.clone(),
+        text: s.text_embedder.clone(),
+        asr_ready: s.asr_ready,
+        llm_ready: s.llm_ready,
+        asr_blocked: s.asr_blocked.clone(),
+        llm_blocked: s.llm_blocked.clone(),
+        capability_state: s.capability_state.clone(),
+        capability_summary: s.capability_summary.clone(),
+        tier_detected: s.tier_detected,
+        tier_effective: s.tier_effective,
+        consent: s.consent.clone(),
+        models: s
+            .models
+            .iter()
+            .map(|model| ModelFp {
+                id: model.id.clone(),
+                state: model.state.clone(),
+                downloaded_bytes: model.downloaded_bytes,
+                error: model.error.clone(),
+                operation: model.operation.clone(),
+                operation_sequence: model.operation_event.as_ref().map(|event| event.sequence),
+                operation_phase: model
+                    .operation_event
+                    .as_ref()
+                    .map(|event| event.phase.clone()),
+                operation_terminal: model.operation_event.as_ref().map(|event| event.terminal),
+                registry_error: model.registry_error.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// One production broadcast seam for runtime snapshots. `AppHandle::emit`
+/// targets every webview; keeping command mutations and the background pump
+/// on this helper prevents a future caller from accidentally narrowing an
+/// authoritative snapshot to the invoking Settings window.
+pub(crate) fn emit_runtime_status<R: Runtime>(
+    handle: &AppHandle<R>,
+    status: crate::dto::RuntimeStatus,
+) -> tauri::Result<()> {
+    handle.emit("runtime-status", status)
+}
+
+/// Forward the sequenced operation event without exposing the Rust enum's
+/// serialization shape as a frontend contract. Returns `false` for unrelated
+/// bus events so the pump can call this on every drained event.
+pub(crate) fn emit_model_operation<R: Runtime>(
+    handle: &AppHandle<R>,
+    event: &RuntimeEvent,
+) -> tauri::Result<bool> {
+    let RuntimeEvent::ModelOperation {
+        model_id,
+        attempt_id,
+        sequence,
+        phase,
+        terminal,
+        error,
+    } = event
+    else {
+        return Ok(false);
+    };
+    handle.emit(
+        "model-operation",
+        serde_json::json!({
+            "modelId": model_id,
+            "attemptId": attempt_id,
+            "sequence": sequence,
+            "phase": phase,
+            "terminal": terminal,
+            "error": error,
+        }),
+    )?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod runtime_fingerprint_tests {
+    use super::{ModelFp, RuntimeFp};
+    use crate::dto::{EmbedderSlot, EmbedderState};
+
+    fn idle_slot() -> EmbedderSlot {
+        EmbedderSlot {
+            state: EmbedderState::Idle,
+            attempt_id: None,
+            model_id: None,
+            generation: 0,
+            started_at: None,
+            error: None,
+            execution: None,
+        }
+    }
+
+    fn fingerprint() -> RuntimeFp {
+        RuntimeFp {
+            clip: idle_slot(),
+            text: idle_slot(),
+            asr_ready: false,
+            llm_ready: false,
+            asr_blocked: None,
+            llm_blocked: None,
+            capability_state: "detecting".into(),
+            capability_summary: None,
+            tier_detected: 0,
+            tier_effective: 0,
+            consent: "download".into(),
+            models: vec![ModelFp {
+                id: "clip".into(),
+                state: "downloading".into(),
+                downloaded_bytes: 100,
+                error: None,
+                operation: None,
+                operation_sequence: None,
+                operation_phase: None,
+                operation_terminal: None,
+                registry_error: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn terminal_download_and_changed_block_reason_force_a_new_snapshot() {
+        let downloading = fingerprint();
+        let mut installed = fingerprint();
+        installed.models[0].state = "installed".into();
+        assert_ne!(downloading, installed);
+
+        let mut first_reason = fingerprint();
+        first_reason.asr_blocked = Some("binary missing".into());
+        let mut changed_reason = fingerprint();
+        changed_reason.asr_blocked = Some("binary is not executable".into());
+        assert_ne!(
+            first_reason, changed_reason,
+            "reason text changes are product state, not just Option presence"
+        );
+
+        let mut verifying = fingerprint();
+        verifying.models[0].operation = Some("verifying".into());
+        assert_ne!(
+            fingerprint(),
+            verifying,
+            "operation phases trigger a bounded cross-window snapshot"
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_broadcast_tests {
+    use std::sync::{Arc, Mutex};
+
+    use photoproof_core::runtime::RuntimeEvent;
+    use tauri::test::{mock_builder, mock_context, noop_assets};
+    use tauri::{Listener, WebviewWindowBuilder};
+
+    use super::{emit_model_operation, emit_runtime_status};
+    use crate::runtime::RuntimeHost;
+
+    fn payload_sink(
+        window: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        event: &'static str,
+    ) -> Arc<Mutex<Vec<String>>> {
+        let payloads = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&payloads);
+        window.listen(event, move |event| {
+            sink.lock()
+                .expect("payload sink")
+                .push(event.payload().into());
+        });
+        payloads
+    }
+
+    #[test]
+    fn runtime_and_model_operation_broadcasts_reach_two_webviews_with_identical_truth() {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app");
+        let main = WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("main webview");
+        let settings = WebviewWindowBuilder::new(&app, "settings", Default::default())
+            .build()
+            .expect("settings webview");
+        let main_runtime = payload_sink(&main, "runtime-status");
+        let settings_runtime = payload_sink(&settings, "runtime-status");
+        let main_operation = payload_sink(&main, "model-operation");
+        let settings_operation = payload_sink(&settings, "model-operation");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let status = RuntimeHost::init(temp.path().join("app-data")).status();
+        emit_runtime_status(app.handle(), status).expect("runtime broadcast");
+        let operation = RuntimeEvent::ModelOperation {
+            model_id: "fixture-model".into(),
+            attempt_id: "fixture-attempt".into(),
+            sequence: 7,
+            phase: "installing".into(),
+            terminal: false,
+            error: None,
+        };
+        assert!(emit_model_operation(app.handle(), &operation).expect("operation broadcast"));
+
+        let main_runtime = main_runtime.lock().expect("main runtime").clone();
+        let settings_runtime = settings_runtime.lock().expect("settings runtime").clone();
+        assert_eq!(main_runtime.len(), 1);
+        assert_eq!(main_runtime, settings_runtime);
+        let runtime: serde_json::Value =
+            serde_json::from_str(&main_runtime[0]).expect("runtime payload");
+        assert_eq!(runtime["capabilityState"], "provisional");
+
+        let main_operation = main_operation.lock().expect("main operation").clone();
+        let settings_operation = settings_operation
+            .lock()
+            .expect("settings operation")
+            .clone();
+        assert_eq!(main_operation.len(), 1);
+        assert_eq!(main_operation, settings_operation);
+        let operation: serde_json::Value =
+            serde_json::from_str(&main_operation[0]).expect("operation payload");
+        assert_eq!(operation["modelId"], "fixture-model");
+        assert_eq!(operation["attemptId"], "fixture-attempt");
+        assert_eq!(operation["sequence"], 7);
+        assert_eq!(operation["phase"], "installing");
+        assert_eq!(operation["terminal"], false);
+    }
 }
 
 /// The runtime pump (RUNTIME §8.3): forwards core-bus events to the
 /// webview as coalesced `runtime-status` snapshots — readiness changes,
 /// state transitions, download progress. Payloads stay snapshot-shaped
 /// and low-rate (UI §7.4 wire discipline / tauri #852). An idle-tick refresh
-/// (gated on `readiness_fp`) catches the embedder's no-bus-event slot landing.
-pub fn spawn_runtime_pump(handle: AppHandle) {
-    std::thread::Builder::new()
-        .name("pp-runtime-pump".into())
-        .spawn(move || {
-            let rx = loop {
-                if let Some(app) = handle.try_state::<Arc<App>>() {
-                    break app.runtime.bus.subscribe();
-                }
-                std::thread::sleep(IDLE_SLEEP);
-            };
+/// (gated on `runtime_fp`) catches committed no-bus-event transitions.
+pub fn spawn_runtime_pump(app: &Arc<App>, handle: AppHandle) -> Result<(), SpawnTaskError> {
+    let pump_app = Arc::clone(app);
+    app.tasks.spawn(
+        "scheduler",
+        "runtime-pump",
+        TaskPriority::Background,
+        move |task| {
+            let rx = pump_app.runtime.bus.subscribe();
             // Last-emitted READINESS fingerprint. The embedder host lands a slot
             // Ready/Failed on a background build thread and publishes NO bus
             // event, so without a timeout-side refresh the webview freezes on the
             // last 'building' snapshot forever (the embedder-loading-that-never-
             // finishes bug). We re-emit on the idle tick ONLY when this changed,
             // so an idle runtime still stays quiet (no 2/s snapshot spam).
-            let mut last_ready: Option<ReadyFp> = None;
+            let mut last_runtime: Option<RuntimeFp> = None;
             loop {
-                let Some(app) = handle.try_state::<Arc<App>>() else {
-                    return;
-                };
-                let app = app.inner().clone();
-                if app.shutdown.load(Ordering::Relaxed) {
-                    return;
+                if task.is_cancelled() || pump_app.shutdown.load(Ordering::Relaxed) {
+                    return Ok(());
                 }
                 // Block for one event, then drain the burst (coalesce).
                 match rx.recv_timeout(RUNTIME_PUMP_TICK) {
@@ -738,39 +1448,56 @@ pub fn spawn_runtime_pump(handle: AppHandle) {
                             events.push(e);
                         }
                         for e in &events {
+                            let _ = emit_model_operation(&handle, e);
                             if let photoproof_core::runtime::RuntimeEvent::DownloadProgress {
                                 model_id,
                                 downloaded_bytes,
                                 total_bytes,
                             } = e
                             {
-                                app.runtime.note_progress(
+                                pump_app.runtime.note_progress(
                                     model_id,
                                     *downloaded_bytes,
                                     *total_bytes,
                                 );
                             }
                         }
-                        let status = app.runtime.status();
-                        last_ready = Some(readiness_fp(&status));
-                        let _ = handle.emit("runtime-status", status);
+                        let status = pump_app.runtime.status();
+                        if let Err(error) = pump_app.request_active_vector_reconcile()
+                            && !matches!(error, SpawnTaskError::AlreadyRunning { .. })
+                        {
+                            tracing::warn!(%error, "active vector reconcile unavailable");
+                        }
+                        last_runtime = Some(runtime_fp(&status));
+                        let _ = emit_runtime_status(&handle, status);
+                        pump_app
+                            .convergence
+                            .publish(&handle, [StateDomain::Runtime]);
                     }
                     // Timeout (or a disconnect, handled by the top-of-loop
                     // shutdown/try_state checks): no bus event fired, but a
                     // silent slot transition may have. Re-emit only on a
                     // readiness change so the UI self-corrects within one tick.
                     Err(_) => {
-                        let status = app.runtime.status();
-                        let fp = readiness_fp(&status);
-                        if last_ready.as_ref() != Some(&fp) {
-                            last_ready = Some(fp);
-                            let _ = handle.emit("runtime-status", status);
+                        let status = pump_app.runtime.status();
+                        if let Err(error) = pump_app.request_active_vector_reconcile()
+                            && !matches!(error, SpawnTaskError::AlreadyRunning { .. })
+                        {
+                            tracing::warn!(%error, "active vector reconcile unavailable");
+                        }
+                        let fp = runtime_fp(&status);
+                        if last_runtime.as_ref() != Some(&fp) {
+                            last_runtime = Some(fp);
+                            let _ = emit_runtime_status(&handle, status);
+                            pump_app
+                                .convergence
+                                .publish(&handle, [StateDomain::Runtime]);
                         }
                     }
                 }
             }
-        })
-        .expect("spawn runtime pump");
+        },
+    )
 }
 
 /// B52 / CAPTURE §2.5: the REAL bounded wait for trailing finals at quit.
@@ -832,6 +1559,107 @@ mod resume_gap_tests {
             prev,
             prev - Duration::from_secs(3600)
         ));
+    }
+}
+
+#[cfg(test)]
+mod idle_maintenance_tests {
+    use std::time::Duration;
+
+    use super::{
+        MAINTENANCE_HOURS, MAINTENANCE_INTERVAL, observe_store_maintenance,
+        should_run_idle_maintenance,
+    };
+
+    #[test]
+    fn maintenance_requires_both_due_cadence_and_a_fully_idle_turn() {
+        assert_eq!(MAINTENANCE_HOURS, 6);
+        assert_eq!(MAINTENANCE_INTERVAL, Duration::from_secs(21_600));
+        assert!(!should_run_idle_maintenance(
+            MAINTENANCE_INTERVAL - Duration::from_millis(1),
+            false,
+            false,
+            false
+        ));
+        assert!(should_run_idle_maintenance(
+            MAINTENANCE_INTERVAL,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_run_idle_maintenance(
+            MAINTENANCE_INTERVAL,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_run_idle_maintenance(
+            MAINTENANCE_INTERVAL,
+            false,
+            true,
+            false
+        ));
+        assert!(!should_run_idle_maintenance(
+            MAINTENANCE_INTERVAL,
+            false,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn blocked_reader_is_wal_health_until_the_next_idle_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("photoproof.db");
+        let store = photoproof_core::EventStore::open(&db).unwrap();
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE wal_health_probe (value INTEGER NOT NULL);
+                 INSERT INTO wal_health_probe VALUES (1);",
+            )
+            .unwrap();
+        let blocker = rusqlite::Connection::open(&db).unwrap();
+        blocker.execute_batch("BEGIN").unwrap();
+        let _: i64 = blocker
+            .query_row("SELECT COUNT(*) FROM wal_health_probe", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        writer
+            .execute("INSERT INTO wal_health_probe VALUES (2)", [])
+            .unwrap();
+        drop(writer);
+
+        let disk =
+            crate::disk::DiskGovernor::new(dir.path().to_path_buf(), dir.path().join("models"));
+        let blocked = observe_store_maintenance(&disk, store.maintain());
+        assert!(matches!(
+            blocked,
+            Err(photoproof_core::StoreError::CheckpointBlocked)
+        ));
+        let blocked_health = disk.snapshot().wal;
+        assert_eq!(blocked_health.state, crate::disk::WalState::Blocked);
+        assert!(blocked_health.blocked_by_reader);
+        assert!(blocked_health.last_maintenance_failure_at_ms.is_some());
+        assert!(
+            blocked_health
+                .last_maintenance_error
+                .as_deref()
+                .is_some_and(|error| error.contains("wal_checkpoint"))
+        );
+
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        observe_store_maintenance(&disk, store.maintain()).unwrap();
+        let recovered = disk.snapshot().wal;
+        assert_eq!(recovered.state, crate::disk::WalState::Healthy);
+        assert!(!recovered.blocked_by_reader);
+        assert!(recovered.last_maintenance_success_at_ms.is_some());
+        assert!(
+            recovered.last_maintenance_failure_at_ms.is_some(),
+            "recovery keeps the last failure timestamp for diagnostics"
+        );
     }
 }
 
@@ -995,7 +1823,8 @@ mod status_tests {
 
 #[cfg(test)]
 mod rate_ema_tests {
-    use super::{RATE_ALPHA, fold_rate_ema};
+    use super::{PROGRESS_INTERVAL, RATE_ALPHA, fold_rate_ema, progress_emit_due};
+    use std::time::Duration;
 
     /// Two samples with a known time + done delta fold to the expected
     /// smoothed rate: alpha * instant + (1 - alpha) * prev_ema. From a 0.0
@@ -1043,6 +1872,22 @@ mod rate_ema_tests {
         );
         // And a non-positive interval is likewise ignored (defensive).
         assert_eq!(fold_rate_ema(warm, 5, 0.0, false), warm);
+    }
+
+    #[test]
+    fn progress_cadence_is_immediate_then_coalesced_at_400ms() {
+        assert!(progress_emit_due(false, false, Duration::ZERO));
+        assert!(!progress_emit_due(
+            true,
+            true,
+            PROGRESS_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(progress_emit_due(true, true, PROGRESS_INTERVAL));
+        assert!(!progress_emit_due(
+            true,
+            false,
+            PROGRESS_INTERVAL + Duration::from_secs(10)
+        ));
     }
 }
 

@@ -42,8 +42,17 @@
   // capture-only now.
   import LibraryStatus from "./LibraryStatus.svelte";
   import type { Action } from "../../logic/keymap";
+  import type { ApplicationHealth } from "../../types/dto";
 
-  let { title }: { title: string } = $props();
+  let {
+    title,
+    health = null,
+    onrefreshhealth = async () => {},
+  }: {
+    title: string;
+    health?: ApplicationHealth | null;
+    onrefreshhealth?: () => Promise<void>;
+  } = $props();
 
   /** Sampled once per mount — the platform cannot change under a window. */
   const mac = isMac();
@@ -83,7 +92,7 @@
        carries the digest signaling that used to live as the "digesting" text
        AND the offline-drive warning right here; the Station no longer does. -->
   <div class="center">
-    <LibraryStatus />
+    <LibraryStatus {health} {onrefreshhealth} />
   </div>
   <div class="cluster">
     <button

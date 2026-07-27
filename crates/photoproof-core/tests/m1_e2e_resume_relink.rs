@@ -55,7 +55,10 @@ fn c2_interrupted_ingest_resumes_then_relinks_after_external_move() {
         );
         let _ = env.lib.process_queue(&QueueOptions {
             cancel: Some(Arc::clone(&cancel)),
+            additional_cancel: None,
             max_items: None,
+            max_concurrency: None,
+            excluded_embedding_root_ids: Vec::new(),
         });
         killer.join().unwrap();
         env = env.reopen(); // running→pending recovery, temp sweep

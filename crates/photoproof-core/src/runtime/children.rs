@@ -30,6 +30,10 @@ pub struct ChildRecord {
 /// `{app-data}/runtime/children.json`.
 pub struct ChildRegistry {
     path: PathBuf,
+    /// `record`/`clear` are read-modify-write operations reached by distinct
+    /// supervisor roles. Serialize them so simultaneous ASR/LLM transitions
+    /// cannot each persist a snapshot that forgets the other child.
+    write_gate: std::sync::Mutex<()>,
 }
 
 impl ChildRegistry {
@@ -37,28 +41,28 @@ impl ChildRegistry {
         std::fs::create_dir_all(runtime_dir)?;
         Ok(Self {
             path: runtime_dir.join("children.json"),
+            write_gate: std::sync::Mutex::new(()),
         })
     }
 
     pub fn list(&self) -> Vec<ChildRecord> {
-        std::fs::read(&self.path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        self.try_list().unwrap_or_default()
+    }
+
+    pub fn try_list(&self) -> Result<Vec<ChildRecord>, super::control_file::ControlFileError> {
+        Ok(super::control_file::load_json(&self.path)?
+            .value
+            .unwrap_or_default())
     }
 
     fn write(&self, records: &[ChildRecord]) -> std::io::Result<()> {
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(records).expect("children json"),
-        )?;
-        std::fs::rename(&tmp, &self.path)
+        super::control_file::save_json(&self.path, records)
     }
 
     /// Record a child at spawn (replaces any prior entry for `process`).
     pub fn record(&self, record: ChildRecord) -> std::io::Result<()> {
-        let mut records = self.list();
+        let _guard = self.write_gate.lock().expect("child registry write gate");
+        let mut records = self.try_list().map_err(std::io::Error::from)?;
         records.retain(|r| r.process != record.process);
         records.push(record);
         self.write(&records)
@@ -66,7 +70,8 @@ impl ChildRegistry {
 
     /// Clear a child at reap.
     pub fn clear(&self, process: &str) -> std::io::Result<()> {
-        let mut records = self.list();
+        let _guard = self.write_gate.lock().expect("child registry write gate");
+        let mut records = self.try_list().map_err(std::io::Error::from)?;
         records.retain(|r| r.process != process);
         self.write(&records)
     }
@@ -76,9 +81,10 @@ impl ChildRegistry {
     /// recycled PID. Returns `(killed, skipped)` process names for the
     /// log.
     pub fn kill_orphans(&self) -> std::io::Result<(Vec<String>, Vec<String>)> {
+        let _guard = self.write_gate.lock().expect("child registry write gate");
         let mut killed = Vec::new();
         let mut skipped = Vec::new();
-        for record in self.list() {
+        for record in self.try_list().map_err(std::io::Error::from)? {
             match record.start_time {
                 Some(expected) if process_start_time(record.pid) == Some(expected) => {
                     kill_pid(record.pid);
@@ -243,6 +249,63 @@ mod tests {
         assert_eq!(list.iter().find(|r| r.process == "llm").unwrap().pid, 12);
         reg.clear("llm").unwrap();
         assert_eq!(reg.list().len(), 1);
+    }
+
+    #[test]
+    fn corrupt_registry_recovers_before_recording_instead_of_forgetting_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = ChildRegistry::new(dir.path()).unwrap();
+        reg.record(ChildRecord {
+            process: "llm".into(),
+            pid: 11,
+            start_time: Some(1),
+            port: 4000,
+        })
+        .unwrap();
+        std::fs::write(dir.path().join("children.json"), b"{").unwrap();
+        reg.record(ChildRecord {
+            process: "asr".into(),
+            pid: 12,
+            start_time: Some(2),
+            port: 4001,
+        })
+        .unwrap();
+
+        let list = reg.try_list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|record| record.process == "llm"));
+        assert!(list.iter().any(|record| record.process == "asr"));
+    }
+
+    #[test]
+    fn concurrent_role_records_do_not_lose_either_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = std::sync::Arc::new(ChildRegistry::new(dir.path()).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for (process, pid) in [("llm", 11_u32), ("asr", 12_u32)] {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                registry
+                    .record(ChildRecord {
+                        process: process.into(),
+                        pid,
+                        start_time: Some(u64::from(pid)),
+                        port: 4000 + pid as u16,
+                    })
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let list = registry.try_list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|record| record.process == "llm"));
+        assert!(list.iter().any(|record| record.process == "asr"));
     }
 
     /// THE recycled-PID trap (§8.4): an entry whose PID is alive but whose

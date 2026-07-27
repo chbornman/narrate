@@ -341,7 +341,7 @@ impl EventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let writer = schema::open_connection(path)?;
-        let from_version = schema::migrate(&writer)?;
+        let from_version = schema::migrate_with_backup(&writer, path)?;
         // Redaction-supremacy recovery (§7-step-8): a prior shutdown whose
         // checkpoint was blocked may have left scrubbed plaintext in `-wal`.
         // Truncate now — at open this is the FIRST connection to the db, so no
@@ -382,6 +382,23 @@ impl EventStore {
     /// value they last read against and re-read only when it advances.
     pub fn journal_version(&self) -> u64 {
         self.journal_version.load(Ordering::Relaxed)
+    }
+
+    /// Cheap live schema truth for the desktop health surface. This reads only
+    /// SQLite's connection-local user_version; integrity and WAL maintenance
+    /// have separate scheduled authorities and are not re-run on every UI
+    /// health refresh.
+    pub fn schema_status(&self) -> Result<(i64, i64), StoreError> {
+        let writer = self.writer.lock().expect("writer mutex poisoned");
+        let actual = writer.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok((actual, schema::CURRENT_VERSION))
+    }
+
+    /// Schema version compiled into this binary. Health reporting uses this
+    /// even when the live PRAGMA query fails, so an inventory error never
+    /// collapses the expected version to a misleading sentinel.
+    pub fn expected_schema_version() -> i64 {
+        schema::CURRENT_VERSION
     }
 
     /// Bump the journal version (Seam 1) after a committed journal mutation.

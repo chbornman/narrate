@@ -23,7 +23,7 @@
     fullDecodeUrl,
     originalUrl,
   } from "../../ipc/urls";
-  import { requestFullDecode } from "../../ipc/commands";
+  import { recordPerformance, requestFullDecode } from "../../ipc/commands";
   import { listen } from "@tauri-apps/api/event";
   import * as zoom from "../../logic/zoom";
   import {
@@ -44,12 +44,15 @@
   let natH = $state(0);
 
   const hash = $derived(ui.look.currentHash);
+  let lookStarted = performance.now();
+  let fullresStarted = performance.now();
 
   // New image (←/→ or R): dims are unknown until load — the transform
   // waits for them rather than reusing the previous image's. The full-res
   // source re-proves its load per image (cache makes a revisit instant).
   $effect(() => {
     void hash;
+    lookStarted = performance.now();
     natW = 0;
     natH = 0;
     fullresLoadedHash = null;
@@ -125,6 +128,7 @@
     if (wantsFullres && fullresHash !== hash) {
       fullresHash = hash;
       fullresSource = FIRST_SOURCE;
+      fullresStarted = performance.now();
     }
   });
   const fullresShown = $derived(
@@ -257,6 +261,13 @@
     const img = e.currentTarget as HTMLImageElement;
     if (loadProvesPixels({ w: img.naturalWidth, h: img.naturalHeight })) {
       fullresLoadedHash = hash;
+      recordPerformance(
+        "look",
+        "load",
+        performance.now() - fullresStarted,
+        true,
+        { itemCount: 1 },
+      );
     } else {
       onFullresError();
     }
@@ -416,6 +427,13 @@
         const img = e.currentTarget as HTMLImageElement;
         natW = img.naturalWidth;
         natH = img.naturalHeight;
+        recordPerformance(
+          "look",
+          "first-paint",
+          performance.now() - lookStarted,
+          img.naturalWidth > 0 && img.naturalHeight > 0,
+          { itemCount: 1 },
+        );
       }}
     />
     {#if fullresHash === hash}

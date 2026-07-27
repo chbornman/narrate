@@ -1,9 +1,9 @@
 //! Stage metrics — the first slice of the BACKLOG "measured, not vibes"
 //! suite (founder, June 2026). `StageStat`/`StageSnapshot` are the
 //! crate-wide primitives: counts and wall-clock per named stage,
-//! aggregated lock-free since workers record from parallel pools — a
-//! record is two `fetch_add`s and a CAS-loop max, cheap enough to stay
-//! on in release builds.
+//! aggregated lock-free since workers record from parallel pools. A record
+//! updates count/total/max plus one fixed histogram bucket, cheap enough to
+//! stay on in release builds.
 //!
 //! `PipelineMetrics` (ingest) is the first tenant; capture, search, and
 //! IPC metrics become sibling structs here when the full suite graduates
@@ -11,9 +11,9 @@
 //! surface. The shape is deliberately the Prometheus counter model:
 //! snapshots are process-lifetime CUMULATIVE (no reset method), so rates
 //! fall out of diffing two snapshots and concurrent readers can never
-//! clear each other's window. Percentile histograms are a future
-//! StageStat-internal upgrade — `record()` is the stable seam; call
-//! sites never change.
+//! clear each other's window. The fixed logarithmic histogram makes
+//! p50/p95/p99 available without retaining samples: bucket N is the inclusive
+//! upper bound `2^N` microseconds.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -21,11 +21,23 @@ use std::time::Duration;
 /// One stage's cumulative tally. Relaxed ordering throughout: each field
 /// is independently monotone and a snapshot may tear between fields by a
 /// record or two — diagnostics, not accounting.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StageStat {
     count: AtomicU64,
     total_us: AtomicU64,
     max_us: AtomicU64,
+    buckets: [AtomicU64; 64],
+}
+
+impl Default for StageStat {
+    fn default() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            total_us: AtomicU64::new(0),
+            max_us: AtomicU64::new(0),
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
 }
 
 impl StageStat {
@@ -34,6 +46,7 @@ impl StageStat {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.total_us.fetch_add(us, Ordering::Relaxed);
         self.max_us.fetch_max(us, Ordering::Relaxed);
+        self.buckets[histogram_bucket(us)].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Time a closure into this stage; the closure's value passes through
@@ -49,6 +62,10 @@ impl StageStat {
         let count = self.count.load(Ordering::Relaxed);
         let total_us = self.total_us.load(Ordering::Relaxed);
         let max_us = self.max_us.load(Ordering::Relaxed);
+        let buckets = self
+            .buckets
+            .each_ref()
+            .map(|bucket| bucket.load(Ordering::Relaxed));
         StageSnapshot {
             stage,
             count,
@@ -58,9 +75,34 @@ impl StageStat {
             } else {
                 total_us as f64 / count as f64 / 1_000.0
             },
+            p50_ms: percentile_upper_bound_ms(&buckets, count, 50),
+            p95_ms: percentile_upper_bound_ms(&buckets, count, 95),
+            p99_ms: percentile_upper_bound_ms(&buckets, count, 99),
             max_ms: max_us as f64 / 1_000.0,
         }
     }
+}
+
+fn histogram_bucket(micros: u64) -> usize {
+    if micros <= 1 {
+        return 0;
+    }
+    (u64::BITS - (micros - 1).leading_zeros()) as usize
+}
+
+fn percentile_upper_bound_ms(buckets: &[u64; 64], count: u64, percentile: u64) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    let target = count.saturating_mul(percentile).div_ceil(100);
+    let mut observed = 0u64;
+    for (index, bucket_count) in buckets.iter().enumerate() {
+        observed = observed.saturating_add(*bucket_count);
+        if observed >= target {
+            return 1u64.checked_shl(index as u32).unwrap_or(u64::MAX) as f64 / 1_000.0;
+        }
+    }
+    u64::MAX as f64 / 1_000.0
 }
 
 /// Plain data out — the desktop shell maps this onto its own DTO (the
@@ -71,6 +113,12 @@ pub struct StageSnapshot {
     pub count: u64,
     pub total_ms: f64,
     pub mean_ms: f64,
+    /// Conservative upper-bound estimate from the fixed histogram.
+    pub p50_ms: f64,
+    /// Conservative upper-bound estimate from the fixed histogram.
+    pub p95_ms: f64,
+    /// Conservative upper-bound estimate from the fixed histogram.
+    pub p99_ms: f64,
     pub max_ms: f64,
 }
 
@@ -123,6 +171,9 @@ mod tests {
         assert_eq!(snap.count, 2);
         assert_eq!(snap.total_ms, 8.0);
         assert_eq!(snap.mean_ms, 4.0);
+        assert_eq!(snap.p50_ms, 2.048);
+        assert_eq!(snap.p95_ms, 8.192);
+        assert_eq!(snap.p99_ms, 8.192);
         assert_eq!(snap.max_ms, 6.0);
     }
 
@@ -139,6 +190,24 @@ mod tests {
         let snap = StageStat::default().snapshot("s");
         assert_eq!(snap.count, 0);
         assert_eq!(snap.mean_ms, 0.0);
+        assert_eq!(snap.p50_ms, 0.0);
+        assert_eq!(snap.p95_ms, 0.0);
+        assert_eq!(snap.p99_ms, 0.0);
+    }
+
+    #[test]
+    fn histogram_uses_the_tight_power_of_two_upper_bound() {
+        for micros in [0, 1, 2, 3, 4, 5, 1023, 1024, 1025, u32::MAX as u64] {
+            let bucket = histogram_bucket(micros);
+            let upper = 1u64 << bucket;
+            assert!(upper >= micros.max(1), "{micros} landed above {upper}");
+            if bucket > 0 {
+                assert!(
+                    upper / 2 < micros,
+                    "{micros} did not use its tightest bucket"
+                );
+            }
+        }
     }
 
     #[test]

@@ -5,9 +5,22 @@
  * Image bytes never cross IPC (DECISIONS P16): previews load via the
  * photoproof:// protocol URLs from `urls.ts`.
  */
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  createPerformanceBatcher,
+  MAX_PERFORMANCE_DURATION_MS,
+  monitoredInvoke,
+  PERFORMANCE_SCHEMA_VERSION,
+  type MonitoredInvokeLabels,
+  type PerformanceCacheStatus,
+  type PerformanceJourney,
+  type PerformancePhase,
+} from "../performance";
 import type {
   AddRootOutcome,
+  ApplicationHealth,
+  ApplicationStateSnapshot,
+  BootstrapStatus,
   AppSettings,
   CollectionCandidateDto,
   CollectionDto,
@@ -23,11 +36,13 @@ import type {
   IndicatorState,
   IngestStatus,
   JournalEntryDto,
+  OperationReceipt,
   PreviewCacheStatsDto,
   RankedImageDto,
   RebuildReportDto,
   RedactReportDto,
   RootDto,
+  RuntimeConsentOutcome,
   RuntimeStatus,
   ScopeSubject,
   ScopeView,
@@ -35,8 +50,152 @@ import type {
   StrokePayloadWire,
   TopicDto,
   TopicNoteDto,
+  UpdateStatus,
 } from "../types/dto";
 import type { Filter, FusionWeights, SearchResults } from "../types/search";
+
+const performanceBatcher = createPerformanceBatcher(
+  tauriInvoke as <T>(
+    command: string,
+    args?: Record<string, unknown>,
+  ) => Promise<T>,
+);
+
+function scopeItemCount(args?: Record<string, unknown>): number | undefined {
+  if (args === undefined) return undefined;
+  for (const key of ["hashes", "targets", "items"]) {
+    const value = args[key];
+    if (Array.isArray(value)) return value.length;
+  }
+  const scope = args.scope;
+  if (
+    typeof scope === "object" &&
+    scope !== null &&
+    Array.isArray((scope as Record<string, unknown>).hashes)
+  ) {
+    return ((scope as Record<string, unknown>).hashes as unknown[]).length;
+  }
+  return undefined;
+}
+
+/** Fixed command-to-journey taxonomy. Arguments contribute counts only; user
+ * text, paths, ids, and error details never enter telemetry. */
+function invokeLabels(
+  command: string,
+  args?: Record<string, unknown>,
+): MonitoredInvokeLabels {
+  const itemCount = scopeItemCount(args);
+  if (
+    command.startsWith("graph_") ||
+    command.startsWith("topic_affinit") ||
+    command.startsWith("cluster_topic") ||
+    command.startsWith("suggest_topic")
+  ) {
+    return { journey: "graph", phase: "invoke", itemCount };
+  }
+  if (command === "diversify_scope" || command === "find_near_duplicates") {
+    return { journey: "filter", phase: "invoke", itemCount };
+  }
+  if (command === "search" || command === "find_similar") {
+    return { journey: "search", phase: "invoke", itemCount };
+  }
+  if (command === "list_folder" || command === "folder_tree") {
+    return { journey: "folder-open", phase: "invoke" };
+  }
+  if (command === "list_images") {
+    return { journey: "grid", phase: "invoke", itemCount };
+  }
+  if (
+    command.includes("preview") ||
+    command === "request_full_decode" ||
+    command === "prioritize_previews"
+  ) {
+    return { journey: "preview", phase: "invoke", itemCount };
+  }
+  if (
+    command === "add_root" ||
+    command === "remove_root" ||
+    command === "archive_root" ||
+    command === "unarchive_root" ||
+    command === "rescan_root"
+  ) {
+    return { journey: "root-add", phase: "invoke" };
+  }
+  if (
+    command.includes("journal") ||
+    command.includes("event") ||
+    command === "add_note" ||
+    command === "set_rating"
+  ) {
+    return { journey: "journal", phase: "invoke", itemCount };
+  }
+  if (
+    command.includes("mic") ||
+    command === "set_scope" ||
+    command === "indicator_state"
+  ) {
+    return { journey: "capture", phase: "invoke", itemCount };
+  }
+  if (command.startsWith("runtime_")) {
+    return { journey: "model-runtime", phase: "invoke" };
+  }
+  if (
+    command.startsWith("settings_") ||
+    command.startsWith("set_") ||
+    command === "open_settings_window"
+  ) {
+    return { journey: "settings", phase: "invoke" };
+  }
+  if (command.startsWith("update_")) {
+    return { journey: "app-update", phase: "invoke" };
+  }
+  return { journey: "ipc", phase: "invoke", itemCount };
+}
+
+const invoke = <T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> =>
+  monitoredInvoke<T>(
+    tauriInvoke as <U>(
+      command: string,
+      args?: Record<string, unknown>,
+    ) => Promise<U>,
+    performanceBatcher,
+    command,
+    args,
+    invokeLabels(command, args),
+  );
+
+export interface PerformanceContext {
+  itemCount?: number;
+  bytes?: number;
+  cacheStatus?: PerformanceCacheStatus;
+}
+
+/** Record a frontend-only phase such as graph layout/paint/settle. */
+export function recordPerformance(
+  journey: PerformanceJourney,
+  phase: PerformancePhase,
+  durationMs: number,
+  ok = true,
+  context: PerformanceContext = {},
+): boolean {
+  return performanceBatcher.enqueue({
+    schemaVersion: PERFORMANCE_SCHEMA_VERSION,
+    journey,
+    phase,
+    durationMs: Math.max(
+      0,
+      Math.min(durationMs, MAX_PERFORMANCE_DURATION_MS),
+    ),
+    ok,
+    observedAtMs: Date.now(),
+    ...context,
+  });
+}
+
+export const flushPerformance = () => performanceBatcher.flush();
 
 // -- scope & capture --------------------------------------------------------
 
@@ -320,8 +479,14 @@ export const findNearDuplicates = (
 // -- roots & grid -----------------------------------------------------------
 
 export const listRoots = () => invoke<RootDto[]>("list_roots");
-export const addRoot = (path: string) =>
-  invoke<AddRootOutcome>("add_root", { path });
+export const applicationStateSnapshot = () =>
+  invoke<ApplicationStateSnapshot>("application_state_snapshot");
+export type NewRootPolicy = "process-now" | "preview-only" | "process-later";
+export const addRoot = (path: string, policy?: NewRootPolicy) => {
+  const args: { path: string; policy?: NewRootPolicy } = { path };
+  if (policy !== undefined) args.policy = policy;
+  return invoke<AddRootOutcome>("add_root", args);
+};
 export const removeRoot = (rootId: string) =>
   invoke<void>("remove_root", { rootId });
 // Archive lifecycle (folder-tree improvements): non-destructive hide/restore
@@ -440,6 +605,22 @@ export const suggestCollections = (scope: GraphScope) =>
 // -- ingest / settings / export ---------------------------------------------
 
 export const ingestStatus = () => invoke<IngestStatus>("ingest_status");
+export const bootstrapStatus = () => invoke<BootstrapStatus>("bootstrap_status");
+export const bootstrapRelaunch = () => invoke<boolean>("bootstrap_relaunch");
+export const bootstrapResetDeviceIdentity = () =>
+  invoke<boolean>("bootstrap_reset_device_identity");
+export const applicationHealth = () =>
+  invoke<ApplicationHealth>("application_health");
+export const retryIntegrityRepair = () =>
+  invoke<void>("retry_integrity_repair");
+export const revealLogs = () => invoke<void>("reveal_logs");
+export const updateStatus = () => invoke<UpdateStatus>("update_status");
+export const updateCheck = () => invoke<UpdateStatus>("update_check");
+/** Downloads the currently offered version, verifies its mandatory updater
+ * signature, cleanly stops the application, installs, and restarts. The
+ * backend re-checks that the feed still offers this exact approved version. */
+export const updateInstall = (expectedVersion: string) =>
+  invoke<void>("update_install", { expectedVersion });
 export const settingsGet = () => invoke<AppSettings>("settings_get");
 /** Settings → "Stacked pairs show": persists and emits `settings-changed`
  * to every window (the main grid re-pairs live). */
@@ -450,6 +631,21 @@ export const setStackDisplay = (display: "jpeg" | "raw") =>
  * Empty/whitespace clears the pref back to the OS default handler. */
 export const setExternalEditor = (editor: string) =>
   invoke<AppSettings>("set_external_editor", { editor });
+/** Persist and apply the shared processing budget/pause/new-folder policy. */
+export const setProcessingPolicy = (
+  intensity: "eco" | "balanced" | "max",
+  paused: boolean,
+  newRootPolicy: NewRootPolicy,
+  deferTextEmbeddings: boolean,
+  deferImageEmbeddings: boolean,
+) =>
+  invoke<AppSettings>("set_processing_policy", {
+    intensity,
+    paused,
+    newRootPolicy,
+    deferTextEmbeddings,
+    deferImageEmbeddings,
+  });
 /** Settings → Previews: set the 1:1 preview cache budget in BYTES
  * (DESIGN-PREVIEW-POLICY.md). Persists and immediately re-evicts so a lowered
  * budget reclaims disk now. Returns the updated settings. */
@@ -469,7 +665,7 @@ export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
  * No download starts without it; Never is remembered; skipping changes
  * nothing about journaling. */
 export const runtimeConsent = (decision: "download" | "later" | "never") =>
-  invoke<RuntimeStatus>("runtime_consent", { decision });
+  invoke<RuntimeConsentOutcome>("runtime_consent", { decision });
 /** §5.3: record a per-model license acceptance (id + url + timestamp). */
 export const runtimeAcceptLicense = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_accept_license", { modelId });
@@ -481,12 +677,31 @@ export const runtimeCancelDownload = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_cancel_download", { modelId });
 export const runtimeRemoveModel = (modelId: string) =>
   invoke<RuntimeStatus>("runtime_remove_model", { modelId });
+/** Re-hash every final artifact against the immutable manifest. */
+export const runtimeVerifyModel = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_verify_model", { modelId });
+/** Delete resumable .part bytes only; final files remain untouched. */
+export const runtimeDiscardPartial = (modelId: string) =>
+  invoke<RuntimeStatus>("runtime_discard_partial", { modelId });
 /** Settings → "restart runtime" (§8.1: fresh attempt budget). */
 export const runtimeRestart = () => invoke<RuntimeStatus>("runtime_restart");
 /** Settings → re-detect hardware (§6.1.4). */
 export const runtimeRedetect = () => invoke<RuntimeStatus>("runtime_redetect");
 export const exportJournal = (dest: string) =>
   invoke<ExportReportDto>("export_journal", { dest });
+/** Offline full-state backup. The backend arms a private helper and quits; the
+ * helper cannot read app data until the desktop process has truly exited. */
+export const backupAndQuit = (destination: string) =>
+  invoke<void>("backup_and_quit", { destination });
+/** Verify the selected full backup, quit, atomically replace app data while
+ * retaining the previous directory, then restart. */
+export const restoreAndRestart = (backup: string) =>
+  invoke<void>("restore_and_restart", { backup });
+export const backupOperationStatus = () =>
+  invoke<OperationReceipt | null>("backup_operation_status");
+/** Conflict-safe union import of authored saved-topic phrases and notes. */
+export const importTopics = (path: string) =>
+  invoke<number>("import_topics", { path });
 export const rebuildIndex = () => invoke<RebuildReportDto>("rebuild_index");
 
 // -- journal & metadata (Stage C bodies in commands/journal.rs) ---------------
@@ -535,6 +750,16 @@ export const openInExternalEditor = (hash: string) =>
 /** Rail-folder menu: rescan a watched root on demand. */
 export const rescanRoot = (rootId: string) =>
   invoke<void>("rescan_root", { rootId });
+
+/** Repair root ownership from backend-authoritative inventory. Unlike a
+ * frontend loop this remains effective when the window's roots read failed. */
+export const recoverRoots = () => invoke<void>("recover_roots");
+
+/** Replace one damaged user control with shipped defaults and immediately
+ * apply the committed value process-wide. */
+export const restoreControlDefaults = (
+  control: "settings" | "config" | "tuning",
+) => invoke<void>("restore_control_defaults", { control });
 
 /** Rail-folder menu: "Rebuild previews…" — re-pend the preview pass for
  * every image under the root (the recovery verb SEPARATE from Rescan;

@@ -12,6 +12,7 @@ mod clip_preprocess;
 mod embedding;
 mod exclusions;
 mod foreign_sidecar;
+mod fs_semantics;
 mod hashing;
 mod ingest;
 mod metadata;
@@ -32,6 +33,7 @@ pub use exclusions::{
 pub use foreign_sidecar::{
     CropRect, ForeignEdit, ForeignSidecarSource, read_foreign_edit, read_foreign_edit_from_str,
 };
+pub use fs_semantics::{FileSystemSemantics, PlatformFileSystemSemantics};
 pub use hashing::{hash_file, hash_invocation_count, hashed_byte_count};
 pub use ingest::{
     PASS_VERSION, PRIORITY_BACKFILL, PRIORITY_GPU, PRIORITY_INTERACTIVE, PRIORITY_SCAN,
@@ -69,9 +71,19 @@ pub use watcher::{
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use photoproof_connectors::vector_store::{VecKind, VecSpace, VectorStore};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
+
+#[derive(Debug)]
+pub(crate) enum ActivePathMatch {
+    Exact(PathRow),
+    /// The DB spelling and observed spelling were independently resolved by
+    /// the filesystem to the same canonical path.
+    CaseAlias(PathRow),
+}
 
 use crate::id::{ContentHash, UtcMillis};
 use crate::metrics::{PipelineMetrics, StageSnapshot};
@@ -79,6 +91,31 @@ use crate::store::StoreError;
 
 pub type VolumeId = String;
 pub type RootId = String;
+
+/// Derived preview/vector data is retained for this long after the LAST path
+/// for an image became stale. This is deliberately far beyond the watcher's
+/// seconds-long move-correlation window: a delayed rename, sleeping removable
+/// volume, or folder re-registration gets a full month to relink without
+/// rebuilding anything.
+pub const DEFAULT_ORPHAN_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// One active root's outcome from a multi-root reconciliation.
+///
+/// A bad root is data, not control flow for the whole library: callers need
+/// the successful reports and the identity of every degraded/offline root so
+/// they can surface precise recovery actions without starving later roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootReconcileResult {
+    pub root_id: RootId,
+    pub outcome: RootReconcileOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootReconcileOutcome {
+    Scanned(ScanReport),
+    Offline { volume_id: VolumeId },
+    Failed { error: String },
+}
 
 #[derive(Debug, Error)]
 pub enum LibraryError {
@@ -117,11 +154,65 @@ pub enum LibraryError {
 /// SQLite transactionality, since transactions are atomic either way).
 pub type CancelFlag = Arc<AtomicBool>;
 
+/// A clonable, waitable manual-pause signal shared by shell-owned long
+/// operations. Unlike a cancellation flag, pausing never abandons the current
+/// idempotent operation: workers sleep at cooperative boundaries and resume
+/// the same scan/download when the signal clears.
+#[derive(Debug, Clone)]
+pub struct PauseToken {
+    inner: Arc<PauseState>,
+}
+
+#[derive(Debug)]
+struct PauseState {
+    paused: Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl PauseToken {
+    pub fn new(paused: bool) -> Self {
+        Self {
+            inner: Arc::new(PauseState {
+                paused: Mutex::new(paused),
+                changed: std::sync::Condvar::new(),
+            }),
+        }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        *self.inner.paused.lock().expect("pause token mutex") = paused;
+        self.inner.changed.notify_all();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        *self.inner.paused.lock().expect("pause token mutex")
+    }
+
+    /// Wait until resumed. Returns false when cancellation wins while paused.
+    pub fn wait_until_resumed(&self, cancel: Option<&AtomicBool>) -> bool {
+        const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+        let mut paused = self.inner.paused.lock().expect("pause token mutex");
+        while *paused {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return false;
+            }
+            let (next, _) = self
+                .inner
+                .changed
+                .wait_timeout(paused, CANCEL_POLL)
+                .expect("pause token condvar");
+            paused = next;
+        }
+        !cancel.is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+}
+
 /// Injectable collaborators (defaults are the platform implementations).
 pub struct LibraryOptions {
     pub probe: Arc<dyn VolumeProbe>,
     pub placeholders: Arc<dyn PlaceholderDetector>,
     pub extractor: Arc<dyn EmbeddedPreviewExtractor>,
+    pub fs_semantics: Arc<dyn FileSystemSemantics>,
 }
 
 impl Default for LibraryOptions {
@@ -130,6 +221,7 @@ impl Default for LibraryOptions {
             probe: Arc::new(PlatformVolumeProbe),
             placeholders: Arc::new(PlatformPlaceholderDetector),
             extractor: Arc::new(RawlerExtractor),
+            fs_semantics: Arc::new(PlatformFileSystemSemantics),
         }
     }
 }
@@ -161,10 +253,12 @@ impl MonotonicMillis {
 /// preview cache directory, and the injectable platform seams.
 pub struct Library {
     db: Mutex<Connection>,
+    db_path: PathBuf,
     cache_dir: PathBuf,
     probe: Arc<dyn VolumeProbe>,
     placeholders: Arc<dyn PlaceholderDetector>,
     extractor: Arc<dyn EmbeddedPreviewExtractor>,
+    fs_semantics: Arc<dyn FileSystemSemantics>,
     clock: MonotonicMillis,
     debug_log: Mutex<Vec<String>>,
     /// Ingest-stage timings (BACKLOG "measured, not vibes" — first slice).
@@ -243,10 +337,12 @@ impl Library {
         let swept = preview::sweep_temp_files(&cache_dir)?;
         let lib = Self {
             db: Mutex::new(conn),
+            db_path: db_path.to_path_buf(),
             cache_dir,
             probe: options.probe,
             placeholders: options.placeholders,
             extractor: options.extractor,
+            fs_semantics: options.fs_semantics,
             clock: MonotonicMillis::new(),
             debug_log: Mutex::new(Vec::new()),
             metrics: PipelineMetrics::default(),
@@ -931,11 +1027,12 @@ impl Library {
     }
 
     /// `(display name, unavailable image count)` for each OFFLINE volume that
-    /// still holds at least one active path. Drives the "drive disconnected"
-    /// warning (founder: warn + pause): the app should TELL the user a volume is
-    /// gone and how many photos that hides, not churn silently. A volume with no
-    /// active paths (nothing of the library lives on it) is omitted, so an
-    /// unrelated unplugged drive never raises a false alarm.
+    /// still holds at least one path under an ACTIVE root. Drives the "drive
+    /// disconnected" warning (founder: warn + pause): the app should TELL the
+    /// user a live source is gone and how many photos that hides, not churn
+    /// silently. Archived roots retain their paths and searchable authored
+    /// truth, but are resting lifecycle state and therefore create no offline
+    /// burden.
     pub fn offline_volume_burden(&self) -> Result<Vec<(String, u64)>, LibraryError> {
         let conn = self.db.lock().expect("poisoned");
         let mut stmt = conn.prepare(
@@ -943,7 +1040,9 @@ impl Library {
                     COUNT(DISTINCT p.image_hash) AS images
              FROM volumes v
              JOIN paths p ON p.volume_id = v.volume_id AND p.state = 'active'
+             LEFT JOIN roots r ON r.root_id = p.root_id
              WHERE v.state = 'offline'
+               AND (p.root_id IS NULL OR r.state = 'active')
              GROUP BY v.volume_id
              HAVING images > 0
              ORDER BY name",
@@ -1203,6 +1302,9 @@ impl Library {
         let root = self
             .root(root_id)?
             .ok_or_else(|| LibraryError::NotFound(format!("root {root_id}")))?;
+        if root.state != "active" {
+            return Err(LibraryError::NotFound(format!("active root {root_id}")));
+        }
         let volume = self
             .volume(&root.volume_id)?
             .ok_or_else(|| LibraryError::NotFound(format!("volume {}", root.volume_id)))?;
@@ -1230,20 +1332,11 @@ impl Library {
     pub fn reconcile_all(
         &self,
         opts: &ScanOptions,
-    ) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+    ) -> Result<Vec<RootReconcileResult>, LibraryError> {
         let roots = self.roots()?;
-        let mut out = Vec::new();
-        for root in roots {
-            if root.state != "active" {
-                continue;
-            }
-            match self.scan_root(&root.root_id, opts) {
-                Ok(report) => out.push((root.root_id, report)),
-                Err(LibraryError::VolumeOffline(_)) => {} // §11: waits out the remount
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(out)
+        Ok(reconcile_active_roots(roots, |root_id| {
+            self.scan_root(root_id, opts)
+        }))
     }
 
     /// Wake trigger (§7.3): watcher gaps across sleep are a canonical
@@ -1254,7 +1347,7 @@ impl Library {
     pub fn on_system_resume(
         &self,
         opts: &ScanOptions,
-    ) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+    ) -> Result<Vec<RootReconcileResult>, LibraryError> {
         self.probe_volumes()?;
         self.reconcile_all(opts)
     }
@@ -1264,14 +1357,39 @@ impl Library {
     /// tick per BACKLOG "Library doctor / self-check pass" (founder, dogfood
     /// round 3): mangled states keep happening; the library should HEAL on
     /// its own schedule, not just avoid poisoning.
-    pub fn maintenance_tick(&self) -> Result<Vec<(RootId, ScanReport)>, LibraryError> {
+    pub fn maintenance_tick(&self) -> Result<Vec<RootReconcileResult>, LibraryError> {
+        self.maintenance_tick_inner(true, &ScanOptions::default())
+    }
+
+    /// The same six-hour maintenance pass when the shell has an independent,
+    /// recent volume-probe cadence. Keeping that lightweight 30-second probe
+    /// out of the heavy reconciliation avoids performing the same mount walk
+    /// twice whenever the six-hour timer lands.
+    pub fn maintenance_tick_without_volume_probe(
+        &self,
+        opts: &ScanOptions,
+    ) -> Result<Vec<RootReconcileResult>, LibraryError> {
+        self.maintenance_tick_inner(false, opts)
+    }
+
+    fn maintenance_tick_inner(
+        &self,
+        probe_volumes: bool,
+        opts: &ScanOptions,
+    ) -> Result<Vec<RootReconcileResult>, LibraryError> {
         {
             let conn = self.db.lock().expect("poisoned");
             ingest::retry_errors(&conn)?;
         }
-        self.doctor()?;
-        self.probe_volumes()?;
-        self.reconcile_all(&ScanOptions::default())
+        self.doctor_with_retention_and_cancel(
+            UtcMillis::now(),
+            OrphanRetentionMode::Reclaim,
+            opts.cancel.as_ref(),
+        )?;
+        if probe_volumes {
+            self.probe_volumes()?;
+        }
+        self.reconcile_all(opts)
     }
 
     /// "Rebuild previews…" (BACKLOG, founder dogfood round 3): the
@@ -1313,22 +1431,260 @@ impl Library {
         Ok(n)
     }
 
-    /// Library doctor v1 (BACKLOG "Library doctor / self-check pass"):
-    /// validate the index against reality and repair what it can,
-    /// CONSERVATIVELY — v1 re-pends and counts, it never deletes rows:
+    /// Library doctor (BACKLOG "Library doctor / self-check pass"): validate
+    /// the index against reality and repair what it can conservatively.
+    ///
+    /// Before checking preview integrity, the doctor reclaims derived data for
+    /// images whose EVERY path has been stale for at least
+    /// [`DEFAULT_ORPHAN_RETENTION`]. A missing or malformed `stale_since`
+    /// timestamp is never guessed and therefore never eligible. Reclamation is
+    /// ordered so every interruption is retryable: final preview files are
+    /// removed before their rebuildable metadata; vector rows are first marked
+    /// dead transactionally, then PPVEC's existing zero/drop + crash-atomic
+    /// compaction machinery reclaims their bytes. `image_clip` is always
+    /// image-local. `annotation_chunk` rows are retired only when every image
+    /// targeted by their source event is in the authoritative eligible cohort;
+    /// any active/recent/unknown/busy sibling target protects the shared row.
+    /// A relink re-pends `text-embedding`, rebuilding chunks from authored
+    /// journal/FTS truth and rebuilding `image_summary` vectors from retained
+    /// `derived_summaries(scope='image')` text. Summary text is never reclaimed:
+    /// no LLM regeneration is required to restore its disposable vector. The
+    /// transaction re-checks active paths and running passes immediately before
+    /// acting.
     ///
     /// - `done` preview passes whose thumb OR display artifact file is
     ///   missing on disk (a cache directory mangled outside the app) →
     ///   re-pend at backfill priority with a fresh budget; the next drain
     ///   regenerates (idempotent, §9.8).
-    /// - stale path rows whose image has NO surviving active path →
-    ///   COUNTED only (the §7.2 move-correlation window may still claim
-    ///   them, and rows are cheap; sweeping is a later, bolder doctor).
+    /// - stale path rows whose image has NO surviving active path are grouped
+    ///   into recent, timestamp-unknown, busy, and retention-eligible cohorts.
+    ///   Stale path tombstones and image/user-truth rows remain intact.
     /// - stranded preview temp files → swept (`sweep_temp_files`, §9.8
     ///   crash hygiene — the same sweep `open_with` runs at startup). A
     ///   sweep racing a mid-write pass at worst fails that one rename;
     ///   the pass retries as transient and finals are never torn.
     pub fn doctor(&self) -> Result<DoctorReport, LibraryError> {
+        self.doctor_with_retention_and_cancel(UtcMillis::now(), OrphanRetentionMode::Reclaim, None)
+    }
+
+    /// Startup/shutdown-owned doctor variant. Cancellation is observed between
+    /// durable repair units; a SQLite transaction or atomic file replacement is
+    /// always allowed to finish, so cancellation never creates a torn repair.
+    pub fn doctor_with_cancel(&self, cancel: &CancelFlag) -> Result<DoctorReport, LibraryError> {
+        self.doctor_with_retention_and_cancel(
+            UtcMillis::now(),
+            OrphanRetentionMode::Reclaim,
+            Some(cancel),
+        )
+    }
+
+    /// Run the same doctor against an explicit wall clock and retention mode.
+    /// The explicit clock makes retention boundaries testable; `ReportOnly`
+    /// powers a settings/debug-panel dry run without mutating derived data.
+    pub fn doctor_with_retention(
+        &self,
+        now: UtcMillis,
+        retention_mode: OrphanRetentionMode,
+    ) -> Result<DoctorReport, LibraryError> {
+        self.doctor_with_retention_and_cancel(now, retention_mode, None)
+    }
+
+    fn doctor_with_retention_and_cancel(
+        &self,
+        now: UtcMillis,
+        retention_mode: OrphanRetentionMode,
+        cancel: Option<&CancelFlag>,
+    ) -> Result<DoctorReport, LibraryError> {
+        let is_cancelled = || cancel.is_some_and(|flag| flag.load(Ordering::Acquire));
+        if is_cancelled() {
+            return Ok(DoctorReport {
+                cancelled: true,
+                ..DoctorReport::default()
+            });
+        }
+        let cutoff = UtcMillis::from_epoch_ms(
+            now.epoch_ms()
+                .saturating_sub(DEFAULT_ORPHAN_RETENTION.as_millis() as i64),
+        );
+        let mut cohorts = {
+            let conn = self.db.lock().expect("poisoned");
+            classify_orphans(&conn, cutoff)?
+        };
+        let mut reclaimed = ReclaimedOrphans::default();
+        if retention_mode == OrphanRetentionMode::Reclaim && !cohorts.eligible.is_empty() {
+            let mut conn = self.db.lock().expect("poisoned");
+            // Take the writer reservation before the authoritative re-check.
+            // A deferred read transaction can deadlock upgrading while a
+            // second connection waits to commit; IMMEDIATE serializes relinks,
+            // pass claims, and vector writes before any file is removed.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // Do not act on the earlier snapshot: a watcher may have relinked
+            // an image or a worker may have claimed it while filesystem stats
+            // were in flight.
+            cohorts = classify_orphans(&tx, cutoff)?;
+            if !cohorts.eligible.is_empty() {
+                let eligible: std::collections::HashSet<String> =
+                    cohorts.eligible.iter().cloned().collect();
+                let mut candidate_annotation_events = std::collections::BTreeSet::new();
+                for image_hash in &cohorts.eligible {
+                    let Ok(hash) = ContentHash::from_hex(image_hash) else {
+                        // A malformed hash cannot map to a cache path safely.
+                        // It remains visible in the eligible count for repair.
+                        continue;
+                    };
+                    let (artifact_rows, artifact_bytes): (i64, i64) = tx.query_row(
+                        "SELECT COUNT(*), COALESCE(SUM(bytes), 0)
+                         FROM preview_artifacts WHERE image_hash = ?1",
+                        [image_hash],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let preview_files_before = reclaimed.preview_files;
+                    let vector_rows_before = reclaimed.vector_rows;
+                    reclaimed.preview_files +=
+                        preview::remove_cached_artifacts(&self.cache_dir, &hash)?;
+                    reclaimed.preview_rows += artifact_rows as usize;
+                    reclaimed.preview_bytes += artifact_bytes as u64;
+
+                    let spaces: Vec<(String, String)> = {
+                        let mut stmt = tx.prepare(
+                            "SELECT DISTINCT vec_kind, model_id FROM vectors
+                             WHERE image_hash = ?1
+                               AND vec_kind IN ('image_clip', 'image_summary')",
+                        )?;
+                        let rows = stmt.query_map([image_hash], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                        rows.collect::<rusqlite::Result<_>>()?
+                    };
+                    for (kind, model_id) in spaces {
+                        if let Some(vec_kind) = retention_vec_kind(&kind) {
+                            reclaimed.spaces.insert(VecSpace { vec_kind, model_id });
+                        }
+                    }
+                    {
+                        let mut stmt = tx.prepare(
+                            "SELECT DISTINCT v.event_id
+                             FROM vectors v
+                             JOIN event_targets t ON t.event_id = v.event_id
+                             WHERE v.vec_kind = 'annotation_chunk'
+                               AND t.image_hash = ?1
+                               AND v.event_id IS NOT NULL",
+                        )?;
+                        let rows = stmt.query_map([image_hash], |r| r.get::<_, String>(0))?;
+                        candidate_annotation_events
+                            .extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+                    }
+                    reclaimed.vector_rows += tx.execute(
+                        "UPDATE vectors SET deleted = 1
+                         WHERE image_hash = ?1
+                           AND vec_kind IN ('image_clip', 'image_summary')
+                           AND deleted = 0",
+                        [image_hash],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM preview_artifacts WHERE image_hash = ?1",
+                        [image_hash],
+                    )?;
+                    // A future relink revives exactly these retention-cleaned
+                    // passes. Keeping a terminal state while the image has no
+                    // path prevents the background queues from churning.
+                    let passes_retired = tx.execute(
+                        "UPDATE ingest_passes
+                         SET state = 'skipped', error = 'orphan-retention',
+                             not_before = NULL, attempts = 0, completed_at = ?2
+                         WHERE image_hash = ?1
+                           AND pass_name IN
+                               ('preview', 'image-embedding', 'text-embedding')
+                           AND state != 'running'
+                           AND NOT (state = 'skipped' AND error = 'orphan-retention')",
+                        params![image_hash, now.to_rfc3339()],
+                    )?;
+                    if artifact_rows > 0
+                        || reclaimed.preview_files > preview_files_before
+                        || reclaimed.vector_rows > vector_rows_before
+                        || passes_retired > 0
+                    {
+                        reclaimed.images += 1;
+                    }
+                }
+                for event_id in candidate_annotation_events {
+                    let targets: Vec<String> = {
+                        let mut stmt = tx.prepare(
+                            "SELECT image_hash FROM event_targets
+                             WHERE event_id = ?1 ORDER BY image_hash",
+                        )?;
+                        let rows = stmt.query_map([&event_id], |r| r.get(0))?;
+                        rows.collect::<rusqlite::Result<_>>()?
+                    };
+                    // Empty means session-level text and is never an orphan
+                    // image's property. A target outside the eligible set may
+                    // be active, recent, timestamp-unknown, or busy; all four
+                    // conservatively protect this shared authored-text index.
+                    if targets.is_empty() || !targets.iter().all(|hash| eligible.contains(hash)) {
+                        continue;
+                    }
+                    let spaces: Vec<(String, String)> = {
+                        let mut stmt = tx.prepare(
+                            "SELECT DISTINCT vec_kind, model_id FROM vectors
+                             WHERE event_id = ?1
+                               AND vec_kind = 'annotation_chunk'",
+                        )?;
+                        let rows = stmt.query_map([&event_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                        rows.collect::<rusqlite::Result<_>>()?
+                    };
+                    for (kind, model_id) in spaces {
+                        if let Some(vec_kind) = retention_vec_kind(&kind) {
+                            reclaimed.spaces.insert(VecSpace { vec_kind, model_id });
+                        }
+                    }
+                    reclaimed.vector_rows += tx.execute(
+                        "UPDATE vectors SET deleted = 1
+                         WHERE event_id = ?1 AND vec_kind = 'annotation_chunk'
+                           AND deleted = 0",
+                        [&event_id],
+                    )?;
+                }
+            }
+            tx.commit()?;
+        }
+
+        // The metadata commit above makes vector rows invisible first. PPVEC's
+        // sweep then zeroes bytes before deleting each row, and its two-phase
+        // compaction journal makes file shrinkage crash-recoverable.
+        if retention_mode == OrphanRetentionMode::Reclaim
+            && (!cohorts.eligible.is_empty() || !reclaimed.spaces.is_empty())
+            && !is_cancelled()
+        {
+            let vectors_dir = crate::retrieval::default_vectors_dir(&self.db_path)
+                .expect("a database path always has a parent");
+            let vectors = crate::retrieval::PpvecStore::open(&self.db_path, vectors_dir)?;
+            vectors.sweep_dead()?;
+            for space in &reclaimed.spaces {
+                if is_cancelled() {
+                    break;
+                }
+                vectors.compact(space.clone())?;
+                reclaimed.vector_spaces_compacted += 1;
+            }
+            // Compaction of a now-empty space leaves a header-only file. Run
+            // the orphan-space pass even when this invocation found only an
+            // already-compacted interrupted state: a crash after compaction
+            // but before file removal otherwise leaves bytes forever.
+            vectors.reconcile_spaces(&std::collections::HashMap::new())?;
+        }
+        let journal_vector_rows_retained = {
+            let conn = self.db.lock().expect("poisoned");
+            let eligible: std::collections::HashSet<&str> =
+                cohorts.eligible.iter().map(String::as_str).collect();
+            let mut stmt = conn.prepare(
+                "SELECT image_hash FROM vectors
+                 WHERE vec_kind = 'image_summary' AND deleted = 0",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|hash| eligible.contains(hash.as_str()))
+                .count()
+        };
+
         // Snapshot the done rows, then probe the filesystem OUTSIDE the DB
         // lock: artifact existence checks on a big library are thousands of
         // stats, and the writer connection must not stall behind them.
@@ -1343,6 +1699,9 @@ impl Library {
         };
         let mut missing: Vec<String> = Vec::new();
         for h in done {
+            if is_cancelled() {
+                break;
+            }
             let Ok(hash) = ContentHash::from_hex(&h) else {
                 continue; // sentinel/garbage hashes are not preview rows
             };
@@ -1357,6 +1716,9 @@ impl Library {
         if !missing.is_empty() {
             let conn = self.db.lock().expect("poisoned");
             for h in &missing {
+                if is_cancelled() {
+                    break;
+                }
                 // `state = 'done'` re-checked: a drain may have raced us.
                 repended += conn.execute(
                     "UPDATE ingest_passes
@@ -1368,41 +1730,65 @@ impl Library {
                 )?;
             }
         }
-        let stale_orphans: usize = {
-            let conn = self.db.lock().expect("poisoned");
-            conn.query_row(
-                "SELECT COUNT(*) FROM paths s
-                 WHERE s.state = 'stale'
-                   AND NOT EXISTS (SELECT 1 FROM paths a
-                                   WHERE a.image_hash = s.image_hash
-                                     AND a.state = 'active')",
-                [],
-                |r| r.get::<_, i64>(0),
-            )? as usize
+        let temps_swept = if is_cancelled() {
+            0
+        } else {
+            preview::sweep_temp_files(&self.cache_dir)?
         };
-        let temps_swept = preview::sweep_temp_files(&self.cache_dir)?;
         let report = DoctorReport {
+            cancelled: is_cancelled(),
             repended,
-            stale_orphans,
+            stale_orphans: cohorts.stale_path_rows,
+            orphan_images: cohorts.images,
+            retention_eligible: cohorts.eligible.len(),
+            retention_deferred_recent: cohorts.recent,
+            retention_deferred_unknown_timestamp: cohorts.unknown_timestamp,
+            retention_deferred_busy: cohorts.busy,
+            retention_dry_run: retention_mode == OrphanRetentionMode::ReportOnly,
+            reclaimed_images: reclaimed.images,
+            preview_rows_reclaimed: reclaimed.preview_rows,
+            preview_files_reclaimed: reclaimed.preview_files,
+            preview_bytes_reclaimed: reclaimed.preview_bytes,
+            vector_rows_reclaimed: reclaimed.vector_rows,
+            vector_spaces_compacted: reclaimed.vector_spaces_compacted,
+            journal_vector_rows_retained,
             temps_swept,
         };
-        if report.repended > 0 || report.stale_orphans > 0 || report.temps_swept > 0 {
+        if report.repended > 0
+            || report.stale_orphans > 0
+            || report.temps_swept > 0
+            || report.reclaimed_images > 0
+        {
             tracing::info!(
                 repended = report.repended,
                 stale_orphans = report.stale_orphans,
+                retention_eligible = report.retention_eligible,
+                reclaimed_images = report.reclaimed_images,
+                preview_rows_reclaimed = report.preview_rows_reclaimed,
+                vector_rows_reclaimed = report.vector_rows_reclaimed,
+                journal_vector_rows_retained = report.journal_vector_rows_retained,
                 temps_swept = report.temps_swept,
                 "library doctor"
             );
             self.log(format!(
-                "doctor: {} previews re-pended, {} orphaned stale paths, {} temp files swept",
-                report.repended, report.stale_orphans, report.temps_swept
+                "doctor: {} previews re-pended, {} orphaned images ({} stale paths; {} eligible), \
+                 {} images / {} preview rows / {} vector rows reclaimed, {} temp files swept",
+                report.repended,
+                report.orphan_images,
+                report.stale_orphans,
+                report.retention_eligible,
+                report.reclaimed_images,
+                report.preview_rows_reclaimed,
+                report.vector_rows_reclaimed,
+                report.temps_swept
             ));
         }
         Ok(report)
     }
 
     /// §7.2 for one observed (stable) file. `move_window_start` bounds the
-    /// remove→create move-correlation flip.
+    /// remove→create move-correlation flip. Watcher hashing observes the
+    /// shell's cooperative pause/cancel controls.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_file(
         &self,
@@ -1415,19 +1801,22 @@ impl Library {
         priority: i64,
         tolerance_ns: i64,
         move_window_start: UtcMillis,
-    ) -> Result<Observed, LibraryError> {
-        let existing = {
-            let conn = self.db.lock().expect("poisoned");
-            paths::active_row_at(&conn, volume_id, rel_path)?
-        };
+        cancel: Option<&AtomicBool>,
+        pause: Option<&PauseToken>,
+    ) -> Result<Option<Observed>, LibraryError> {
+        let existing = self.active_path_match(volume_id, rel_path, abs_path)?;
         match existing {
-            Some(row) => {
+            Some(ActivePathMatch::Exact(row)) => {
                 if row.size == size && (row.mtime_ns - mtime_ns).abs() <= tolerance_ns {
                     let conn = self.db.lock().expect("poisoned");
                     paths::touch_verified(&conn, &row.path_id, self.now())?;
-                    return Ok(Observed::FastPath);
+                    return Ok(Some(Observed::FastPath));
                 }
-                let (hash, hashed_size) = hashing::hash_file(abs_path)?;
+                let Some((hash, hashed_size)) =
+                    hashing::hash_file_controlled(abs_path, cancel, pause)?
+                else {
+                    return Ok(None);
+                };
                 if hash == row.image_hash {
                     let conn = self.db.lock().expect("poisoned");
                     paths::update_size_mtime(
@@ -1437,7 +1826,7 @@ impl Library {
                         mtime_ns,
                         self.now(),
                     )?;
-                    Ok(Observed::Updated)
+                    Ok(Some(Observed::Updated))
                 } else {
                     // §1.3 in-place change protocol.
                     self.supersede_tx(
@@ -1450,10 +1839,65 @@ impl Library {
                         rel_path,
                         priority,
                     )?;
-                    Ok(Observed::Superseded {
+                    Ok(Some(Observed::Superseded {
                         old: row.image_hash,
                         new: hash,
-                    })
+                    }))
+                }
+            }
+            Some(ActivePathMatch::CaseAlias(row)) => {
+                // The filesystem, not a guessed fs-type table or SQLite
+                // collation, proved these spellings alias one entry. Preserve
+                // the existing path_id/hash and update its display spelling.
+                if row.size == size && (row.mtime_ns - mtime_ns).abs() <= tolerance_ns {
+                    let conn = self.db.lock().expect("poisoned");
+                    paths::recase_active(
+                        &conn,
+                        &row.path_id,
+                        root_id,
+                        rel_path,
+                        size,
+                        mtime_ns,
+                        self.now(),
+                    )?;
+                    drop(conn);
+                    self.bump_images_version();
+                    return Ok(Some(Observed::Relinked(row.image_hash)));
+                }
+                let Some((hash, hashed_size)) =
+                    hashing::hash_file_controlled(abs_path, cancel, pause)?
+                else {
+                    return Ok(None);
+                };
+                if hash == row.image_hash {
+                    let conn = self.db.lock().expect("poisoned");
+                    paths::recase_active(
+                        &conn,
+                        &row.path_id,
+                        root_id,
+                        rel_path,
+                        hashed_size as i64,
+                        mtime_ns,
+                        self.now(),
+                    )?;
+                    drop(conn);
+                    self.bump_images_version();
+                    Ok(Some(Observed::Relinked(hash)))
+                } else {
+                    self.supersede_tx(
+                        &row.path_id,
+                        &hash,
+                        hashed_size as i64,
+                        mtime_ns,
+                        volume_id,
+                        root_id,
+                        rel_path,
+                        priority,
+                    )?;
+                    Ok(Some(Observed::Superseded {
+                        old: row.image_hash,
+                        new: hash,
+                    }))
                 }
             }
             None => {
@@ -1465,21 +1909,22 @@ impl Library {
                 {
                     {
                         let conn = self.db.lock().expect("poisoned");
-                        paths::reactivate(
-                            &conn,
-                            &stale.path_id,
-                            root_id.unwrap_or(""),
-                            self.now(),
-                        )?;
+                        let now = self.now();
+                        paths::reactivate(&conn, &stale.path_id, root_id.unwrap_or(""), now)?;
+                        ingest::revive_retention_cleaned(&conn, &stale.image_hash, now)?;
                     }
                     // Seam 1 (AUDIT-2026-07-07 S3): reactivation IS a relink
                     // (the image re-enters the grid's slice), just via the
                     // zero-hash fast path — same bump as `relink_tx`, after
                     // the write and outside the lock.
                     self.bump_images_version();
-                    return Ok(Observed::Relinked(stale.image_hash));
+                    return Ok(Some(Observed::Relinked(stale.image_hash)));
                 }
-                let (hash, hashed_size) = hashing::hash_file(abs_path)?;
+                let Some((hash, hashed_size)) =
+                    hashing::hash_file_controlled(abs_path, cancel, pause)?
+                else {
+                    return Ok(None);
+                };
                 let known = self.image_exists(&hash)?;
                 if known {
                     self.relink_tx(
@@ -1491,7 +1936,7 @@ impl Library {
                         mtime_ns,
                         move_window_start,
                     )?;
-                    Ok(Observed::Relinked(hash))
+                    Ok(Some(Observed::Relinked(hash)))
                 } else {
                     self.new_image_tx(
                         &hash,
@@ -1502,10 +1947,77 @@ impl Library {
                         mtime_ns,
                         priority,
                     )?;
-                    Ok(Observed::NewImage(hash))
+                    Ok(Some(Observed::NewImage(hash)))
                 }
             }
         }
+    }
+
+    /// Resolve an active path claim for an observed file without importing a
+    /// case-sensitivity guess into path identity. Exact DB spelling always
+    /// wins. A case-folded candidate is accepted only when both path
+    /// spellings canonicalize to the same path on the live filesystem.
+    ///
+    /// Consequently default APFS/FAT aliases recase one row, while two
+    /// distinct Linux files such as `a.jpg` and `A.jpg` remain two claims.
+    pub(crate) fn active_path_match(
+        &self,
+        volume_id: &str,
+        rel_path: &str,
+        observed_abs: &Path,
+    ) -> Result<Option<ActivePathMatch>, LibraryError> {
+        {
+            let conn = self.db.lock().expect("poisoned");
+            let exact = paths::active_row_at(&conn, volume_id, rel_path)?;
+            if exact.is_some() {
+                return Ok(exact.map(ActivePathMatch::Exact));
+            }
+        }
+        self.active_case_alias_match(volume_id, rel_path, observed_abs)
+    }
+
+    /// Resolve only a differently-cased active candidate. The watcher uses
+    /// this before its exact `from` lookup for a case-only rename pair: on a
+    /// case-insensitive volume the post-rename `to` spelling aliases the old
+    /// row and path identity can be preserved; on a case-sensitive volume the
+    /// proof fails and ordinary move correlation remains authoritative.
+    pub(crate) fn active_case_alias_match(
+        &self,
+        volume_id: &str,
+        rel_path: &str,
+        observed_abs: &Path,
+    ) -> Result<Option<ActivePathMatch>, LibraryError> {
+        let (candidates, mount_point) = {
+            let conn = self.db.lock().expect("poisoned");
+            let candidates = paths::active_case_alias_candidates(&conn, volume_id, rel_path)?;
+            let mount_point: Option<String> = conn
+                .query_row(
+                    "SELECT mount_point FROM volumes WHERE volume_id = ?1",
+                    params![volume_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            (candidates, mount_point)
+        };
+        let Some(mount_point) = mount_point else {
+            return Ok(None);
+        };
+        let mount = Path::new(&mount_point);
+        let mut matches = candidates.into_iter().filter(|row| {
+            self.fs_semantics
+                .same_entry(&mount.join(&row.rel_path), observed_abs)
+        });
+        let Some(row) = matches.next() else {
+            return Ok(None);
+        };
+        // Ambiguity is never resolved by guessing. It should be impossible
+        // for multiple directory entries to canonicalize to one path, but
+        // hard links and unusual network filesystems make conservatism cheap.
+        if matches.next().is_some() {
+            return Ok(None);
+        }
+        Ok(Some(ActivePathMatch::CaseAlias(row)))
     }
 
     /// §7.2 step R: mark the active row stale (`deleted`); a later relink of
@@ -1590,10 +2102,10 @@ impl Library {
         size: i64,
         mtime_ns: i64,
         move_window_start: UtcMillis,
-    ) -> Result<(), LibraryError> {
+    ) -> Result<usize, LibraryError> {
         let mut conn = self.db.lock().expect("poisoned");
         let tx = conn.transaction()?;
-        self.relink_in_tx(
+        let retention_repairs_revived = self.relink_in_tx(
             &tx,
             hash,
             volume_id,
@@ -1610,7 +2122,7 @@ impl Library {
         // image, or the grid shows the pre-move state until an unrelated
         // event fires. After the commit, mirroring `new_image_tx`.
         self.bump_images_version();
-        Ok(())
+        Ok(retention_repairs_revived)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1624,7 +2136,7 @@ impl Library {
         size: i64,
         mtime_ns: i64,
         move_window_start: UtcMillis,
-    ) -> Result<(), LibraryError> {
+    ) -> Result<usize, LibraryError> {
         let path_id = self.mint_ulid();
         let now = self.now();
         paths::insert_active(
@@ -1632,7 +2144,7 @@ impl Library {
         )?;
         paths::correlate_move(tx, hash, move_window_start)?;
         ingest::clear_placeholder(tx, volume_id, rel_path)?;
-        Ok(())
+        Ok(ingest::revive_retention_cleaned(tx, hash, now)?)
     }
 
     /// New image: `images` row + `hash` done-row + sibling enqueues + the
@@ -1910,6 +2422,34 @@ impl Library {
         Ok(report)
     }
 
+    /// Drain only the small metadata pass, leaving preview/model/full-decode
+    /// rows pending. The desktop uses this under a critical app-data
+    /// free-space condition: EXIF indexing can continue, but every large,
+    /// reproducible artifact writer is safely paused until capacity recovers.
+    pub fn process_essential_queue(
+        &self,
+        opts: &QueueOptions,
+    ) -> Result<QueueReport, LibraryError> {
+        self.run_pipeline(
+            opts,
+            worker_pool(),
+            |conn, now| ingest::claim_next_of(conn, now, &[PassName::Exif], true),
+            |lib, item, local| lib.run_pass(item, local),
+        )
+    }
+
+    /// Drain only preview generation. The desktop schedules this behind the
+    /// metadata/live-ingest lane so a large decode backlog cannot delay fresh
+    /// photo discovery and EXIF visibility.
+    pub fn process_preview_queue(&self, opts: &QueueOptions) -> Result<QueueReport, LibraryError> {
+        self.run_pipeline(
+            opts,
+            worker_pool(),
+            |conn, now| ingest::claim_next_of(conn, now, &[PassName::Preview], true),
+            |lib, item, local| lib.run_pass(item, local),
+        )
+    }
+
     /// The shared bounded-channel pipeline (BACKLOG "Ingest pass pipelining").
     /// A CLAIMER (the calling thread) flips pending→running under the DB lock
     /// and feeds a BOUNDED `sync_channel`; `pool_width` worker tasks on `pool`
@@ -1935,7 +2475,10 @@ impl Library {
         C: Fn(&Connection, UtcMillis) -> rusqlite::Result<Option<ingest::QueueItem>> + Sync,
         W: Fn(&Library, &ingest::QueueItem, &mut QueueReport) -> Result<(), LibraryError> + Sync,
     {
-        let width = pool.current_num_threads().max(1);
+        let width = opts
+            .max_concurrency
+            .unwrap_or_else(|| pool.current_num_threads())
+            .clamp(1, pool.current_num_threads().max(1));
         // BOUNDED for backpressure: capacity == pool width keeps peak in-flight
         // decoded frames at ~2*width (width queued + width being worked), the
         // old wave's worst case, so a slow stage cannot grow an unbounded queue
@@ -1988,9 +2531,7 @@ impl Library {
             // backpressure) until cancel/max_items/empty queue. Dropping
             // `work_tx` afterward signals the workers to wind down.
             loop {
-                if let Some(cancel) = &opts.cancel
-                    && cancel.load(std::sync::atomic::Ordering::Relaxed)
-                {
+                if opts.is_cancelled() {
                     total.cancelled = true;
                     break;
                 }
@@ -2353,9 +2894,7 @@ impl Library {
         let mut report = QueueReport::default();
         let allowed = [ingest::PassName::FullRawDecode];
         loop {
-            if let Some(cancel) = &opts.cancel
-                && cancel.load(std::sync::atomic::Ordering::Relaxed)
-            {
+            if opts.is_cancelled() {
                 report.cancelled = true;
                 break;
             }
@@ -2590,6 +3129,15 @@ impl Library {
         Ok(ingest::pass_counters(&conn)?)
     }
 
+    /// Processable queue counters for the desktop activity projection.
+    /// Archived roots keep their durable rows but do not appear as live work.
+    pub fn active_pass_counters(
+        &self,
+    ) -> Result<std::collections::BTreeMap<(String, i64), PassCounters>, LibraryError> {
+        let conn = self.db.lock().expect("poisoned");
+        Ok(ingest::active_pass_counters(&conn)?)
+    }
+
     // -----------------------------------------------------------------------
     // Watcher entry points (§7.1)
     // -----------------------------------------------------------------------
@@ -2612,6 +3160,21 @@ impl Library {
         root_id: &str,
     ) -> Result<watcher::RootWatcherHandle, LibraryError> {
         watcher::start_root_watcher(self, root_id)
+    }
+
+    /// Start a watcher whose event hashing and recovery scans are admitted by
+    /// a shell-supplied dynamic policy. The returned guard is held for the
+    /// complete event/reconcile unit; returning `None` cancels that turn.
+    pub fn start_watcher_with_options<F, G>(
+        self: &Arc<Self>,
+        root_id: &str,
+        policy: F,
+    ) -> Result<watcher::RootWatcherHandle, LibraryError>
+    where
+        F: Fn(&CancelFlag) -> Option<(ScanOptions, G)> + Send + Sync + 'static,
+        G: Send + 'static,
+    {
+        watcher::start_root_watcher_with_options(self, root_id, policy)
     }
 
     // -----------------------------------------------------------------------
@@ -3355,21 +3918,170 @@ pub enum Observed {
     Superseded { old: ContentHash, new: ContentHash },
 }
 
+/// Whether the orphan-retention portion of [`Library::doctor_with_retention`]
+/// only reports candidates or also reclaims their derived data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanRetentionMode {
+    ReportOnly,
+    Reclaim,
+}
+
+#[derive(Debug, Default)]
+struct OrphanCohorts {
+    stale_path_rows: usize,
+    images: usize,
+    eligible: Vec<String>,
+    recent: usize,
+    unknown_timestamp: usize,
+    busy: usize,
+}
+
+#[derive(Debug, Default)]
+struct ReclaimedOrphans {
+    images: usize,
+    preview_rows: usize,
+    preview_files: usize,
+    preview_bytes: u64,
+    vector_rows: usize,
+    vector_spaces_compacted: usize,
+    spaces: std::collections::HashSet<VecSpace>,
+}
+
+/// Classify by IMAGE, using the latest stale timestamp across all of its path
+/// tombstones. Every timestamp must be canonical and at/before the cutoff:
+/// partial knowledge is not authority to delete.
+fn classify_orphans(conn: &Connection, cutoff: UtcMillis) -> Result<OrphanCohorts, LibraryError> {
+    let mut by_image: std::collections::BTreeMap<String, (Vec<Option<String>>, bool)> =
+        std::collections::BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT s.image_hash, s.stale_since,
+                EXISTS(SELECT 1 FROM ingest_passes ip
+                       WHERE ip.image_hash = s.image_hash AND ip.state = 'running')
+         FROM paths s
+         WHERE s.state = 'stale'
+           AND NOT EXISTS (
+             SELECT 1 FROM paths a
+             WHERE a.image_hash = s.image_hash AND a.state = 'active')
+         ORDER BY s.image_hash, s.path_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, i64>(2)? != 0,
+        ))
+    })?;
+    for row in rows {
+        let (image_hash, stale_since, busy) = row?;
+        let entry = by_image.entry(image_hash).or_default();
+        entry.0.push(stale_since);
+        entry.1 |= busy;
+    }
+
+    let mut result = OrphanCohorts {
+        stale_path_rows: by_image
+            .values()
+            .map(|(timestamps, _)| timestamps.len())
+            .sum(),
+        images: by_image.len(),
+        ..OrphanCohorts::default()
+    };
+    for (image_hash, (timestamps, busy)) in by_image {
+        let parsed: Option<Vec<UtcMillis>> = timestamps
+            .iter()
+            .map(|ts| ts.as_deref().and_then(|s| UtcMillis::parse(s).ok()))
+            .collect();
+        let Some(parsed) = parsed else {
+            result.unknown_timestamp += 1;
+            continue;
+        };
+        if busy {
+            result.busy += 1;
+            continue;
+        }
+        if parsed.iter().copied().max().is_some_and(|ts| ts <= cutoff) {
+            result.eligible.push(image_hash);
+        } else {
+            result.recent += 1;
+        }
+    }
+    Ok(result)
+}
+
+fn retention_vec_kind(kind: &str) -> Option<VecKind> {
+    match kind {
+        "annotation_chunk" => Some(VecKind::AnnotationChunk),
+        "image_summary" => Some(VecKind::ImageSummary),
+        "image_clip" => Some(VecKind::ImageClip),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct QueueOptions {
     pub cancel: Option<CancelFlag>,
+    /// Optional second cancellation authority. Desktop derived lanes use this
+    /// to combine a workload-specific preemption signal (for example capture
+    /// becoming live) with process shutdown; either flag stops at the same
+    /// per-item boundary.
+    pub additional_cancel: Option<CancelFlag>,
     pub max_items: Option<usize>,
+    /// Optional per-drain worker ceiling. The desktop resource governor uses
+    /// this to turn Eco/Balanced/Max into a decoded-frame/RAM bound without
+    /// rebuilding the process-global rayon pool.
+    pub max_concurrency: Option<usize>,
+    /// Root ids whose images should retain pending embedding rows. Used by the
+    /// desktop's durable preview-only/process-later source policy.
+    pub excluded_embedding_root_ids: Vec<String>,
+}
+
+impl QueueOptions {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        [&self.cancel, &self.additional_cancel]
+            .into_iter()
+            .flatten()
+            .any(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// What `Library::doctor` found and did (BACKLOG "Library doctor"): the
 /// debug panel renders it, the 6-hour tick `info!`s it when nonzero.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DoctorReport {
+    /// The caller requested shutdown between durable repair units. Work
+    /// already committed remains valid; unvisited derived state is checked by
+    /// the next startup/maintenance pass.
+    pub cancelled: bool,
     /// `done` preview passes re-pended because an artifact file vanished.
     pub repended: usize,
-    /// Stale path rows whose image has no surviving active path — COUNTED,
-    /// never deleted (doctor v1 is conservative by charter).
+    /// Stale path rows whose image has no surviving active path. Path
+    /// tombstones are counted and retained even when derived data is reclaimed.
     pub stale_orphans: usize,
+    /// Distinct images represented by `stale_orphans`.
+    pub orphan_images: usize,
+    /// Images beyond the 30-day boundary with complete authoritative
+    /// timestamps and no running ingest pass.
+    pub retention_eligible: usize,
+    /// Orphan images still inside the retention window.
+    pub retention_deferred_recent: usize,
+    /// Orphan images with at least one absent or malformed `stale_since`.
+    pub retention_deferred_unknown_timestamp: usize,
+    /// Old orphan images protected because derived work is currently running.
+    pub retention_deferred_busy: usize,
+    /// True when eligible data was reported but not reclaimed.
+    pub retention_dry_run: bool,
+    /// Eligible orphan images whose derived state was retired this run.
+    pub reclaimed_images: usize,
+    pub preview_rows_reclaimed: usize,
+    pub preview_files_reclaimed: usize,
+    /// Sum of authoritative `preview_artifacts.bytes` for reclaimed rows.
+    pub preview_bytes_reclaimed: u64,
+    pub vector_rows_reclaimed: usize,
+    pub vector_spaces_compacted: usize,
+    /// Legacy observability counter for eligible live image-summary vectors
+    /// left after reclamation. This should be zero now that retained summary
+    /// text lets the relink-repended text pass rebuild those vectors.
+    pub journal_vector_rows_retained: usize,
     /// Stranded `.pp-tmp-*` preview temp files removed.
     pub temps_swept: usize,
 }
@@ -3630,6 +4342,31 @@ fn root_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<RootRecord> {
     })
 }
 
+fn reconcile_active_roots(
+    roots: Vec<RootRecord>,
+    mut scan: impl FnMut(&str) -> Result<ScanReport, LibraryError>,
+) -> Vec<RootReconcileResult> {
+    roots
+        .into_iter()
+        .filter(|root| root.state == "active")
+        .map(|root| {
+            let outcome = match scan(&root.root_id) {
+                Ok(report) => RootReconcileOutcome::Scanned(report),
+                Err(LibraryError::VolumeOffline(volume_id)) => {
+                    RootReconcileOutcome::Offline { volume_id }
+                }
+                Err(error) => RootReconcileOutcome::Failed {
+                    error: error.to_string(),
+                },
+            };
+            RootReconcileResult {
+                root_id: root.root_id,
+                outcome,
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Connection + path helpers
 // ---------------------------------------------------------------------------
@@ -3746,6 +4483,55 @@ fn sync_service_hint(dir: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_root(root_id: &str, state: &str) -> RootRecord {
+        RootRecord {
+            root_id: root_id.into(),
+            volume_id: format!("volume-{root_id}"),
+            rel_path: root_id.into(),
+            display_name: None,
+            state: state.into(),
+        }
+    }
+
+    #[test]
+    fn reconcile_active_roots_reports_each_failure_and_keeps_scanning() {
+        let roots = vec![
+            test_root("bad", "active"),
+            test_root("archived", "archived"),
+            test_root("offline", "active"),
+            test_root("healthy", "active"),
+        ];
+        let mut visited = Vec::new();
+        let outcomes = reconcile_active_roots(roots, |root_id| {
+            visited.push(root_id.to_owned());
+            match root_id {
+                "bad" => Err(LibraryError::Invalid("permission denied".into())),
+                "offline" => Err(LibraryError::VolumeOffline("volume-offline".into())),
+                _ => Ok(ScanReport {
+                    files_seen: 2,
+                    ..ScanReport::default()
+                }),
+            }
+        });
+
+        assert_eq!(visited, ["bad", "offline", "healthy"]);
+        assert_eq!(outcomes.len(), 3);
+        assert!(matches!(
+            &outcomes[0].outcome,
+            RootReconcileOutcome::Failed { error } if error.contains("permission denied")
+        ));
+        assert_eq!(
+            outcomes[1].outcome,
+            RootReconcileOutcome::Offline {
+                volume_id: "volume-offline".into()
+            }
+        );
+        assert!(matches!(
+            &outcomes[2].outcome,
+            RootReconcileOutcome::Scanned(report) if report.files_seen == 2
+        ));
+    }
 
     #[test]
     fn rel_contains_is_component_wise() {
@@ -4003,6 +4789,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pipeline_honors_per_drain_concurrency_ceiling() {
+        let (_tmp, lib) = pipeline_test_library();
+        let available = worker_pool().current_num_threads().max(1);
+        let ceiling = available.min(2);
+        let queue = std::sync::Mutex::new(synthetic_items(16).into());
+        let inside = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_inside = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opts = QueueOptions {
+            max_concurrency: Some(ceiling),
+            ..QueueOptions::default()
+        };
+        let report = lib
+            .run_pipeline(
+                &opts,
+                worker_pool(),
+                draining_claim(&queue),
+                |_lib, _item, local| {
+                    let count = inside.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    max_inside.fetch_max(count, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    inside.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    local.done += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(report.processed, 16);
+        assert!(
+            max_inside.load(std::sync::atomic::Ordering::SeqCst) <= ceiling,
+            "configured ceiling must bound simultaneous decoded work"
+        );
+    }
+
     /// (b) NO LOSS / NO DOUBLE-PROCESSING: every claimed item is handled
     /// exactly once. We feed many more items than workers (so the bounded
     /// channel backpressures repeatedly) and assert the multiset of processed
@@ -4052,12 +4872,16 @@ mod tests {
         const N: usize = 1_000;
         let queue = std::sync::Mutex::new(synthetic_items(N).into());
         let cancel: CancelFlag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let primary: CancelFlag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let processed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cancel_at = 10usize;
 
         let opts = QueueOptions {
-            cancel: Some(cancel.clone()),
+            cancel: Some(primary),
+            additional_cancel: Some(cancel.clone()),
             max_items: None,
+            max_concurrency: None,
+            excluded_embedding_root_ids: Vec::new(),
         };
         let report = lib
             .run_pipeline(
@@ -4066,8 +4890,8 @@ mod tests {
                 draining_claim(&queue),
                 |_lib, _item, local| {
                     let n = processed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    // Trip cancel mid-drain; the claimer's per-item check then
-                    // stops feeding and the pipeline winds down.
+                    // Trip the second authority mid-drain; the claimer must
+                    // treat it exactly like the primary and wind down.
                     if n >= cancel_at {
                         cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                     }

@@ -319,6 +319,51 @@ fn remove_stale_full_artifacts(cache_dir: &Path, hash: &ContentHash) {
     }
 }
 
+/// Remove every final cache artifact owned by one image hash. Used by the
+/// orphan-retention doctor after it has excluded active paths and running
+/// ingest work. Unlike [`existing_full_artifact`], this intentionally includes
+/// old-version and legacy-unversioned full-decode files so a reclaimed orphan
+/// cannot leave invisible 1:1 bytes behind. Temp files remain the startup/temp
+/// sweep's responsibility.
+pub(super) fn remove_cached_artifacts(cache_dir: &Path, hash: &ContentHash) -> io::Result<usize> {
+    let mut removed = 0usize;
+    for kind in [
+        ArtifactKind::Micro,
+        ArtifactKind::Thumb,
+        ArtifactKind::Display,
+    ] {
+        match std::fs::remove_file(artifact_path(cache_dir, hash, kind)) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    let h = hash.as_str();
+    let shard = cache_dir.join("previews").join(&h[0..2]).join(&h[2..4]);
+    let entries = match std::fs::read_dir(&shard) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(removed),
+        Err(e) => return Err(e),
+    };
+    let full_prefix = format!("{h}-full");
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with(&full_prefix) || !(name.ends_with(".webp") || name.ends_with(".jpg")) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(removed)
+}
+
 const TMP_PREFIX: &str = ".pp-tmp-";
 
 fn atomic_write(dest: &Path, bytes: &[u8]) -> io::Result<()> {

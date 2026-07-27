@@ -368,6 +368,15 @@ describe("add-root from the rail (founder dogfood, rounds 1+2)", () => {
     expect(ui.grid.rootId).toBe("root:/shoots/keflavik");
   });
 
+  it("a one-shot preview-only choice rides the command without changing defaults", async () => {
+    dialog.nextDir = "/shoots/contact-sheet";
+    await ui.addRootFromPicker("preview-only");
+    expect(lastCall("add_root")?.args).toEqual({
+      path: "/shoots/contact-sheet",
+      policy: "preview-only",
+    });
+  });
+
   it("cancelling the picker registers nothing", async () => {
     dialog.nextDir = null;
     await ui.perform({ kind: "add-root" });

@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use photoproof_core::library::{
-    DebounceConfig, FakeVolumeProbe, Library, LibraryOptions, Observed, PipelineEffect,
-    PlatformIdKind, ProbedVolume, QueueOptions, RawWatchEvent, ScanOptions,
-    SharedSetPlaceholderDetector, hash_invocation_count,
+    DebounceConfig, FakeVolumeProbe, FileSystemSemantics, Library, LibraryOptions, Observed,
+    PipelineEffect, PlatformFileSystemSemantics, PlatformIdKind, ProbedVolume, QueueOptions,
+    RawWatchEvent, ScanOptions, SharedSetPlaceholderDetector, hash_invocation_count,
 };
 use photoproof_core::{ContentHash, UtcMillis};
 
@@ -46,6 +46,10 @@ fn probed(mount: &Path) -> ProbedVolume {
 
 impl Env {
     fn new() -> Env {
+        Self::new_with_semantics(Arc::new(PlatformFileSystemSemantics))
+    }
+
+    fn new_with_semantics(fs_semantics: Arc<dyn FileSystemSemantics>) -> Env {
         let tmp = tempfile::tempdir().unwrap();
         let mount = tmp.path().join("mount");
         std::fs::create_dir_all(mount.join("photos")).unwrap();
@@ -58,6 +62,7 @@ impl Env {
                 LibraryOptions {
                     probe: Arc::new(probe),
                     placeholders: Arc::new(SharedSetPlaceholderDetector::new()),
+                    fs_semantics,
                     ..Default::default()
                 },
             )
@@ -77,6 +82,17 @@ impl Env {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+}
+
+#[derive(Debug)]
+struct InjectedCaseInsensitiveSemantics;
+
+impl FileSystemSemantics for InjectedCaseInsensitiveSemantics {
+    fn same_entry(&self, stored: &Path, observed: &Path) -> bool {
+        stored
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&observed.to_string_lossy())
     }
 }
 
@@ -340,4 +356,223 @@ fn w07_real_watcher_ingests_a_new_file() {
         .preview_artifact(&hash, photoproof_core::library::ArtifactKind::Thumb)
         .unwrap();
     assert!(thumb.is_some_and(|t| t.file.exists()));
+}
+
+/// Inject case-insensitive volume semantics so the post-rename-only FSEvents
+/// shape is deterministic on every CI host.
+#[test]
+fn w08_unpaired_case_alias_recases_one_row_without_hashing() {
+    let _g = guard();
+    let env = Env::new_with_semantics(Arc::new(InjectedCaseInsensitiveSemantics));
+    let bytes = jpeg(9);
+    let lower = env.mount.join("photos/case.jpg");
+    std::fs::write(&lower, &bytes).unwrap();
+    env.lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+    let hash = ContentHash::from_bytes_of(&bytes);
+    assert_eq!(env.lib.paths_for_image(&hash).unwrap().len(), 1);
+
+    let observed = env.mount.join("photos/CASE.JPG");
+    std::fs::rename(&lower, &observed).unwrap();
+
+    let mut pl = env
+        .lib
+        .watch_pipeline(&env.root, DebounceConfig::default())
+        .unwrap();
+    let base = UtcMillis::now().epoch_ms();
+    let before = hash_invocation_count();
+    pl.push(RawWatchEvent::Modified(observed), at(base, 0))
+        .unwrap();
+    assert!(pl.tick(at(base, 600)).unwrap().is_empty());
+    let effects = pl.tick(at(base, 2700)).unwrap();
+    assert!(matches!(
+        effects.as_slice(),
+        [PipelineEffect::Observed {
+            outcome: Observed::Relinked(h),
+            ..
+        }] if h == &hash
+    ));
+    assert_eq!(
+        hash_invocation_count(),
+        before,
+        "a proven case alias is a metadata-only relink"
+    );
+    let rows = env.lib.paths_for_image(&hash).unwrap();
+    assert_eq!(rows.len(), 1, "one filesystem entry is one active claim");
+    assert_eq!(rows[0].rel_path, "photos/CASE.JPG");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn w09_case_sensitive_case_distinct_paths_remain_distinct() {
+    let _g = guard();
+    let env = Env::new();
+    let bytes = jpeg(10);
+    env.write("photos/case.jpg", &bytes);
+    env.lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+    let upper = env.write("photos/CASE.JPG", &bytes);
+
+    assert_ne!(
+        std::fs::canonicalize(env.mount.join("photos/case.jpg")).unwrap(),
+        std::fs::canonicalize(&upper).unwrap(),
+        "this acceptance fixture requires a case-sensitive filesystem"
+    );
+
+    let mut pl = env
+        .lib
+        .watch_pipeline(&env.root, DebounceConfig::default())
+        .unwrap();
+    let base = UtcMillis::now().epoch_ms();
+    let before = hash_invocation_count();
+    pl.push(RawWatchEvent::Created(upper), at(base, 0)).unwrap();
+    assert!(pl.tick(at(base, 600)).unwrap().is_empty());
+    let effects = pl.tick(at(base, 2700)).unwrap();
+    assert!(matches!(
+        effects.as_slice(),
+        [PipelineEffect::Observed {
+            outcome: Observed::Relinked(_),
+            ..
+        }]
+    ));
+    assert_eq!(
+        hash_invocation_count(),
+        before + 1,
+        "a distinct path is hashed, never guessed to be an alias"
+    );
+    let hash = ContentHash::from_bytes_of(&bytes);
+    let rows = env.lib.paths_for_image(&hash).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| row.rel_path == "photos/case.jpg"));
+    assert!(rows.iter().any(|row| row.rel_path == "photos/CASE.JPG"));
+}
+
+/// Startup/scheduled reconciliation sees directory entries, not rename
+/// events. Inject the default-APFS equivalence result on every CI host and
+/// prove the scan recases the existing claim without hashing or briefly
+/// manufacturing a stale+active duplicate.
+#[test]
+fn w10_scan_case_alias_preserves_path_identity_without_hashing() {
+    let _g = guard();
+    let env = Env::new_with_semantics(Arc::new(InjectedCaseInsensitiveSemantics));
+    let bytes = jpeg(11);
+    let lower = env.mount.join("photos/scan_case.jpg");
+    std::fs::write(&lower, &bytes).unwrap();
+    env.lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+    let hash = ContentHash::from_bytes_of(&bytes);
+    let before_rows = env.lib.paths_for_image(&hash).unwrap();
+    assert_eq!(before_rows.len(), 1);
+    let path_id = before_rows[0].path_id.clone();
+
+    let upper = env.mount.join("photos/SCAN_CASE.JPG");
+    std::fs::rename(&lower, &upper).unwrap();
+    let before_hashes = hash_invocation_count();
+    let report = env
+        .lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+
+    assert_eq!(report.rehashed, 0);
+    assert_eq!(report.relinked, 1);
+    assert_eq!(report.went_stale, 0);
+    assert_eq!(hash_invocation_count(), before_hashes);
+    let rows = env.lib.paths_for_image(&hash).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path_id, path_id);
+    assert!(rows[0].active);
+    assert_eq!(rows[0].rel_path, "photos/SCAN_CASE.JPG");
+}
+
+/// A paired rename carries both spellings, but default APFS still represents
+/// one directory entry. The watcher must not turn that representational case
+/// change into a stale row plus a freshly-minted path identity.
+#[test]
+fn w11_paired_case_alias_preserves_path_identity_without_hashing() {
+    let _g = guard();
+    let env = Env::new_with_semantics(Arc::new(InjectedCaseInsensitiveSemantics));
+    let bytes = jpeg(12);
+    let lower = env.mount.join("photos/pair_case.jpg");
+    std::fs::write(&lower, &bytes).unwrap();
+    env.lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+    let hash = ContentHash::from_bytes_of(&bytes);
+    let before_rows = env.lib.paths_for_image(&hash).unwrap();
+    let path_id = before_rows[0].path_id.clone();
+
+    let upper = env.mount.join("photos/PAIR_CASE.JPG");
+    std::fs::rename(&lower, &upper).unwrap();
+    let before_hashes = hash_invocation_count();
+    let mut pipeline = env
+        .lib
+        .watch_pipeline(&env.root, DebounceConfig::default())
+        .unwrap();
+    let effects = pipeline
+        .push(
+            RawWatchEvent::Renamed {
+                from: lower,
+                to: upper,
+            },
+            UtcMillis::now(),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        effects.as_slice(),
+        [PipelineEffect::RenameRelinked { from, to }]
+            if from == "photos/pair_case.jpg" && to == "photos/PAIR_CASE.JPG"
+    ));
+    assert_eq!(hash_invocation_count(), before_hashes);
+    let rows = env.lib.paths_for_image(&hash).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path_id, path_id);
+    assert!(rows[0].active);
+    assert_eq!(rows[0].rel_path, "photos/PAIR_CASE.JPG");
+}
+
+/// Native half of the S6 receipt. The wrapper script first proves that TMPDIR
+/// is default case-insensitive APFS, then runs this test with that TMPDIR.
+#[cfg(target_os = "macos")]
+#[test]
+fn w12_macos_case_insensitive_scan_uses_platform_semantics() {
+    let _g = guard();
+    let env = Env::new();
+    let probe_lower = env.mount.join("photos/apfs_probe");
+    let probe_upper = env.mount.join("photos/APFS_PROBE");
+    std::fs::write(&probe_lower, b"probe").unwrap();
+    assert!(
+        probe_upper.exists(),
+        "S6 native receipt requires a case-insensitive test volume"
+    );
+    std::fs::remove_file(&probe_lower).unwrap();
+
+    let bytes = jpeg(13);
+    let lower = env.mount.join("photos/native_case.jpg");
+    std::fs::write(&lower, &bytes).unwrap();
+    env.lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+    let hash = ContentHash::from_bytes_of(&bytes);
+    let path_id = env.lib.paths_for_image(&hash).unwrap()[0].path_id.clone();
+
+    let upper = env.mount.join("photos/NATIVE_CASE.JPG");
+    std::fs::rename(&lower, &upper).unwrap();
+    let before_hashes = hash_invocation_count();
+    let report = env
+        .lib
+        .scan_root(&env.root, &ScanOptions::default())
+        .unwrap();
+
+    assert_eq!(report.rehashed, 0);
+    assert_eq!(report.relinked, 1);
+    assert_eq!(report.went_stale, 0);
+    assert_eq!(hash_invocation_count(), before_hashes);
+    let rows = env.lib.paths_for_image(&hash).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path_id, path_id);
+    assert_eq!(rows[0].rel_path, "photos/NATIVE_CASE.JPG");
 }

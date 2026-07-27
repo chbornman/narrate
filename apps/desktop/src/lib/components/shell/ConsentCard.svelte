@@ -11,13 +11,46 @@
   import { consentCard, formatGb } from "../../logic/consent";
 
   const model = $derived(consentCard(ui.shell.runtime, ui.roots.length > 0));
+  let decisionFailure = $state<{
+    consentCommitted: boolean;
+    decision: "download" | "later" | "never";
+    message: string;
+  } | null>(null);
+  let committing = $state(false);
 
   async function decide(decision: "download" | "later" | "never") {
-    ui.shell.onRuntimeStatus(await ipc.runtimeConsent(decision));
+    if (committing) return;
+    committing = true;
+    decisionFailure = null;
+    try {
+      const outcome = await ipc.runtimeConsent(decision);
+      ui.shell.onRuntimeStatus(outcome.status);
+      if (outcome.consentCommitted && outcome.operationRetryable) {
+        decisionFailure = {
+          consentCommitted: true,
+          decision,
+          message: outcome.operationError ?? "The model download did not start. You can retry.",
+        };
+      }
+    } catch (error) {
+      decisionFailure = {
+        consentCommitted: false,
+        decision,
+        message:
+          error instanceof Error ? error.message : "The consent decision could not be saved.",
+      };
+    } finally {
+      committing = false;
+    }
   }
 
   async function accept(modelId: string) {
     ui.shell.onRuntimeStatus(await ipc.runtimeAcceptLicense(modelId));
+  }
+
+  function retryDecisionFailure() {
+    const failure = decisionFailure;
+    if (failure !== null) void decide(failure.decision);
   }
 </script>
 
@@ -52,11 +85,40 @@
       {/each}
     </ul>
     <div class="actions">
-      <button disabled={!model.downloadReady} onclick={() => void decide("download")}>
+      <button disabled={!model.downloadReady || committing} onclick={() => void decide("download")}>
         Download now
       </button>
-      <button class="quiet" onclick={() => void decide("later")}>Later</button>
-      <button class="quiet" onclick={() => void decide("never")}>Never</button>
+      <button class="quiet" disabled={committing} onclick={() => void decide("later")}>Later</button>
+      <button class="quiet" disabled={committing} onclick={() => void decide("never")}>Never</button>
+    </div>
+    {#if decisionFailure !== null}
+      <div class="decision-failure" role="alert">
+        <p>Your model preference could not be saved.</p>
+        <p class="dim">{decisionFailure.message}</p>
+        <button
+          class="quiet"
+          disabled={committing}
+          onclick={() => (decisionFailure = null)}>Dismiss</button
+        >
+      </div>
+    {/if}
+  </aside>
+{/if}
+{#if model === null && decisionFailure !== null}
+  <aside class="consent operation-failure" aria-label="Model download">
+    <p>
+      {decisionFailure.consentCommitted
+        ? "Your model preference was saved, but the download did not start."
+        : "Your model preference could not be saved."}
+    </p>
+    <p class="dim">{decisionFailure.message}</p>
+    <div class="actions">
+      <button disabled={committing} onclick={retryDecisionFailure}>
+        Retry
+      </button>
+      <button class="quiet" disabled={committing} onclick={() => (decisionFailure = null)}>
+        Dismiss
+      </button>
     </div>
   </aside>
 {/if}
@@ -74,6 +136,14 @@
     z-index: 50;
     font-size: 12px;
     color: var(--text);
+  }
+
+  .operation-failure {
+    width: 360px;
+  }
+
+  .decision-failure {
+    margin-top: 10px;
   }
   p {
     margin: 0 0 8px;

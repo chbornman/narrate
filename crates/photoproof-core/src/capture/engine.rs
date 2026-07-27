@@ -271,6 +271,13 @@ impl<'t, C: Clock> CaptureEngine<'t, C> {
         self
     }
 
+    /// Apply live VAD hysteresis after a validated tuning commit is ready.
+    /// The shell holds the engine mutex while calling this, so an audio frame
+    /// can observe either the old triple or the new triple, never a mixture.
+    pub fn reconfigure_vad(&mut self, enter: f32, exit: f32, hang_windows: u32) -> bool {
+        self.vad.reconfigure(enter, exit, hang_windows)
+    }
+
     /// DESIGN-VOICE-SUBJECTS.md: wire the subject-note seam (the shell's
     /// `Arc<Collections>`/`Arc<Topics>` accessor). Builder form so the bare
     /// `new` signature — used by ~15 acceptance tests and the pump's

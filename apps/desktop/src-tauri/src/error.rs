@@ -24,6 +24,8 @@ pub enum CmdError {
     Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("temporarily unavailable: {0}")]
+    Unavailable(String),
     #[error("{0}")]
     Invalid(String),
 }

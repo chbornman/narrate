@@ -1,0 +1,54 @@
+name: Desktop NVIDIA package candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      require_tensorrt:
+        description: Require a staged TensorRT 10 runtime in addition to CUDA
+        required: true
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-nvidia-package
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Verified Linux x64 NVIDIA package
+    runs-on: [self-hosted, linux, x64, nvidia]
+    env:
+      PHOTOPROOF_ORT_DYLIB: ${{ vars.PHOTOPROOF_NVIDIA_ORT_DYLIB }}
+      PHOTOPROOF_TRT_LIBS: ${{ vars.PHOTOPROOF_NVIDIA_TRT_LIBS }}
+      PHOTOPROOF_REQUIRE_TENSORRT: ${{ inputs.require_tensorrt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: Install locked frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Verify feature and package separation
+        working-directory: apps/desktop
+        run: bun run verify:nvidia-wiring
+      - name: Verify host NVIDIA runtime inputs
+        working-directory: apps/desktop
+        run: bun run verify:nvidia-runtime
+      - name: Build NVIDIA packages
+        working-directory: apps/desktop
+        run: bun run bundle:nvidia -- --bundles appimage,deb
+      - name: Smoke extracted NVIDIA package
+        working-directory: apps/desktop
+        run: bun run bundle:smoke:nvidia
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photoproof-linux-x64-nvidia
+          path: target/release/bundle
+          if-no-files-found: error

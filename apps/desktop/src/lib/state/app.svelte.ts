@@ -71,11 +71,13 @@ import type { ActionContext, ViewMode } from "../actions/types";
 import type {
   AddRootOutcome,
   AppSettings,
+  BootstrapStatus,
   CollectionDto,
   DuplicateGroupDto,
   FolderNode,
   IngestStatus,
   RootDto,
+  RuntimeStatus,
   StrokePayloadWire,
   TopicDto,
 } from "../types/dto";
@@ -115,6 +117,68 @@ export const INGEST_RELIST_DEBOUNCE_MS = 300;
  * If a real status DOES land, it cancels this timer (shell.clearIngestExpecting),
  * so a healthy scan never trips it. */
 export const INGEST_EXPECT_TIMEOUT_MS = 8_000;
+
+/** The frontend-owned boot dependencies. Each settles independently so one
+ * unavailable service cannot discard snapshots that already loaded. */
+export type BootSubsystem =
+  | "bootstrap"
+  | "events"
+  | "settings"
+  | "roots"
+  | "archived-roots"
+  | "folder"
+  | "ingest"
+  | "runtime"
+  | "collections"
+  | "topics";
+
+export interface BootFailure {
+  subsystem: BootSubsystem;
+  message: string;
+}
+
+/** Main-window boot truth. `retrying` is separate from the phase so a retry
+ * keeps a previously usable/degraded shell on screen instead of covering it
+ * with a cold-start gate. */
+export interface BootStatus {
+  phase: "loading" | "usable" | "degraded" | "fatal";
+  attempt: number;
+  retrying: boolean;
+  failures: BootFailure[];
+}
+
+const BOOT_SUBSYSTEMS: readonly BootSubsystem[] = [
+  "bootstrap",
+  "settings",
+  "roots",
+  "archived-roots",
+  "folder",
+  "ingest",
+  "runtime",
+  "collections",
+  "topics",
+];
+
+function bootError(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== "") return error.message;
+  if (typeof error === "string" && error.trim() !== "") return error;
+  return "The application service did not respond.";
+}
+
+/** `list_archived_roots` was added after the first desktop command surface.
+ * Only a Tauri unknown/unregistered-command error is compatibility evidence;
+ * timeouts, I/O errors, and database failures are real degraded-state signals
+ * and must remain retryable instead of becoming a healthy empty archive. */
+function archivedRootsUnsupported(error: unknown): boolean {
+  const value = bootError(error).toLowerCase();
+  return (
+    value.includes("list_archived_roots") &&
+    (value.includes("unknown command") ||
+      value.includes("command not found") ||
+      value.includes("not registered") ||
+      value.includes("no such command"))
+  );
+}
 
 // MIN_QUERY_CHARS (the minimum free-text query length before a search runs)
 // now lives in the centralized UI tuning module (lib/tuning.ts) — imported
@@ -204,6 +268,10 @@ export class Ui {
    * "Archived" affordance lists these, restorable. Loaded lazily and
    * refreshed alongside the active snapshot. */
   archivedRoots = $state<RootDto[]>([]);
+  /** Capability truth for the optional archived-roots surface. `false` means
+   * an older backend explicitly rejected the command as unknown; a transient
+   * read failure leaves this null/true and degrades boot for retry. */
+  archivedRootsSupported = $state<boolean | null>(null);
   /** Lazy deep-tree cap: folders deeper than this auto-collapse so a deep
    * root never renders its whole tree eagerly. A filter raises it past any
    * depth (every surviving match shows). The constant is a deliberate small
@@ -451,11 +519,50 @@ export class Ui {
   /** Set by App.svelte at mount (compile-time debug builds only). */
   debugEnabled = false;
 
+  /** Explicit frontend boot state. Successful subsystem snapshots are never
+   * cleared by retry: only dependencies that have not yet succeeded run again. */
+  boot = $state<BootStatus>({
+    phase: "loading",
+    attempt: 0,
+    retrying: false,
+    failures: [],
+  });
+  bootstrapRecoveryAction = $state<BootstrapStatus["recoveryAction"]>(null);
+  private bootSucceeded = new Set<BootSubsystem>();
+  private bootFailures = new Map<BootSubsystem, string>();
+  private bootInFlight: Promise<void> | null = null;
+  private prefsLoaded = false;
+  private eventListenerFailure: string | null = null;
+  /** Monotone local arbitration between launch reads and newer event or
+   * mutation echoes. Slow cold responses may finish, but cannot roll a
+   * subsystem back over a snapshot that landed after they started. */
+  private snapshotEpoch = {
+    settings: 0,
+    roots: 0,
+    runtime: 0,
+    collections: 0,
+    topics: 0,
+  };
+  /** Backend-owned per-domain revisions. Local epochs still arbitrate the
+   * individual legacy reads/events; these revisions add durable catch-up when
+   * a window opens late or detects an event gap. */
+  private applicationRevision = 0;
+  private applicationRevisions = {
+    settings: 0,
+    roots: 0,
+    collections: 0,
+    topics: 0,
+    runtime: 0,
+    previewCache: 0,
+  };
+
   // ---------------------------------------------------------------------------
   // boot
   // ---------------------------------------------------------------------------
 
-  async init() {
+  private loadPrefsOnce() {
+    if (this.prefsLoaded) return;
+    this.prefsLoaded = true;
     this.shell.loadPrefs();
     this.grid.loadPrefs();
     this.look.loadPrefs();
@@ -485,47 +592,285 @@ export class Ui {
     // pass via reportScope when the filter restores ON.
     this.diversifyOn = prefs.loadDiversifyOn();
     this.diversifyTolerancePercent = prefs.loadDiversifyTolerance();
+  }
+
+  private publishBoot(retrying: boolean) {
+    const failures: BootFailure[] = BOOT_SUBSYSTEMS.flatMap((subsystem) => {
+      const message = this.bootFailures.get(subsystem);
+      return message === undefined ? [] : [{ subsystem, message }];
+    });
+    if (this.eventListenerFailure !== null) {
+      failures.splice(1, 0, {
+        subsystem: "events",
+        message: this.eventListenerFailure,
+      });
+    }
+    const rootsUnavailable = !this.bootSucceeded.has("roots");
+    const bootstrapUnavailable = !this.bootSucceeded.has("bootstrap");
+    const allReady =
+      this.eventListenerFailure === null &&
+      BOOT_SUBSYSTEMS.every((s) => this.bootSucceeded.has(s));
+    this.boot = {
+      phase:
+        bootstrapUnavailable || rootsUnavailable
+          ? "fatal"
+          : allReady
+            ? "usable"
+            : "degraded",
+      attempt: this.boot.attempt,
+      retrying,
+      failures,
+    };
+  }
+
+  eventListenersReady() {
+    this.eventListenerFailure = null;
+    if (this.boot.attempt > 0) this.publishBoot(false);
+  }
+
+  eventListenersFailed(error: unknown) {
+    this.eventListenerFailure = bootError(error);
+    if (this.boot.attempt > 0) this.publishBoot(false);
+  }
+
+  /** Read one backend-tagged snapshot and apply only domains newer than this
+   * window's committed revision. Overlapping catch-up reads may finish out of
+   * order; per-domain revision guards make the older one a no-op. */
+  async catchUpApplicationState(): Promise<void> {
+    const snapshot = await ipc.applicationStateSnapshot();
+    // Older permissive test/dev shims may resolve an unknown command as null.
+    // Real older Tauri backends reject, which event-listener boot health
+    // surfaces; null is compatibility neutrality rather than a fake snapshot.
+    if (snapshot === null) return;
+
+    if (snapshot.revisions.settings > this.applicationRevisions.settings) {
+      this.applicationRevisions.settings = snapshot.revisions.settings;
+      this.applySettings(snapshot.settings);
+    }
+    if (snapshot.revisions.runtime > this.applicationRevisions.runtime) {
+      this.applicationRevisions.runtime = snapshot.revisions.runtime;
+      this.onRuntimeStatus(snapshot.runtime);
+    }
+    if (snapshot.revisions.roots > this.applicationRevisions.roots) {
+      this.applicationRevisions.roots = snapshot.revisions.roots;
+      this.archivedRootsSupported = true;
+      this.archivedRoots = snapshot.archivedRoots;
+      if (this.boot.attempt === 0) {
+        this.snapshotEpoch.roots += 1;
+        this.applyRootsSnapshot(snapshot.roots);
+      } else {
+        await this.onRootsChanged(snapshot.roots);
+      }
+    }
+    if (
+      snapshot.revisions.collections >
+      this.applicationRevisions.collections
+    ) {
+      this.applicationRevisions.collections =
+        snapshot.revisions.collections;
+      if (this.boot.attempt === 0) {
+        this.snapshotEpoch.collections += 1;
+        this.collections = snapshot.collections;
+      } else {
+        await this.onCollectionsChanged(snapshot.collections);
+      }
+    }
+    if (snapshot.revisions.topics > this.applicationRevisions.topics) {
+      this.applicationRevisions.topics = snapshot.revisions.topics;
+      this.snapshotEpoch.topics += 1;
+      this.topics = snapshot.topics;
+    }
+    this.applicationRevisions.previewCache =
+      Math.max(
+        this.applicationRevisions.previewCache,
+        snapshot.revisions.previewCache,
+      );
+    this.applicationRevision = Math.max(
+      this.applicationRevision,
+      snapshot.revision,
+    );
+  }
+
+  /** A contiguous application-state event follows its domain snapshot event
+   * on the same backend emitter, so it can advance the clock without another
+   * full read. A gap means this window missed something and must catch up. */
+  async onApplicationStateChanged(change: {
+    revision: number;
+    domains: Array<
+      | "settings"
+      | "roots"
+      | "collections"
+      | "topics"
+      | "runtime"
+      | "preview-cache"
+    >;
+  }): Promise<void> {
+    if (change.revision <= this.applicationRevision) return;
+    if (this.eventListenerFailure !== null) {
+      await this.catchUpApplicationState();
+      return;
+    }
+    if (change.revision !== this.applicationRevision + 1) {
+      await this.catchUpApplicationState();
+      return;
+    }
+    this.applicationRevision = change.revision;
+    for (const domain of change.domains) {
+      if (domain === "preview-cache") {
+        this.applicationRevisions.previewCache = change.revision;
+      } else {
+        this.applicationRevisions[domain] = change.revision;
+      }
+    }
+  }
+
+  private async bootRead(
+    subsystem: BootSubsystem,
+    read: () => Promise<void>,
+  ): Promise<void> {
+    if (this.bootSucceeded.has(subsystem)) return;
     try {
-      this.applySettings(await ipc.settingsGet());
-    } catch {
-      /* backend unavailable (tests/dev): defaults stand */
+      await read();
+      this.bootSucceeded.add(subsystem);
+      this.bootFailures.delete(subsystem);
+    } catch (error) {
+      this.bootFailures.set(subsystem, bootError(error));
     }
-    this.roots = await ipc.listRoots();
-    // Archived snapshot for the rail's "Archived" affordance (folder-tree
-    // improvements). Tolerant of an older backend without the command.
+  }
+
+  private async loadRootsAndFolder(): Promise<void> {
+    await this.bootRead("roots", async () => {
+      const epoch = this.snapshotEpoch.roots;
+      const roots = (await ipc.listRoots()) ?? [];
+      if (this.snapshotEpoch.roots === epoch) this.roots = roots;
+    });
+    if (!this.bootSucceeded.has("roots")) return;
+
+    await this.bootRead("folder", async () => {
+      const last = prefs.loadLastFolder();
+      if (last && this.roots.some((r) => r.rootId === last.rootId)) {
+        await this.openFolder(last.rootId, last.folder);
+      } else if (this.roots.length > 0) {
+        await this.openFolder(this.roots[0].rootId, "");
+      }
+    });
+  }
+
+  private async loadArchivedRoots(): Promise<void> {
+    if (this.archivedRootsSupported === false) return;
     try {
-      this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
-    } catch {
-      /* backend unavailable / pre-archive build: no archived roots shown */
+      const roots = await ipc.listArchivedRoots();
+      // Permissive non-Tauri/old-backend shims sometimes resolve an unknown
+      // command as null instead of rejecting it. Treat only that exact shape
+      // as unsupported; an empty array is a supported, healthy snapshot.
+      if (roots === null) {
+        this.archivedRootsSupported = false;
+        this.archivedRoots = [];
+        return;
+      }
+      this.archivedRootsSupported = true;
+      this.archivedRoots = roots ?? [];
+    } catch (error) {
+      if (archivedRootsUnsupported(error)) {
+        this.archivedRootsSupported = false;
+        this.archivedRoots = [];
+        return;
+      }
+      throw error;
     }
-    const last = prefs.loadLastFolder();
-    if (last && this.roots.some((r) => r.rootId === last.rootId)) {
-      await this.openFolder(last.rootId, last.folder);
-    } else if (this.roots.length > 0) {
-      await this.openFolder(this.roots[0].rootId, "");
-    }
-    this.shell.ingest = await ipc.ingestStatus();
-    try {
-      this.shell.onRuntimeStatus(await ipc.runtimeStatus());
-    } catch {
-      /* backend unavailable (tests/dev): runtime stays dark */
-    }
-    // After the folder is on screen — collections are rail furniture, not
-    // boot-critical. `?? []`: test mocks resolve unknown commands to null.
-    try {
-      this.collections = (await ipc.listCollections()) ?? [];
-    } catch {
-      /* backend unavailable (tests/dev): no collections yet */
-    }
-    // Saved manual topics (the Topics rail tab) — rail furniture like
-    // collections, fetched after the folder is on screen. `?? []`: test mocks
-    // resolve unknown commands to null.
-    try {
-      this.topics = (await ipc.listTopics()) ?? [];
-    } catch {
-      /* backend unavailable (tests/dev): no saved topics yet */
-    }
-    await this.reportScope();
+  }
+
+  /** Initialize or retry the main window without a relaunch. Independent
+   * reads start together after first paint; the initial folder alone waits for
+   * its roots snapshot. A successful dependency is not fetched again by retry,
+   * which preserves its last known-good state even while another service is
+   * unavailable. */
+  async init(): Promise<void> {
+    this.loadPrefsOnce();
+    await this.retryBoot();
+  }
+
+  retryBoot(): Promise<void> {
+    if (this.bootInFlight !== null) return this.bootInFlight;
+    const attempt = this.boot.attempt + 1;
+    const hadUsableSnapshot = this.bootSucceeded.has("roots");
+    this.boot = {
+      phase: hadUsableSnapshot ? this.boot.phase : "loading",
+      attempt,
+      retrying: true,
+      failures: this.boot.failures,
+    };
+
+    const run = async () => {
+      await this.bootRead("bootstrap", async () => {
+        const status = await ipc.bootstrapStatus();
+        // Several non-Tauri harnesses use a permissive invoke mock whose
+        // unknown-command value is null. A real older/missing Tauri command
+        // rejects; null is therefore test/back-compat neutrality, not a way a
+        // product fatal state can be hidden.
+        if (status === null) return;
+        this.bootstrapRecoveryAction = status.recoveryAction ?? null;
+        if (status.state === "fatal") {
+          throw new Error(status.error ?? "The application data could not be opened.");
+        }
+        if (status.state !== "ready") {
+          throw new Error("The application is still opening.");
+        }
+        this.bootstrapRecoveryAction = null;
+      });
+      if (!this.bootSucceeded.has("bootstrap")) {
+        this.publishBoot(false);
+        return;
+      }
+      const tasks: Promise<void>[] = [
+        this.bootRead("settings", async () => {
+          const epoch = this.snapshotEpoch.settings;
+          const value = await ipc.settingsGet();
+          if (this.snapshotEpoch.settings === epoch) this.applySettings(value);
+        }),
+        this.loadRootsAndFolder(),
+        this.bootRead("ingest", async () => {
+          this.shell.ingest = await ipc.ingestStatus();
+        }),
+        this.bootRead("runtime", async () => {
+          const epoch = this.snapshotEpoch.runtime;
+          const value = await ipc.runtimeStatus();
+          if (this.snapshotEpoch.runtime === epoch) this.onRuntimeStatus(value);
+        }),
+        this.bootRead("collections", async () => {
+          const epoch = this.snapshotEpoch.collections;
+          const value = (await ipc.listCollections()) ?? [];
+          if (this.snapshotEpoch.collections === epoch) this.collections = value;
+        }),
+        this.bootRead("topics", async () => {
+          const epoch = this.snapshotEpoch.topics;
+          const value = (await ipc.listTopics()) ?? [];
+          if (this.snapshotEpoch.topics === epoch) this.topics = value;
+        }),
+      ];
+
+      // Archived roots are optional only when an older backend proves that it
+      // does not implement the command. A transient command/database failure
+      // is a visible degraded dependency and participates in Retry.
+      tasks.push(
+        this.bootRead("archived-roots", () => this.loadArchivedRoots()),
+      );
+      await Promise.all(tasks);
+      this.publishBoot(false);
+    };
+
+    this.bootInFlight = run().finally(() => {
+      this.bootInFlight = null;
+    });
+    return this.bootInFlight;
+  }
+
+  /** Last-resort boundary for a programming error outside the settled boot
+   * reads. App.svelte attaches this to the startup promise so no rejection is
+   * fire-and-forgotten. */
+  failBoot(error: unknown) {
+    this.bootFailures.set("roots", bootError(error));
+    this.publishBoot(false);
   }
 
   /** UI scale, the webview half (desktop conventions): the shell slice
@@ -548,11 +893,27 @@ export class Ui {
    * flows into the grid slice (stacks.ts). Look starts on the same member
    * by construction — LookEntry.display derives from DisplayUnit.primary. */
   applySettings(s: AppSettings | null) {
+    this.snapshotEpoch.settings += 1;
     const member = s?.stackDisplay === "raw" ? "raw" : "jpeg";
     if (member === this.grid.stackDisplay) return;
     this.grid.setStackDisplay(member);
-    // A selected collapsed pair re-reports: display member leads (U4).
-    void this.reportScope();
+  }
+
+  /** Live settings events may change which member leads a collapsed pair.
+   * Re-report that user-visible scope explicitly and await it here; boot-time
+   * settings adoption calls `applySettings` only and never dispatches an
+   * unrelated background write while the rest of startup is still loading. */
+  async onSettingsChanged(s: AppSettings) {
+    const before = this.grid.stackDisplay;
+    this.applySettings(s);
+    if (before !== this.grid.stackDisplay) await this.reportScope();
+  }
+
+  /** Runtime snapshots from events and mutation echoes share one arbitration
+   * path so an older launch response cannot overwrite either. */
+  onRuntimeStatus(status: RuntimeStatus) {
+    this.snapshotEpoch.runtime += 1;
+    this.shell.onRuntimeStatus(status);
   }
 
   // ---------------------------------------------------------------------------
@@ -569,7 +930,7 @@ export class Ui {
    * Download. Echoes fresh status so `needsLicense` flips off live. */
   async acceptModelLicense(modelId: string) {
     try {
-      this.shell.onRuntimeStatus(await ipc.runtimeAcceptLicense(modelId));
+      this.onRuntimeStatus(await ipc.runtimeAcceptLicense(modelId));
     } catch {
       /* backend unavailable (tests/dev): the prompt keeps its prior state */
     }
@@ -582,7 +943,7 @@ export class Ui {
    * transient + working border take over on the next render. */
   async downloadMissingModel(modelId: string) {
     try {
-      this.shell.onRuntimeStatus(await ipc.runtimeDownloadModel(modelId));
+      this.onRuntimeStatus(await ipc.runtimeDownloadModel(modelId));
     } catch {
       /* backend unavailable (tests/dev): the prompt stays, no progress faked */
     }
@@ -777,7 +1138,7 @@ export class Ui {
     this.applyRootsSnapshot(await ipc.listRoots());
     // Keep the archived snapshot fresh too (folder-tree improvements): the
     // rail's "Archived" affordance reads it. Cheap; only changes on lifecycle.
-    this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
+    await this.loadArchivedRoots();
   }
 
   /** Apply a roots snapshot: a vanished current root resets the grid. */
@@ -799,6 +1160,7 @@ export class Ui {
    * just arrived — the first remaining root opens (the init() rule), so
    * the grid never sits on a dead folder. */
   async onRootsChanged(roots: RootDto[]) {
+    this.snapshotEpoch.roots += 1;
     // Drop any cached Visualizer graph for a root that just disappeared from the
     // snapshot. The module-level graphState snapshot survives the lens
     // close→reopen by design, so a removed root would otherwise restore a stale
@@ -824,7 +1186,9 @@ export class Ui {
    * directory picker straight from the rail — the FirstRun/Settings
    * add-root flow, one click (founder, dogfood rounds 1+2). The new root
    * opens; every other window's rail follows via `roots-changed`. */
-  async addRootFromPicker() {
+  async addRootFromPicker(
+    policy?: "process-now" | "preview-only" | "process-later",
+  ) {
     let dir: unknown;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -841,7 +1205,7 @@ export class Ui {
     this.shell.expectIngest(INGEST_EXPECT_TIMEOUT_MS);
     let outcome: AddRootOutcome;
     try {
-      outcome = await ipc.addRoot(dir);
+      outcome = await ipc.addRoot(dir, policy);
     } catch (e) {
       this.shell.clearIngestExpecting(); // terminal: no scan will run
       throw e;
@@ -859,6 +1223,18 @@ export class Ui {
   }
 
   async openFolder(rootId: string, folder: string) {
+    // Fetch the complete destination snapshot before committing any visible
+    // navigation state. A failed list or tree read leaves the current scope,
+    // items, selection, and view intact rather than exposing a half-advanced
+    // folder. The monotone token still lets a newer navigation supersede this
+    // one while the two independent reads run in parallel.
+    const load = ++this.gridLoad;
+    const [items, tree] = await Promise.all([
+      ipc.listFolder(rootId, folder),
+      ipc.folderTree(rootId),
+    ]);
+    if (load !== this.gridLoad) return;
+
     // Opening a folder from the rail drops Look back to the grid (founder
     // dogfood, round 1); the visualizer PERSISTS and re-points at the new
     // scope via graphScope() (DESIGN-VIEW-MODES.md transition table). Only the
@@ -872,12 +1248,7 @@ export class Ui {
     this.grid.folder = folder;
     this.grid.sort = prefs.loadSort(rootId, folder);
     this.grid.sel = sel.EMPTY;
-    const load = ++this.gridLoad;
-    const items = await ipc.listFolder(rootId, folder);
-    if (load !== this.gridLoad) return; // a newer load owns the grid now
     this.grid.setItems(items);
-    const tree = await ipc.folderTree(rootId);
-    if (load !== this.gridLoad) return;
     this.tree = tree;
     prefs.saveLastFolder(rootId, folder);
     await this.reportScope();
@@ -906,9 +1277,15 @@ export class Ui {
    * re-lists its members, and the active image's membership marks
    * re-fetch, because membership may be what changed. */
   async onCollectionsChanged(collections: CollectionDto[]) {
+    this.snapshotEpoch.collections += 1;
     this.collections = collections;
     if (this.collectionId !== null) await this.refreshItems();
     await this.refreshActiveMemberships(true);
+  }
+
+  async onTopicsChanged() {
+    this.snapshotEpoch.topics += 1;
+    this.topics = (await ipc.listTopics()) ?? [];
   }
 
   /** The rail's inline create (its footer affordance, the add-root
@@ -2816,7 +3193,6 @@ export class Ui {
   async archiveRoot(rootId: string) {
     await ipc.archiveRoot(rootId);
     await this.refreshRoots();
-    this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
   }
 
   /** Restore an archived root to active, then open it (the rail drives the
@@ -2824,7 +3200,6 @@ export class Ui {
   async unarchiveRoot(rootId: string) {
     const root = await ipc.unarchiveRoot(rootId);
     await this.refreshRoots();
-    this.archivedRoots = (await ipc.listArchivedRoots()) ?? [];
     await this.openFolder(root.rootId, "");
   }
 
@@ -3079,6 +3454,8 @@ export class Ui {
     }
     const tolerance = percentToTolerance(this.diversifyTolerancePercent);
     const load = ++this.diversifyLoad;
+    const performanceStarted = performance.now();
+    let performanceOk = false;
     // Pending covers the IPC flight; a superseding pass takes it over (the
     // token means only the LAST one to land clears it, so the chrome never
     // flashes "settled" between overlapping passes) (U6).
@@ -3087,6 +3464,7 @@ export class Ui {
       // Reuse the SAME GraphScope the visualizer/topic commands resolve, so the
       // backend diversifies exactly the set the grid is scoped to.
       const report = await ipc.diversifyScope(scope, tolerance);
+      performanceOk = true;
       if (load !== this.diversifyLoad) return; // a newer pass owns the filter now
       this.diversifyPending = false;
       this.diversifyDegraded = report.degraded;
@@ -3106,6 +3484,14 @@ export class Ui {
       if (load !== this.diversifyLoad) return;
       this.diversifyPending = false;
       this.grid.diversifyHiddenHashes = null;
+    } finally {
+      ipc.recordPerformance(
+        "filter",
+        "total",
+        performance.now() - performanceStarted,
+        performanceOk,
+        { itemCount: hashes.length },
+      );
     }
   }
 

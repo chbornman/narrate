@@ -1,5 +1,5 @@
-//! In-process ort embedders (the §3.3 defended `ort` exception, retrieval
-//! side): EmbeddingGemma / Qwen3 text towers and the DFN5B CLIP pair.
+//! ORT embedder implementation used inside the desktop's isolated helper
+//! processes: EmbeddingGemma / Qwen3 text towers and the DFN5B CLIP pair.
 //!
 //! One parameterized connector, not three structs (PLAN-P7.4 decision 3):
 //! the [`TextRecipe`] enum carries the per-model text deltas (prompts,
@@ -26,8 +26,11 @@
 //! session sits behind a `Mutex` so concurrent callers serialize on the
 //! native session (which is not internally reentrant anyway).
 
+use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ort::session::Session;
 use ort::session::SessionInputValue;
@@ -37,6 +40,142 @@ use tokenizers::Tokenizer;
 
 use crate::embedder::{DecodedImage, Embedder, Embedding};
 use crate::error::{ConnectorError, ConnectorResult};
+
+/// What ONNX Runtime can prove about one constructed session's execution
+/// provider. ORT rc.12 exposes provider-library availability and registration
+/// failures, but not the provider assigned to every graph node after
+/// partitioning. `selected` is therefore `Unknown` for a fail-silent NVIDIA
+/// session while `actual` carries later profiling evidence; callers must not
+/// infer GPU work merely because registration succeeded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExecution {
+    pub requested: Vec<String>,
+    pub available: Vec<String>,
+    /// Providers whose registration is proved. ORT's default CPU provider is
+    /// known; fail-silent accelerator attempts stay absent until profiling
+    /// proves that they executed graph nodes.
+    pub registered: Vec<String>,
+    /// Provider selected/configured for this session after construction.
+    /// NVIDIA remains Unknown when rc.12's fail-silent ladder cannot identify
+    /// which registration won.
+    pub selected: ExecutionSelection,
+    /// Providers observed executing graph nodes. Empty means not yet proved.
+    /// A mixed accelerator/CPU graph retains both entries.
+    pub actual: Vec<String>,
+    pub fallback_reason: Option<String>,
+    pub measurement: &'static str,
+    pub profile_path: Option<String>,
+}
+
+impl SessionExecution {
+    /// Scheduling may claim acceleration only after execution evidence proves
+    /// every observed provider is an accelerator. Empty or mixed CPU evidence
+    /// remains conservative.
+    pub fn is_proven_accelerated(&self) -> bool {
+        !self.actual.is_empty()
+            && self
+                .actual
+                .iter()
+                .all(|provider| matches!(provider.as_str(), "CoreML" | "CUDA" | "TensorRT"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionSelection {
+    Cpu,
+    CoreMl,
+    Cuda,
+    TensorRt,
+    Unknown,
+}
+
+/// Per-model truth. CLIP owns two independently partitioned graphs, so both
+/// towers are retained rather than collapsing a mixed/fallback result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelExecution {
+    pub model_id: String,
+    pub sessions: Vec<SessionExecution>,
+}
+
+/// Runtime-library provider discovery used by the desktop capability report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrtProviderCapability {
+    pub provider: String,
+    pub compiled: bool,
+    pub runtime_available: Option<bool>,
+    pub error: Option<String>,
+}
+
+/// Query the provider list exported by the ONNX Runtime library currently
+/// loaded by `ort`. This proves library availability, not that a provider can
+/// initialize against a particular adapter or accept a particular model.
+pub fn ort_provider_capabilities() -> Vec<OrtProviderCapability> {
+    use ort::ep::ExecutionProvider;
+
+    fn capability(
+        provider: &str,
+        compiled: bool,
+        result: ort::Result<bool>,
+    ) -> OrtProviderCapability {
+        match result {
+            Ok(available) => OrtProviderCapability {
+                provider: provider.into(),
+                compiled,
+                runtime_available: Some(available),
+                error: None,
+            },
+            Err(error) => OrtProviderCapability {
+                provider: provider.into(),
+                compiled,
+                runtime_available: None,
+                error: Some(error.to_string()),
+            },
+        }
+    }
+
+    let mut providers = vec![OrtProviderCapability {
+        provider: "CPU".into(),
+        compiled: true,
+        runtime_available: Some(true),
+        error: None,
+    }];
+    providers.push(capability(
+        "CoreML",
+        true,
+        ort::ep::CoreML::default().is_available(),
+    ));
+    #[cfg(feature = "cuda")]
+    providers.push(capability(
+        "CUDA",
+        true,
+        ort::ep::CUDA::default().is_available(),
+    ));
+    #[cfg(not(feature = "cuda"))]
+    providers.push(OrtProviderCapability {
+        provider: "CUDA".into(),
+        compiled: false,
+        runtime_available: None,
+        error: None,
+    });
+    #[cfg(feature = "tensorrt")]
+    providers.push(capability(
+        "TensorRT",
+        true,
+        ort::ep::TensorRT::default().is_available(),
+    ));
+    #[cfg(not(feature = "tensorrt"))]
+    providers.push(OrtProviderCapability {
+        provider: "TensorRT".into(),
+        compiled: false,
+        runtime_available: None,
+        error: None,
+    });
+    providers
+}
 
 /// Spike CPU posture (docs/SPIKE-P6.3 floor, reused for P7): 4 intra-op
 /// threads. WHY a constant and not a config knob yet: the GPU EP is gated
@@ -109,7 +248,7 @@ pub enum TextRecipe {
     LastToken,
 }
 
-/// One in-process ort embedder. A text instance holds a single encode
+/// One ORT embedder. A text instance holds a single encode
 /// session; a CLIP instance holds both towers (the [`Embedder`] trait
 /// fuses text+image, and CLIP needs both — queries and images).
 pub struct OrtEmbedder {
@@ -123,7 +262,9 @@ pub struct OrtEmbedder {
     /// background embed pass must pause while the mic is armed for ASR. The
     /// discriminator is the accelerator, not the pass kind (a CPU CLIP fallback
     /// must still pause). Text embedders are always `Cpu` (SPIKE-COREML-TEXT.md).
-    accel: Accel,
+    execution: Mutex<ModelExecution>,
+    profile_pending: Vec<AtomicBool>,
+    retain_profiles: Vec<bool>,
     inner: Inner,
 }
 
@@ -142,6 +283,49 @@ enum Inner {
         image_session: Mutex<Session>,
         tokenizer: Tokenizer,
     },
+}
+
+impl Drop for OrtEmbedder {
+    fn drop(&mut self) {
+        let execution = self.execution.get_mut().expect("poisoned execution status");
+        match &mut self.inner {
+            Inner::Text { session, .. } => {
+                if self.profile_pending[0].swap(false, Ordering::AcqRel)
+                    && let Ok(session) = session.get_mut()
+                {
+                    finish_provider_profile(
+                        session,
+                        &mut execution.sessions[0],
+                        self.retain_profiles[0],
+                    );
+                }
+            }
+            Inner::Clip {
+                text_session,
+                image_session,
+                ..
+            } => {
+                if self.profile_pending[0].swap(false, Ordering::AcqRel)
+                    && let Ok(session) = image_session.get_mut()
+                {
+                    finish_provider_profile(
+                        session,
+                        &mut execution.sessions[0],
+                        self.retain_profiles[0],
+                    );
+                }
+                if self.profile_pending[1].swap(false, Ordering::AcqRel)
+                    && let Ok(session) = text_session.get_mut()
+                {
+                    finish_provider_profile(
+                        session,
+                        &mut execution.sessions[1],
+                        self.retain_profiles[1],
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A precomputed zero-length cache input: its name and the concrete shape
@@ -169,17 +353,24 @@ impl OrtEmbedder {
         // the CLIP path, gated per-model in `clip`. (NVIDIA/TensorRT may revisit
         // text-embed - it takes the whole graph - but that is a separate measure.)
         // Text stays CPU by construction; resolve through the same override
-        // helper so the recorded accel matches what `build_session` actually
-        // registered (e.g. the CoreML spike env could flip a CPU base).
-        let accel = resolve_effective_accel(Accel::Cpu);
-        let session = build_session(model_path, Accel::Cpu)?;
+        // helper so the recorded execution request matches what
+        // `build_session` configured (e.g. the CoreML spike env could flip a
+        // CPU base).
+        let model_id = model_id.into();
+        let (session, session_execution, retain_profile) = build_session(model_path, Accel::Cpu)?;
+        let profile_pending = session_execution.profile_path.is_some();
         let tokenizer = load_tokenizer(tokenizer_path)?;
         let kv_feeds = zero_length_kv_feeds(&session);
         let has_position_ids = session.inputs().iter().any(|i| i.name() == "position_ids");
         Ok(Self {
-            model_id: model_id.into(),
+            model_id: model_id.clone(),
             dims,
-            accel,
+            execution: Mutex::new(ModelExecution {
+                model_id,
+                sessions: vec![session_execution],
+            }),
+            profile_pending: vec![AtomicBool::new(profile_pending)],
+            retain_profiles: vec![retain_profile],
             inner: Inner::Text {
                 recipe,
                 session: Mutex::new(session),
@@ -207,16 +398,25 @@ impl OrtEmbedder {
         // int8 external-data CLIP + the text embedder stay CPU. The `-fp16`
         // model-id suffix marks the GPU-ready single-file export.
         let base = select_clip_accel(&model_id);
-        // The EFFECTIVE accel after env overrides — the same value `build_session`
-        // registers — so `runs_on_accelerator` reports what actually loaded.
-        let accel = resolve_effective_accel(base);
-        let image_session = build_session(image_model_path, base)?;
-        let text_session = build_session(text_model_path, base)?;
+        let (image_session, image_execution, retain_image_profile) =
+            build_session(image_model_path, base)?;
+        let (text_session, text_execution, retain_text_profile) =
+            build_session(text_model_path, base)?;
+        let image_profile_pending = image_execution.profile_path.is_some();
+        let text_profile_pending = text_execution.profile_path.is_some();
         let tokenizer = load_tokenizer(tokenizer_path)?;
         Ok(Self {
-            model_id,
+            model_id: model_id.clone(),
             dims,
-            accel,
+            execution: Mutex::new(ModelExecution {
+                model_id: model_id.clone(),
+                sessions: vec![image_execution, text_execution],
+            }),
+            profile_pending: vec![
+                AtomicBool::new(image_profile_pending),
+                AtomicBool::new(text_profile_pending),
+            ],
+            retain_profiles: vec![retain_image_profile, retain_text_profile],
             inner: Inner::Clip {
                 text_session: Mutex::new(text_session),
                 image_session: Mutex::new(image_session),
@@ -228,7 +428,7 @@ impl OrtEmbedder {
 
 impl Embedder for OrtEmbedder {
     async fn embed_text(&self, text: &str) -> ConnectorResult<Embedding> {
-        let vector = match &self.inner {
+        let (result, session_index, session) = match &self.inner {
             Inner::Text {
                 recipe,
                 session,
@@ -243,22 +443,34 @@ impl Embedder for OrtEmbedder {
                 // the DOCUMENT prompt, matching how the ingest pass embeds
                 // annotation chunks.
                 let prompted = assemble_document_prompt(*recipe, text);
-                run_text(
+                (
+                    run_text(
+                        session,
+                        tokenizer,
+                        &prompted,
+                        *recipe,
+                        kv_feeds,
+                        *has_position_ids,
+                        self.dims,
+                    ),
+                    0,
                     session,
-                    tokenizer,
-                    &prompted,
-                    *recipe,
-                    kv_feeds,
-                    *has_position_ids,
-                    self.dims,
-                )?
+                )
             }
             Inner::Clip {
                 text_session,
                 tokenizer,
                 ..
-            } => run_clip_text(text_session, tokenizer, text, self.dims)?,
+            } => (
+                run_clip_text(text_session, tokenizer, text, self.dims),
+                1,
+                text_session,
+            ),
         };
+        if result.is_ok() {
+            self.finalize_provider_profile(session_index, session);
+        }
+        let vector = result?;
         Ok(self.embedding(vector))
     }
 
@@ -272,7 +484,11 @@ impl Embedder for OrtEmbedder {
                 message: format!("embed_image unsupported by text embedder {}", self.model_id),
             });
         };
-        let vector = run_clip_image(image_session, img, self.dims)?;
+        let result = run_clip_image(image_session, img, self.dims);
+        if result.is_ok() {
+            self.finalize_provider_profile(0, image_session);
+        }
+        let vector = result?;
         Ok(self.embedding(vector))
     }
 
@@ -299,7 +515,34 @@ impl OrtEmbedder {
     /// it must still pause. The discriminator is the EXECUTION PROVIDER, not the
     /// pass kind — which is exactly what this reports.
     pub fn runs_on_accelerator(&self) -> bool {
-        self.accel != Accel::Cpu
+        let execution = self.execution.lock().expect("poisoned execution status");
+        !execution.sessions.is_empty()
+            && execution
+                .sessions
+                .iter()
+                .all(SessionExecution::is_proven_accelerated)
+    }
+
+    /// Requested/available/registered/selected/actual provider truth for
+    /// status and diagnostics. The clone is a small bounded status payload.
+    pub fn execution(&self) -> ModelExecution {
+        self.execution
+            .lock()
+            .expect("poisoned execution status")
+            .clone()
+    }
+
+    fn finalize_provider_profile(&self, index: usize, session: &Mutex<Session>) {
+        if !self.profile_pending[index].swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let mut session = session.lock().expect("poisoned ort session");
+        let mut execution = self.execution.lock().expect("poisoned execution status");
+        finish_provider_profile(
+            &mut session,
+            &mut execution.sessions[index],
+            self.retain_profiles[index],
+        );
     }
 }
 
@@ -309,7 +552,7 @@ impl OrtEmbedder {
     /// time for the text query vector. CLIP queries use the textual tower
     /// directly (its eval transform has no separate query prompt).
     pub fn embed_query(&self, text: &str) -> ConnectorResult<Embedding> {
-        let vector = match &self.inner {
+        let (result, session_index, session) = match &self.inner {
             Inner::Text {
                 recipe,
                 session,
@@ -318,22 +561,34 @@ impl OrtEmbedder {
                 has_position_ids,
             } => {
                 let prompted = assemble_query_prompt(*recipe, text);
-                run_text(
+                (
+                    run_text(
+                        session,
+                        tokenizer,
+                        &prompted,
+                        *recipe,
+                        kv_feeds,
+                        *has_position_ids,
+                        self.dims,
+                    ),
+                    0,
                     session,
-                    tokenizer,
-                    &prompted,
-                    *recipe,
-                    kv_feeds,
-                    *has_position_ids,
-                    self.dims,
-                )?
+                )
             }
             Inner::Clip {
                 text_session,
                 tokenizer,
                 ..
-            } => run_clip_text(text_session, tokenizer, text, self.dims)?,
+            } => (
+                run_clip_text(text_session, tokenizer, text, self.dims),
+                1,
+                text_session,
+            ),
         };
+        if result.is_ok() {
+            self.finalize_provider_profile(session_index, session);
+        }
+        let vector = result?;
         Ok(self.embedding(vector))
     }
 
@@ -450,12 +705,13 @@ fn select_clip_accel(model_id: &str) -> Accel {
     return Accel::Cpu;
 }
 
-/// Apply the env overrides to a per-model base accelerator, yielding the EP a
-/// session will ACTUALLY register: an explicit force-CPU wins (the GPU spike
-/// baseline — same fp16 weights on CPU); otherwise the legacy CoreML knob can
-/// promote a CPU-selected model to CoreML (the CoreML spike harness); else the
-/// base is used as-is. Pure over (base, env) so the pause policy and the
-/// session builder agree, and so it is unit-testable without loading a model.
+/// Apply the env overrides to a per-model base accelerator, yielding the EP
+/// configuration a session will request: an explicit force-CPU wins (the GPU
+/// spike baseline — same fp16 weights on CPU); otherwise the legacy CoreML
+/// knob can promote a CPU-selected model to CoreML (the CoreML spike harness);
+/// else the base is used as-is. Pure over (base, env) so the pause policy and
+/// the session builder agree, and so it is unit-testable without loading a
+/// model.
 fn resolve_effective_accel(base: Accel) -> Accel {
     if force_cpu_requested() {
         Accel::Cpu
@@ -466,7 +722,10 @@ fn resolve_effective_accel(base: Accel) -> Accel {
     }
 }
 
-fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
+fn build_session(
+    model_path: &Path,
+    accel: Accel,
+) -> ConnectorResult<(Session, SessionExecution, bool)> {
     // CPU EP is ort's default; 4 intra-op threads is the spike posture.
     // GraphOptimizationLevel::Level3 matches onnxruntime python's default
     // (ORT_ENABLE_ALL) the spike measured against. The builder option
@@ -474,16 +733,25 @@ fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
     // Decode error explicitly rather than chaining over mixed Results.
     let err =
         |e: String| ConnectorError::Decode(format!("ort session {}: {e}", model_path.display()));
+    let accel = resolve_effective_accel(accel);
     let mut builder = Session::builder()
         .map_err(|e| err(e.to_string()))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| err(e.to_string()))?
         .with_intra_threads(INTRA_OP_THREADS)
         .map_err(|e| err(e.to_string()))?;
-    // Resolve the effective accelerator (force-CPU / CoreML env overrides).
-    // Shared with the embedder's recorded `accel` so `runs_on_accelerator`
-    // reports exactly the EP this session registers.
-    let accel = resolve_effective_accel(accel);
+    let profile = provider_profile_plan(model_path, accel);
+    if let Some(profile) = &profile {
+        builder = builder
+            .with_profiling(&profile.prefix)
+            .map_err(|e| err(format!("enable profiling: {e}")))?;
+    }
+    let requested = requested_provider_names(accel);
+    let available = available_provider_names(accel);
+    // ORT always retains its default CPU provider. Accelerator entries are
+    // added only when construction can fail closed (CoreML), or later when
+    // profiling proves that a fail-silent provider executed graph nodes.
+    let mut registered = vec!["CPU".to_owned()];
     match accel {
         // CPU EP is ort's default - nothing to register.
         Accel::Cpu => {}
@@ -493,6 +761,7 @@ fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
             // FP16 production caveat: ~16.5 min, docs/SPIKE-COREML.md). Best-effort.
             let cache = coreml_cache_dir(model_path);
             builder = build_session_with_coreml(builder, cache.as_deref()).map_err(err)?;
+            registered.push("CoreML".to_owned());
             // Stderr (not tracing): this crate installs no subscriber, and the
             // "GPU path taken" signal must be visible regardless of host logging.
             eprintln!(
@@ -507,14 +776,244 @@ fn build_session(model_path: &Path, accel: Accel) -> ConnectorResult<Session> {
         Accel::Nvidia => {
             builder = build_session_with_nvidia(builder, model_path).map_err(err)?;
             eprintln!(
-                "[ort nvidia] registered NVIDIA EP ladder (TensorRT-fp16 -> CUDA -> CPU) for {}",
+                "[ort nvidia] configured fail-silent NVIDIA EP ladder (TensorRT-fp16 -> CUDA -> CPU) for {}",
                 model_path.display()
             );
         }
     }
-    builder
+    let session = builder
         .commit_from_file(model_path)
-        .map_err(|e| err(e.to_string()))
+        .map_err(|e| err(e.to_string()))?;
+    let (selected, actual, fallback_reason, measurement) = match accel {
+        Accel::Cpu => (
+            ExecutionSelection::Cpu,
+            vec!["CPU".to_owned()],
+            None,
+            "configured",
+        ),
+        Accel::CoreML => (
+            ExecutionSelection::CoreMl,
+            Vec::new(),
+            None,
+            "pending-profile",
+        ),
+        Accel::Nvidia if available.iter().any(|provider| provider != "CPU") => (
+            ExecutionSelection::Unknown,
+            Vec::new(),
+            Some(
+                "the rc.12 fail-silent NVIDIA ladder does not expose which provider registered or partitioned this graph"
+                    .to_owned(),
+            ),
+            "pending-profile",
+        ),
+        Accel::Nvidia => (
+            ExecutionSelection::Cpu,
+            vec!["CPU".to_owned()],
+            Some("requested NVIDIA providers are unavailable in the loaded runtime library".into()),
+            "configured",
+        ),
+    };
+    let retain_profile = profile.as_ref().is_some_and(|profile| profile.retain);
+    Ok((
+        session,
+        SessionExecution {
+            requested,
+            available,
+            registered,
+            selected,
+            actual,
+            fallback_reason,
+            measurement,
+            profile_path: profile.map(|profile| profile.prefix.to_string_lossy().into_owned()),
+        },
+        retain_profile,
+    ))
+}
+
+const MAX_PROVIDER_PROFILE_BYTES: u64 = 8 * 1024 * 1024;
+static PROFILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct ProviderProfilePlan {
+    prefix: PathBuf,
+    retain: bool,
+}
+
+/// Accelerated sessions automatically profile only their first inference.
+/// This is the bounded rc.12 seam that turns provider configuration into
+/// execution evidence while the helper remains alive. An explicit profile
+/// directory retains evidence for a hardware receipt; automatic temp profiles
+/// are parsed and removed immediately.
+fn provider_profile_plan(model_path: &Path, accel: Accel) -> Option<ProviderProfilePlan> {
+    let explicit_dir = std::env::var_os("PHOTOPROOF_ORT_PROFILE_DIR").map(PathBuf::from);
+    if explicit_dir.is_none() && accel == Accel::Cpu {
+        return None;
+    }
+    let (dir, retain) = explicit_dir
+        .map(|dir| (dir, true))
+        .unwrap_or_else(|| (std::env::temp_dir().join("photoproof-ort-provider"), false));
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = model_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("model")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sequence = PROFILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    Some(ProviderProfilePlan {
+        prefix: dir.join(format!("{stem}-{epoch}-{}-{sequence}", std::process::id())),
+        retain,
+    })
+}
+
+fn finish_provider_profile(session: &mut Session, execution: &mut SessionExecution, retain: bool) {
+    let path = match session.end_profiling() {
+        Ok(path) => PathBuf::from(path),
+        Err(error) => {
+            execution.measurement = "profile-unavailable";
+            execution.actual.clear();
+            execution.fallback_reason = Some(format!(
+                "provider profile could not finish; actual execution remains unknown: {error}"
+            ));
+            return;
+        }
+    };
+    let evidence = providers_from_profile(&path);
+    if !retain {
+        let _ = std::fs::remove_file(&path);
+        execution.profile_path = None;
+    } else {
+        execution.profile_path = Some(path.display().to_string());
+    }
+    match evidence {
+        Ok(actual) if !actual.is_empty() => {
+            record_profiled_execution(execution, actual);
+        }
+        Ok(_) => {
+            execution.actual.clear();
+            execution.measurement = "profile-unavailable";
+            execution.fallback_reason =
+                Some("provider profile contained no graph-node assignments".into());
+        }
+        Err(error) => {
+            execution.actual.clear();
+            execution.measurement = "profile-unavailable";
+            execution.fallback_reason = Some(error);
+        }
+    }
+}
+
+fn record_profiled_execution(execution: &mut SessionExecution, actual: Vec<String>) {
+    execution.actual = actual;
+    // Executing a graph node proves that the provider was registered, even
+    // when the rc.12 configuration API itself was fail-silent.
+    for provider in &execution.actual {
+        if !execution.registered.contains(provider) {
+            execution.registered.push(provider.clone());
+        }
+    }
+    execution.registered.sort();
+    execution.registered.dedup();
+    execution.measurement = "profiled";
+    execution.fallback_reason = profiled_fallback_reason(execution);
+}
+
+fn providers_from_profile(path: &Path) -> Result<Vec<String>, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("provider profile could not be opened: {error}"))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_PROVIDER_PROFILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("provider profile could not be read: {error}"))?;
+    if bytes.len() as u64 > MAX_PROVIDER_PROFILE_BYTES {
+        return Err(format!(
+            "provider profile exceeded the {} byte evidence limit",
+            MAX_PROVIDER_PROFILE_BYTES
+        ));
+    }
+    let events: Vec<serde_json::Value> = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("provider profile was invalid JSON: {error}"))?;
+    let providers = events
+        .iter()
+        .filter_map(|event| event.get("args"))
+        .filter_map(|args| args.get("provider"))
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(canonical_profile_provider)
+        .collect::<BTreeSet<_>>();
+    Ok(providers.into_iter().collect())
+}
+
+fn canonical_profile_provider(provider: &str) -> Option<String> {
+    match provider {
+        "CPUExecutionProvider" | "CPU" => Some("CPU".into()),
+        "CoreMLExecutionProvider" | "CoreML" => Some("CoreML".into()),
+        "CUDAExecutionProvider" | "CUDA" => Some("CUDA".into()),
+        "TensorrtExecutionProvider" | "TensorRTExecutionProvider" | "TensorRT" => {
+            Some("TensorRT".into())
+        }
+        _ => None,
+    }
+}
+
+fn profiled_fallback_reason(execution: &SessionExecution) -> Option<String> {
+    let requested_acceleration = execution.requested.iter().any(|provider| provider != "CPU");
+    let used_cpu = execution.actual.iter().any(|provider| provider == "CPU");
+    let used_acceleration = execution.actual.iter().any(|provider| provider != "CPU");
+    if requested_acceleration && used_cpu && !used_acceleration {
+        Some("provider profile proved complete CPU fallback".into())
+    } else if requested_acceleration && used_cpu {
+        Some("provider profile proved partial CPU fallback".into())
+    } else {
+        None
+    }
+}
+
+fn requested_provider_names(accel: Accel) -> Vec<String> {
+    match accel {
+        Accel::Cpu => vec!["CPU".into()],
+        Accel::CoreML => vec!["CoreML".into(), "CPU".into()],
+        Accel::Nvidia => {
+            #[cfg(feature = "tensorrt")]
+            {
+                vec!["TensorRT".into(), "CUDA".into(), "CPU".into()]
+            }
+            #[cfg(not(feature = "tensorrt"))]
+            {
+                vec!["CUDA".into(), "CPU".into()]
+            }
+        }
+    }
+}
+
+fn available_provider_names(accel: Accel) -> Vec<String> {
+    use ort::ep::ExecutionProvider;
+
+    let mut providers = Vec::new();
+    match accel {
+        Accel::Cpu => {}
+        Accel::CoreML => {
+            if matches!(ort::ep::CoreML::default().is_available(), Ok(true)) {
+                providers.push("CoreML".into());
+            }
+        }
+        Accel::Nvidia => {
+            #[cfg(feature = "tensorrt")]
+            if matches!(ort::ep::TensorRT::default().is_available(), Ok(true)) {
+                providers.push("TensorRT".into());
+            }
+            #[cfg(feature = "cuda")]
+            if matches!(ort::ep::CUDA::default().is_available(), Ok(true)) {
+                providers.push("CUDA".into());
+            }
+        }
+    }
+    providers.push("CPU".into());
+    providers
 }
 
 /// The CoreML compiled-model cache directory for `model_path`: a `.coreml-cache`
@@ -1004,6 +1503,134 @@ mod tests {
     // ---- prompt assembly (deterministic, no model) ----
 
     // ---- accelerator selection (the capture-pause discriminator) ----
+
+    #[test]
+    fn unknown_registration_never_claims_accelerated_execution() {
+        let unknown = SessionExecution {
+            requested: vec!["CUDA".into(), "CPU".into()],
+            available: vec!["CUDA".into(), "CPU".into()],
+            registered: vec!["CPU".into()],
+            selected: ExecutionSelection::Unknown,
+            actual: Vec::new(),
+            fallback_reason: None,
+            measurement: "pending-profile",
+            profile_path: Some("/tmp/pending".into()),
+        };
+        assert!(!unknown.is_proven_accelerated());
+        let configured_but_unproved = SessionExecution {
+            selected: ExecutionSelection::Cuda,
+            ..unknown
+        };
+        assert!(
+            !configured_but_unproved.is_proven_accelerated(),
+            "selection or registration is never execution evidence"
+        );
+    }
+
+    #[test]
+    fn profile_evidence_graduates_fail_silent_provider_to_registered() {
+        let mut execution = SessionExecution {
+            requested: vec!["CUDA".into(), "CPU".into()],
+            available: vec!["CUDA".into(), "CPU".into()],
+            registered: vec!["CPU".into()],
+            selected: ExecutionSelection::Unknown,
+            actual: Vec::new(),
+            fallback_reason: Some("registration is not yet proved".into()),
+            measurement: "pending-profile",
+            profile_path: None,
+        };
+
+        record_profiled_execution(&mut execution, vec!["CUDA".into()]);
+
+        assert_eq!(execution.registered, vec!["CPU", "CUDA"]);
+        assert_eq!(execution.actual, vec!["CUDA"]);
+        assert_eq!(execution.measurement, "profiled");
+        assert_eq!(execution.fallback_reason, None);
+        assert!(execution.is_proven_accelerated());
+    }
+
+    #[test]
+    fn bounded_profile_parser_reports_mixed_execution_and_forced_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "photoproof-provider-profile-test-{}-{}",
+            std::process::id(),
+            PROFILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profile.json");
+        std::fs::write(
+            &path,
+            br#"[
+                {"cat":"Node","args":{"provider":"CUDAExecutionProvider"}},
+                {"cat":"Node","args":{"provider":"CPUExecutionProvider"}},
+                {"cat":"Session","args":{"provider":"ignored-provider"}}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            providers_from_profile(&path).unwrap(),
+            vec!["CPU".to_owned(), "CUDA".to_owned()]
+        );
+
+        let mut mixed = SessionExecution {
+            requested: vec!["CUDA".into(), "CPU".into()],
+            available: vec!["CUDA".into(), "CPU".into()],
+            registered: vec!["CUDA".into(), "CPU".into()],
+            selected: ExecutionSelection::Unknown,
+            actual: vec!["CPU".into(), "CUDA".into()],
+            fallback_reason: None,
+            measurement: "profiled",
+            profile_path: None,
+        };
+        assert_eq!(
+            profiled_fallback_reason(&mixed).as_deref(),
+            Some("provider profile proved partial CPU fallback")
+        );
+        assert!(!mixed.is_proven_accelerated());
+        mixed.actual = vec!["CPU".into()];
+        assert_eq!(
+            profiled_fallback_reason(&mixed).as_deref(),
+            Some("provider profile proved complete CPU fallback")
+        );
+        mixed.actual = vec!["CUDA".into()];
+        assert_eq!(profiled_fallback_reason(&mixed), None);
+        assert!(mixed.is_proven_accelerated());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn provider_profile_parser_enforces_its_byte_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "photoproof-provider-profile-limit-{}-{}",
+            std::process::id(),
+            PROFILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profile.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_PROVIDER_PROFILE_BYTES + 1).unwrap();
+        assert!(
+            providers_from_profile(&path)
+                .unwrap_err()
+                .contains("evidence limit")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn provider_capability_report_separates_compile_and_runtime_truth() {
+        let report = ort_provider_capabilities();
+        let cpu = report
+            .iter()
+            .find(|provider| provider.provider == "CPU")
+            .expect("CPU row");
+        assert!(cpu.compiled);
+        assert_eq!(cpu.runtime_available, Some(true));
+        for name in ["CoreML", "CUDA", "TensorRT"] {
+            assert!(report.iter().any(|provider| provider.provider == name));
+        }
+    }
 
     /// The fp16 single-file CLIP graduates to the platform GPU/ANE; the int8
     /// external-data CLIP and any non-fp16 id stay on CPU. (The platform arm is

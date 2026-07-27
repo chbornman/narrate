@@ -26,12 +26,12 @@
 //! and the CoreML/CPU execution providers untouched (`select_clip_accel` in
 //! `photoproof-connectors` never returns `Nvidia` off a `cuda` build anyway).
 //!
-//! RESOLUTION ORDER (first hit wins; a miss is non-fatal — we fall through to
-//! `ort`'s default/bundled library, which still works on CPU):
+//! RESOLUTION ORDER (first hit wins):
 //!   1. `PHOTOPROOF_ORT_DYLIB` — an explicit path to the `libonnxruntime.so`
 //!      (the escape hatch for a hand-staged or non-conventional location; e.g.
 //!      the margo dev shell that exports the tarball path directly).
-//!   2. `{data_dir}/runtime/onnxruntime-cuda/lib/` — the CONVENTIONAL staging
+//!   2. The signed package's `runtime/` resources.
+//!   3. `{data_dir}/runtime/onnxruntime-cuda/lib/` — the CONVENTIONAL staging
 //!      location the distribution drops/fetches the cuda13 tarball into (the
 //!      analog of the models dir). We pick the bare `libonnxruntime.so` if the
 //!      tarball shipped the symlink, else the versioned `libonnxruntime.so.N`.
@@ -42,6 +42,12 @@
 //! and the system CUDA libs (`/opt/cuda/lib64`, `/usr/lib`) so the EP ladder's
 //! TensorRT -> CUDA rungs find `libnvinfer.so.10`, `libcudart.so`, `libcudnn.so`.
 
+#[cfg(all(
+    feature = "nvidia-package",
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
+compile_error!("the nvidia-package feature is supported only on Linux x86_64");
+
 /// Resolve and stage the onnxruntime runtime for the current build. Call this
 /// as the FIRST statement in `main()` (before any thread spawns).
 ///
@@ -49,7 +55,11 @@
 /// macOS/CPU launch is byte-for-byte unaffected.
 pub fn resolve() {
     #[cfg(feature = "cuda-dynamic")]
-    nvidia::resolve();
+    if let Err(error) = nvidia::resolve() {
+        eprintln!("[ort runtime] fatal NVIDIA runtime contract failure: {error}");
+        #[cfg(feature = "nvidia-package")]
+        std::process::exit(78);
+    }
 }
 
 #[cfg(feature = "cuda-dynamic")]
@@ -75,19 +85,28 @@ mod nvidia {
 
     /// Stage the runtime: pick a `libonnxruntime.so`, export `ORT_DYLIB_PATH`,
     /// and extend `LD_LIBRARY_PATH` with the lib dirs the EP ladder needs.
-    pub fn resolve() {
+    pub fn resolve() -> Result<(), String> {
         let Some(dylib) = locate_dylib() else {
-            // No hardware-matched lib staged: leave `ORT_DYLIB_PATH` unset so
-            // `ort` uses its bundled binary. On a `cuda-dynamic` build with the
-            // CUDA EP types compiled in, that bundled lib may still bring up the
-            // CUDA EP on supported (<= sm_90) GPUs; on Blackwell it falls to CPU.
-            // Either way the app launches — degraded GPU, never a crash.
-            eprintln!(
-                "[ort runtime] no staged onnxruntime found (set {ORT_DYLIB_OVERRIDE} or stage \
+            #[cfg(feature = "nvidia-package")]
+            return Err(format!(
+                "this is an nvidia-package build, but no verified packaged runtime or \
+                 {ORT_DYLIB_OVERRIDE} was found"
+            ));
+
+            #[cfg(not(feature = "nvidia-package"))]
+            {
+                // No hardware-matched lib staged: leave `ORT_DYLIB_PATH` unset so
+                // `ort` uses its bundled binary. On a `cuda-dynamic` build with the
+                // CUDA EP types compiled in, that bundled lib may still bring up the
+                // CUDA EP on supported (<= sm_90) GPUs; on Blackwell it falls to CPU.
+                // Either way the app launches — degraded GPU, never a crash.
+                eprintln!(
+                    "[ort runtime] no staged onnxruntime found (set {ORT_DYLIB_OVERRIDE} or stage \
                  the cuda13 tarball at {{app_data}}/runtime/onnxruntime-cuda/lib/); \
                  using ort's bundled library"
-            );
-            return;
+                );
+                return Ok(());
+            }
         };
         let lib_dir = dylib.parent().map(Path::to_path_buf);
 
@@ -108,7 +127,7 @@ mod nvidia {
         if let Some(dir) = lib_dir {
             prefix.push(dir);
         }
-        if let Some(trt) = tensorrt_lib_dir() {
+        if let Some(trt) = tensorrt_lib_dir(&dylib) {
             prefix.push(trt);
         }
         for cuda in CUDA_LIB_DIRS {
@@ -118,10 +137,11 @@ mod nvidia {
             }
         }
         extend_ld_library_path(&prefix);
+        Ok(())
     }
 
     /// Find the `libonnxruntime.so` to load: the explicit override first, else
-    /// the conventional `{data_dir}/runtime/onnxruntime-cuda/lib/` directory.
+    /// packaged resources, then the conventional app-data runtime directory.
     fn locate_dylib() -> Option<PathBuf> {
         if let Some(over) = std::env::var_os(ORT_DYLIB_OVERRIDE) {
             let p = PathBuf::from(over);
@@ -134,8 +154,57 @@ mod nvidia {
                 p.display()
             );
         }
+
+        if let Ok(exe) = std::env::current_exe() {
+            let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+            for runtime_root in packaged_runtime_roots(&exe, appdir.as_deref()) {
+                if let Some(dylib) = packaged_onnxruntime(&runtime_root) {
+                    return Some(dylib);
+                }
+            }
+        }
+
         let lib_dir = data_dir()?.join("runtime/onnxruntime-cuda/lib");
         pick_onnxruntime_so(&lib_dir)
+    }
+
+    /// Candidate locations produced by Tauri's Linux resource layouts. The
+    /// direct sibling supports unpacked/dev bundles; the `../lib/<name>` paths
+    /// support deb/rpm installs; APPDIR covers AppImage mounts.
+    fn packaged_runtime_roots(exe: &Path, appdir: Option<&Path>) -> Vec<PathBuf> {
+        let Some(exe_dir) = exe.parent() else {
+            return Vec::new();
+        };
+        let mut roots = vec![exe_dir.join("runtime")];
+        for product in ["Photoproof", "photoproof", "photoproof-desktop"] {
+            roots.push(exe_dir.join("../lib").join(product).join("runtime"));
+        }
+        if let Some(appdir) = appdir {
+            for product in ["Photoproof", "photoproof", "photoproof-desktop"] {
+                roots.push(appdir.join("usr/lib").join(product).join("runtime"));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        roots.retain(|path| seen.insert(path.clone()));
+        roots
+    }
+
+    /// Accept a package resource only when its runtime contract and CUDA
+    /// provider are both present. Hashes are checked before release/signing and
+    /// by installed-bundle smoke; this launch check prevents a CPU resource tree
+    /// from being mistaken for an NVIDIA package.
+    fn packaged_onnxruntime(runtime_root: &Path) -> Option<PathBuf> {
+        if !runtime_root.join("runtime-contract.json").is_file() {
+            return None;
+        }
+        let lib_dir = runtime_root.join("onnxruntime-cuda/lib");
+        let has_cuda_provider = std::fs::read_dir(&lib_dir).ok()?.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("libonnxruntime_providers_cuda.so"))
+        });
+        has_cuda_provider.then(|| pick_onnxruntime_so(&lib_dir))?
     }
 
     /// Choose the onnxruntime shared object inside `lib_dir`: prefer the bare
@@ -169,12 +238,20 @@ mod nvidia {
     /// conventional `{data_dir}/runtime/tensorrt/lib/` when it exists. `None`
     /// means "no TensorRT staged" — the EP ladder then skips the TRT rung and the
     /// CUDA EP carries the GPU work (`fail_silently` in ort_embedder.rs).
-    fn tensorrt_lib_dir() -> Option<PathBuf> {
+    fn tensorrt_lib_dir(dylib: &Path) -> Option<PathBuf> {
         if let Some(over) = std::env::var_os(TRT_LIBS_OVERRIDE) {
             let p = PathBuf::from(over);
             if p.is_dir() {
                 return Some(p);
             }
+        }
+        let adjacent = dylib
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(|runtime| runtime.join("tensorrt/lib"));
+        if adjacent.as_ref().is_some_and(|dir| dir.is_dir()) {
+            return adjacent;
         }
         let dir = data_dir()?.join("runtime/tensorrt/lib");
         dir.is_dir().then_some(dir)
@@ -262,6 +339,37 @@ mod nvidia {
             std::fs::write(tmp.join("libsomethingelse.so"), b"").unwrap();
             assert_eq!(pick_onnxruntime_so(&tmp), None);
             let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn package_requires_contract_and_cuda_provider() {
+            let tmp = std::env::temp_dir().join(format!("pp-ort-package-{}", std::process::id()));
+            let lib = tmp.join("onnxruntime-cuda/lib");
+            std::fs::create_dir_all(&lib).unwrap();
+            std::fs::write(lib.join("libonnxruntime.so"), b"core").unwrap();
+            assert_eq!(packaged_onnxruntime(&tmp), None);
+
+            std::fs::write(tmp.join("runtime-contract.json"), b"{}").unwrap();
+            assert_eq!(packaged_onnxruntime(&tmp), None);
+
+            std::fs::write(lib.join("libonnxruntime_providers_cuda.so"), b"cuda").unwrap();
+            assert_eq!(
+                packaged_onnxruntime(&tmp),
+                Some(lib.join("libonnxruntime.so"))
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn package_candidates_cover_deb_and_appimage_layouts() {
+            let exe = Path::new("/usr/bin/photoproof");
+            let appdir = Path::new("/tmp/.mount-photoproof");
+            let roots = packaged_runtime_roots(exe, Some(appdir));
+            assert!(roots.contains(&PathBuf::from("/usr/bin/runtime")));
+            assert!(roots.contains(&PathBuf::from("/usr/bin/../lib/Photoproof/runtime")));
+            assert!(roots.contains(&PathBuf::from(
+                "/tmp/.mount-photoproof/usr/lib/Photoproof/runtime"
+            )));
         }
     }
 }

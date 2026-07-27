@@ -69,7 +69,13 @@ A path row asserts: "these bytes were observed at `(volume_id, rel_path)` with t
 
 - `rel_path` is relative to the **volume root**, UTF-8, `/`-separated on all platforms.
   Non-UTF-8 filenames are skipped and logged (lossy storage would break relinking).
-  Comparisons are byte-wise; a case-only rename is an ordinary rename (relink, §7.4).
+  Stored spellings and exact lookups are byte-wise. On a case-sensitive volume,
+  a case-only rename is an ordinary rename (relink, §7.4), and two simultaneous
+  entries that differ only by case remain distinct path claims. On a
+  case-insensitive volume, a case-folded DB candidate is treated as the same
+  path only when the live filesystem proves both spellings resolve to the same
+  directory entry; the row is recased in place. OS name or filesystem type is
+  never used as a proxy for mounted-volume semantics.
 - Symlinks are **not followed**. Hard links are fine: same bytes, two paths, one image.
 - States: `active` and `stale` (`stale_reason` ∈ `moved | deleted | superseded |
   root-removed`). Stale rows are kept forever — the breadcrumbs for dormant-prior-version

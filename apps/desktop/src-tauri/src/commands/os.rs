@@ -24,7 +24,8 @@ use std::process::Command;
 use photoproof_core::ContentHash;
 use photoproof_core::library::Library;
 
-use super::S;
+use super::{S, run_blocking};
+use crate::command_work::CommandClass;
 use crate::dto::ImagePathsDto;
 use crate::error::{CmdError, CmdResult};
 
@@ -166,24 +167,32 @@ fn spawn_detached<P: AsRef<OsStr>>((program, args): (P, Vec<OsString>)) -> CmdRe
 #[tauri::command]
 pub async fn image_abs_path(app: S<'_>, hash: String) -> CmdResult<ImagePathsDto> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        image_paths(&app.library, &hash)
-    })
+    run_blocking(
+        app,
+        "os.image-abs-path",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            image_paths(&app.library, &hash)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// "Show in file manager" (D4) for the active image.
 #[tauri::command]
 pub async fn reveal_in_file_manager(app: S<'_>, hash: String) -> CmdResult<()> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        spawn_detached(reveal_spec(&online_abs(&app.library, &hash)?)?)
-    })
+    run_blocking(
+        app,
+        "os.reveal-in-file-manager",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            spawn_detached(reveal_spec(&online_abs(&app.library, &hash)?)?)
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// "Show in file manager" for a rail folder (root-relative `folder`;
@@ -191,32 +200,62 @@ pub async fn reveal_in_file_manager(app: S<'_>, hash: String) -> CmdResult<()> {
 #[tauri::command]
 pub async fn reveal_folder(app: S<'_>, root_id: String, folder: String) -> CmdResult<()> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let record = app
-            .library
-            .root(&root_id)?
-            .ok_or_else(|| CmdError::Invalid(format!("unknown root: {root_id}")))?;
-        let dto = super::library::root_dto(&app, &record)?;
-        let base = dto
-            .abs_path
-            .ok_or_else(|| CmdError::Invalid("folder is on an offline volume".into()))?;
-        spawn_detached(open_spec(&join_mount(&base, &folder)))
+    run_blocking(
+        app,
+        "os.reveal-folder",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let record = app
+                .library
+                .root(&root_id)?
+                .ok_or_else(|| CmdError::Invalid(format!("unknown root: {root_id}")))?;
+            let dto = super::library::root_dto(app, &record)?;
+            let base = dto
+                .abs_path
+                .ok_or_else(|| CmdError::Invalid("folder is on an offline volume".into()))?;
+            spawn_detached(open_spec(&join_mount(&base, &folder)))
+        },
+    )
+    .await
+}
+
+/// Open the retained diagnostics directory. This uses backend-owned path
+/// truth, so the Settings window never has to infer app-data layout.
+#[tauri::command]
+pub async fn reveal_logs(app: S<'_>) -> CmdResult<()> {
+    let app = app.inner().clone();
+    run_blocking(app, "os.reveal-logs", CommandClass::Mutation, move |app| {
+        let path = app
+            .diagnostics
+            .as_ref()
+            .map(|diagnostics| diagnostics.logs_dir.clone())
+            .ok_or_else(|| {
+                CmdError::Invalid(
+                    app.diagnostics_error
+                        .clone()
+                        .unwrap_or_else(|| "diagnostics directory is unavailable".into()),
+                )
+            })?;
+        spawn_detached(open_spec(&path))
     })
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// "Open with default app" (D4 — no configurable editor yet).
 #[tauri::command]
 pub async fn open_with_default(app: S<'_>, hash: String) -> CmdResult<()> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        spawn_detached(open_spec(&online_abs(&app.library, &hash)?))
-    })
+    run_blocking(
+        app,
+        "os.open-with-default",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            spawn_detached(open_spec(&online_abs(&app.library, &hash)?))
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 /// "Open in external editor" (BACKLOG "Configurable external editor, D4
@@ -232,30 +271,34 @@ pub async fn open_with_default(app: S<'_>, hash: String) -> CmdResult<()> {
 #[tauri::command]
 pub async fn open_in_external_editor(app: S<'_>, hash: String) -> CmdResult<()> {
     let app = app.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.touch()?;
-        let path = online_abs(&app.library, &hash)?;
-        // Refuse the missing/unreadable file before any spawn: an offline
-        // volume already errored in online_abs; this catches a path that
-        // resolved but no longer points at a real file.
-        if !path.is_file() {
-            return Err(CmdError::Invalid(
-                "image file is missing or unreadable".into(),
-            ));
-        }
-        // Snapshot the pref, then DROP the lock — the launch happens outside
-        // the critical section.
-        let editor = {
-            let s = app.settings.lock().expect("settings mutex");
-            s.external_editor.clone()
-        };
-        match editor {
-            Some(editor) => spawn_detached(editor_spec(&editor, &path)),
-            None => spawn_detached(open_spec(&path)),
-        }
-    })
+    run_blocking(
+        app,
+        "os.open-in-external-editor",
+        CommandClass::Mutation,
+        move |app| {
+            app.touch()?;
+            let path = online_abs(&app.library, &hash)?;
+            // Refuse the missing/unreadable file before any spawn: an offline
+            // volume already errored in online_abs; this catches a path that
+            // resolved but no longer points at a real file.
+            if !path.is_file() {
+                return Err(CmdError::Invalid(
+                    "image file is missing or unreadable".into(),
+                ));
+            }
+            // Snapshot the pref, then DROP the lock — the launch happens outside
+            // the critical section.
+            let editor = {
+                let s = app.settings.lock().expect("settings mutex");
+                s.external_editor.clone()
+            };
+            match editor {
+                Some(editor) => spawn_detached(editor_spec(&editor, &path)),
+                None => spawn_detached(open_spec(&path)),
+            }
+        },
+    )
     .await
-    .map_err(|e| CmdError::Invalid(format!("task join: {e}")))?
 }
 
 // ---------------------------------------------------------------------------

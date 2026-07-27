@@ -27,12 +27,22 @@
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import Popover from "../../primitives/Popover.svelte";
   import { ui } from "../../state/app.svelte";
+  import * as ipc from "../../ipc/commands";
+  import type { ApplicationHealth } from "../../types/dto";
   import {
     libraryStatusModel,
     formatEta,
     formatRate,
     formatCount,
   } from "../../logic/librarystatus";
+
+  let {
+    health = null,
+    onrefreshhealth = async () => {},
+  }: {
+    health?: ApplicationHealth | null;
+    onrefreshhealth?: () => Promise<void>;
+  } = $props();
 
   const model = $derived(
     libraryStatusModel({
@@ -45,6 +55,9 @@
   // current working stage. Blocked wins: a paused drive is more urgent than
   // the stage it paused.
   const blocked = $derived(model.waitingOn.length > 0);
+  const healthIssues = $derived(health?.issues ?? []);
+  const healthBlocked = $derived(healthIssues.some((issue) => issue.blocking));
+  const needsAttention = $derived(healthIssues.length > 0);
   const overallEta = $derived(formatEta(model.etaSecs));
 
   // Hover lifetime — mirror the Station's open-on-enter / delayed-close idiom
@@ -58,6 +71,7 @@
   function openNow() {
     clearTimeout(closeTimer);
     open = true;
+    void onrefreshhealth();
   }
   function scheduleClose() {
     clearTimeout(closeTimer);
@@ -91,11 +105,31 @@
       <!-- keep the hover alive while the pointer is over the dropped panel -->
       <div class="panel" onpointerenter={openNow} onpointerleave={scheduleClose} role="presentation">
         <div class="panel-head">
-          <span class="panel-title">{model.headline}</span>
+          <span class="panel-title">
+            {needsAttention ? "Application needs attention" : model.headline}
+          </span>
           {#if !model.settled && overallEta !== ""}
             <span class="panel-eta">{overallEta}</span>
           {/if}
         </div>
+
+        {#if healthIssues.length > 0}
+          <div class="waiting health-issues">
+            <span class="section-label">Application health</span>
+            {#each healthIssues.slice(0, 4) as issue (issue.id)}
+              <div
+                class="waiting-row"
+                class:degraded={!issue.blocking}
+                title={issue.lastError ?? issue.summary}
+              >
+                 {issue.title} - {issue.summary}
+              </div>
+            {/each}
+            <button class="health-settings" type="button" onclick={() => void ipc.openSettingsWindow()}>
+              Open health settings
+            </button>
+          </div>
+        {/if}
 
         {#if model.stages.length > 0}
           <div class="stages">
@@ -150,15 +184,22 @@
   <div
     bind:this={anchorEl}
     class="pill"
-    class:blocked
-    class:working={!model.settled && !blocked}
+    class:blocked={blocked || needsAttention}
+    class:working={!model.settled && !blocked && !needsAttention}
     role="button"
     tabindex="0"
     aria-expanded={open}
-    aria-label="Library status - {model.headline}"
+    aria-label="Library status - {needsAttention ? "application needs attention" : model.headline}"
     onkeydown={onPillKeydown}
   >
-    {#if blocked}
+    {#if needsAttention}
+      <span class="glyph amber"><TriangleAlert size={11} aria-hidden="true" /></span>
+      <span class="label amber">
+        {healthBlocked
+          ? "Health action required"
+          : `${healthIssues.length} health ${healthIssues.length === 1 ? "issue" : "issues"}`}
+      </span>
+    {:else if blocked}
       <!-- A failed embedder lane is degraded: same amber error register as the
            other blockers; the full error rides the panel's waiting-row title.
            No `title` on the pill itself: hovering opens the panel, so a native
@@ -359,6 +400,11 @@
   .waiting-row {
     font-size: 12px;
     color: var(--station-error);
+  }
+  .health-settings {
+    align-self: flex-start;
+    margin-top: 3px;
+    font-size: 11px;
   }
   /* a degraded row (a failed embedder lane) carries more weight than a
      transient wait — same error token, a touch bolder so it reads as a fault */

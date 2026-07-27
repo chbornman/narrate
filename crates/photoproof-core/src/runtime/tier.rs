@@ -19,11 +19,21 @@ use photoproof_connectors::config::Tier;
 pub struct GpuAdapter {
     pub name: String,
     pub backend: String,
+    #[serde(default)]
+    pub vendor_id: Option<u32>,
+    #[serde(default)]
+    pub device_id: Option<u32>,
+    #[serde(default)]
+    pub driver: Option<String>,
+    #[serde(default)]
+    pub driver_info: Option<String>,
     pub vram_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct HardwareReport {
+    #[serde(default)]
+    pub schema_version: u32,
     pub adapters: Vec<GpuAdapter>,
     /// Apple Silicon unified memory (`sysctl hw.memsize`); `None` off
     /// macOS / on Intel Macs.
@@ -143,20 +153,29 @@ pub struct TierCache {
 }
 
 impl TierCache {
+    pub fn load_checked(
+        path: &Path,
+    ) -> Result<super::control_file::ControlFileLoad<Self>, super::control_file::ControlFileError>
+    {
+        super::control_file::load_json(path)
+    }
+
     pub fn load(path: &Path) -> Option<Self> {
-        std::fs::read(path)
+        Self::load_checked(path)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|loaded| loaded.value)
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self).expect("tier json"))?;
-        std::fs::rename(tmp, path)
+        super::control_file::save_json(path, self)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TierResolution {
+    pub decision: TierDecision,
+    pub recovery: Option<super::control_file::ControlFileRecovery>,
+    pub issues: Vec<super::control_file::ControlFileError>,
 }
 
 /// Resolve the tier: cache hit unless `redetect`; probe + decide + cache
@@ -167,19 +186,59 @@ pub fn resolve_tier(
     cache_path: &Path,
     redetect: bool,
 ) -> TierDecision {
-    if !redetect && let Some(cached) = TierCache::load(cache_path) {
-        // The override is config, not cache: re-apply over the cached
-        // report so a config edit wins without a re-probe.
-        return decide_tier(&cached.report, config_tier);
+    resolve_tier_checked(probe, config_tier, cache_path, redetect).decision
+}
+
+pub fn resolve_tier_checked(
+    probe: &mut dyn HardwareProbe,
+    config_tier: Tier,
+    cache_path: &Path,
+    redetect: bool,
+) -> TierResolution {
+    let mut issues = Vec::new();
+    let mut observed_recovery = None;
+    match TierCache::load_checked(cache_path) {
+        Ok(loaded) => {
+            if !redetect && let Some(cached) = loaded.value {
+                // The override is config, not cache: re-apply over the
+                // cached report so an edit wins without a re-probe.
+                return TierResolution {
+                    decision: decide_tier(&cached.report, config_tier),
+                    recovery: Some(loaded.recovery),
+                    issues,
+                };
+            }
+            observed_recovery = Some(loaded.recovery);
+        }
+        Err(issue) => issues.push(issue),
     }
     let report = probe.probe();
     let decision = decide_tier(&report, config_tier);
-    let _ = TierCache {
+    let save_result = (TierCache {
         report,
         decision: decision.clone(),
-    }
+    })
     .save(cache_path);
-    decision
+    let recovery = if let Err(error) = save_result {
+        issues.push(super::control_file::ControlFileError::from_io(
+            cache_path, error,
+        ));
+        None
+    } else {
+        let mut recovery =
+            observed_recovery.unwrap_or_else(|| super::control_file::ControlFileRecovery {
+                source: super::control_file::ControlFileSource::Primary,
+                quarantined: Vec::new(),
+                warnings: Vec::new(),
+            });
+        recovery.source = super::control_file::ControlFileSource::Primary;
+        Some(recovery)
+    };
+    TierResolution {
+        decision,
+        recovery,
+        issues,
+    }
 }
 
 #[cfg(test)]
@@ -193,12 +252,17 @@ mod tests {
                     vec![GpuAdapter {
                         name: "scripted".into(),
                         backend: "vulkan".into(),
+                        vendor_id: None,
+                        device_id: None,
+                        driver: None,
+                        driver_info: None,
                         vram_bytes: Some(gb * 1024 * 1024 * 1024),
                     }]
                 })
                 .unwrap_or_default(),
             apple_unified_bytes: unified_gb.map(|gb| gb * 1024 * 1024 * 1024),
             detected_at: "2026-06-11T00:00:00Z".into(),
+            schema_version: 1,
         }
     }
 
@@ -251,5 +315,38 @@ mod tests {
         let redetected = resolve_tier(&mut probe, Tier::Auto, &path, true);
         assert_eq!(redetected.effective_tier, 2);
         assert!(probe.0.is_empty(), "exactly two probe calls");
+    }
+
+    #[test]
+    fn corrupt_tier_cache_recovers_lkg_without_reprobing() {
+        struct CountingProbe {
+            calls: usize,
+        }
+        impl HardwareProbe for CountingProbe {
+            fn probe(&mut self) -> HardwareReport {
+                self.calls += 1;
+                report(Some(16), None)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tier.json");
+        let cached_report = report(Some(8), None);
+        TierCache {
+            decision: decide_tier(&cached_report, Tier::Auto),
+            report: cached_report,
+        }
+        .save(&path)
+        .unwrap();
+        std::fs::write(&path, b"{").unwrap();
+        let mut probe = CountingProbe { calls: 0 };
+
+        let resolved = resolve_tier_checked(&mut probe, Tier::Auto, &path, false);
+        assert_eq!(resolved.decision.effective_tier, 1);
+        assert_eq!(probe.calls, 0, "valid LKG avoids an unnecessary probe");
+        assert_eq!(
+            resolved.recovery.unwrap().source,
+            super::super::control_file::ControlFileSource::LastKnownGood
+        );
     }
 }

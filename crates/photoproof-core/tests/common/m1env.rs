@@ -76,6 +76,7 @@ impl M1Env {
                     probe: Arc::new(probe.clone()),
                     placeholders: Arc::new(PlatformPlaceholderDetector),
                     extractor: Arc::new(RawlerExtractor),
+                    ..Default::default()
                 },
             )
             .expect("open library"),

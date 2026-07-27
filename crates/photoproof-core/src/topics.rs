@@ -6,22 +6,21 @@
 //! what distinguishes a topic (continuous, fuzzy, a lens) from a collection
 //! (discrete, evented, durable).
 //!
-//! So this engine is deliberately tiny: just CRUD over the `topics` table
-//! (id, phrase, space?, created_ts). No evented membership, no notes, no
-//! portability mirror — unlike `collections`, which IS user truth mirrored to
-//! collections.photoproof.json. A saved phrase is cheap, regenerable intent; the
-//! lens it opens recomputes from the (already-portable) vectors + notes. Losing
-//! one costs the user a retype, not a curated decision, so it lives in SQLite
-//! (the rebuildable index) only.
+//! The ranked image set is derived, but the saved phrase and its notes are
+//! authored intent. `topics.photoproof.json` therefore travels with an explicit
+//! journal export. It is deliberately export/import rather than an adjacent
+//! per-image sidecar: topics have no natural photo-volume owner.
 //!
 //! Same connection shape as `collections` (its own connection over the shared
 //! photoproof database, the Library pattern), so the schema it depends on is
 //! already migrated by the time the shell opens it.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -34,10 +33,44 @@ pub enum TopicsError {
     Sqlite(#[from] rusqlite::Error),
     #[error("store error: {0}")]
     Store(#[from] StoreError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("topics portability file: {0}")]
+    Portable(String),
     #[error("topic not found: {0}")]
     NotFound(String),
     #[error("invalid input: {0}")]
     Invalid(String),
+}
+
+pub const TOPICS_FILENAME: &str = "topics.photoproof.json";
+const TOPICS_FORMAT: &str = "photoproof-topics";
+const TOPICS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TopicsDoc {
+    format: String,
+    version: u32,
+    topics: Vec<PortableTopic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableTopic {
+    id: String,
+    phrase: String,
+    space: String,
+    created_ts: String,
+    notes: Vec<PortableTopicNote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableTopicNote {
+    id: String,
+    ts: String,
+    text: String,
 }
 
 /// Which embedding space the user wants a saved topic pulled in. `None`
@@ -64,15 +97,18 @@ impl TopicSpace {
         }
     }
 
-    /// Parse the stored column. An unknown/absent value is the `Blend` default
-    /// (forward-compatible: a future space the user pinned that this build does
-    /// not understand simply reads as "blend", never an error that hides the
-    /// whole row).
-    fn from_db(s: Option<&str>) -> Self {
+    /// Parse the stored column. NULL is the canonical `Blend` default; an
+    /// unknown non-null value is corrupt or belongs to a newer build and must
+    /// not silently change the user's pinned topic into a healthy-looking
+    /// blend.
+    fn from_db(s: Option<&str>) -> Result<Self, TopicsError> {
         match s {
-            Some("annotation") => TopicSpace::Annotation,
-            Some("clip") => TopicSpace::Clip,
-            _ => TopicSpace::Blend,
+            None => Ok(TopicSpace::Blend),
+            Some("annotation") => Ok(TopicSpace::Annotation),
+            Some("clip") => Ok(TopicSpace::Clip),
+            Some(other) => Err(TopicsError::Invalid(format!(
+                "stored topic space is unsupported: {other}"
+            ))),
         }
     }
 
@@ -120,8 +156,8 @@ pub struct TopicNote {
 }
 
 /// The manual-topics engine: its own connection over the shared photoproof
-/// database (the `collections` pattern), but with no portability file — a saved
-/// phrase is rebuildable-index state, not user truth (see the module docs).
+/// database (the `collections` pattern). Explicit journal export/import owns
+/// the portable authored phrase/note document; affinity results remain derived.
 pub struct Topics {
     conn: Mutex<Connection>,
 }
@@ -185,15 +221,24 @@ impl Topics {
             "SELECT id, phrase, space, created_ts FROM topics ORDER BY created_ts DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |r| {
-            let space: Option<String> = r.get(2)?;
-            Ok(TopicRecord {
-                id: r.get(0)?,
-                phrase: r.get(1)?,
-                space: TopicSpace::from_db(space.as_deref()),
-                created_ts: r.get(3)?,
-            })
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, phrase, space, created_ts) = row?;
+            out.push(TopicRecord {
+                id,
+                phrase,
+                space: TopicSpace::from_db(space.as_deref())?,
+                created_ts,
+            });
+        }
+        Ok(out)
     }
 
     /// Remove a saved topic by id. A missing id is an error (the caller asked to
@@ -274,6 +319,208 @@ impl Topics {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Write every saved phrase and authored topic note beside the journal and
+    /// collections export. Ordering and JSON shape are deterministic so a
+    /// repeated export is diffable and checksummable.
+    pub fn export_to(&self, destination: &Path) -> Result<PathBuf, TopicsError> {
+        let doc = {
+            let conn = self.conn.lock().expect("topics mutex");
+            read_portable_doc(&conn)?
+        };
+        let mut bytes = serde_json::to_vec_pretty(&doc)
+            .map_err(|error| TopicsError::Portable(error.to_string()))?;
+        bytes.push(b'\n');
+        std::fs::create_dir_all(destination)?;
+        let target = destination.join(TOPICS_FILENAME);
+        crate::sidecar::write_atomic(&target, &bytes)?;
+        Ok(target)
+    }
+
+    /// Union an exported topics document into the live database. Existing rows
+    /// with the same id must be byte-for-byte equivalent; an ambiguous
+    /// same-id/different-authored-content conflict aborts the entire
+    /// transaction instead of silently choosing a winner.
+    pub fn import_from(&self, path: &Path) -> Result<usize, TopicsError> {
+        let bytes = std::fs::read(path)?;
+        let doc: TopicsDoc = serde_json::from_slice(&bytes)
+            .map_err(|error| TopicsError::Portable(error.to_string()))?;
+        validate_portable_doc(&doc)?;
+        let mut conn = self.conn.lock().expect("topics mutex");
+        let tx = conn.transaction()?;
+        let mut inserted = 0_usize;
+        for topic in doc.topics {
+            let stored = tx
+                .query_row(
+                    "SELECT phrase, COALESCE(space, 'blend'), created_ts
+                       FROM topics WHERE id = ?1",
+                    params![topic.id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let db_space = if topic.space == "blend" {
+                None
+            } else {
+                Some(topic.space.as_str())
+            };
+            match stored {
+                Some(existing)
+                    if existing
+                        != (
+                            topic.phrase.clone(),
+                            topic.space.clone(),
+                            topic.created_ts.clone(),
+                        ) =>
+                {
+                    return Err(TopicsError::Portable(format!(
+                        "topic {} conflicts with existing authored content",
+                        topic.id
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    tx.execute(
+                        "INSERT INTO topics (id, phrase, space, created_ts)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![topic.id, topic.phrase, db_space, topic.created_ts],
+                    )?;
+                    inserted += 1;
+                }
+            }
+            for note in topic.notes {
+                let stored = tx
+                    .query_row(
+                        "SELECT topic_id, ts, text FROM topic_notes WHERE id = ?1",
+                        params![note.id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                match stored {
+                    Some(existing)
+                        if existing != (topic.id.clone(), note.ts.clone(), note.text.clone()) =>
+                    {
+                        return Err(TopicsError::Portable(format!(
+                            "topic note {} conflicts with existing authored content",
+                            note.id
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        tx.execute(
+                            "INSERT INTO topic_notes (id, topic_id, ts, text)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params![note.id, topic.id, note.ts, note.text],
+                        )?;
+                        inserted += 1;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+}
+
+fn read_portable_doc(conn: &Connection) -> Result<TopicsDoc, TopicsError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, phrase, COALESCE(space, 'blend'), created_ts
+           FROM topics ORDER BY id",
+    )?;
+    let heads = stmt
+        .query_map([], |row| {
+            Ok(PortableTopic {
+                id: row.get(0)?,
+                phrase: row.get(1)?,
+                space: row.get(2)?,
+                created_ts: row.get(3)?,
+                notes: Vec::new(),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut note_stmt =
+        conn.prepare("SELECT id, ts, text FROM topic_notes WHERE topic_id = ?1 ORDER BY id")?;
+    let mut topics = Vec::with_capacity(heads.len());
+    for mut topic in heads {
+        topic.notes = note_stmt
+            .query_map(params![topic.id], |row| {
+                Ok(PortableTopicNote {
+                    id: row.get(0)?,
+                    ts: row.get(1)?,
+                    text: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        topics.push(topic);
+    }
+    Ok(TopicsDoc {
+        format: TOPICS_FORMAT.into(),
+        version: TOPICS_VERSION,
+        topics,
+    })
+}
+
+fn validate_portable_doc(doc: &TopicsDoc) -> Result<(), TopicsError> {
+    if doc.format != TOPICS_FORMAT || doc.version != TOPICS_VERSION {
+        return Err(TopicsError::Portable(format!(
+            "unsupported format/version {}/{}",
+            doc.format, doc.version
+        )));
+    }
+    let mut topic_ids = HashSet::new();
+    let mut note_ids = HashSet::new();
+    for topic in &doc.topics {
+        if Ulid::from_string(&topic.id).is_err() || !topic_ids.insert(&topic.id) {
+            return Err(TopicsError::Portable(format!(
+                "invalid or duplicate topic id {}",
+                topic.id
+            )));
+        }
+        if topic.phrase.trim().is_empty() || topic.phrase.trim() != topic.phrase {
+            return Err(TopicsError::Portable(format!(
+                "topic {} has an invalid phrase",
+                topic.id
+            )));
+        }
+        if !matches!(topic.space.as_str(), "blend" | "annotation" | "clip") {
+            return Err(TopicsError::Portable(format!(
+                "topic {} has unsupported space {}",
+                topic.id, topic.space
+            )));
+        }
+        UtcMillis::parse(&topic.created_ts).map_err(|error| {
+            TopicsError::Portable(format!("topic {} timestamp: {error}", topic.id))
+        })?;
+        for note in &topic.notes {
+            if Ulid::from_string(&note.id).is_err() || !note_ids.insert(&note.id) {
+                return Err(TopicsError::Portable(format!(
+                    "invalid or duplicate topic-note id {}",
+                    note.id
+                )));
+            }
+            if note.text.trim().is_empty() || note.text.trim() != note.text {
+                return Err(TopicsError::Portable(format!(
+                    "topic note {} has invalid text",
+                    note.id
+                )));
+            }
+            UtcMillis::parse(&note.ts).map_err(|error| {
+                TopicsError::Portable(format!("topic note {} timestamp: {error}", note.id))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -320,6 +567,30 @@ mod tests {
         assert!(matches!(
             topics.remove(&a.id),
             Err(TopicsError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn list_surfaces_an_unknown_stored_space_instead_of_defaulting_to_blend() {
+        let (_dir, topics) = open();
+        let saved = topics
+            .add("harbor", TopicSpace::Clip, UtcMillis::now())
+            .unwrap();
+        topics
+            .conn
+            .lock()
+            .expect("topics mutex")
+            .execute(
+                "UPDATE topics SET space = 'future-space' WHERE id = ?1",
+                params![saved.id],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            topics.list(),
+            Err(TopicsError::Invalid(detail))
+                if detail.contains("stored topic space")
+                    && detail.contains("future-space")
         ));
     }
 
@@ -454,6 +725,97 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, note_id);
         assert_eq!(listed[0].text, "the alpine series");
+    }
+
+    #[test]
+    fn portable_export_import_preserves_authored_topics_and_notes() {
+        let (_source_dir, source) = open();
+        let saved = source
+            .add(
+                "harbor at dusk",
+                TopicSpace::Annotation,
+                UtcMillis::from_epoch_ms(1_000_000),
+            )
+            .unwrap();
+        let note = source
+            .add_note(
+                &saved.id,
+                "the working definition",
+                UtcMillis::from_epoch_ms(2_000_000),
+            )
+            .unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let path = source.export_to(export_dir.path()).unwrap();
+        assert_eq!(path.file_name().unwrap(), TOPICS_FILENAME);
+
+        let (_target_dir, target) = open();
+        assert_eq!(target.import_from(&path).unwrap(), 2);
+        let imported = target.list().unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].id, saved.id);
+        assert_eq!(imported[0].phrase, saved.phrase);
+        assert_eq!(imported[0].space, TopicSpace::Annotation);
+        assert_eq!(target.notes(&saved.id).unwrap(), vec![note]);
+        assert_eq!(target.import_from(&path).unwrap(), 0, "union is idempotent");
+    }
+
+    #[test]
+    fn portable_conflict_aborts_the_whole_import() {
+        let (_source_dir, source) = open();
+        let first = source
+            .add("first", TopicSpace::Blend, UtcMillis::from_epoch_ms(1_000))
+            .unwrap();
+        let second = source
+            .add("second", TopicSpace::Clip, UtcMillis::from_epoch_ms(2_000))
+            .unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let path = source.export_to(export_dir.path()).unwrap();
+
+        let (_target_dir, target) = open();
+        target
+            .add(
+                "unrelated",
+                TopicSpace::Blend,
+                UtcMillis::from_epoch_ms(3_000),
+            )
+            .unwrap();
+        {
+            let conn = target.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO topics (id, phrase, space, created_ts)
+                 VALUES (?1, 'conflicting', NULL, ?2)",
+                params![second.id, second.created_ts],
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            target.import_from(&path),
+            Err(TopicsError::Portable(detail)) if detail.contains("conflicts")
+        ));
+        assert!(
+            !target
+                .list()
+                .unwrap()
+                .iter()
+                .any(|topic| topic.id == first.id),
+            "the earlier insert in the same import transaction rolled back"
+        );
+    }
+
+    #[test]
+    fn portable_document_rejects_unknown_format_without_mutation() {
+        let (_dir, topics) = open();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            br#"{"format":"other","version":1,"topics":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            topics.import_from(file.path()),
+            Err(TopicsError::Portable(detail)) if detail.contains("unsupported")
+        ));
+        assert!(topics.list().unwrap().is_empty());
     }
 
     /// `TopicSpace::parse` maps the command layer's optional string to a space,

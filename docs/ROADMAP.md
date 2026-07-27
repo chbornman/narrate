@@ -22,12 +22,15 @@ floor (typed notes + grease pencil + FTS5) is always a complete product undernea
 
 ## M1 - library (mostly shipped; remaining tails)
 
-- At-idle WAL checkpoint scheduling (shutdown path built; idle caller missing) - `STATUS` partial, `spec/EVENTS §5.1`
-- User-facing backup guidance + "export includes overflow + sessions" messaging - `STATUS` not-built, `spec/SIDECARS §8.3`
+- Installed-platform control-file and complete app-state backup/restore drills -
+  local idle WAL scheduling, backup helper, restore rollback, and guidance are
+  built and tested
 - Overflow-only count in the export UI - `STATUS` not-built
-- APFS case-only rename relinking (the known-red `s02_2`) - awaiting case-sensitivity ruling
+- Retain the native default-APFS S6 receipt after the implemented case-only
+  rename semantics pass on the founder Mac
 - Cloud-sync root advisory (Dropbox/OneDrive/iCloud one-time warning) - detection exists, UI does not
-- CI pipeline (GitHub Actions standing gate + OS-matrix sidecar byte-compare + nightly full-scale)
+- Remote receipts for the checked-in three-OS quality/package workflows, plus
+  the still-open nightly full-scale lane
 - Real-hardware budget checks (grid 60 fps, search <100 ms, 50k-RAW real ingest) - `FOUNDER-CHECKLIST`
 
 ## M1.5 - deep image decode (scheduled concept)
@@ -137,9 +140,11 @@ Landed: P1 preview resize (3.66x), P3 graph Worker, P4 PPG demosaic. Rejected: P
 
 ## Cross-cutting / quality
 
-- Full metrics suite across every pipeline stage (when feature-complete)
-- Em-dash CI grep-gate (the sweep landed; the guard against creep did not)
-- Stronger storage/backup messaging beyond the welcome card
+- Extend the landed closed-taxonomy JSONL journey monitor only when new
+  journeys need durable baselines; retain real-device receipts
+- The no-em-dash UI-copy gate is checked in and green
+- Native installed backup/restore and hard-volume receipts; the local helper,
+  safety contract, health projection, and user guidance are built
 
 ---
 

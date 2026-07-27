@@ -14,6 +14,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "isolatedModules": true,
+    "noEmit": true,
     "skipLibCheck": true,
     "types": ["svelte", "vite/client"]
   },

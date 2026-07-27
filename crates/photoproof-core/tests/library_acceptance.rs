@@ -14,11 +14,12 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use image::{DynamicImage, RgbImage};
 use photoproof_core::library::{
     ArtifactKind, ClearKind, DebounceConfig, EmbeddedPreviewExtractor, ExtractedPreview,
-    FakeVolumeProbe, FullDecodeFormat, Library, LibraryOptions, MARKER_FILENAME, Observed,
-    PipelineEffect, PlatformIdKind, PreviewError, PreviewSource, ProbedVolume, QueueOptions,
-    RawWatchEvent, ScanOptions, SharedSetPlaceholderDetector, full_artifact_path,
-    hash_invocation_count,
+    FakeVolumeProbe, FileSystemSemantics, FullDecodeFormat, Library, LibraryOptions,
+    MARKER_FILENAME, Observed, PipelineEffect, PlatformFileSystemSemantics, PlatformIdKind,
+    PreviewError, PreviewSource, ProbedVolume, QueueOptions, RawWatchEvent, ScanOptions,
+    SharedSetPlaceholderDetector, artifact_path, full_artifact_path, hash_invocation_count,
 };
+use photoproof_core::search::Searcher;
 use photoproof_core::{
     ContentHash, EventDraft, EventStore, RemarkSource, SessionContext, SessionId, StrokePayload,
     StrokePoint, Tool, UtcMillis,
@@ -114,6 +115,10 @@ fn probed(mount: &Path) -> ProbedVolume {
 
 impl Env {
     fn new() -> Env {
+        Self::new_with_fs_semantics(Arc::new(PlatformFileSystemSemantics))
+    }
+
+    fn new_with_fs_semantics(fs_semantics: Arc<dyn FileSystemSemantics>) -> Env {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mount = tmp.path().join("mount");
         std::fs::create_dir_all(&mount).unwrap();
@@ -123,7 +128,19 @@ impl Env {
         probe.set_mounts(vec![probed(&mount)]);
         let placeholders = SharedSetPlaceholderDetector::new();
         let extractor = Arc::new(FakeExtractor::default());
-        let lib = open_lib(&db, &cache, &probe, &placeholders, &extractor);
+        let lib = Arc::new(
+            Library::open_with(
+                &db,
+                &cache,
+                LibraryOptions {
+                    probe: Arc::new(probe.clone()),
+                    placeholders: Arc::new(placeholders.clone()),
+                    extractor: Arc::clone(&extractor) as Arc<dyn EmbeddedPreviewExtractor>,
+                    fs_semantics,
+                },
+            )
+            .unwrap(),
+        );
         Env {
             _tmp: tmp,
             mount,
@@ -203,6 +220,39 @@ impl Env {
     }
 }
 
+#[derive(Debug, Default)]
+struct MetadataFailureSemantics {
+    fail_path: Mutex<Option<PathBuf>>,
+}
+
+impl MetadataFailureSemantics {
+    fn fail_on(&self, path: PathBuf) {
+        *self.fail_path.lock().unwrap() = Some(path);
+    }
+}
+
+impl FileSystemSemantics for MetadataFailureSemantics {
+    fn same_entry(&self, stored: &Path, observed: &Path) -> bool {
+        PlatformFileSystemSemantics.same_entry(stored, observed)
+    }
+
+    fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        if self
+            .fail_path
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|failed| failed == path)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected metadata failure",
+            ));
+        }
+        std::fs::metadata(path)
+    }
+}
+
 fn open_lib(
     db: &Path,
     cache: &Path,
@@ -218,6 +268,7 @@ fn open_lib(
                 probe: Arc::new(probe.clone()),
                 placeholders: Arc::new(placeholders.clone()),
                 extractor: Arc::clone(extractor) as Arc<dyn EmbeddedPreviewExtractor>,
+                ..Default::default()
             },
         )
         .unwrap(),
@@ -688,7 +739,10 @@ fn l13_03_interrupt_resume() {
         );
         let _ = env.lib.process_queue(&QueueOptions {
             cancel: Some(Arc::clone(&cancel)),
+            additional_cancel: None,
             max_items: None,
+            max_concurrency: None,
+            excluded_embedding_root_ids: Vec::new(),
         });
         killer.join().unwrap();
         // Torn-write simulation: a stranded temp file in the cache.
@@ -1117,6 +1171,59 @@ fn l13_09_root_removal() {
     assert_eq!(store.folded_journal(&hash).unwrap().len(), 1);
 }
 
+#[test]
+fn incomplete_root_walk_never_stales_unseen_paths() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("photos");
+    env.write("photos/kept.jpg", &unique_jpeg(990));
+    env.scan(&root);
+    assert_eq!(env.lib.image_count().unwrap(), 1);
+
+    // The volume still identifies as online, but the registered directory is
+    // temporarily unavailable. WalkDir reports an enumeration error; that is
+    // not authoritative evidence that every indexed file was deleted.
+    std::fs::remove_dir_all(env.mount.join("photos")).unwrap();
+    let report = env.scan(&root);
+    assert!(report.io_errors > 0);
+    assert!(report.stale_inference_suppressed);
+    assert_eq!(report.went_stale, 0);
+    let active: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE root_id = ?1 AND state = 'active'",
+            [&root],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active, 1, "an incomplete walk preserves indexed paths");
+}
+
+#[test]
+fn metadata_read_failure_never_stales_the_affected_path() {
+    let _g = guard();
+    let fs_semantics = Arc::new(MetadataFailureSemantics::default());
+    let env = Env::new_with_fs_semantics(fs_semantics.clone());
+    let root = env.register("photos");
+    let path = env.write("photos/kept.jpg", &unique_jpeg(991));
+    env.scan(&root);
+
+    fs_semantics.fail_on(path);
+    let report = env.scan(&root);
+    assert_eq!(report.io_errors, 1);
+    assert!(report.stale_inference_suppressed);
+    assert_eq!(report.went_stale, 0);
+    let active: i64 = env
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE root_id = ?1 AND state = 'active'",
+            [&root],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active, 1, "metadata failure preserves the indexed path");
+}
+
 /// Removed-folder reconciliation: removing a root must RETIRE the pending
 /// ingest passes of the images it FULLY orphans (no active path left), so the
 /// drain stops churning on files that no longer exist — and those images must
@@ -1312,6 +1419,191 @@ fn archive_root_hides_from_active_keeps_journal_then_restores() {
     );
     assert!(env.lib.archived_roots().unwrap().is_empty());
     assert_eq!(store.folded_journal(&hash).unwrap().len(), 1);
+}
+
+/// A25 cross-cutting archive contract: archive is a searchable, non-destructive
+/// resting state, not a half-active source. Retained path rows preserve identity
+/// and authored truth, while offline burden, stale inference, cache repair, and
+/// every ingest pass remain dormant. Unarchive resumes the same pending work;
+/// remove/re-add revives the same root identity.
+#[test]
+fn archive_root_pauses_background_lifecycle_but_keeps_search_truth() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("archive-cycle");
+    let source = env.write("archive-cycle/image.jpg", &unique_jpeg(1301));
+    env.scan(&root);
+    let drained = env.drain_queue();
+    assert!(
+        drained.done > 0,
+        "fixture starts from complete derived state"
+    );
+    let hash = env.only_hash();
+    let (store, session) = env.store();
+    store
+        .append(
+            &session,
+            d_remark("cobalt lighthouse archive invariant", &hash),
+            None,
+        )
+        .unwrap();
+
+    for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+        std::fs::remove_file(artifact_path(&env.cache, &hash, kind))
+            .expect("remove derived preview fixture");
+    }
+    env.lib.archive_root(&root).unwrap();
+    assert!(
+        env.lib.image_hashes().unwrap().contains(&hash),
+        "archive retains searchable image identity"
+    );
+
+    env.probe.set_mounts(Vec::new());
+    env.lib.probe_volumes().unwrap();
+    assert!(
+        env.lib.offline_volume_burden().unwrap().is_empty(),
+        "a resting source creates no disconnected-drive warning"
+    );
+    assert!(
+        env.lib
+            .reconcile_all(&ScanOptions::default())
+            .unwrap()
+            .is_empty(),
+        "stale inference never walks an archived root"
+    );
+
+    let doctor = env.lib.doctor().unwrap();
+    assert_eq!(
+        doctor.repended, 1,
+        "cache drift becomes durable pending repair"
+    );
+    let paused = env.lib.process_queue(&QueueOptions::default()).unwrap();
+    assert_eq!(
+        paused.processed, 0,
+        "pending preview repair stays paused while archived"
+    );
+    let pending: String = env
+        .conn()
+        .query_row(
+            "SELECT state FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'preview'",
+            [hash.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, "pending");
+    assert!(
+        env.lib.active_pass_counters().unwrap().is_empty(),
+        "archived pending rows do not impersonate active background work"
+    );
+
+    let search = Searcher::open(&env.db).unwrap();
+    let result = search
+        .search("cobalt lighthouse", &[])
+        .expect("search retained authored truth");
+    assert!(
+        result.images.iter().any(|image| image.image_hash == hash),
+        "archived content stays discoverable through authored search"
+    );
+
+    env.probe.set_mounts(vec![probed(&env.mount)]);
+    env.lib.probe_volumes().unwrap();
+    env.lib.unarchive_root(&root).unwrap();
+    let resumed = env.lib.process_queue(&QueueOptions::default()).unwrap();
+    assert!(
+        resumed.done > 0,
+        "the same pending cache repair resumes after unarchive"
+    );
+    for kind in [ArtifactKind::Thumb, ArtifactKind::Display] {
+        assert!(
+            artifact_path(&env.cache, &hash, kind).exists(),
+            "resumed repair regenerates {kind:?}"
+        );
+    }
+
+    // A delete while resting must not become a stale inference. Restoration
+    // re-enables reconciliation and observes it exactly once.
+    env.lib.archive_root(&root).unwrap();
+    std::fs::remove_file(&source).unwrap();
+    assert!(
+        env.lib
+            .reconcile_all(&ScanOptions::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        env.lib
+            .paths_for_image(&hash)
+            .unwrap()
+            .iter()
+            .any(|path| path.active),
+        "retained path is not guessed stale during archive"
+    );
+    env.lib.unarchive_root(&root).unwrap();
+    let reports = env.lib.reconcile_all(&ScanOptions::default()).unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(
+        env.lib
+            .paths_for_image(&hash)
+            .unwrap()
+            .iter()
+            .all(|path| !path.active),
+        "active reconciliation sees the real deletion"
+    );
+
+    env.lib.remove_root(&root).unwrap();
+    let revived = env
+        .lib
+        .register_root(&env.mount.join("archive-cycle"), Some("archive-cycle"))
+        .unwrap();
+    assert_eq!(revived, root, "re-add revives the durable root identity");
+    env.write("archive-cycle/image.jpg", &unique_jpeg(1301));
+    env.scan(&revived);
+    let result = search.search("cobalt lighthouse", &[]).unwrap();
+    assert!(
+        result.images.iter().any(|image| image.image_hash == hash),
+        "archive/remove/re-add never loses authored search truth"
+    );
+}
+
+#[test]
+fn doctor_cancellation_stops_before_a_new_repair_unit_and_resumes_cleanly() {
+    let _g = guard();
+    let env = Env::new();
+    let root = env.register("doctor-cancel");
+    env.write("doctor-cancel/image.jpg", &unique_jpeg(1302));
+    env.scan(&root);
+    env.drain_queue();
+    let hash = env.only_hash();
+    std::fs::remove_file(artifact_path(&env.cache, &hash, ArtifactKind::Thumb)).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(true));
+    let stopped = env.lib.doctor_with_cancel(&cancel).unwrap();
+    assert!(stopped.cancelled);
+    assert_eq!(stopped.repended, 0);
+    let state: String = env
+        .conn()
+        .query_row(
+            "SELECT state FROM ingest_passes
+             WHERE image_hash = ?1 AND pass_name = 'preview'",
+            [hash.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "done",
+        "cancellation does not partially publish the next repair"
+    );
+
+    cancel.store(false, Ordering::Release);
+    let resumed = env.lib.doctor_with_cancel(&cancel).unwrap();
+    assert!(!resumed.cancelled);
+    assert_eq!(resumed.repended, 1);
+    env.drain_queue();
+    assert!(
+        artifact_path(&env.cache, &hash, ArtifactKind::Thumb).exists(),
+        "the next managed pass resumes and heals the derived artifact"
+    );
 }
 
 /// Adding a folder INSIDE an existing active root (or a parent of one) is

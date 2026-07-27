@@ -178,11 +178,25 @@ impl VoiceActivityDetector for SileroVad {
     fn sample_rate(&self) -> u32 {
         SAMPLE_RATE_HZ
     }
+
+    fn reconfigure(&mut self, enter: f32, exit: f32, hang_windows: u32) -> bool {
+        self.enter = enter;
+        self.exit = exit;
+        self.hang_windows = hang_windows;
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_hysteresis_reconfiguration_commits_the_whole_triple() {
+        let mut vad = SileroVad::new().unwrap();
+        assert!(vad.reconfigure(0.61, 0.29, 9));
+        assert_eq!((vad.enter, vad.exit, vad.hang_windows), (0.61, 0.29, 9));
+    }
 
     /// Minimal RIFF/PCM16 mono reader for the bundled fixture (sherpa's
     /// LibriSpeech-derived test clip, 16 kHz).

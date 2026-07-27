@@ -511,6 +511,7 @@ mod synthetic {
                         probe: Arc::new(probe),
                         placeholders: Arc::new(PlatformPlaceholderDetector),
                         extractor: Arc::new(RawlerExtractor),
+                        ..Default::default()
                     },
                 )
                 .map_err(|e| format!("open library: {e}"))?,

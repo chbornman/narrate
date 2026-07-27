@@ -1,7 +1,8 @@
 //! Search command (RETRIEVAL §4 / §5.4 — M1 contract) — moved verbatim
 //! from the old commands.rs (FOUNDATIONS split).
 
-use super::S;
+use super::{S, admit, run_blocking};
+use crate::command_work::CommandClass;
 use crate::error::CmdResult;
 use crate::search_types::{Filter, FusionWeightsWire, SearchResults};
 use crate::search_wire::SearchMode;
@@ -42,6 +43,7 @@ pub fn search(
     include_debug: Option<bool>,
     fuzzy: Option<bool>,
 ) -> CmdResult<SearchResults> {
+    let _permit = admit(app.inner(), "search.search", CommandClass::Read)?;
     app.touch()?;
     app.searcher.interrupt();
     let mode = SearchMode::from_wire(mode.as_deref())?;
@@ -85,7 +87,7 @@ pub async fn find_similar(
     // The brute-force scan + a metadata read can take real time on a large
     // space; do it off the async runtime's cooperative threads (the os.rs
     // spawn_blocking precedent) so a big library can't stall the UI loop.
-    tauri::async_runtime::spawn_blocking(move || {
+    run_blocking(app, "search.find-similar", CommandClass::Read, move |app| {
         app.touch()?;
         let pairs = app
             .vectors
@@ -96,5 +98,4 @@ pub async fn find_similar(
         Ok(pairs.into_iter().map(|(h, _score)| h).collect())
     })
     .await
-    .map_err(|e| crate::error::CmdError::Invalid(format!("task join: {e}")))?
 }

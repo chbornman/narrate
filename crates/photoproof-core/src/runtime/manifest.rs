@@ -85,12 +85,16 @@ impl FileEntry {
         self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 
-    /// B55 fail-closed: an all-zero sha or the UNPINNED-P6.3 revision
-    /// placeholder means this entry has not been through a spike session.
+    /// B55 fail-closed: an all-zero sha or a known staged-only revision
+    /// placeholder means this entry is not backed by immutable hosted bytes.
     /// The downloader refuses it pre-flight; consent never enqueues it;
     /// settings renders it as pending, not failed.
     pub fn is_pinned(&self) -> bool {
-        !(self.sha256.bytes().all(|b| b == b'0') || self.revision == "UNPINNED-P6.3")
+        !(self.sha256.bytes().all(|b| b == b'0')
+            || matches!(
+                self.revision.as_str(),
+                "UNPINNED-P6.3" | "local-fp16-convert"
+            ))
     }
 }
 
@@ -123,13 +127,9 @@ impl Manifest {
     /// §5.1: also written to `{models_dir}/manifest.json` for the debug
     /// panel.
     pub fn write_to(&self, models_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(models_dir)?;
-        let tmp = models_dir.join("manifest.json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(self).expect("manifest json"),
-        )?;
-        std::fs::rename(tmp, models_dir.join("manifest.json"))
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        super::control_file::write_durable(&models_dir.join("manifest.json"), &bytes)
     }
 }
 
@@ -527,16 +527,19 @@ pub fn compiled_manifest() -> Manifest {
             // (COCO nDCG 0.8212 vs int8 0.8225). Selected on macOS when config names
             // this id; the int8 entry stays the CPU fallback.
             //
-            // NOT YET HOSTED: this artifact is LOCALLY converted (the immich repo
-            // serves fp32, not this single-file fp16), so the repo/revision below is
-            // a NOMINAL pointer and a real download URL is a backlog item (host the
-            // file + re-pin). Dev machines stage the files under models/<id>/ and
-            // mark installed.json, so the downloader is never invoked. The sha256 +
-            // bytes ARE the real local artifact (a future hosted copy must match).
+            // STAGED, NOT OFFERED: this artifact is LOCALLY converted (the immich
+            // repo serves fp32, not this single-file fp16), so
+            // `local-fp16-convert` is deliberately rejected by `is_pinned` and the
+            // empty tier list keeps it out of consent/download offers. Dev and eval
+            // rigs may stage the files manually, but production must remain on the
+            // hosted int8 model until these exact bytes have an immutable hosted
+            // revision. Graduation requires BOTH replacing the revision and
+            // restoring appropriate tiers. The SHA-256 values and sizes below are
+            // the real local artifacts a future hosted copy must match.
             ModelEntry {
                 id: "ViT-H-14-378-quickgelu__dfn5b-fp16".into(),
                 role: "embedder".into(),
-                tiers: vec![1, 2],
+                tiers: vec![],
                 license: License {
                     name: "Apple Sample Code License (ASCL)".into(),
                     url: "https://huggingface.co/immich-app/ViT-H-14-378-quickgelu__dfn5b".into(),
@@ -658,23 +661,22 @@ pub struct AcceptanceRecord {
 }
 
 impl Acceptances {
+    pub fn load_checked(
+        path: &Path,
+    ) -> Result<super::control_file::ControlFileLoad<Self>, super::control_file::ControlFileError>
+    {
+        super::control_file::load_json(path)
+    }
+
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        Self::load_checked(path)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|loaded| loaded.value)
             .unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(self).expect("acceptances json"),
-        )?;
-        std::fs::rename(tmp, path)
+        super::control_file::save_json(path, self)
     }
 
     pub fn accept(&mut self, model_id: &str, license_url: &str, at_rfc3339: &str) {
@@ -713,13 +715,12 @@ mod tests {
         // Tier-1 bundle with the B73 embedder pins REAL: E2B (3.91 GB) + int8
         // English ASR (0.66 GB, the fallback engine) + DFN5B int8 (3.95 GB, graph
         // + ~400 external-data files) + EmbeddingGemma-300m q8 (0.33 GB, the
-        // text-embedder default) + DFN5B-fp16 (1.98 GB, the single-file CLIP) +
-        // Nemotron 3.5 parakeet (2.59 GB, the LIVE default ASR since 2026-06-14) =
-        // 13_424_936_294 bytes. Qwen3-alt + the MTP variants are tier-2-only, so
-        // NOT counted here. Exact, not a range — every byte traces to a pinned
-        // file. (The fp16 bundle byte is nominal: dev machines stage it locally;
-        // a hosted download URL is a backlog item, see the entry comment.)
-        assert_eq!(m.total_bytes_at(1), 13_424_936_294, "tier-1 pinned sum");
+        // text-embedder default) + Nemotron 3.5 parakeet (2.59 GB, the LIVE
+        // default ASR since 2026-06-14) = 11_446_605_175 bytes. Qwen3-alt + the
+        // MTP variants are tier-2-only. The staged-only fp16 CLIP is offered at
+        // no tier and is therefore absent too. Exact, not a range — every byte
+        // traces to an immutable hosted file.
+        assert_eq!(m.total_bytes_at(1), 11_446_605_175, "tier-1 pinned sum");
         assert_eq!(m.total_bytes_at(0), 0, "tier 0 offers NOTHING");
     }
 
@@ -812,6 +813,33 @@ mod tests {
             dfn.files.iter().map(|f| f.bytes).sum::<u64>(),
             "total_bytes is the live file sum, never an estimate"
         );
+    }
+
+    /// D8/P0: the locally converted fp16 bundle has valid hashes for eval rigs,
+    /// but no immutable hosted revision. It must stay in the manifest only as a
+    /// staged artifact: no public offer, no consent sum, and `is_pinned` false
+    /// so even the explicit download seam refuses it.
+    #[test]
+    fn fp16_clip_is_staged_unpinned_and_offered_at_no_tier() {
+        let m = compiled_manifest();
+        let fp16 = m
+            .model("ViT-H-14-378-quickgelu__dfn5b-fp16")
+            .expect("staged fp16 entry remains available to eval rigs");
+        assert_eq!(fp16.role, "embedder");
+        assert!(
+            !fp16.is_pinned(),
+            "local-fp16-convert is not an immutable hosted pin"
+        );
+        assert!(
+            fp16.tiers.is_empty(),
+            "staged artifact is not offered to any hardware tier"
+        );
+        for tier in [0, 1, 2] {
+            assert!(
+                m.offered_at(tier).iter().all(|entry| entry.id != fp16.id),
+                "tier {tier} must never offer the staged fp16 artifact"
+            );
+        }
     }
 
     /// B74: the Nemotron 3.5 entry is a STAGED pin — fully resolvable
@@ -968,5 +996,27 @@ mod tests {
         let rec = &loaded.accepted["gemma-4-e4b-it-q4_k_m"];
         assert_eq!(rec.license_url, "https://ai.google.dev/gemma/terms");
         assert_eq!(rec.at, "2026-06-11T08:00:00Z");
+    }
+
+    #[test]
+    fn corrupt_acceptances_recover_lkg_instead_of_revoking_every_license() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acceptances.json");
+        let mut expected = Acceptances::default();
+        expected.accept(
+            "gemma-4-e4b-it-q4_k_m",
+            "https://ai.google.dev/gemma/terms",
+            "2026-06-11T08:00:00Z",
+        );
+        expected.save(&path).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+
+        let loaded = Acceptances::load_checked(&path).unwrap();
+        assert_eq!(loaded.value, Some(expected));
+        assert_eq!(
+            loaded.recovery.source,
+            super::super::control_file::ControlFileSource::LastKnownGood
+        );
+        assert_eq!(loaded.recovery.quarantined.len(), 1);
     }
 }

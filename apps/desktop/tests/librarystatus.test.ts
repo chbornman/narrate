@@ -48,6 +48,12 @@ const input = (over: Partial<LibraryStatusInput> = {}): LibraryStatusInput => ({
 const model = (over: Partial<ModelRowDto> = {}): ModelRowDto => ({
   id: "dfn5b",
   role: "embedder",
+  defaultOffer: true,
+  advancedAvailable: false,
+  compatible: true,
+  compatibilityReason: "fixture",
+  compatibleProviders: ["CPU"],
+  consumers: [],
   state: "installed",
   totalBytes: 1_000,
   downloadedBytes: 1_000,
@@ -57,6 +63,9 @@ const model = (over: Partial<ModelRowDto> = {}): ModelRowDto => ({
   accepted: true,
   error: null,
   retryHint: null,
+  operation: null,
+  operationEvent: null,
+  registryError: null,
   ...over,
 });
 
@@ -67,8 +76,12 @@ const runtime = (over: Partial<RuntimeStatus> = {}): RuntimeStatus => ({
   llmBlocked: null,
   clipReady: true,
   textEmbedderReady: true,
-  clip: { state: "ready", error: null },
-  textEmbedder: { state: "ready", error: null },
+  clip: { state: "ready", attemptId: 1, modelId: "clip", generation: 1, startedAt: "2026-01-01T00:00:00.000Z", error: null },
+  textEmbedder: { state: "ready", attemptId: 2, modelId: "text", generation: 1, startedAt: "2026-01-01T00:00:00.000Z", error: null },
+  capabilityState: "ready",
+  capabilitySummary: null,
+  capabilityAdapters: [],
+  capabilityDetectedAt: null,
   tierDetected: 1,
   tierEffective: 1,
   tierOverriddenAbove: false,
@@ -76,6 +89,7 @@ const runtime = (over: Partial<RuntimeStatus> = {}): RuntimeStatus => ({
   consentOfferBytes: 0,
   models: [],
   instanceLockHeld: true,
+  controlFiles: [],
   ...over,
 });
 
@@ -100,6 +114,23 @@ describe("settled vs working", () => {
     expect(m.settled).toBe(false);
     expect(m.headline).toBe("Library is working");
     expect(m.current?.id).toBe("preview");
+  });
+
+  it("manual Pause is explicit even while queued rows remain", () => {
+    const m = libraryStatusModel(
+      input({
+        ingest: ingest({
+          processingPaused: true,
+          processingIntensity: "eco",
+          passes: [pass({ name: "preview", remaining: 40, total: 40 })],
+        }),
+      }),
+    );
+    expect(m.settled).toBe(false);
+    expect(m.waitingOn[0]).toEqual({
+      id: "processing-paused",
+      text: "Paused by you - Eco",
+    });
   });
 
   it("a scanning walk -> working with the discover stage, even with no passes yet", () => {
@@ -280,16 +311,28 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
 
   it("a CLIP lane building -> 'image embedder loading' (transient, not degraded)", () => {
     const m = libraryStatusModel(
-      input({ runtime: runtime({ clip: { state: "building", error: null } }) }),
+      input({ runtime: runtime({ clip: { state: "building", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null } }) }),
     );
     expect(m.waitingOn.map((w) => w.text)).toEqual(["image embedder loading"]);
     expect(m.waitingOn[0].degraded).not.toBe(true);
     expect(m.degraded).toBe(false);
   });
 
+  it("a queued lane is honestly waiting, not idle or degraded", () => {
+    const m = libraryStatusModel(
+      input({
+        runtime: runtime({
+          clip: { state: "queued", attemptId: 5, modelId: "clip", generation: 3, startedAt: "2026-01-01T00:00:00.000Z", error: null },
+        }),
+      }),
+    );
+    expect(m.waitingOn.map((w) => w.text)).toEqual(["image embedder loading"]);
+    expect(m.degraded).toBe(false);
+  });
+
   it("a text lane building -> 'text embedder loading' (transient, not degraded)", () => {
     const m = libraryStatusModel(
-      input({ runtime: runtime({ textEmbedder: { state: "building", error: null } }) }),
+      input({ runtime: runtime({ textEmbedder: { state: "building", attemptId: 3, modelId: "text", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null } }) }),
     );
     expect(m.waitingOn.map((w) => w.text)).toEqual(["text embedder loading"]);
     expect(m.waitingOn[0].degraded).not.toBe(true);
@@ -300,7 +343,7 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clip: { state: "failed", error: "ort session create failed: bad graph" },
+          clip: { state: "failed", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: "ort session create failed: bad graph" },
         }),
       }),
     );
@@ -318,7 +361,7 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          textEmbedder: { state: "failed", error: "model not found" },
+          textEmbedder: { state: "failed", attemptId: 3, modelId: "text", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: "model not found" },
         }),
       }),
     );
@@ -331,7 +374,7 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     const long =
       "session construction failed because the execution provider could not be initialized on this device";
     const m = libraryStatusModel(
-      input({ runtime: runtime({ clip: { state: "failed", error: long } }) }),
+      input({ runtime: runtime({ clip: { state: "failed", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: long } }) }),
     );
     // text stays glanceable (clamped, ASCII ellipsis); detail carries the whole.
     expect(m.waitingOn[0].text.length).toBeLessThanOrEqual(
@@ -343,7 +386,7 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
 
   it("a failed lane with no error -> just the headline, no colon", () => {
     const m = libraryStatusModel(
-      input({ runtime: runtime({ clip: { state: "failed", error: null } }) }),
+      input({ runtime: runtime({ clip: { state: "failed", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null } }) }),
     );
     expect(m.waitingOn[0].text).toBe("image search unavailable");
     expect(m.waitingOn[0].detail).toBeUndefined();
@@ -354,8 +397,8 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clip: { state: "building", error: null },
-          textEmbedder: { state: "failed", error: "boom" },
+          clip: { state: "building", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null },
+          textEmbedder: { state: "failed", attemptId: 4, modelId: "text", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: "boom" },
         }),
       }),
     );
@@ -371,7 +414,7 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
       input({
         ingest: ingest({ offlineVolumes: [{ label: "HomeNAS", images: 10 }] }),
         runtime: runtime({
-          clip: { state: "failed", error: "boom" },
+          clip: { state: "failed", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: "boom" },
           models: [
             model({ id: "txt", role: "text-embedder", state: "downloading", totalBytes: 100, downloadedBytes: 50 }),
           ],
@@ -389,8 +432,8 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clip: { state: "ready", error: null },
-          textEmbedder: { state: "ready", error: null },
+          clip: { state: "ready", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null },
+          textEmbedder: { state: "ready", attemptId: 4, modelId: "text", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null },
         }),
       }),
     );
@@ -405,8 +448,8 @@ describe("waitingOn assembly (offline + downloading + degraded, top-most first)"
     const m = libraryStatusModel(
       input({
         runtime: runtime({
-          clip: { state: "ready", error: null },
-          textEmbedder: { state: "idle", error: null },
+          clip: { state: "ready", attemptId: 3, modelId: "clip", generation: 2, startedAt: "2026-01-01T00:00:00.000Z", error: null },
+          textEmbedder: { state: "idle", attemptId: null, modelId: null, generation: 2, startedAt: null, error: null },
         }),
       }),
     );
