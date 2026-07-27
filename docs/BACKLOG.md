@@ -220,6 +220,176 @@ logged but deliberately deferred; each names its audit ID and why.
   in CI over .svelte template regions / string literals) so they don't
   creep back. (Founder, June 12 2026.)
 
+## Dogfood round 5 (founder, June 21 2026 - fresh-install model setup)
+
+Came out of a clean-slate run (fresh `cargo clean` + deleted downloaded
+models) on the margo desktop (Arch / Hyprland / Ryzen 9900X + RTX 5080),
+exercising the very first-launch model-download + first-ingest path. Findings
+span the consent/download moment, the header progress indicator, ingest
+intensity / RAM, and a startup-reliability bug.
+
+- [ ] **Model-license consent card should be a centered modal, bigger**
+  (founder, June 21 2026: "the screen asking you to accept licenses is not
+  large enough... should probably be a centered modal and bigger"). Today the
+  gate is `ConsentCard.svelte` - a quiet fixed-`380px` `<aside>` pinned
+  bottom-right (`position: fixed; right:16px; bottom:48px; z-index:50`, no
+  backdrop), deliberately un-modal so journaling stays visible behind it
+  (`logic/consent.ts:23-45`: shows once after the first root is added, only
+  when `consent==='undecided'`, Tier >= 1). On a FRESH install the user must
+  actually read several model licenses + tick a per-model acceptance checkbox
+  + weigh the total download size, and 380px in the corner is too cramped for
+  that. Founder wants it promoted to a CENTERED MODAL with a backdrop and more
+  room for the license list. Note the design tension: the corner-card was an
+  intentional "quiet, non-blocking" choice - but first-run licensing IS a hard
+  gate (§13.7), so a modal is right THERE; keep it unobtrusive if it ever
+  re-appears mid-session (e.g. a later tier offering new models). Pairs with
+  the first-run onboarding flow item below. Anchors:
+  `apps/desktop/src/lib/components/shell/ConsentCard.svelte:24-116`,
+  `apps/desktop/src/lib/logic/consent.ts:23-45`. (Founder, June 21 2026.)
+
+- [ ] **Model download offers ALL variants (int8 + fp16 duplicates), not the
+  hardware-best pick** (founder, June 21 2026, after a fresh `cargo clean` +
+  delete: "it asked me to download ALL models?? like duplicates that shouldn't
+  be if we are analyzing the machine's capabilities and selecting the best
+  options"). CONFIRMED - the offered set is TIER-ONLY, never backend-aware.
+  `Manifest::offered_at(tier)` (`runtime/manifest.rs:110-115`) returns every
+  entry whose `tiers` vec contains the effective tier; `runtime.rs:378-425`
+  renders all of them into the consent card. Tier detection itself
+  (`runtime/tier.rs:90-114`) gates on VRAM / Apple unified memory ONLY - it
+  never consults the detected accelerator backend, even though
+  `HardwareReport.adapters[].backend` (Metal/Vulkan/DXGI) is right there and
+  unused for filtering. So BOTH DFN5B CLIP towers ship to every machine - int8
+  `ViT-H-14-378-quickgelu__dfn5b` (`manifest.rs:512`) AND fp16 `...__dfn5b-fp16`
+  (`manifest.rs:537`), both `tiers:[1,2]` - plus several alt Gemma LLMs (E2B
+  default + E4B + the MTP variants) all at once. The app ALREADY KNOWS the
+  right per-platform pick (the CoreML spike decided fp16-on-Metal for Mac,
+  int8-on-CPU for plain CPU, fp16-on-CUDA/TensorRT for the 5080 - see the two
+  "CoreML EP" / "CoreML CLIP graph fragmentation" items + `docs/RUNTIME-MATRIX.md`);
+  it just never applies that knowledge to the DOWNLOAD set. FIX: a backend-aware
+  narrowing step after tier detection so each seam (CLIP visual, LLM, ASR,
+  text-embed) offers ONE variant matched to the machine (Metal->fp16 CLIP,
+  CPU->int8, CUDA->fp16; the default LLM, not every alt), with the other
+  variants reachable only via an explicit "advanced / other models" affordance
+  rather than the default consent list. This is the concrete first cut of the
+  hardware-aware model selection the first-run onboarding item wants - it makes
+  the "optimizing for your hardware" promise true at the download gate, not
+  just in copy. (Founder, June 21 2026.)
+
+- [ ] **Header still shows "downloading" when the last model is at 100%**
+  (founder, June 21 2026: "the last model to download is at 100% but it still
+  shows as downloading in the header"). The header pill / settlement lives in
+  `LibraryStatus.svelte` + `logic/librarystatus.ts`. The `downloading` flag is
+  raised when any model row reports `state==='downloading'`
+  (`librarystatus.ts:318-327`) and the indicator only settles when
+  `waitingOn.length === 0` AND nothing is mid-download (`:355-360`). A model
+  that has reached 100% bytes but whose state has not yet flipped
+  `downloading -> installed` (the post-download verify/move step, or a
+  not-yet-arrived status event) keeps the pill in "downloading". Fix: treat
+  100%-bytes as visually complete per row, and/or settle on the terminal state
+  transition rather than a lingering `downloading` row; make sure the final
+  model's `installed` event actually clears the aggregate. Anchors:
+  `apps/desktop/src/lib/logic/librarystatus.ts:318-327,355-360`,
+  `apps/desktop/src/lib/components/shell/LibraryStatus.svelte:149-183`.
+  (Founder, June 21 2026.)
+
+- [ ] **Status hover card makes large jumps between number updates** (founder,
+  June 21 2026: "the hover card when i hover over it seems to do large jumps
+  between number updates"). The expanded panel
+  (`LibraryStatus.svelte:89-146`) shows per-stage counts + rate + a summed
+  overall ETA (`librarystatus.ts:369-377`). Two jitter sources: (a) the overall
+  ETA is the SUM of every working+pending stage's `remaining / ratePerSec`, and
+  while the rate is EMA-smoothed (`pump.rs RATE_ALPHA=0.3`) the per-model
+  download % is a RAW `downloadedBytes/totalBytes` ratio - a single fast model
+  can swing the sum; (b) the pump emits coalesced progress only every 400ms
+  (`PROGRESS_INTERVAL`) or on a rate-quantum change, so the card updates in
+  bursty steps rather than smoothly. Fix: smooth the displayed numbers
+  (monotonic counts that never go backwards, eased % / ETA), and/or update the
+  hover card on a steadier cadence so it reads continuous. Anchors above +
+  `apps/desktop/src/lib/components/shell/LibraryStatus.svelte:271` (the 300ms
+  width transition that can lag the number). (Founder, June 21 2026.)
+
+- [ ] **User control over ingest intensity + "what processes when" (left
+  sidebar) - the app runs too hard / eats RAM** (founder, June 21 2026: "i'm
+  not sure the best strategy is to just cue up every image instantly to go
+  through all the operations... probably in the left sidebar we need more
+  control / options for first time processing, re-processing, what happens when
+  you add a new folder of source images... the app is currently using a ton of
+  ram, so we probably just need to make sure we are being thoughtful about user
+  control over how hard our app runs"). CURRENT BEHAVIOR (confirmed): `add_root`
+  spawns a `pp-initial-scan` thread (`commands/library.rs:83-150`) that walks
+  the folder and enqueues EVERY discovered image through `new_image_in_tx`
+  (`library/mod.rs`) - exif + preview passes at scan priority immediately,
+  embeddings as P3 backfill, full-RAW-decode on-demand. The pump drains with
+  HARD-CODED batch bounds (`pump.rs:22-40`: `QUEUE_BATCH=64`, `EMBED_BATCH=8`,
+  `DECODE_BATCH=2`) and the only existing throttle is the capture-pause
+  (`pump.rs:356-358`) plus the env-only `PHOTOPROOF_INGEST_WORKERS` decode-pool
+  cap. There is NO user-facing processing control anywhere: `SourceRail.svelte`
+  (Folders/Collections/Topics) and the 4-section settings window have none;
+  only `rescan_root` / `rebuild_previews` context verbs exist
+  (`commands/library.rs:283-319`). WANT: surface processing as a user-governed
+  thing - (a) a left-sidebar / settings affordance for an overall intensity
+  budget ("how hard the app runs": worker/RAM/CPU ceiling, maybe Eco/Balanced/Max);
+  (b) explicit control over FIRST-TIME processing vs RE-processing; (c) a clear
+  policy + prompt for what happens when a new source folder is added (process
+  now / process later / preview-only); (d) pause/resume + per-pass toggles
+  (e.g. defer embeddings). Ties directly to the RAM concern and to the
+  first-run onboarding flow item. The batch constants and pool caps already
+  exist as the mechanism - this is about USER GOVERNANCE over them. Needs a
+  design round (where it lives, the default that stays quiet and fast, how RAM
+  ceiling maps to worker/batch sizing). (Founder, June 21 2026.)
+
+- [ ] **Startup hang when a library root's volume is on an unresponsive
+  network mount (silent windowless freeze)** (margo, June 21 2026 - diagnosed
+  live). REPRO: a hung `hard` NFS mount (`bornmanserver:/HomeNAS/raw_photos` at
+  `/mnt/raw_photos`) that a library root lives on. SYMPTOM: app launches, the
+  process and the WebKit children spawn, but NO window ever maps and there is
+  zero error - it looks completely broken. ROOT CAUSE: `App::init` ->
+  `state.library.probe_volumes()` runs SYNCHRONOUSLY on the main thread in
+  `setup()` (`apps/desktop/src-tauri/src/lib.rs:162,166`) and stats the mount
+  to re-identify the volume by its `.photoproof-volume` marker; on a `hard`
+  NFS mount the stat blocks FOREVER (kernel `nfs4_handle_exception` /
+  `rpc_wait_bit_killable`), so `setup()` never returns, Tauri's event loop
+  never starts, and the window never shows. Confirmed it is NOT graphics:
+  zenity (GTK) and MiniBrowser (WebKitGTK 2.52.4) both opened windows fine; the
+  fix that unblocked it was `sudo umount -f -l /mnt/raw_photos` then relaunch
+  (plain, no env flags). PRODUCTION IMPACT: build-agnostic (same code path in
+  release) and arguably MORE likely for real users - a NAS asleep/off-network,
+  a laptop that left the LAN, an unplugged/spun-down external drive that a root
+  sits on all reproduce it. The volumes schema already models `online/offline`
+  state precisely so it CAN degrade gracefully; the startup just doesn't. The
+  team already knew about main-thread startup blocking - the startup-doctor's
+  preview walk was deliberately moved to a background thread for exactly this
+  reason (`lib.rs:183-194` comment) - but `probe_volumes()` and the
+  watcher-start loop (`lib.rs:166-181`) were left on the main thread. FIX: run
+  `probe_volumes()` (and the watcher start) off the main thread, or give each
+  per-volume probe a short timeout / non-blocking stat, so an unreachable
+  volume just marks itself offline and the window still comes up. (Founder /
+  margo dogfood, June 21 2026.)
+
+- [ ] **Default `tauri dev` launch on NVIDIA silently runs CPU embedding (no
+  CUDA) - and nothing tells the user** (margo, June 21 2026 - "did we detect
+  CUDA? / embedding is super slow"). CONFIRMED on the 5080: the live app log
+  shows ONLY `CPUExecutionProvider` (1262 CPU BFCArena allocs, zero
+  CUDA/TensorRT), `nvidia-smi` shows the GPU idle with NO photoproof process on
+  it, and the dev build runs `cargo run --no-default-features` (tauri.conf
+  `devCommand`) so the `cuda`/`tensorrt`/`cuda-dynamic` features are not even
+  compiled in - `ort` falls back to the only EP present (CPU). Result: CLIP
+  embeds at the CPU rate (~41 img/min) instead of the validated 54x CUDA /
+  85x TensorRT (2259 / 3635 img/min), i.e. "super slow", with NO indication
+  anywhere that the GPU is unused. TWO GAPS, file under both: (1) WIRING - the
+  open CUDA EP item already owns getting the `cuda-dynamic` build + `ORT_DYLIB_PATH`
+  (cuda13 / Blackwell sm_120, `docs/PLAN-ORT-BLACKWELL.md`) into the actual
+  desktop launch (today it only works via the `cuda_spike` harness); the plain
+  `bun run tauri dev` / `tauri build` has no NVIDIA-accelerated path. (2)
+  OBSERVABILITY - even once wired, the app should SURFACE the active execution
+  provider per model ("CLIP: CUDA / TensorRT / CoreML / CPU") so a silent
+  CPU-fallback (wrong build, missing dylib, EP init failure) is visible, not a
+  mystery slowdown. This is the legible-hardware promise from the first-run
+  onboarding item, extended to runtime: the user (and the assistant) should be
+  able to SEE that the 5080 is or isn't doing the work. Pairs with the
+  hardware-aware model-selection item above and the CUDA EP item below.
+  (Founder / margo dogfood, June 21 2026.)
+
 ## Founder thread, June 14 2026 - model-usage walkthrough (decisions)
 
 Came out of a walkthrough of every ML model and where they overlap (see
