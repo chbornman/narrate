@@ -35,6 +35,22 @@ impl FileSystemSemantics for PlatformFileSystemSemantics {
         if contains_symlink(stored) || contains_symlink(observed) {
             return false;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            // `canonicalize` is not an entry-identity primitive on
+            // case-insensitive APFS: it can preserve the caller's spelling,
+            // so two aliases of one inode compare as different PathBufs.
+            // Device + inode is the kernel identity used by rename/link
+            // semantics and works for both case-sensitive and insensitive
+            // Unix-mounted filesystems.
+            match (std::fs::metadata(stored), std::fs::metadata(observed)) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
         match (
             std::fs::canonicalize(stored),
             std::fs::canonicalize(observed),
