@@ -199,7 +199,8 @@ device-removal drills; installed control-file, backup, and crash/relaunch
 drills; pinned-model ASR Ready; real CUDA/TensorRT execution; signed/notarized
 macOS and signed Windows packages plus update rollback; remote workflow runs;
 and representative SSD/removable/NAS/Apple/NVIDIA/Windows performance
-receipts. S6 also awaits its default-APFS founder-Mac receipt.
+receipts. S6 is closed: its default-APFS founder-Mac receipt passed at
+`4495b5b`.
 
 Every packet close records:
 

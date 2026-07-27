@@ -26,8 +26,6 @@ floor (typed notes + grease pencil + FTS5) is always a complete product undernea
   local idle WAL scheduling, backup helper, restore rollback, and guidance are
   built and tested
 - Overflow-only count in the export UI - `STATUS` not-built
-- Retain the native default-APFS S6 receipt after the implemented case-only
-  rename semantics pass on the founder Mac
 - Cloud-sync root advisory (Dropbox/OneDrive/iCloud one-time warning) - detection exists, UI does not
 - Remote receipts for the checked-in three-OS quality/package workflows, plus
   the still-open nightly full-scale lane

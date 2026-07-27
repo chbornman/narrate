@@ -12,7 +12,7 @@ updater, and remote-CI evidence remains exactly as listed in
 - `cargo test --workspace`: passed with only explicitly ignored hardware,
   corpus, and performance cases.
 - Desktop library: 290 passed, 3 ignored.
-- Core library: 323 passed, 2 ignored.
+- Core library: 325 passed, 2 ignored.
 - Library acceptance: 36 passed, 2 ignored.
 - Frontend `check`: 0 errors, 0 warnings.
 - Frontend: 100 files and 1,251 tests passed.
@@ -27,7 +27,7 @@ updater, and remote-CI evidence remains exactly as listed in
 `node apps/desktop/scripts/run-desktop-chaos-matrix.mjs` executed all 15 local
 suites. All suites passed. Of 28 cases, 23 passed and 5 were correctly emitted
 as `fixture-passed-platform-drill-pending`. The generated machine report for
-this run was `/tmp/photoproof-a25-final-2026-07-27.json`.
+this run was `/tmp/photoproof-a25-final-4495b5b.json`.
 
 ## Linux package receipt
 
@@ -59,3 +59,20 @@ Metal, package, and lifecycle receipts. It has no Developer ID Application
 identity, no installed app or pinned ASR models, and about 23 GiB free.
 GitHub SSH and `gh` authentication are currently invalid, so this delivery is
 synchronized over the trusted LAN after the authoritative local push.
+
+## Native APFS receipt
+
+The first native run exposed a real gap hidden by injected fixtures:
+case-insensitive APFS can preserve the caller's spelling during canonicalization
+and macOS's `/var` path is itself a symlink. The corrected filesystem seam uses
+device/inode identity plus one physical folded directory entry, while rejecting
+case-distinct hard links and final symlinks.
+
+The rerun on commit `4495b5b7b12b23496f4668ede0085f31bf4991c1`
+passed on `/dev/disk4s5`, case-insensitive APFS, macOS 27.0 arm64:
+
+- `s02_2_case_only_rename_relinks_sidecar`: passed;
+- `w12_macos_case_insensitive_scan_uses_platform_semantics`: passed with zero
+  rehash and preserved path identity;
+- full `library_watcher`: 11 passed;
+- final receipt: `result=PASS`.

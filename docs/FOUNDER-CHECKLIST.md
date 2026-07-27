@@ -81,12 +81,12 @@ since `e60cb15` (optimized deps).
   probe via getmntinfo + getattrlist(ATTR_VOL_UUID), firmlink-aware path
   binding, §4.1 level-3 heuristic fallback (B63). Windows volume-serial
   recipe still behind its seam — defer until Windows is a target.
-- [ ] **APFS case-insensitivity ruling** — s02_2 (case-only rename
+- [x] **APFS case-insensitivity ruling** — s02_2 (case-only rename
   relinks sidecar) is implemented with live mounted-volume semantics:
   same-entry aliases recase one path row, while case-distinct entries remain
-  independent. After synchronizing the current worktree, run
-  `./scripts/verify-apfs-case-rename.sh <receipt-path>` on the founder Mac;
-  check this item only when its default-APFS receipt says `result=PASS`.
+  independent. DONE 2026-07-27 on the founder Mac's default case-insensitive
+  APFS Data volume at `4495b5b`: sidecar relink, zero-hash reconciliation
+  recase, and all 11 watcher tests passed with `result=PASS`.
 - [ ] **Desktop-foundation native receipts** — retain the installed Mac
   package startup/shutdown and crash/relaunch record, two-webview convergence,
   real suspend/resume, CPAL device-removal behavior, and control-file plus

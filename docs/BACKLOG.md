@@ -17,7 +17,7 @@ implicit and needs one coordinator before the app can reliably promise
 "opens quickly, tells the truth, heals itself, and closes cleanly."
 
 Existing items are PART OF this program and stay canonical where already
-recorded (S5 is now landed; S6/D4/D6/D7/D8 retain their current statuses);
+recorded (S5/S6/D4/D6/D7/D8 are now landed);
 Dogfood round 5's backend-aware model offer,
 terminal 100%-download settlement, ingest intensity controls, unresponsive-
 volume startup hang, and CUDA/provider observability. Do not create parallel
@@ -764,7 +764,7 @@ logged but deliberately deferred; each names its audit ID and why.
   reconciliation for already-completed libraries. Relinking revives all three
   derived passes, and interruption/idempotence/relink coverage proves the
   retained text restores both text-vector spaces without an LLM call.
-- [~] **S6 / `s02_2`: case-only rename correlation on APFS** - implemented
+- [x] **S6 / `s02_2`: case-only rename correlation on APFS** - implemented
   2026-07-27. Exact path spelling remains authoritative on case-sensitive
   volumes. A case-folded candidate is recased in place only after an injectable
   live-filesystem seam proves both spellings are one entry; watcher
@@ -774,9 +774,9 @@ logged but deliberately deferred; each names its audit ID and why.
   directory-entry spelling, and uses a temporary rename hop when an
   alias-to-alias APFS rename is a no-op. `s02_2` and cross-platform injected
   fixtures are green locally; three-OS CI no longer skips or tolerates the
-  test. Remaining proof only: after this worktree is synchronized to the
-  founder Mac, run `./scripts/verify-apfs-case-rename.sh <receipt-path>` on its
-  confirmed default APFS Data volume and retain the emitted receipt.
+  test. Native receipt passed 2026-07-27 on the founder Mac's case-insensitive
+  default APFS Data volume at `4495b5b`: sidecar relink, zero-hash scan recase,
+  and the full 11-test watcher suite all passed.
 - [x] **D4: reclaim failed partial downloads from the UI** - a terminally-
   failed model keeps `.part` gigabytes the orphan scan skips (it has a manifest
   entry) and the settings row offers only Download. Surface partial bytes + a

@@ -36,7 +36,7 @@ successfully. The report contains 28 cases: 23 passed locally and 5 recorded as
 `fixture-passed-platform-drill-pending`. In particular:
 
 - desktop library: 290 passed, 3 ignored;
-- core library: 323 passed, 2 ignored;
+- core library: 325 passed, 2 ignored;
 - library acceptance: 36 passed, 2 ignored;
 - runtime download: 20 passed, 1 ignored;
 - runtime process: 6 passed;
@@ -47,7 +47,7 @@ The machine-readable report was emitted by:
 
 ```text
 node apps/desktop/scripts/run-desktop-chaos-matrix.mjs \
-  > /tmp/photoproof-a25-final-2026-07-27.json
+  > /tmp/photoproof-a25-final-4495b5b.json
 ```
 
 The runner needs loopback permission for its local download and child-runtime
