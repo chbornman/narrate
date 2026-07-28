@@ -27,7 +27,7 @@ tauri-plugin-single-instance = "2"
 # byte-accurate VRAM via the native layer (ash/Vulkan on Linux; DXGI and
 # Metal paths are cfg-gated, founder/CI-verified). No shaders, no surface:
 # enumeration only.
-wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "metal", "dx12"] }
+wgpu = { version = "30", default-features = false, features = ["std", "vulkan", "metal", "dx12"] }
 # Tiny executor for wgpu 29's async enumerate_adapters (probe-time only).
 pollster = "0.4"
 # Window geometry persistence (featureset §6) — new dependency, flagged:
