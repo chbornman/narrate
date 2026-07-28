@@ -116,7 +116,7 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: apps/desktop
         run: node scripts/smoke-installed-bundle.mjs ../../target/release/bundle --format appimage
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: photoproof-${{ runner.os }}
           path: target/release/bundle
